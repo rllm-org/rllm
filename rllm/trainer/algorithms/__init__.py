@@ -21,6 +21,7 @@ from rllm.trainer.algorithms.loss import (
     get_loss,
     is_custom_loss,
     load_loss_plugins,
+    native_loss_names,
     register_loss,
     resolve_loss,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "get_loss",
     "is_custom_loss",
     "load_loss_plugins",
+    "native_loss_names",
     "resolve_loss",
     "LossContext",
     "ResolvedLoss",

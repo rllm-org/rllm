@@ -68,6 +68,22 @@ def ppo_clip_env(ctx):
 `ppo_clip_env` with `env_loss_coef=0.05`. To add ECHO to a different surrogate, write one
 loss that adds the same term (the verl way) — no config list.
 
+## Native-loss registry
+
+`native_loss_names(backend)` is the central map of what each backend has a **native fused
+kernel** for. It's *derived from each backend's own source of truth* (not hardcoded), so it
+never drifts from the installed version:
+
+| backend | source | native losses |
+|---|---|---|
+| **verl** (0.8) | `verl.trainer.ppo.core_algos.POLICY_LOSS_REGISTRY` | `vanilla`, `dppo_tv`, `dppo_kl`, `gspo`, `sapo`, `gpg`, `clip_cov`, `kl_cov`, `geo_mean`, `cispo`, `bypass_mode` |
+| **tinker** | `tinker.types.LossFnType` | `cross_entropy`, `importance_sampling`, `ppo`, `cispo`, `dro` |
+| **fireworks** | `training.utils.rl.builtin_losses.BUILTIN_LOSSES` | `grpo`, `importance_sampling`, `dapo`, `dro`, `gspo`, `cispo` |
+
+Returns `∅` if the backend isn't importable in the current process → everything falls back to
+the rLLM custom path. (verl 0.7 would return a smaller set, e.g. no `dppo_tv` — hence derivation
+over hardcoding.)
+
 ## Routing: native-first
 
 `resolve_loss(config, native_losses)` is **native-first**. For a given `loss_fn`, each backend

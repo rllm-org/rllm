@@ -30,7 +30,7 @@ from rllm.trainer.algorithms import (
     CompactFilteringConfig,
     TransformConfig,
 )
-from rllm.trainer.algorithms.loss import resolve_loss
+from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
 from rllm.trainer.tinker.tinker_policy_trainer import (
     compute_schedule_lr_multiplier,
     require_training_client,
@@ -522,15 +522,6 @@ class FireworksPolicyTrainer:
     # ------------------------------------------------------------------
 
     @require_training_client
-    @staticmethod
-    def _native_loss_names() -> set[str]:
-        """Names Fireworks has a builtin (server-side fused) kernel for. A ``loss_fn`` in this
-        set runs the fast native path; anything else that's rLLM-registered takes the
-        forward_backward_custom path."""
-        from training.utils.rl.builtin_losses import BUILTIN_LOSSES
-
-        return set(BUILTIN_LOSSES)
-
     async def forward_backward_from_trajectory_groups(
         self,
         trajectory_groups: list[TrajectoryGroup],
@@ -565,12 +556,10 @@ class FireworksPolicyTrainer:
         # in ECHO), evaluate it client-side in one pass over the rollout log-probs instead
         # of the server-side builtin kernel. mu defaults to the sampling (inference)
         # log-probs — the tmax DPPO choice.
-        from rllm.trainer.algorithms.loss import resolve_loss
-
         # native-first: a loss Fireworks has a builtin (server-side fused) kernel for
         # (grpo/importance_sampling/dapo/dro/gspo/cispo) runs there; only rLLM losses it
         # can't run natively (e.g. dppo_tv, ppo_clip_env) take the forward_backward_custom path.
-        resolved = resolve_loss(algorithm_config, native_losses=self._native_loss_names())
+        resolved = resolve_loss(algorithm_config, native_losses=native_loss_names("fireworks"))
         if resolved is not None:
             from rllm.trainer.tinker.custom_loss import build_custom_loss
 
@@ -694,7 +683,7 @@ class FireworksPolicyTrainer:
         # The custom-loss path computes its gradient client-side with normalization already
         # folded in (the loss closure's seq-mean-token-mean). Server-side re-normalization
         # would rescale it, so disable it.
-        if resolve_loss(self.algorithm_config, native_losses=self._native_loss_names()) is not None:
+        if resolve_loss(self.algorithm_config, native_losses=native_loss_names("fireworks")) is not None:
             grad_norm = GradAccNormalization.NONE
         optim_result = await self._run_training_op(
             self.training_client.optim_step,

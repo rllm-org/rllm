@@ -84,18 +84,17 @@ class CustomPPOLoss:
         self.loss_plugins = list(loss_plugins or [])
 
     def __call__(self, model_output, data, dp_group=None):
-        from verl.trainer.ppo.core_algos import POLICY_LOSS_REGISTRY
         from verl.utils import tensordict_utils as _tu
         from verl.workers.utils.losses import ppo_loss
 
-        from rllm.trainer.algorithms.loss import is_custom_loss
+        from rllm.trainer.algorithms.loss import is_custom_loss, native_loss_names
 
         override = _tu.get(data, "policy_loss_mode_override", default=None)
         loss_mode = override if override is not None else self.config.policy_loss.get("loss_mode", "vanilla")
 
         # Native-first: if verl has a fused kernel for this name (e.g. dppo_tv/gspo/cispo on
         # 0.8), use it. Only fall back to the in-process rLLM loss when verl can't run it.
-        if is_custom_loss(loss_mode) and loss_mode not in POLICY_LOSS_REGISTRY:
+        if is_custom_loss(loss_mode) and loss_mode not in native_loss_names("verl"):
             return self._rllm_loss(loss_mode, model_output, data)
 
         # verl-native loss (vanilla / gspo / ...), with per-call mode override.
@@ -430,12 +429,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         # pad_token_id lets it identify environment-observation tokens. Installed after
         # algorithm_config is resolved so loss_fn / env_loss_coef defaults are reflected.
         if hasattr(self.actor_rollout_wg, "set_loss_fn"):
-            from verl.trainer.ppo.core_algos import POLICY_LOSS_REGISTRY
-
-            from rllm.trainer.algorithms.loss import resolve_loss
+            from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
 
             # native-first: only an rLLM loss verl can't run natively takes the in-process path
-            resolved = resolve_loss(self.algorithm_config, native_losses=set(POLICY_LOSS_REGISTRY.keys())) if self.algorithm_config is not None else None
+            resolved = resolve_loss(self.algorithm_config, native_losses=native_loss_names("verl")) if self.algorithm_config is not None else None
             self.actor_rollout_wg.set_loss_fn(
                 CustomPPOLoss(
                     self.config.actor_rollout_ref.actor,

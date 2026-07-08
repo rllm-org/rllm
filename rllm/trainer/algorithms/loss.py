@@ -177,6 +177,42 @@ def load_loss_plugins(modules: list[str]) -> None:
             raise ImportError(f"Failed to import loss plugin module {mod!r} (algorithm.loss_plugins). Importable on this process (and on verl Ray workers)?") from e
 
 
+def native_loss_names(backend: str) -> set[str]:
+    """The loss names a backend has a **native fused kernel** for — the map used for
+    native-first routing (``resolve_loss``'s ``native_losses``).
+
+    Read from each backend's own source of truth (not hardcoded) so it never drifts from the
+    installed version — e.g. verl 0.7 lacks ``dppo_tv`` while 0.8 has it:
+
+    * ``verl``     → ``verl.trainer.ppo.core_algos.POLICY_LOSS_REGISTRY``
+      (vanilla, dppo_tv, dppo_kl, gspo, sapo, gpg, clip_cov, kl_cov, geo_mean, cispo, …)
+    * ``tinker``   → ``tinker.types.LossFnType``
+      (cross_entropy, importance_sampling, ppo, cispo, dro)
+    * ``fireworks``→ ``training.utils.rl.builtin_losses.BUILTIN_LOSSES``
+      (grpo, importance_sampling, dapo, dro, gspo, cispo)
+
+    Returns an empty set if the backend isn't importable in this process (→ everything falls
+    back to the rLLM custom path)."""
+    try:
+        if backend == "verl":
+            from verl.trainer.ppo.core_algos import POLICY_LOSS_REGISTRY
+
+            return set(POLICY_LOSS_REGISTRY)
+        if backend == "tinker":
+            from typing import get_args
+
+            from tinker.types import LossFnType
+
+            return set(get_args(LossFnType))
+        if backend == "fireworks":
+            from training.utils.rl.builtin_losses import BUILTIN_LOSSES
+
+            return set(BUILTIN_LOSSES)
+    except Exception as e:  # backend not installed here → treat as "no native kernels"
+        logger.debug("native_loss_names(%r): backend not available (%s)", backend, e)
+    return set()
+
+
 @dataclass
 class ResolvedLoss:
     """The single loss selected from config, ready for a backend to run."""

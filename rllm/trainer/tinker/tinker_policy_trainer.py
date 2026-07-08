@@ -179,11 +179,11 @@ class TinkerPolicyTrainer:
         # Custom-loss path: a single forward_backward_custom pass runs the rLLM loss
         # (e.g. dppo_tv, or ppo_clip_env which folds in ECHO) over per-datum log-probs.
         # Engaged when algorithm.loss_fn names an rLLM loss; else the native string path runs.
-        from rllm.trainer.algorithms.loss import resolve_loss
+        from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
 
         # native-first: a loss Tinker has a server-side kernel for (importance_sampling/ppo/
         # cispo/dro/cross_entropy) runs there; only non-native rLLM losses take the custom path.
-        resolved = resolve_loss(algorithm_config, native_losses=TINKER_KNOWN_LOSSES)
+        resolved = resolve_loss(algorithm_config, native_losses=native_loss_names("tinker"))
         if resolved is not None:
             from rllm.trainer.tinker.custom_loss import build_custom_loss
 

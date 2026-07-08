@@ -243,6 +243,16 @@ def test_resolve_loss_custom_vs_native():
     assert resolve_loss(_alg(loss_fn=None)) is None
 
 
+def test_native_loss_names_registry():
+    from rllm.trainer.algorithms.loss import native_loss_names
+
+    # Derived from each backend's own source of truth (present in this venv: tinker, fireworks).
+    assert native_loss_names("tinker") == {"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"}
+    assert native_loss_names("fireworks") == {"grpo", "importance_sampling", "dapo", "dro", "gspo", "cispo"}
+    # A backend not importable here (verl) or unknown → empty (→ everything uses the custom path).
+    assert native_loss_names("nonexistent_backend") == set()
+
+
 def test_resolve_loss_prefers_native_kernel():
     # A loss the backend has a native fused kernel for → route native (None), even though
     # it's also rLLM-registered (e.g. verl-native dppo_tv, Fireworks builtin cispo/gspo).
