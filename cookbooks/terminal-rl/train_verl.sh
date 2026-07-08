@@ -25,6 +25,9 @@ unset ROCR_VISIBLE_DEVICES 2>/dev/null || true
 export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-modal}"
 # Per-rollout turn cap for terminus2 (read by train.py). Empty = uncapped.
 export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
+# Disable Terminus-2 context compaction (summarization) so it doesn't fragment
+# the captured trajectory during training. Set to 1 to re-enable.
+export TERMINUS_ENABLE_SUMMARIZE="${TERMINUS_ENABLE_SUMMARIZE:-0}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
 # Modal sandbox LIFETIME (not idle time). Must exceed the agent run timeout
 # above plus setup/verify, or sandboxes get reaped mid-rollout — surfacing as
