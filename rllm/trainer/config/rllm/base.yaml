@@ -63,6 +63,12 @@ rollout:
 trainer:
   total_epochs: 10
   total_batches: -1
+  # Dump each optimizer step's consumed batch in eval's episode-store layout
+  # (<dump_batch_dir>/<timestamp>/step_<N>/episodes/episode_*.json + meta.json
+  # + trajectory_groups.json) — browsable with `rllm view <dir>`. A relative
+  # path resolves under the rLLM home (e.g. ~/.rllm/train_batches/...), beside
+  # eval_results; absolute paths are used as-is. null = disabled.
+  dump_batch_dir: null
   logger: ['console']  # Options: 'console', 'wandb', 'tensorboard'
   project_name: 'rllm-training'
   experiment_name: 'default'
