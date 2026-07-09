@@ -249,6 +249,8 @@ class TestDeliverableSurfacing:
         return Task(id="t", instruction="x", metadata=meta, dataset_dir=Path("/"))
 
     def test_reads_output_dir(self):
+        from pathlib import Path
+
         from rllm.eval._resolution import surface_deliverable
 
         # A stray file in the workdir root is ignored; only output/ is read.
@@ -257,6 +259,8 @@ class TestDeliverableSurfacing:
         surface_deliverable(sb, self._task([]), ep)
         p = ep.artifacts.get("deliverable_path")
         assert p and open(p, "rb").read() == b"REAL"
+        # The agent's original basename must be preserved (rubric checks basename).
+        assert Path(p).name == "report.docx"
 
     def test_matches_expected_names_within_output(self):
         from rllm.eval._resolution import surface_deliverable

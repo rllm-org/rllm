@@ -712,13 +712,17 @@ def surface_deliverable(sandbox: Sandbox, task: Task, episode: Any) -> None:
     if not paths:
         return
 
+    # Preserve the agent's original basename: write into a temp *directory* under
+    # the file's real name (not mkstemp, which mangles it). Basename matters — the
+    # rubric grader has criteria like "the deliverable's basename is 'Sample'".
+    tmpdir = tempfile.mkdtemp(prefix="rllm_deliv_")
     host_paths: list[str] = []
     for p in paths:
         data = _read_sandbox_file(sandbox, p)
         if data is None:
             continue
-        fd, host_path = tempfile.mkstemp(prefix="rllm_deliv_", suffix=Path(p).suffix)
-        with os.fdopen(fd, "wb") as fh:
+        host_path = os.path.join(tmpdir, Path(p).name)
+        with open(host_path, "wb") as fh:
             fh.write(data)
         host_paths.append(host_path)
 
