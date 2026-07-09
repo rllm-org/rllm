@@ -247,6 +247,20 @@ class TinkerPolicyTrainer:
             algorithm_config=algorithm_config,
         )
 
+        # Every trajectory dropped as malformed (e.g. empty logprobs from failed/overloaded
+        # generations) -> nothing to train on, and forward_backward([]) would raise "No data
+        # provided". Skip the pass; the training loop skips the optimizer step + weight sync
+        # when no sequences are produced. (training_datums is a list, or a dict keyed by role.)
+        is_empty = (not training_datums) if isinstance(training_datums, list) else (not any(training_datums.values()))
+        if is_empty:
+            logger.warning(
+                "All %d trajectory group(s) dropped (no trainable sequences); skipping forward-backward for this batch.",
+                len(trajectory_groups),
+            )
+            adv_metrics["train/num_sequences"] = 0
+            adv_metrics["train/dropped_all_sequences"] = 1.0
+            return training_datums, [], adv_metrics
+
         # Forward-backward pass
         fwd_bwd_futures = await self._get_forward_backward_futures(
             training_datums=training_datums,

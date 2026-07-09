@@ -704,6 +704,7 @@ class UnifiedTrainer:
 
             # 1. Pull mini_batch_size task batches total, split into
             #    num_fwd_bwd_passes forward-backward passes of fwd_bwd_group_size each.
+            sequences_this_step = 0  # trainable sequences produced across all passes this step
             for pass_idx in range(num_fwd_bwd_passes):
                 chunk_groups: list[TrajectoryGroup] = []
 
@@ -736,6 +737,12 @@ class UnifiedTrainer:
                     trainer_state.backend_batch = self.backend.transform_to_backend_batch(trainer_state)
                     await self.backend.process_backend_batch(trainer_state)
 
+                    # Count trainable sequences this pass. A pass can yield zero when every
+                    # trajectory was dropped as malformed (backend_batch = []); those passes
+                    # contribute no gradient (forward-backward was skipped).
+                    bb = trainer_state.backend_batch
+                    sequences_this_step += len(bb) if bb is not None else 0
+
                     # Drain per-chunk backend metrics into aggregator
                     aggregator.record_dict(trainer_state.metrics)
                     trainer_state.metrics = {}
@@ -745,9 +752,21 @@ class UnifiedTrainer:
                 logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: incomplete batch ({groups_consumed}/{mini_batch_size}), stopping")
                 break
 
-            # 2. Optimizer step
-            logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: optimizer step")
-            await self.backend.update_policy(trainer_state)
+            # 2. Optimizer step — only when the batch produced trainable sequences. If every
+            #    trajectory was dropped (e.g. an inference-overload spike -> empty logprobs),
+            #    no gradient was accumulated, so stepping the optimizer would apply an
+            #    undefined/zero-gradient update (and bump the LR schedule + trigger a weight
+            #    sync) for nothing. Skip optim + sync and ride out the bad batch.
+            trained_this_step = sequences_this_step > 0
+            if trained_this_step:
+                logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: optimizer step")
+                await self.backend.update_policy(trainer_state)
+            else:
+                logger.warning(
+                    f"[TrainingLoop] Step {trainer_state.global_step}: all {groups_consumed} groups dropped "
+                    f"(no trainable sequences); skipping optimizer step + weight sync."
+                )
+            aggregator.record("async/trained_this_step", float(trained_this_step))
 
             # 3. Capture pre-sync metrics (before weight sync resets coordinator state)
             staleness_values = [coordinator.weight_version - v for v in weight_versions]
@@ -759,15 +778,17 @@ class UnifiedTrainer:
             pre_sync_coordinator_stats = coordinator.stats()
             pre_sync_buffer_stats = buffer.stats()
 
-            # 4. Weight sync
-            coordinator.on_training_step_complete()
+            # 4. Weight sync — only counts as a training step (toward the sync trigger) when we
+            #    actually stepped; a skipped batch changed no weights, so nothing to sync.
             sync_time = 0.0
-            if coordinator.should_sync():
-                logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: triggering weight sync")
-                t0 = time.perf_counter()
-                await self._perform_weight_sync(trainer_state, coordinator, rollout_engine)
-                sync_time = time.perf_counter() - t0
-                logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: weight sync complete ({sync_time:.2f}s)")
+            if trained_this_step:
+                coordinator.on_training_step_complete()
+                if coordinator.should_sync():
+                    logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: triggering weight sync")
+                    t0 = time.perf_counter()
+                    await self._perform_weight_sync(trainer_state, coordinator, rollout_engine)
+                    sync_time = time.perf_counter() - t0
+                    logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: weight sync complete ({sync_time:.2f}s)")
             if sync_time > 0:
                 aggregator.record("time/weight_sync", sync_time)
             step_time = time.perf_counter() - step_start

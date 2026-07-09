@@ -555,6 +555,20 @@ class FireworksPolicyTrainer:
             algorithm_config=algorithm_config,
         )
 
+        # Every trajectory in this batch was dropped as malformed (e.g. empty logprobs from
+        # failed/overloaded generations that returned no completion). There is nothing to train
+        # on, and forward_backward([]) would raise "No data provided". Skip the pass; the
+        # training loop skips the optimizer step + weight sync when no sequences are produced.
+        if not raw_datums:
+            logger.warning(
+                "All %d trajectory group(s) dropped (no trainable sequences); skipping forward-backward for this batch. "
+                "Common cause: inference overload/errors yielding empty logprobs — check async/dropped and reduce rollout concurrency.",
+                len(trajectory_groups),
+            )
+            adv_metrics["train/num_sequences"] = 0
+            adv_metrics["train/dropped_all_sequences"] = 1.0
+            return raw_datums, [], adv_metrics
+
         adv_metrics["train/num_sequences"] = len(raw_datums)
         adv_metrics["train/active_tokens"] = sum(int(sum(datum.loss_fn_inputs["mask"].data)) for datum in raw_datums)
         adv_metrics.update(self._compute_rollout_entropy_metrics(raw_datums))
