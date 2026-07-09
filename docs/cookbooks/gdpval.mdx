@@ -5,25 +5,37 @@ description: Evaluate an agent on OpenAI's GDPval — 220 gold tasks of economic
 
 This cookbook runs an agent against [GDPval](https://openai.com/index/gdpval/) (`openai/gdpval`), OpenAI's benchmark of real, economically valuable knowledge work: 220 open "gold" tasks across 44 occupations in 9 GDP-heavy sectors. Each task is a role-first prompt plus reference files, and the deliverable is a document (xlsx / docx / pptx / pdf). Like `claw_eval`, this is a native rLLM benchmark — no plugin to install: the builder, the dataset entry, and the reward function all ship with rLLM.
 
-Unlike Terminal-Bench (pass/fail pytest verifier), GDPval is graded by an **LLM judge against a per-task rubric**. This benchmark reproduces GDPval's *automated* grading — the reproducible LLM-judge methodology — not the headline human pairwise win-rate.
+GDPval's grading standard is blind **pairwise human-expert preference** — an expert compares the model's deliverable to the expert's own and picks the better one. Per [OpenAI's current guidance](https://evals.openai.com/gdpval/grading) (the hosted leaderboard/grader is retired), you now run grading yourself, and you may "run an LLM-based judge on the rubrics and deliverables to get a rough estimate of model performance." This benchmark does exactly that.
+
+Two graders ship, and they are complementary:
+
+- **`gdpval`** (headline) — **rubric-informed pairwise** vs. the gold deliverable → GDPval win-rate. This reproduces the benchmark's number.
+- **`gdpval-rubric`** — **absolute weighted-rubric** score in [0, 1]. Dense signal, best used as an RL reward.
 
 ## Pattern
 
 | Aspect | Value |
 |---|---|
 | Loop shape | Single-turn deliverable production (agent runs in a sandbox, writes a file) |
-| Dataset | `gdpval` — 220 tasks, reference files pulled from the HF Hub |
-| Grading | `gdpval_reward_fn`: for each rubric criterion, an LLM judge decides met / not-met |
-| Reward shape | Weight-normalized: `clip(Σ score[met] / Σ score[positive], 0, 1)` |
-| Metrics | Per-task rubric score in [0, 1], averaged across tasks |
+| Dataset | `gdpval` — 220 tasks; reference files **and** gold deliverables pulled from the HF Hub |
+| Grading | `gdpval_pairwise_reward_fn`: judge picks the better of {candidate, expert} deliverable, guided by the rubric |
+| Reward shape | `{0, 0.5, 1}` (loss / tie / win vs. expert), position-swap debiased |
+| Metrics | Win-rate vs. expert, averaged across tasks |
 
 ## Grading detail
 
-Each task ships `rubric_json`: a list of weighted criteria such as
-`{"score": 5, "criterion": "The recommended sample size is 220 …"}`. The grader
-(`rllm/eval/reward_fns/gdpval.py`) extracts the deliverable's text
-(openpyxl / python-docx / python-pptx / pdfplumber), asks the judge to rule on
-each criterion independently, and aggregates:
+**Pairwise (`gdpval`, headline).** The grader extracts the text of both the
+model's deliverable and the expert's gold deliverable
+(openpyxl / python-docx / python-pptx / pdfplumber), gives the judge the task
+prompt, the rubric criteria as guidance, and both deliverables, and asks which
+is the better professional work product. To cancel the judge's position bias it
+runs twice with the deliverables swapped and averages: win = 1, tie = 0.5,
+loss = 0. `is_correct` is a strict win (> 0.5). Averaged over tasks this is the
+GDPval win-rate.
+
+**Rubric (`gdpval-rubric`, RL reward).** Each task ships `rubric_json`: weighted
+criteria such as `{"score": 5, "criterion": "The recommended sample size is 220 …"}`.
+The grader judges each criterion met / not-met and aggregates:
 
 ```
 earned         = Σ score[c] for criteria judged satisfied     # penalties (score < 0) subtract
@@ -74,7 +86,8 @@ surfaced. See `_find_deliverable_text` in `rllm/eval/reward_fns/gdpval.py`.
 
 ## Caveat
 
-GDPval's headline metric is a blind human pairwise win-rate against an expert's
-deliverable, which is not reproducible in an automated harness. The score here
-is the automated rubric grade — useful and comparable across runs, but not the
-same number as the human evaluation.
+The true GDPval standard is *human* expert pairwise preference. The LLM judge
+here is OpenAI's sanctioned self-serve approximation ("a rough estimate"), not a
+human panel — OpenAI's own automated grader agrees with human experts ~66% of
+the time (vs. ~71% human-human). The pairwise number is comparable across runs
+and to the published methodology, but it is an estimate, not the human result.

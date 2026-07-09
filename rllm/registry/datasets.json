@@ -2,7 +2,19 @@
   "version": 1,
   "datasets": {
     "gdpval": {
-      "description": "GDPval (OpenAI): 220 gold tasks of economically valuable knowledge work across 44 occupations (sandbox; weighted-rubric LLM-judge graded)",
+      "description": "GDPval (OpenAI): 220 gold tasks of economically valuable knowledge work across 44 occupations (sandbox; rubric-informed pairwise LLM-judge vs. the expert deliverable -> win-rate)",
+      "source": "openai/gdpval",
+      "builder": "rllm.data.gdpval_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "train"
+      ],
+      "eval_split": "train",
+      "default_agent": "claude-code",
+      "reward_fn": "gdpval_pairwise_reward_fn"
+    },
+    "gdpval-rubric": {
+      "description": "GDPval scored by absolute weighted-rubric LLM-judge (dense [0,1] signal; useful as an RL reward). Same tasks as gdpval.",
       "source": "openai/gdpval",
       "builder": "rllm.data.gdpval_builder:build_benchmark",
       "category": "agentic",

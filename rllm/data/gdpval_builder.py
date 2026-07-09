@@ -81,7 +81,7 @@ def _write_instruction(task_dir: Path, row: dict, ref_names: list[str]) -> None:
     (task_dir / "instruction.md").write_text("\n".join(lines), encoding="utf-8")
 
 
-def _write_task_toml(task_dir: Path, row: dict, ref_names: list[str], judge_model: str | None) -> None:
+def _write_task_toml(task_dir: Path, row: dict, ref_names: list[str], gold_names: list[str], judge_model: str | None) -> None:
     prompt = row.get("prompt") or ""
     rubric_json = row.get("rubric_json") or "[]"
     deliverables = _deliverable_basenames(row)
@@ -97,6 +97,9 @@ def _write_task_toml(task_dir: Path, row: dict, ref_names: list[str], judge_mode
         f'rubric_json = """{_toml_escape(rubric_json)}"""',
         f"expected_deliverables = {json.dumps(deliverables)}",
         f"reference_files = {json.dumps(ref_names)}",
+        # Gold (expert) deliverables staged under <task_dir>/reference/ — read by
+        # the pairwise grader (gdpval_pairwise_reward_fn) via _find_reference_text.
+        f"reference_deliverables = {json.dumps(gold_names)}",
     ]
     if judge_model:
         lines.append(f'judge_model = "{judge_model}"')
@@ -133,6 +136,29 @@ def _stage_reference_files(row: dict, files_dir: Path) -> list[str]:
             logger.warning("[gdpval] could not download reference file %s: %s", rel, e)
             continue
         dest = files_dir / Path(rel).name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(local, dest)
+        names.append(dest.name)
+    return names
+
+
+def _stage_gold_deliverables(row: dict, ref_dir: Path) -> list[str]:
+    """Download the task's gold (expert) deliverables into ``ref_dir``.
+
+    These are the reference deliverables the pairwise grader compares against.
+    Uses ``hf_hub_download`` on the repo-relative paths in ``deliverable_files``.
+    """
+    from huggingface_hub import hf_hub_download
+
+    names: list[str] = []
+    for rel in row.get("deliverable_files") or []:
+        rel = str(rel)
+        try:
+            local = hf_hub_download(REPO_ID, rel, repo_type="dataset")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[gdpval] could not download gold deliverable %s: %s", rel, e)
+            continue
+        dest = ref_dir / Path(rel).name
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(local, dest)
         names.append(dest.name)
@@ -213,6 +239,7 @@ def build_benchmark(
 
     reg_rows: list[dict] = []
     n_with_files = 0
+    n_with_gold = 0
     for row in rows:
         task_id = row.get("task_id")
         if not task_id:
@@ -227,8 +254,13 @@ def build_benchmark(
         if ref_names:
             n_with_files += 1
 
+        # Gold deliverables → <task_dir>/reference/ (used by the pairwise grader).
+        gold_names = [] if skip_files else _stage_gold_deliverables(row, task_dir / "reference")
+        if gold_names:
+            n_with_gold += 1
+
         _write_instruction(task_dir, row, ref_names)
-        _write_task_toml(task_dir, row, ref_names, judge_model)
+        _write_task_toml(task_dir, row, ref_names, gold_names, judge_model)
 
         # Ship the structured rubric alongside the task for transparency/debug.
         tests_dir = task_dir / "tests"
@@ -244,12 +276,13 @@ def build_benchmark(
                 "occupation": row.get("occupation", ""),
                 "sector": row.get("sector", ""),
                 "expected_deliverables": _deliverable_basenames(row),
+                "reference_deliverables": gold_names,
             }
         )
 
     description = (catalog_entry or {}).get("description") or "GDPval (OpenAI): 220 gold tasks of economically valuable knowledge work (sandbox; weighted-rubric LLM-judge graded)."
     _write_dataset_toml(out, name=name, split=split, description=description, default_agent=default_agent)
-    logger.info("[gdpval] wrote %d task dirs to %s (%d with reference files)", len(reg_rows), out, n_with_files)
+    logger.info("[gdpval] wrote %d task dirs to %s (%d with reference files, %d with gold deliverables)", len(reg_rows), out, n_with_files, n_with_gold)
 
     if not reg_rows:
         raise RuntimeError(f"[gdpval] no tasks materialized from {REPO_ID} split={split}.")

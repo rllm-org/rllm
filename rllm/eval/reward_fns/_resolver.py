@@ -33,6 +33,7 @@ _REWARD_FN_TO_SCORE_FN: dict[str, str] = {
     "llm_equality_reward_fn": "rllm.eval.reward_fns.llm_equality",
     "llm_judge_reward_fn": "rllm.eval.reward_fns.llm_judge",
     "gdpval_reward_fn": "rllm.eval.reward_fns.gdpval",
+    "gdpval_pairwise_reward_fn": "rllm.eval.reward_fns.gdpval",
     "translation_reward_fn": "rllm.eval.reward_fns.translation",
     "widesearch_reward_fn": "rllm.eval.reward_fns.widesearch",
 }

@@ -337,6 +337,16 @@ def _parse_met(text: str) -> bool:
     return bool(re.search(r"\b(yes|met|true|1)\b", text, re.IGNORECASE))
 
 
+def _rubric_as_guidance(criteria: list[Criterion], limit: int = 40) -> str:
+    """Render the rubric as bullet guidance for the pairwise judge."""
+    if not criteria:
+        return "(no rubric provided; judge on overall professional quality)"
+    lines = [f"- [weight {int(c.score) if c.score == int(c.score) else c.score}] {c.text}" for c in criteria[:limit]]
+    if len(criteria) > limit:
+        lines.append(f"- ...(+{len(criteria) - limit} more criteria)")
+    return "\n".join(lines)
+
+
 def evaluate(task: Task, episode: Episode) -> EvalOutput:
     """Host-side ``gdpval_reward_fn``: weighted-rubric LLM-judge grade."""
     rubric_raw = task.metadata.get("rubric_json") or task.metadata.get("rubric")
@@ -374,6 +384,184 @@ def evaluate(task: Task, episode: Episode) -> EvalOutput:
             "total_possible": result.total_possible,
             "criteria_met": n_met,
             "criteria_total": len(criteria),
+            "occupation": task.metadata.get("occupation", ""),
+            "sector": task.metadata.get("sector", ""),
+        },
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Pairwise grader (headline metric) — rubric-informed, vs the gold deliverable
+# --------------------------------------------------------------------------- #
+#
+# This reproduces GDPval's grading standard as closely as a self-hosted judge
+# can: the judge compares the model's deliverable against the expert's gold
+# deliverable and picks the better one, guided by the task's rubric. Per
+# OpenAI's own current guidance (evals.openai.com/gdpval/grading): the standard
+# is pairwise human-expert preference, but you may "run an LLM-based judge on
+# the rubrics and deliverables to get a rough estimate of model performance."
+#
+# Output per task: candidate score in {0, 0.5, 1} (loss / tie / win vs. the
+# expert), averaged over a position-swapped pair of judge calls to cancel the
+# judge's position bias. Averaged across tasks this is the GDPval win-rate.
+
+PAIRWISE_SYSTEM_PROMPT = """\
+You are an experienced professional grading two deliverables produced for the same
+work request — one by an AI, one by a human expert (you are not told which is which).
+Decide which deliverable is the higher-quality professional work product.
+
+Use the provided rubric criteria as your guide, and also weigh professional quality:
+correctness, completeness, structure, and fitness for the stated purpose. Be
+decisive; only call a genuine tie when the two are truly indistinguishable in quality.
+
+Respond with ONLY a JSON object: {"winner": "A" | "B" | "tie", "reasoning": "<one sentence>"}."""
+
+PAIRWISE_USER_TEMPLATE = """\
+## Work request
+{prompt}
+
+## Rubric criteria (guidance)
+{rubric}
+
+## Deliverable A
+{a}
+
+## Deliverable B
+{b}
+
+Which deliverable is the better professional work product? Respond with JSON:
+{{"winner": "A" | "B" | "tie", "reasoning": "..."}}"""
+
+
+def _parse_winner(text: str) -> str | None:
+    """Return 'A', 'B', or 'tie' from a judge response, or None if unparseable."""
+    m = re.search(r"\{.*?\}", text, re.DOTALL)
+    if m:
+        try:
+            w = str(json.loads(m.group()).get("winner", "")).strip().lower()
+            if w in ("a", "b", "tie"):
+                return w
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+    low = text.lower()
+    if "tie" in low:
+        return "tie"
+    if re.search(r"\bwinner\b[^ab]*b\b", low) or re.search(r"\bb\b.*better", low):
+        return "b"
+    if re.search(r"\ba\b", low):
+        return "a"
+    return None
+
+
+def _make_litellm_pairwise_judge(model: str, base_url: str | None, api_key: str | None):
+    import litellm
+
+    def judge(prompt: str, rubric: str, a: str, b: str) -> str | None:
+        messages = [
+            {"role": "system", "content": PAIRWISE_SYSTEM_PROMPT},
+            {"role": "user", "content": PAIRWISE_USER_TEMPLATE.format(prompt=prompt[:4000], rubric=rubric, a=a, b=b)},
+        ]
+        kwargs: dict = {"model": model, "messages": messages, "temperature": 0.0}
+        if base_url:
+            kwargs["base_url"] = base_url
+        if api_key:
+            kwargs["api_key"] = api_key
+        resp = litellm.completion(**kwargs)
+        return _parse_winner(resp.choices[0].message.content or "")
+
+    return judge
+
+
+def score_pairwise(candidate: str, reference: str, prompt: str, rubric: str, judge) -> float | None:
+    """Candidate's win score in {0, 0.5, 1}, position-swap debiased.
+
+    ``judge(prompt, rubric, a, b) -> 'a'|'b'|'tie'|None`` is injected for testing.
+    Runs twice with candidate in each slot; returns the mean of the two per-call
+    candidate scores (win=1, tie=0.5, loss=0). Returns None if both calls fail.
+    """
+
+    def _cand_score(winner: str | None, candidate_is: str) -> float | None:
+        if winner is None:
+            return None
+        if winner == "tie":
+            return 0.5
+        return 1.0 if winner == candidate_is else 0.0
+
+    s1 = _cand_score(judge(prompt, rubric, candidate, reference), "a")  # candidate = A
+    s2 = _cand_score(judge(prompt, rubric, reference, candidate), "b")  # candidate = B
+    scores = [s for s in (s1, s2) if s is not None]
+    if not scores:
+        return None
+    return sum(scores) / len(scores)
+
+
+def _find_reference_text(task: Task) -> tuple[str, str]:
+    """Locate the gold (expert) deliverable's text. Returns (text, source)."""
+    meta = task.metadata or {}
+    if meta.get("reference_deliverable_text"):
+        return str(meta["reference_deliverable_text"]), "metadata.reference_deliverable_text"
+    if meta.get("reference_deliverable_path"):
+        text = extract_deliverable_text(meta["reference_deliverable_path"])
+        if text:
+            return text, "metadata.reference_deliverable_path"
+    # Resolve files staged under <task_dir>/reference/ by the builder.
+    names = meta.get("reference_deliverables") or []
+    if names and task.dataset_dir is not None:
+        base = task.dataset_dir / task.sub_dir if task.sub_dir else task.dataset_dir
+        for name in names:
+            text = extract_deliverable_text(Path(base) / "reference" / name)
+            if text:
+                return text, f"reference/{name}"
+    return "", "none"
+
+
+def evaluate_pairwise(task: Task, episode: Episode) -> EvalOutput:
+    """Headline ``gdpval_pairwise_reward_fn``: rubric-informed pairwise vs. gold.
+
+    reward = candidate win score in {0, 0.5, 1} (loss / tie / win vs. the expert
+    deliverable). Mean over tasks = GDPval win-rate.
+    """
+    candidate, cand_src = _find_deliverable_text(task, episode)
+    reference, ref_src = _find_reference_text(task)
+    if not reference:
+        # No gold deliverable → pairwise is impossible; don't fabricate a score.
+        return EvalOutput(
+            reward=0.0,
+            is_correct=False,
+            signals=[Signal(name="pairwise_win", value=0.0)],
+            metadata={"reason": "no_reference_deliverable", "ungraded": True},
+        )
+
+    criteria = parse_rubric(task.metadata.get("rubric_json") or task.metadata.get("rubric") or [])
+    rubric = _rubric_as_guidance(criteria)
+    prompt = task.metadata.get("prompt") or (task.instruction if isinstance(task.instruction, str) else "") or ""
+
+    model, base_url, api_key = _resolve_judge(task)
+    if not model:
+        return EvalOutput(
+            reward=0.0,
+            is_correct=False,
+            signals=[Signal(name="pairwise_win", value=0.0)],
+            metadata={"reason": "no_judge_configured", "ungraded": True},
+        )
+
+    score = score_pairwise(candidate, reference, prompt, rubric, _make_litellm_pairwise_judge(model, base_url, api_key))
+    if score is None:
+        return EvalOutput(
+            reward=0.0,
+            is_correct=False,
+            signals=[Signal(name="pairwise_win", value=0.0)],
+            metadata={"reason": "judge_call_failed", "ungraded": True},
+        )
+
+    return EvalOutput(
+        reward=float(score),
+        is_correct=score > 0.5,  # strict win over the expert; tie (0.5) is not a "win"
+        signals=[Signal(name="pairwise_win", value=float(score))],
+        metadata={
+            "judge_model": model,
+            "candidate_source": cand_src,
+            "reference_source": ref_src,
             "occupation": task.metadata.get("occupation", ""),
             "sector": task.metadata.get("sector", ""),
         },

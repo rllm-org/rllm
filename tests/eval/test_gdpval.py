@@ -203,3 +203,87 @@ class TestParseMet:
     def test_prose_fallback(self):
         assert g._parse_met("Yes, this is met.") is True
         assert g._parse_met("No.") is False
+
+
+# --------------------------------------------------------------------------- #
+# Pairwise grader
+# --------------------------------------------------------------------------- #
+
+
+class TestParseWinner:
+    def test_json(self):
+        assert g._parse_winner('{"winner": "A", "reasoning": "x"}') == "a"
+        assert g._parse_winner('{"winner": "B"}') == "b"
+        assert g._parse_winner('{"winner": "tie"}') == "tie"
+
+    def test_unparseable(self):
+        assert g._parse_winner("no verdict here 12345") is None
+
+
+class TestScorePairwise:
+    def test_consistent_win_both_positions(self):
+        # judge always prefers the candidate regardless of slot
+        def judge(prompt, rubric, a, b):
+            return "a" if a == "CAND" else "b"
+
+        # call1: a=CAND -> 'a' -> win(1); call2: a=REF,b=CAND -> 'b' -> win(1)
+        assert g.score_pairwise("CAND", "REF", "p", "r", judge) == 1.0
+
+    def test_consistent_loss(self):
+        def judge(prompt, rubric, a, b):
+            return "a" if a == "REF" else "b"  # always prefers REF
+
+        assert g.score_pairwise("CAND", "REF", "p", "r", judge) == 0.0
+
+    def test_tie(self):
+        assert g.score_pairwise("C", "R", "p", "r", lambda *a: "tie") == 0.5
+
+    def test_position_bias_averages_to_tie(self):
+        # judge always picks slot A regardless of content -> pure position bias
+        def judge(prompt, rubric, a, b):
+            return "a"
+
+        # call1 (cand=A) -> win(1); call2 (cand=B) -> 'a'=REF -> loss(0); mean 0.5
+        assert g.score_pairwise("C", "R", "p", "r", judge) == 0.5
+
+    def test_both_calls_fail_returns_none(self):
+        assert g.score_pairwise("C", "R", "p", "r", lambda *a: None) is None
+
+
+class TestEvaluatePairwise:
+    def _task(self, *, rubric=None, ref_text="EXPERT DELIVERABLE"):
+        from pathlib import Path
+
+        from rllm.types import Task
+
+        meta = {"prompt": "do the thing", "judge_model": "stub/model", "reference_deliverable_text": ref_text}
+        if rubric is not None:
+            meta["rubric_json"] = json.dumps(rubric)
+        return Task(id="t1", instruction="do the thing", metadata=meta, dataset_dir=Path("/"))
+
+    def test_no_reference_is_ungraded(self):
+        from pathlib import Path
+
+        from rllm.types import Task
+
+        task = Task(id="t", instruction="x", metadata={"prompt": "p", "judge_model": "m"}, dataset_dir=Path("/"))
+        out = g.evaluate_pairwise(task, Episode(artifacts={"deliverable_text": "cand"}))
+        assert out.reward == 0.0 and out.metadata.get("reason") == "no_reference_deliverable"
+
+    def test_win_with_stub_judge(self, monkeypatch):
+        # stub the pairwise judge factory to always prefer the candidate
+        monkeypatch.setattr(g, "_make_litellm_pairwise_judge", lambda *a, **k: (lambda prompt, rubric, x, y: "a" if x == "CAND" else "b"))
+        task = self._task(rubric=[{"score": 2, "criterion": "c1"}])
+        out = g.evaluate_pairwise(task, Episode(artifacts={"deliverable_text": "CAND"}))
+        assert out.reward == 1.0 and out.is_correct is True
+        assert out.metadata["reference_source"] == "metadata.reference_deliverable_text"
+
+    def test_tie_is_not_a_win(self, monkeypatch):
+        monkeypatch.setattr(g, "_make_litellm_pairwise_judge", lambda *a, **k: (lambda *args: "tie"))
+        out = g.evaluate_pairwise(self._task(), Episode(artifacts={"deliverable_text": "CAND"}))
+        assert out.reward == 0.5 and out.is_correct is False
+
+    def test_no_judge_is_ungraded(self, monkeypatch):
+        monkeypatch.setattr(g, "_resolve_judge", lambda task: ("", None, None))
+        out = g.evaluate_pairwise(self._task(), Episode(artifacts={"deliverable_text": "CAND"}))
+        assert out.reward == 0.0 and out.metadata.get("reason") == "no_judge_configured"
