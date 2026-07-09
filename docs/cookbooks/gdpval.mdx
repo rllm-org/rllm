@@ -1,0 +1,80 @@
+---
+title: GDPval
+description: Evaluate an agent on OpenAI's GDPval — 220 gold tasks of economically valuable knowledge work — with a faithful weighted-rubric LLM judge, entirely from the CLI
+---
+
+This cookbook runs an agent against [GDPval](https://openai.com/index/gdpval/) (`openai/gdpval`), OpenAI's benchmark of real, economically valuable knowledge work: 220 open "gold" tasks across 44 occupations in 9 GDP-heavy sectors. Each task is a role-first prompt plus reference files, and the deliverable is a document (xlsx / docx / pptx / pdf). Like `claw_eval`, this is a native rLLM benchmark — no plugin to install: the builder, the dataset entry, and the reward function all ship with rLLM.
+
+Unlike Terminal-Bench (pass/fail pytest verifier), GDPval is graded by an **LLM judge against a per-task rubric**. This benchmark reproduces GDPval's *automated* grading — the reproducible LLM-judge methodology — not the headline human pairwise win-rate.
+
+## Pattern
+
+| Aspect | Value |
+|---|---|
+| Loop shape | Single-turn deliverable production (agent runs in a sandbox, writes a file) |
+| Dataset | `gdpval` — 220 tasks, reference files pulled from the HF Hub |
+| Grading | `gdpval_reward_fn`: for each rubric criterion, an LLM judge decides met / not-met |
+| Reward shape | Weight-normalized: `clip(Σ score[met] / Σ score[positive], 0, 1)` |
+| Metrics | Per-task rubric score in [0, 1], averaged across tasks |
+
+## Grading detail
+
+Each task ships `rubric_json`: a list of weighted criteria such as
+`{"score": 5, "criterion": "The recommended sample size is 220 …"}`. The grader
+(`rllm/eval/reward_fns/gdpval.py`) extracts the deliverable's text
+(openpyxl / python-docx / python-pptx / pdfplumber), asks the judge to rule on
+each criterion independently, and aggregates:
+
+```
+earned         = Σ score[c] for criteria judged satisfied     # penalties (score < 0) subtract
+total_possible = Σ score[c] for criteria with score > 0
+reward         = clip(earned / total_possible, 0, 1)
+```
+
+## Prerequisites
+
+- **Python ≥ 3.12**, with the deliverable-extraction extras: `pip install openpyxl python-docx python-pptx pdfplumber`.
+- **A judge model** — resolved (first hit wins) from `GDPVAL_JUDGE_MODEL` / `GDPVAL_JUDGE_BASE_URL` / `GDPVAL_JUDGE_API_KEY`, then per-task metadata, then your `rllm model setup` provider config.
+- **A configured model provider** for the solver agent (`rllm model setup`).
+
+## Steps
+
+Pull the benchmark (materializes task dirs and downloads reference files):
+
+```bash
+# smoke run: 3 tasks
+python -m rllm.data.gdpval_builder --out-dir ~/.rllm/datasets/gdpval --limit 3 --clean
+# or via the catalog
+rllm dataset pull gdpval
+```
+
+Run the eval:
+
+```bash
+export GDPVAL_JUDGE_MODEL=...           # your judge endpoint
+rllm eval gdpval --agent claude-code --limit 3
+```
+
+Restrict to the occupations that overlap your task-generation pipeline:
+
+```bash
+python -m rllm.data.gdpval_builder --out-dir ~/.rllm/datasets/gdpval \
+  --occupations "Accountants and Auditors" "Financial and Investment Analysts" --clean
+```
+
+## Integration seam
+
+The host-side reward function grades the deliverable **text surfaced on the
+episode**. The solver's harness must expose the produced file via
+`episode.artifacts['deliverable_path']` (a path the grader extracts) or
+`['deliverable_text']` (already-extracted text). If neither is present, the
+grader falls back to the agent's final answer text — fine for text-only
+deliverables, but document deliverables (xlsx/pptx/pdf) require the file to be
+surfaced. See `_find_deliverable_text` in `rllm/eval/reward_fns/gdpval.py`.
+
+## Caveat
+
+GDPval's headline metric is a blind human pairwise win-rate against an expert's
+deliverable, which is not reproducible in an automated harness. The score here
+is the automated rubric grade — useful and comparable across runs, but not the
+same number as the human evaluation.

@@ -1,6 +1,18 @@
 {
   "version": 1,
   "datasets": {
+    "gdpval": {
+      "description": "GDPval (OpenAI): 220 gold tasks of economically valuable knowledge work across 44 occupations (sandbox; weighted-rubric LLM-judge graded)",
+      "source": "openai/gdpval",
+      "builder": "rllm.data.gdpval_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "train"
+      ],
+      "eval_split": "train",
+      "default_agent": "claude-code",
+      "reward_fn": "gdpval_reward_fn"
+    },
     "claw_eval": {
       "description": "Claw-Eval general split: 161 personal-assistant agent tasks (sandbox; LLM-judge graded)",
       "source": "claw-eval/Claw-Eval",
