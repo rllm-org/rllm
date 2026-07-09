@@ -574,21 +574,11 @@ class FireworksPolicyTrainer:
             if algorithm_config.mu_source == "proximal":
                 logger.warning("mu_source='proximal' not yet supported on the Fireworks custom path; using inference log-probs (mu=sampling).")
 
-            # Off-policy diagnostics (parity with the builtin path, which computes these after
-            # its own return): proximal (pi_old, via forward) vs inference (sampling) log-probs.
-            # Especially relevant for DPPO, whose keep-mask depends on this train/inference gap.
-            rc = algorithm_config.rollout_correction
-            clean_datums, _adv, inf_logprobs, _plens, _nlt = self._process_datums(raw_datums)
-            t0 = time.perf_counter()
-            prox_logprobs = inf_logprobs if rc.bypass_mode else await self._compute_proximal_logprobs(clean_datums)
-            adv_metrics.update(
-                self._compute_offpolicy_metrics(
-                    old_logprobs=prox_logprobs,
-                    rollout_logprobs=inf_logprobs,
-                    masks=[list(datum.loss_fn_inputs["mask"].data) for datum in raw_datums],
-                )
-            )
-            adv_metrics["time/proximal_forward"] = time.perf_counter() - t0
+            # No proximal forward here: on the custom (DPPO) path mu = the inference log-probs
+            # already carried by the datums, so pi_old is never recomputed. offpolicy/* would
+            # cost an extra forward per pass purely for a diagnostic, so it's intentionally not
+            # logged (the loss still emits its own diagnostic, e.g. dppo_tv/mask_frac). The
+            # builtin path recomputes proximal because its ratio *requires* pi_old.
 
             # server_normalized=True: the closure returns a RAW SUM over sequences; optim_step
             # sets GradAccNormalization from resolved.agg_mode so the server normalizes across
