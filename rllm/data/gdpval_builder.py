@@ -49,6 +49,9 @@ logger = logging.getLogger(__name__)
 
 REPO_ID = "openai/gdpval"
 VERIFIER_NAME = "gdpval_reward_fn"
+# Designated output directory (relative to the sandbox workdir) the agent is
+# told to save deliverables into, and the surfacer reads first.
+DELIVERABLE_DIR = "output"
 
 
 def _toml_escape(s: str) -> str:
@@ -78,6 +81,11 @@ def _write_instruction(task_dir: Path, row: dict, ref_names: list[str]) -> None:
         lines.append("## Expected deliverable filename(s)")
         lines += [f"- {n}" for n in deliverables]
         lines.append("")
+    # Harness instruction: a designated output directory removes any ambiguity
+    # about which produced file is the deliverable to grade.
+    lines.append("## Where to save your work")
+    lines.append(f"Save your final deliverable file(s) into the `{DELIVERABLE_DIR}/` directory of your working directory. Only put the files you want graded there.")
+    lines.append("")
     (task_dir / "instruction.md").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -103,6 +111,9 @@ def _write_task_toml(task_dir: Path, row: dict, ref_names: list[str], gold_names
         # Opt in to sandbox->host deliverable surfacing before host-side grading
         # (SandboxTaskHooks wraps the evaluator with _SurfacingEvaluator).
         "surface_deliverable = true",
+        # Directory (under workdir) the agent is told to write deliverables to;
+        # the surfacer reads it first before falling back to filename heuristics.
+        f'deliverable_dir = "{DELIVERABLE_DIR}"',
     ]
     if judge_model:
         lines.append(f'judge_model = "{judge_model}"')

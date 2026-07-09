@@ -89,9 +89,11 @@ Surfacing is automatic. Because a host-side grader never sees the sandbox,
 task's `surface_deliverable` metadata, set by the builder): right before
 grading — while the sandbox is still alive — it reads the produced deliverable
 out of the workdir and sets `deliverable_path`. It's backend-agnostic (base64
-over `sandbox.exec`), so it works on Docker/Modal/Daytona alike. It picks the
-file matching the task's `expected_deliverables`, else the newest non-input file
-in the workdir. See `surface_deliverable` in `rllm/eval/_resolution.py`.
+over `sandbox.exec`), so it works on Docker/Modal/Daytona alike. The task
+instruction tells the agent to save deliverables into an `output/` directory, so
+the surfacer reads that first (unambiguous); it only falls back to the expected
+filename, then the newest non-input file, if the agent ignores that. See
+`surface_deliverable` in `rllm/eval/_resolution.py`.
 
 ## Caveat
 

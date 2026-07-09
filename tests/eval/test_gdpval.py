@@ -238,24 +238,43 @@ class TestDeliverableSurfacing:
                 return "yes" if any(p in command for p in self.files) else ""
             if command.strip().startswith("find"):
                 import re as _re
-
-                m = _re.search(r"-name\s+(\S+)", command)
                 from pathlib import Path as _P
 
-                name = m.group(1).strip("'\"") if m else None
-                return "\n".join(p for p in self.files if _P(p).name == name)
+                if "-name" in command:
+                    m = _re.search(r"-name\s+(\S+)", command)
+                    name = m.group(1).strip("'\"") if m else None
+                    return "\n".join(p for p in self.files if _P(p).name == name)
+                # `find <dir> -type f` (no -name): list files under that dir.
+                m = _re.search(r"find\s+('([^']*)'|\"([^\"]*)\"|(\S+))", command)
+                raw = m.group(1) if m else ""
+                d = raw.strip("'\"").rstrip("/")
+                return "\n".join(p for p in self.files if p.startswith(d + "/"))
             if "ls -1t" in command:
                 from pathlib import Path as _P
 
                 return "\n".join(_P(p).name for p in self.files)
             return ""
 
-    def _task(self, expected, inputs=None):
+    def _task(self, expected, inputs=None, deliverable_dir=None):
         from pathlib import Path
 
         from rllm.types import Task
 
-        return Task(id="t", instruction="x", metadata={"workdir": "/workspace", "expected_deliverables": expected, "reference_files": inputs or []}, dataset_dir=Path("/"))
+        meta = {"workdir": "/workspace", "expected_deliverables": expected, "reference_files": inputs or []}
+        if deliverable_dir:
+            meta["deliverable_dir"] = deliverable_dir
+        return Task(id="t", instruction="x", metadata=meta, dataset_dir=Path("/"))
+
+    def test_output_dir_takes_priority_over_heuristics(self):
+        from rllm.eval._resolution import surface_deliverable
+
+        # A stray newest file sits in the workdir root, but the real deliverable
+        # is in output/ — the designated dir must win.
+        sb = self.FakeSandbox({"/workspace/scratch.txt": b"junk", "/workspace/output/report.docx": b"REAL"})
+        ep = Episode(artifacts={})
+        surface_deliverable(sb, self._task([], deliverable_dir="output"), ep)
+        p = ep.artifacts.get("deliverable_path")
+        assert p and open(p, "rb").read() == b"REAL"
 
     def test_surfaces_expected_file(self):
         from rllm.eval._resolution import surface_deliverable

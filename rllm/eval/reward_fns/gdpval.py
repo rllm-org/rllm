@@ -55,9 +55,10 @@ logger = logging.getLogger(__name__)
 # Hint injected into the solver's system prompt (picked up by
 # rllm.eval.reward_fns._resolver.get_verifier_system_prompt).
 SYSTEM_PROMPT = (
-    "Produce the requested deliverable as an actual file (xlsx/docx/pptx/pdf/csv/txt) "
-    "in the working directory, using the exact filename the task specifies. Your work "
-    "is graded by an LLM judge against a detailed rubric applied to that file's contents."
+    "Produce the requested deliverable as an actual file (xlsx/docx/pptx/pdf/csv/txt), "
+    "using the exact filename the task specifies, and save it into the 'output/' directory "
+    "of your working directory. Your work is graded by an LLM judge applied to that file's "
+    "contents, so only the files you place in 'output/' will be evaluated."
 )
 
 JUDGE_SYSTEM_PROMPT = """\
