@@ -274,6 +274,13 @@ class SandboxTaskHooks:
                 _run_healthcheck(task, sandbox)
 
             evaluator = self.evaluation.resolve(task, sandbox, plan.verifier_kind, plan.verifier_config)
+            # Opt-in: pull the produced deliverable out of the sandbox before a
+            # host-side grader runs (it never sees the sandbox otherwise). Gated
+            # by task metadata so it's a no-op for every other benchmark.
+            if sandbox is not None and task.metadata.get("surface_deliverable"):
+                from rllm.eval._resolution import _SurfacingEvaluator
+
+                evaluator = _SurfacingEvaluator(evaluator, sandbox)
         except BaseException:
             # Nothing has registered a teardown yet — close the sandbox here
             # or it leaks (and the retry path provisions another).

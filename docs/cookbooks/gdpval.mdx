@@ -76,15 +76,22 @@ python -m rllm.data.gdpval_builder --out-dir ~/.rllm/datasets/gdpval \
 
 ## Integration seam
 
-The host-side reward function grades **only a deliverable the harness has
-explicitly surfaced** on the episode — via `episode.artifacts['deliverable_path']`
-(a file path the grader extracts) or `['deliverable_text']` (already-extracted
-text). It is **fail-closed**: it never reads the agent's transcript or final
-answer, so the judge grades the artifact, not the process (and can't be gamed by
-an agent that merely *describes* a good deliverable). If nothing is surfaced, the
-task is marked `ungraded` (reason `no_deliverable_surfaced`) rather than scored 0.
-So the solver's harness must copy the produced file out of the sandbox and set
-`deliverable_path`. See `_find_deliverable_text` in `rllm/eval/reward_fns/gdpval.py`.
+The host-side grader scores **only a deliverable surfaced on the episode** —
+`episode.artifacts['deliverable_path']` (a file the grader extracts) or
+`['deliverable_text']`. It is **fail-closed**: it never reads the agent's
+transcript or final answer, so the judge grades the artifact, not the process
+(and can't be gamed by an agent that merely *describes* a good deliverable). If
+nothing is surfaced, the task is `ungraded` (reason `no_deliverable_surfaced`),
+not scored 0.
+
+Surfacing is automatic. Because a host-side grader never sees the sandbox,
+`SandboxTaskHooks` wraps the grader with `_SurfacingEvaluator` (opt-in via the
+task's `surface_deliverable` metadata, set by the builder): right before
+grading — while the sandbox is still alive — it reads the produced deliverable
+out of the workdir and sets `deliverable_path`. It's backend-agnostic (base64
+over `sandbox.exec`), so it works on Docker/Modal/Daytona alike. It picks the
+file matching the task's `expected_deliverables`, else the newest non-input file
+in the workdir. See `surface_deliverable` in `rllm/eval/_resolution.py`.
 
 ## Caveat
 

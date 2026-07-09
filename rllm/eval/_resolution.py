@@ -629,6 +629,127 @@ def _safe_exec(sandbox: Sandbox, command: str, timeout: float | None = None, use
         return ""
 
 
+# --------------------------------------------------------------------------- #
+# Deliverable surfacing: the reverse of _setup_task_environment's upload_dir.
+#
+# Host-side graders (e.g. GDPval's) score a file the agent produced *inside* the
+# sandbox, but they only receive (task, episode) — never the sandbox handle. So
+# before such a grader runs we read the produced deliverable out of the still-
+# alive sandbox and attach it to the episode. Backend-agnostic: uses the common
+# ``exec`` primitive (base64 over stdout), so it works on Docker/Modal/Daytona
+# alike. Opt-in per task via ``metadata['surface_deliverable']``.
+# --------------------------------------------------------------------------- #
+
+_SURFACE_MAX_BYTES = 25 * 1024 * 1024  # skip files too large to base64 over exec
+
+
+def _locate_deliverable_paths(sandbox: Sandbox, workdir: str, expected: list[str], inputs: set[str]) -> list[str]:
+    """Find the produced deliverable file(s) inside the sandbox workdir.
+
+    Prefers files matching the task's expected deliverable basenames; otherwise
+    falls back to the newest top-level file that isn't a staged input.
+    """
+    import shlex
+
+    wd = shlex.quote(workdir)
+    found: list[str] = []
+    for name in expected:
+        out = _safe_exec(sandbox, f"find {wd} -type f -name {shlex.quote(name)} 2>/dev/null | head -n 5", timeout=30)
+        found += [ln.strip() for ln in out.splitlines() if ln.strip()]
+    if found:
+        return list(dict.fromkeys(found))  # dedupe, preserve order
+
+    # Fallback: newest top-level file that wasn't uploaded as an input.
+    listing = _safe_exec(sandbox, f"ls -1t {wd} 2>/dev/null", timeout=30)
+    for name in (ln.strip() for ln in listing.splitlines()):
+        if not name or name in inputs:
+            continue
+        path = f"{workdir.rstrip('/')}/{name}"
+        if _safe_exec(sandbox, f"test -f {shlex.quote(path)} && echo yes", timeout=15).strip() == "yes":
+            return [path]
+    return []
+
+
+def _read_sandbox_file(sandbox: Sandbox, path: str) -> bytes | None:
+    """Read a file's bytes out of the sandbox via base64-over-exec."""
+    import shlex
+
+    q = shlex.quote(path)
+    size = _safe_exec(sandbox, f"wc -c < {q} 2>/dev/null", timeout=15).strip()
+    if size.isdigit() and int(size) > _SURFACE_MAX_BYTES:
+        logger.warning("[surface] deliverable %s is %s bytes (> %d); skipping", path, size, _SURFACE_MAX_BYTES)
+        return None
+    b64 = _safe_exec(sandbox, f"base64 {q} 2>/dev/null", timeout=120)
+    if not b64.strip():
+        return None
+    try:
+        return base64.b64decode("".join(b64.split()))
+    except (ValueError, TypeError):
+        logger.warning("[surface] could not decode base64 for %s", path)
+        return None
+
+
+def surface_deliverable(sandbox: Sandbox, task: Task, episode: Any) -> None:
+    """Pull the agent's produced deliverable out of the sandbox onto the episode.
+
+    Sets ``episode.artifacts['deliverable_path']`` (and ``output_files`` for
+    multi-file deliverables) so a host-side grader can read it. No-op if the
+    flow already surfaced a deliverable, or if nothing was produced (the grader
+    then fails closed — marks the task ungraded rather than scoring it).
+    """
+    import os
+    import tempfile
+
+    arts = episode.artifacts if episode.artifacts is not None else {}
+    if arts.get("deliverable_path") or arts.get("deliverable_text"):
+        return
+
+    workdir = task.metadata.get("workdir") or "/workspace"
+    expected = list(task.metadata.get("expected_deliverables") or [])
+    inputs = {Path(x).name for x in (task.metadata.get("reference_files") or [])}
+
+    paths = _locate_deliverable_paths(sandbox, workdir, expected, inputs)
+    if not paths:
+        return
+
+    host_paths: list[str] = []
+    for p in paths:
+        data = _read_sandbox_file(sandbox, p)
+        if data is None:
+            continue
+        fd, host_path = tempfile.mkstemp(prefix="rllm_deliv_", suffix=Path(p).suffix)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        host_paths.append(host_path)
+
+    if not host_paths:
+        return
+    episode.artifacts["deliverable_path"] = host_paths[0]
+    if len(host_paths) > 1:
+        episode.artifacts["output_files"] = host_paths
+
+
+class _SurfacingEvaluator:
+    """Wrap an evaluator so the produced deliverable is surfaced before grading.
+
+    Runs at evaluate time — while the sandbox is still alive (teardown is
+    deferred until after the evaluator) — so the closed-over sandbox handle is
+    valid. Surfacing failures are swallowed: the wrapped grader then sees no
+    deliverable and fails closed on its own terms.
+    """
+
+    def __init__(self, inner: Evaluator, sandbox: Sandbox) -> None:
+        self._inner = inner
+        self._sandbox = sandbox
+
+    def evaluate(self, task: Task, episode: Any):
+        try:
+            surface_deliverable(self._sandbox, task, episode)
+        except Exception:
+            logger.warning("[surface] deliverable surfacing failed; grader will fail closed", exc_info=True)
+        return self._inner.evaluate(task, episode)
+
+
 # ---------------------------------------------------------------------------
 # Adapters
 # ---------------------------------------------------------------------------

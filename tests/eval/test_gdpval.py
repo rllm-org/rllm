@@ -212,6 +212,92 @@ class TestEvaluate:
 # --------------------------------------------------------------------------- #
 
 
+class TestDeliverableSurfacing:
+    """The sandbox->host surfacing step (rllm.eval._resolution)."""
+
+    class FakeSandbox:
+        """Minimal sandbox emulating the exec commands the surfacer issues."""
+
+        def __init__(self, files):
+            self.files = files  # {sandbox_path: bytes}
+
+        def exec(self, command, timeout=None, user=None):
+            import base64 as _b64
+
+            if "base64 " in command:
+                for p, d in self.files.items():
+                    if p in command:
+                        return _b64.b64encode(d).decode()
+                return ""
+            if "wc -c" in command:
+                for p, d in self.files.items():
+                    if p in command:
+                        return str(len(d))
+                return ""
+            if command.startswith("test -f"):
+                return "yes" if any(p in command for p in self.files) else ""
+            if command.strip().startswith("find"):
+                import re as _re
+
+                m = _re.search(r"-name\s+(\S+)", command)
+                from pathlib import Path as _P
+
+                name = m.group(1).strip("'\"") if m else None
+                return "\n".join(p for p in self.files if _P(p).name == name)
+            if "ls -1t" in command:
+                from pathlib import Path as _P
+
+                return "\n".join(_P(p).name for p in self.files)
+            return ""
+
+    def _task(self, expected, inputs=None):
+        from pathlib import Path
+
+        from rllm.types import Task
+
+        return Task(id="t", instruction="x", metadata={"workdir": "/workspace", "expected_deliverables": expected, "reference_files": inputs or []}, dataset_dir=Path("/"))
+
+    def test_surfaces_expected_file(self):
+        from rllm.eval._resolution import surface_deliverable
+
+        sb = self.FakeSandbox({"/workspace/out.xlsx": b"BINARYBYTES\x00\x01"})
+        ep = Episode(artifacts={})
+        surface_deliverable(sb, self._task(["out.xlsx"]), ep)
+        p = ep.artifacts.get("deliverable_path")
+        assert p and open(p, "rb").read() == b"BINARYBYTES\x00\x01"
+
+    def test_no_produced_file_leaves_unsurfaced(self):
+        from rllm.eval._resolution import surface_deliverable
+
+        sb = self.FakeSandbox({"/workspace/input.csv": b"a,b"})  # only the staged input exists
+        ep = Episode(artifacts={})
+        surface_deliverable(sb, self._task(["out.xlsx"], inputs=["input.csv"]), ep)
+        assert "deliverable_path" not in ep.artifacts  # fail-closed downstream
+
+    def test_does_not_clobber_already_surfaced(self):
+        from rllm.eval._resolution import surface_deliverable
+
+        sb = self.FakeSandbox({"/workspace/out.xlsx": b"x"})
+        ep = Episode(artifacts={"deliverable_text": "already here"})
+        surface_deliverable(sb, self._task(["out.xlsx"]), ep)
+        assert "deliverable_path" not in ep.artifacts
+
+    def test_wrapper_surfaces_then_delegates(self):
+        from rllm.eval._resolution import _SurfacingEvaluator
+
+        sb = self.FakeSandbox({"/workspace/out.txt": b"hello"})
+        seen = {}
+
+        class Inner:
+            def evaluate(self, task, episode):
+                seen["path"] = episode.artifacts.get("deliverable_path")
+                return "RESULT"
+
+        out = _SurfacingEvaluator(Inner(), sb).evaluate(self._task(["out.txt"]), Episode(artifacts={}))
+        assert out == "RESULT"
+        assert seen["path"] and open(seen["path"]).read() == "hello"
+
+
 class TestParseMet:
     def test_json_forms(self):
         assert g._parse_met('{"met": 1, "reasoning": "ok"}') is True

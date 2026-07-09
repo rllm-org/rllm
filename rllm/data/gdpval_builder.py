@@ -100,6 +100,9 @@ def _write_task_toml(task_dir: Path, row: dict, ref_names: list[str], gold_names
         # Gold (expert) deliverables staged under <task_dir>/reference/ — read by
         # the pairwise grader (gdpval_pairwise_reward_fn) via _find_reference_text.
         f"reference_deliverables = {json.dumps(gold_names)}",
+        # Opt in to sandbox->host deliverable surfacing before host-side grading
+        # (SandboxTaskHooks wraps the evaluator with _SurfacingEvaluator).
+        "surface_deliverable = true",
     ]
     if judge_model:
         lines.append(f'judge_model = "{judge_model}"')
