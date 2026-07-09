@@ -282,8 +282,8 @@ def test_echo_estimator_defaults_to_echo():
 def test_agg_mode_resolution_default_config_and_pin():
     from rllm.trainer.algorithms.loss import DEFAULT_LOSS_AGG_MODE
 
-    # default: no config → canonical default (token-mean)
-    assert resolve_loss(_alg(loss_fn="dppo_tv")).agg_mode == DEFAULT_LOSS_AGG_MODE == "token-mean"
+    # default: no config → canonical default (seq-mean-token-mean)
+    assert resolve_loss(_alg(loss_fn="dppo_tv")).agg_mode == DEFAULT_LOSS_AGG_MODE == "seq-mean-token-mean"
     # config value flows through
     assert resolve_loss(_alg(loss_fn="dppo_tv", loss_agg_mode="seq-mean-token-sum")).agg_mode == "seq-mean-token-sum"
     # a loss that PINS its mode (GSPO) overrides even an explicit config
