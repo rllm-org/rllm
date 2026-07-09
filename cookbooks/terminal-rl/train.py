@@ -68,6 +68,12 @@ TB_VAL_MAX = int(os.environ.get("TB_VAL_MAX", "0"))
 _terminus_max_turns = os.environ.get("TERMINUS_MAX_TURNS")
 TERMINUS_MAX_TURNS = int(_terminus_max_turns) if _terminus_max_turns and int(_terminus_max_turns) > 0 else None
 
+# Terminus-2 context compaction (summarization). Harbor enables it by default;
+# summarization subagents compress history when the context fills, which
+# fragments the trajectory the gateway captures. The train_*.sh scripts set
+# TERMINUS_ENABLE_SUMMARIZE=0 to disable it. Unset = Harbor's default (on).
+TERMINUS_ENABLE_SUMMARIZE = os.environ.get("TERMINUS_ENABLE_SUMMARIZE", "1").strip().lower() not in ("0", "false", "no", "off")
+
 
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig) -> None:
@@ -86,7 +92,10 @@ def main(config: DictConfig) -> None:
     # explicit evaluator/hooks) makes AgentTrainer auto-wire SandboxTaskHooks
     # for the sandbox lifecycle + per-task verifier, and route rollouts through
     # AgentFlowEngine — rLLM's own runtime, not the remote Harbor runtime.
-    agent_flow = Terminus2Harness(sandbox_backend=SANDBOX_BACKEND, max_turns=TERMINUS_MAX_TURNS)
+    # enable_summarize controls Terminus-2 context compaction; the train_*.sh
+    # scripts set TERMINUS_ENABLE_SUMMARIZE=0 to turn it off so summarization
+    # subagents don't fragment the captured trajectory during training.
+    agent_flow = Terminus2Harness(sandbox_backend=SANDBOX_BACKEND, max_turns=TERMINUS_MAX_TURNS, enable_summarize=TERMINUS_ENABLE_SUMMARIZE)
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),

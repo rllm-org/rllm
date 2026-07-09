@@ -31,7 +31,8 @@ export TB_TRAIN_DATASET="${TB_TRAIN_DATASET:-tb-v2-debug}"
 # Per-rollout turn cap for terminus2 (read by train.py). Empty = uncapped.
 export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
 # Plain ReAct loop: no harbor summarization — a context overflow ends the episode.
-export RLLM_TERMINUS_ENABLE_SUMMARIZE="${RLLM_TERMINUS_ENABLE_SUMMARIZE:-0}"
+# (read by train.py and passed to the harness as enable_summarize)
+export TERMINUS_ENABLE_SUMMARIZE="${TERMINUS_ENABLE_SUMMARIZE:-0}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-3600}"
 # Modal sandbox LIFETIME (not idle time). Must exceed the agent run timeout
 # above plus setup/verify, or sandboxes get reaped mid-rollout — surfacing as
