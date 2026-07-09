@@ -208,9 +208,15 @@ def build_trace_record(
     if "completion_tokens" in usage:
         token_counts["completion"] = usage["completion_tokens"]
 
-    response_weight_version = extract_weight_version(response_body)
-    if response_weight_version is not None:
-        weight_version = response_weight_version
+    # Prefer the proxy's tracked version (set via /admin/weight_version, fanned out to every
+    # worker by the multi-worker front) over the engine-stamped one in the response. A gateway
+    # worker subprocess rebuilds its own rollout engine whose weight_version is never updated
+    # (only proxy.weight_version is), so the response carries a stale 0 that would otherwise
+    # clobber the correct proxy value → all traces stamped 0 → async staleness reads the full
+    # weight_version. Fall back to the engine stamp only when the proxy isn't tracking a version.
+    # (Matches build_trace_record_from_chunks, which already uses the proxy value only.)
+    if weight_version is None:
+        weight_version = extract_weight_version(response_body)
 
     return TraceRecord(
         trace_id=str(uuid.uuid4()),
