@@ -90,10 +90,12 @@ task's `surface_deliverable` metadata, set by the builder): right before
 grading — while the sandbox is still alive — it reads the produced deliverable
 out of the workdir and sets `deliverable_path`. It's backend-agnostic (base64
 over `sandbox.exec`), so it works on Docker/Modal/Daytona alike. The task
-instruction tells the agent to save deliverables into an `output/` directory, so
-the surfacer reads that first (unambiguous); it only falls back to the expected
-filename, then the newest non-input file, if the agent ignores that. See
-`surface_deliverable` in `rllm/eval/_resolution.py`.
+instruction tells the agent to save deliverables into an `output/` directory,
+and the surfacer reads **only** that directory — matching the task's expected
+basenames within it when given, else taking all files there. Nothing else in
+the workdir is searched: if the agent didn't write to `output/`, nothing is
+surfaced and grading fails closed. See `surface_deliverable` in
+`rllm/eval/_resolution.py`.
 
 ## Caveat
 

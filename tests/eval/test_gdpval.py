@@ -213,90 +213,80 @@ class TestEvaluate:
 
 
 class TestDeliverableSurfacing:
-    """The sandbox->host surfacing step (rllm.eval._resolution)."""
+    """The sandbox->host surfacing step (rllm.eval._resolution).
+
+    Behavior: read files from <workdir>/<deliverable_dir> only; match expected
+    basenames within it when given; nothing else is searched.
+    """
 
     class FakeSandbox:
-        """Minimal sandbox emulating the exec commands the surfacer issues."""
+        """Minimal sandbox emulating the exec commands the surfacer issues:
+        ``find <dir> -type f``, ``wc -c < <path>``, ``base64 <path>``."""
 
         def __init__(self, files):
             self.files = files  # {sandbox_path: bytes}
 
         def exec(self, command, timeout=None, user=None):
             import base64 as _b64
+            import re as _re
 
             if "base64 " in command:
-                for p, d in self.files.items():
-                    if p in command:
-                        return _b64.b64encode(d).decode()
-                return ""
+                return next((_b64.b64encode(d).decode() for p, d in self.files.items() if p in command), "")
             if "wc -c" in command:
-                for p, d in self.files.items():
-                    if p in command:
-                        return str(len(d))
-                return ""
-            if command.startswith("test -f"):
-                return "yes" if any(p in command for p in self.files) else ""
+                return next((str(len(d)) for p, d in self.files.items() if p in command), "")
             if command.strip().startswith("find"):
-                import re as _re
-                from pathlib import Path as _P
-
-                if "-name" in command:
-                    m = _re.search(r"-name\s+(\S+)", command)
-                    name = m.group(1).strip("'\"") if m else None
-                    return "\n".join(p for p in self.files if _P(p).name == name)
-                # `find <dir> -type f` (no -name): list files under that dir.
                 m = _re.search(r"find\s+('([^']*)'|\"([^\"]*)\"|(\S+))", command)
-                raw = m.group(1) if m else ""
-                d = raw.strip("'\"").rstrip("/")
+                d = (m.group(1) if m else "").strip("'\"").rstrip("/")
                 return "\n".join(p for p in self.files if p.startswith(d + "/"))
-            if "ls -1t" in command:
-                from pathlib import Path as _P
-
-                return "\n".join(_P(p).name for p in self.files)
             return ""
 
-    def _task(self, expected, inputs=None, deliverable_dir=None):
+    def _task(self, expected, deliverable_dir="output"):
         from pathlib import Path
 
         from rllm.types import Task
 
-        meta = {"workdir": "/workspace", "expected_deliverables": expected, "reference_files": inputs or []}
-        if deliverable_dir:
-            meta["deliverable_dir"] = deliverable_dir
+        meta = {"workdir": "/workspace", "expected_deliverables": expected, "deliverable_dir": deliverable_dir}
         return Task(id="t", instruction="x", metadata=meta, dataset_dir=Path("/"))
 
-    def test_output_dir_takes_priority_over_heuristics(self):
+    def test_reads_output_dir(self):
         from rllm.eval._resolution import surface_deliverable
 
-        # A stray newest file sits in the workdir root, but the real deliverable
-        # is in output/ — the designated dir must win.
+        # A stray file in the workdir root is ignored; only output/ is read.
         sb = self.FakeSandbox({"/workspace/scratch.txt": b"junk", "/workspace/output/report.docx": b"REAL"})
         ep = Episode(artifacts={})
-        surface_deliverable(sb, self._task([], deliverable_dir="output"), ep)
+        surface_deliverable(sb, self._task([]), ep)
         p = ep.artifacts.get("deliverable_path")
         assert p and open(p, "rb").read() == b"REAL"
 
-    def test_surfaces_expected_file(self):
+    def test_matches_expected_names_within_output(self):
         from rllm.eval._resolution import surface_deliverable
 
-        sb = self.FakeSandbox({"/workspace/out.xlsx": b"BINARYBYTES\x00\x01"})
+        sb = self.FakeSandbox({"/workspace/output/report.docx": b"WANT", "/workspace/output/notes.txt": b"scratch"})
+        ep = Episode(artifacts={})
+        surface_deliverable(sb, self._task(["report.docx"]), ep)
+        assert open(ep.artifacts["deliverable_path"], "rb").read() == b"WANT"
+        assert "output_files" not in ep.artifacts  # only the matched file
+
+    def test_returns_all_when_no_expected_match(self):
+        from rllm.eval._resolution import surface_deliverable
+
+        sb = self.FakeSandbox({"/workspace/output/a.txt": b"A"})
+        ep = Episode(artifacts={})
+        surface_deliverable(sb, self._task(["nomatch.docx"]), ep)  # expected present but absent in output/
+        assert open(ep.artifacts["deliverable_path"], "rb").read() == b"A"
+
+    def test_empty_output_dir_leaves_unsurfaced(self):
+        from rllm.eval._resolution import surface_deliverable
+
+        sb = self.FakeSandbox({"/workspace/input.csv": b"a,b"})  # nothing in output/
         ep = Episode(artifacts={})
         surface_deliverable(sb, self._task(["out.xlsx"]), ep)
-        p = ep.artifacts.get("deliverable_path")
-        assert p and open(p, "rb").read() == b"BINARYBYTES\x00\x01"
-
-    def test_no_produced_file_leaves_unsurfaced(self):
-        from rllm.eval._resolution import surface_deliverable
-
-        sb = self.FakeSandbox({"/workspace/input.csv": b"a,b"})  # only the staged input exists
-        ep = Episode(artifacts={})
-        surface_deliverable(sb, self._task(["out.xlsx"], inputs=["input.csv"]), ep)
         assert "deliverable_path" not in ep.artifacts  # fail-closed downstream
 
     def test_does_not_clobber_already_surfaced(self):
         from rllm.eval._resolution import surface_deliverable
 
-        sb = self.FakeSandbox({"/workspace/out.xlsx": b"x"})
+        sb = self.FakeSandbox({"/workspace/output/out.xlsx": b"x"})
         ep = Episode(artifacts={"deliverable_text": "already here"})
         surface_deliverable(sb, self._task(["out.xlsx"]), ep)
         assert "deliverable_path" not in ep.artifacts
@@ -304,7 +294,7 @@ class TestDeliverableSurfacing:
     def test_wrapper_surfaces_then_delegates(self):
         from rllm.eval._resolution import _SurfacingEvaluator
 
-        sb = self.FakeSandbox({"/workspace/out.txt": b"hello"})
+        sb = self.FakeSandbox({"/workspace/output/out.txt": b"hello"})
         seen = {}
 
         class Inner:

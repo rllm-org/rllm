@@ -643,42 +643,31 @@ def _safe_exec(sandbox: Sandbox, command: str, timeout: float | None = None, use
 _SURFACE_MAX_BYTES = 25 * 1024 * 1024  # skip files too large to base64 over exec
 
 
-def _locate_deliverable_paths(sandbox: Sandbox, workdir: str, expected: list[str], inputs: set[str], deliverable_dir: str | None = None) -> list[str]:
-    """Find the produced deliverable file(s) inside the sandbox workdir.
+def _locate_deliverable_paths(sandbox: Sandbox, workdir: str, expected: list[str], deliverable_dir: str | None) -> list[str]:
+    """Return the produced deliverable file(s) from the designated output dir.
 
-    Priority: (1) everything in the designated ``deliverable_dir`` the agent was
-    told to write to; (2) files matching the task's expected basenames; (3) the
-    newest top-level file that isn't a staged input. (1) is the reliable path;
-    (2)/(3) are fallbacks for when the agent ignores the output-dir instruction.
+    Reads every file under ``<workdir>/<deliverable_dir>`` — the directory the
+    agent was instructed to save deliverables into. When the task declares
+    expected basenames and any of them are present, restricts to those;
+    otherwise returns all files found. No workdir-wide search or newest-file
+    guessing: if the agent didn't write to the output dir, nothing is surfaced
+    and the grader fails closed.
     """
     import shlex
 
-    wd = shlex.quote(workdir)
-
-    # (1) Designated output directory — unambiguous when the agent complied.
-    if deliverable_dir:
-        out_dir = f"{workdir.rstrip('/')}/{deliverable_dir.strip('/')}"
-        listed = _safe_exec(sandbox, f"find {shlex.quote(out_dir)} -type f 2>/dev/null | head -n 50", timeout=30)
-        in_dir = [ln.strip() for ln in listed.splitlines() if ln.strip()]
-        if in_dir:
-            return list(dict.fromkeys(in_dir))
-
-    found: list[str] = []
-    for name in expected:
-        out = _safe_exec(sandbox, f"find {wd} -type f -name {shlex.quote(name)} 2>/dev/null | head -n 5", timeout=30)
-        found += [ln.strip() for ln in out.splitlines() if ln.strip()]
-    if found:
-        return list(dict.fromkeys(found))  # dedupe, preserve order
-
-    # Fallback: newest top-level file that wasn't uploaded as an input.
-    listing = _safe_exec(sandbox, f"ls -1t {wd} 2>/dev/null", timeout=30)
-    for name in (ln.strip() for ln in listing.splitlines()):
-        if not name or name in inputs:
-            continue
-        path = f"{workdir.rstrip('/')}/{name}"
-        if _safe_exec(sandbox, f"test -f {shlex.quote(path)} && echo yes", timeout=15).strip() == "yes":
-            return [path]
-    return []
+    if not deliverable_dir:
+        return []
+    out_dir = f"{workdir.rstrip('/')}/{deliverable_dir.strip('/')}"
+    listed = _safe_exec(sandbox, f"find {shlex.quote(out_dir)} -type f 2>/dev/null | head -n 100", timeout=30)
+    files = list(dict.fromkeys(ln.strip() for ln in listed.splitlines() if ln.strip()))
+    if not files:
+        return []
+    if expected:
+        exp = set(expected)
+        matched = [f for f in files if Path(f).name in exp]
+        if matched:
+            return matched
+    return files
 
 
 def _read_sandbox_file(sandbox: Sandbox, path: str) -> bytes | None:
@@ -717,10 +706,9 @@ def surface_deliverable(sandbox: Sandbox, task: Task, episode: Any) -> None:
 
     workdir = task.metadata.get("workdir") or "/workspace"
     expected = list(task.metadata.get("expected_deliverables") or [])
-    inputs = {Path(x).name for x in (task.metadata.get("reference_files") or [])}
     deliverable_dir = task.metadata.get("deliverable_dir")
 
-    paths = _locate_deliverable_paths(sandbox, workdir, expected, inputs, deliverable_dir)
+    paths = _locate_deliverable_paths(sandbox, workdir, expected, deliverable_dir)
     if not paths:
         return
 
