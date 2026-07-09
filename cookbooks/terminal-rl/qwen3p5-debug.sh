@@ -45,7 +45,7 @@ python -u train.py \
     model.lora_rank=32 \
     fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3p5-35b-a3b-256k-lora \
     fireworks_config.policy_trainer_replica_count=2 \
-    fireworks_config.rollout_deployment_replica_count=6 \
+    fireworks_config.rollout_deployment_replica_count=4 \
     training.group_size=32 \
     training.learning_rate=2e-5 \
     training.max_length=101072 \
@@ -62,6 +62,8 @@ python -u train.py \
     rllm.data.train_batch_size=1 \
     rllm.data.val_batch_size=-1 \
     rllm.compact_filtering.enable=true \
+    rllm.compact_filtering.mask_max_prompt_length_exceeded=false \
+    rllm.compact_filtering.mask_max_turns_exceeded=false \
     rllm.algorithm.adv_estimator=grpo \
     rllm.algorithm.norm_adv_by_std_in_grpo=true \
     rllm.async_training.enable=true \
@@ -78,6 +80,7 @@ python -u train.py \
     rllm.gateway.cumulative_token_mode=true \
     rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=100 \
+    rllm.trainer.dump_batch_dir=train_batches/qwen3p5-35b-a3b-tb-v2-debug \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='terminal-rl' \
     rllm.trainer.experiment_name='qwen3p5-35b-a3b-tb-v2-debug' \
