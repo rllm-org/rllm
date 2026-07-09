@@ -48,7 +48,22 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 REPO_ID = "openai/gdpval"
-VERIFIER_NAME = "gdpval_reward_fn"
+# Default per-task verifiers, matched to the two catalog entries. The stamped
+# [verifier] in task.toml MUST agree with the catalog reward_fn, or eval can
+# grade with a different grader than intended depending on the dispatch path.
+PAIRWISE_VERIFIER = "gdpval_pairwise_reward_fn"
+RUBRIC_VERIFIER = "gdpval_reward_fn"
+
+
+def _verifier_for(name: str, catalog_entry: dict | None) -> str:
+    """The per-task verifier to stamp — the catalog reward_fn when known, else
+    inferred from the dataset name (``*-rubric`` → rubric, else pairwise)."""
+    rf = (catalog_entry or {}).get("reward_fn")
+    if rf:
+        return rf
+    return RUBRIC_VERIFIER if "rubric" in name else PAIRWISE_VERIFIER
+
+
 # Designated output directory (relative to the sandbox workdir) the agent is
 # told to save deliverables into, and the surfacer reads first.
 DELIVERABLE_DIR = "output"
@@ -89,7 +104,7 @@ def _write_instruction(task_dir: Path, row: dict, ref_names: list[str]) -> None:
     (task_dir / "instruction.md").write_text("\n".join(lines), encoding="utf-8")
 
 
-def _write_task_toml(task_dir: Path, row: dict, ref_names: list[str], gold_names: list[str], judge_model: str | None) -> None:
+def _write_task_toml(task_dir: Path, row: dict, ref_names: list[str], gold_names: list[str], verifier_name: str, judge_model: str | None) -> None:
     prompt = row.get("prompt") or ""
     rubric_json = row.get("rubric_json") or "[]"
     deliverables = _deliverable_basenames(row)
@@ -112,7 +127,7 @@ def _write_task_toml(task_dir: Path, row: dict, ref_names: list[str], gold_names
         # (SandboxTaskHooks wraps the evaluator with _SurfacingEvaluator).
         "surface_deliverable = true",
         # Directory (under workdir) the agent is told to write deliverables to;
-        # the surfacer reads it first before falling back to filename heuristics.
+        # the surfacer reads only this directory.
         f'deliverable_dir = "{DELIVERABLE_DIR}"',
     ]
     if judge_model:
@@ -126,7 +141,7 @@ def _write_task_toml(task_dir: Path, row: dict, ref_names: list[str], gold_names
         'workdir = "/workspace"',
         "",
         "[verifier]",
-        f'name = "{VERIFIER_NAME}"',
+        f'name = "{verifier_name}"',
         "",
     ]
     (task_dir / "task.toml").write_text("\n".join(lines), encoding="utf-8")
@@ -254,6 +269,8 @@ def build_benchmark(
     reg_rows: list[dict] = []
     n_with_files = 0
     n_with_gold = 0
+    verifier_name = _verifier_for(name, catalog_entry)
+    logger.info("[gdpval] per-task verifier: %s", verifier_name)
     for row in rows:
         task_id = row.get("task_id")
         if not task_id:
@@ -274,7 +291,7 @@ def build_benchmark(
             n_with_gold += 1
 
         _write_instruction(task_dir, row, ref_names)
-        _write_task_toml(task_dir, row, ref_names, gold_names, judge_model)
+        _write_task_toml(task_dir, row, ref_names, gold_names, verifier_name, judge_model)
 
         # Ship the structured rubric alongside the task for transparency/debug.
         tests_dir = task_dir / "tests"

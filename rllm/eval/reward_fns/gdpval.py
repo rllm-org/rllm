@@ -321,7 +321,10 @@ def _make_litellm_judge(model: str, base_url: str | None, api_key: str | None):
             {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
             {"role": "user", "content": JUDGE_USER_TEMPLATE.format(prompt=prompt[:4000], score=score, criterion=criterion, deliverable=deliverable)},
         ]
-        kwargs: dict = {"model": model, "messages": messages, "temperature": 0.0}
+        # drop_params lets litellm silently drop provider-unsupported params:
+        # reasoning models (gpt-5*, o-series) reject temperature=0.0, so it's
+        # dropped for them while non-reasoning judges keep deterministic temp=0.
+        kwargs: dict = {"model": model, "messages": messages, "temperature": 0.0, "drop_params": True}
         if base_url:
             kwargs["base_url"] = base_url
         if api_key:
@@ -474,7 +477,10 @@ def _make_litellm_pairwise_judge(model: str, base_url: str | None, api_key: str 
             {"role": "system", "content": PAIRWISE_SYSTEM_PROMPT},
             {"role": "user", "content": PAIRWISE_USER_TEMPLATE.format(prompt=prompt[:4000], rubric=rubric, a=a, b=b)},
         ]
-        kwargs: dict = {"model": model, "messages": messages, "temperature": 0.0}
+        # drop_params lets litellm silently drop provider-unsupported params:
+        # reasoning models (gpt-5*, o-series) reject temperature=0.0, so it's
+        # dropped for them while non-reasoning judges keep deterministic temp=0.
+        kwargs: dict = {"model": model, "messages": messages, "temperature": 0.0, "drop_params": True}
         if base_url:
             kwargs["base_url"] = base_url
         if api_key:
