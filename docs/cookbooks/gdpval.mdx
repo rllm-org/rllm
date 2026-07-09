@@ -76,13 +76,15 @@ python -m rllm.data.gdpval_builder --out-dir ~/.rllm/datasets/gdpval \
 
 ## Integration seam
 
-The host-side reward function grades the deliverable **text surfaced on the
-episode**. The solver's harness must expose the produced file via
-`episode.artifacts['deliverable_path']` (a path the grader extracts) or
-`['deliverable_text']` (already-extracted text). If neither is present, the
-grader falls back to the agent's final answer text — fine for text-only
-deliverables, but document deliverables (xlsx/pptx/pdf) require the file to be
-surfaced. See `_find_deliverable_text` in `rllm/eval/reward_fns/gdpval.py`.
+The host-side reward function grades **only a deliverable the harness has
+explicitly surfaced** on the episode — via `episode.artifacts['deliverable_path']`
+(a file path the grader extracts) or `['deliverable_text']` (already-extracted
+text). It is **fail-closed**: it never reads the agent's transcript or final
+answer, so the judge grades the artifact, not the process (and can't be gamed by
+an agent that merely *describes* a good deliverable). If nothing is surfaced, the
+task is marked `ungraded` (reason `no_deliverable_surfaced`) rather than scored 0.
+So the solver's harness must copy the produced file out of the sandbox and set
+`deliverable_path`. See `_find_deliverable_text` in `rllm/eval/reward_fns/gdpval.py`.
 
 ## Caveat
 

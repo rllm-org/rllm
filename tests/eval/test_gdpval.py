@@ -189,6 +189,23 @@ class TestEvaluate:
         out = g.evaluate(self._task(rubric), Episode(artifacts={"deliverable_text": "d"}))
         assert out.reward == 0.0 and out.metadata.get("reason") == "no_judge_configured"
 
+    def test_no_deliverable_is_ungraded_not_zero(self):
+        # Fail-closed: nothing surfaced -> ungraded, and the judge is never called.
+        rubric = [{"score": 1, "criterion": "c"}]
+        out = g.evaluate(self._task(rubric), Episode(artifacts={}))
+        assert out.reward == 0.0 and out.metadata.get("reason") == "no_deliverable_surfaced"
+        assert out.metadata.get("ungraded") is True
+
+    def test_never_reads_transcript(self, monkeypatch):
+        # Even with a rich transcript on the episode, no deliverable => ungraded.
+        rubric = [{"score": 1, "criterion": "c"}]
+        called = {"n": 0}
+        monkeypatch.setattr(g, "_make_litellm_judge", lambda *a, **k: (lambda *args: called.__setitem__("n", called["n"] + 1) or True))
+        ep = Episode(artifacts={"answer": "I produced a perfect deliverable", "conversation": [{"role": "assistant", "content": "trust me"}]})
+        out = g.evaluate(self._task(rubric), ep)
+        assert out.metadata.get("reason") == "no_deliverable_surfaced"
+        assert called["n"] == 0  # judge never invoked
+
 
 # --------------------------------------------------------------------------- #
 # _parse_met tolerance
@@ -287,3 +304,11 @@ class TestEvaluatePairwise:
         monkeypatch.setattr(g, "_resolve_judge", lambda task: ("", None, None))
         out = g.evaluate_pairwise(self._task(), Episode(artifacts={"deliverable_text": "CAND"}))
         assert out.reward == 0.0 and out.metadata.get("reason") == "no_judge_configured"
+
+    def test_no_candidate_deliverable_is_ungraded(self, monkeypatch):
+        # Fail-closed: no candidate surfaced -> ungraded; judge never called.
+        called = {"n": 0}
+        monkeypatch.setattr(g, "_make_litellm_pairwise_judge", lambda *a, **k: (lambda *args: called.__setitem__("n", called["n"] + 1) or "a"))
+        out = g.evaluate_pairwise(self._task(), Episode(artifacts={"answer": "I made a great file"}))
+        assert out.reward == 0.0 and out.metadata.get("reason") == "no_deliverable_surfaced"
+        assert called["n"] == 0

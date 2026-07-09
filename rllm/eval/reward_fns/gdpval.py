@@ -47,7 +47,6 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from rllm.eval.reward_fns._helpers import extract_answer_text
 from rllm.eval.types import EvalOutput, Signal
 from rllm.types import Episode, Task
 
@@ -255,12 +254,17 @@ def _extract_pdf(p: Path) -> str:
 def _find_deliverable_text(task: Task, episode: Episode) -> tuple[str, str]:
     """Locate the deliverable's text. Returns (text, source_description).
 
+    FAIL-CLOSED: the grader only ever reads a deliverable the harness has
+    explicitly surfaced — never the agent's transcript or final answer. This
+    keeps the judge from grading the *process* instead of the *artifact* (and
+    from being gamed by an agent that describes a good deliverable it never
+    produced). If nothing is surfaced, returns ("", "none") and the caller
+    marks the task ungraded rather than scoring it.
+
     Resolution order:
-      1. ``episode.artifacts['deliverable_text']`` — text surfaced directly.
+      1. ``episode.artifacts['deliverable_text']`` — deliverable text surfaced directly.
       2. ``episode.artifacts['deliverable_path']`` / ``output_files`` — a file
-         path (in the sandbox workdir mount or on the host) to extract.
-      3. Fallback: the agent's final answer text (lets text-only deliverables
-         still be graded, matching the claw_eval fallback philosophy).
+         path (sandbox workdir mount or host) to extract.
     """
     arts = episode.artifacts or {}
     if arts.get("deliverable_text"):
@@ -279,7 +283,7 @@ def _find_deliverable_text(task: Task, episode: Episode) -> tuple[str, str]:
         if text:
             return text, f"file:{Path(c).name}"
 
-    return extract_answer_text(episode) or "", "final_answer_fallback"
+    return "", "none"
 
 
 def _resolve_judge(task: Task) -> tuple[str, str | None, str | None]:
@@ -360,6 +364,14 @@ def evaluate(task: Task, episode: Episode) -> EvalOutput:
         )
 
     deliverable, source = _find_deliverable_text(task, episode)
+    if not deliverable:
+        # Fail-closed: no deliverable was surfaced (never grade the transcript).
+        return EvalOutput(
+            reward=0.0,
+            is_correct=False,
+            signals=[Signal(name="rubric_score", value=0.0)],
+            metadata={"reason": "no_deliverable_surfaced", "ungraded": True},
+        )
     prompt = task.metadata.get("prompt") or (task.instruction if isinstance(task.instruction, str) else "") or ""
 
     model, base_url, api_key = _resolve_judge(task)
@@ -522,6 +534,14 @@ def evaluate_pairwise(task: Task, episode: Episode) -> EvalOutput:
     deliverable). Mean over tasks = GDPval win-rate.
     """
     candidate, cand_src = _find_deliverable_text(task, episode)
+    if not candidate:
+        # Fail-closed: no candidate deliverable surfaced (never grade the transcript).
+        return EvalOutput(
+            reward=0.0,
+            is_correct=False,
+            signals=[Signal(name="pairwise_win", value=0.0)],
+            metadata={"reason": "no_deliverable_surfaced", "ungraded": True},
+        )
     reference, ref_src = _find_reference_text(task)
     if not reference:
         # No gold deliverable → pairwise is impossible; don't fabricate a score.
