@@ -24,6 +24,7 @@ builds the trajectory. Reward comes from rLLM's per-task verifier, not here.
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
@@ -144,7 +145,10 @@ class Terminus2Harness(BaseCliHarness):
             "RLLM_TERMINUS_PARSER": self.parser_name,
             "RLLM_TERMINUS_TEMPERATURE": str(self.temperature),
             "RLLM_TERMINUS_RECORD": "1" if self.record_terminal_session else "0",
-            "RLLM_TERMINUS_ENABLE_SUMMARIZE": "1" if self.enable_summarize else "0",
+            # Host env wins over the class attribute so eval runs can disable
+            # summarization without a code edit — `rllm eval` has no
+            # agent-kwargs mechanism (mirrors RLLM_TERMINUS_CONTEXT_LIMIT).
+            "RLLM_TERMINUS_ENABLE_SUMMARIZE": os.environ.get("RLLM_TERMINUS_ENABLE_SUMMARIZE") or ("1" if self.enable_summarize else "0"),
             "RLLM_TERMINUS_INSTRUCTION_FILE": _INSTRUCTION_PATH,
             "RLLM_TERMINUS_LOGS_DIR": _LOGS_DIR,
             "RLLM_TERMINUS_OUTCOME_FILE": _OUTCOME_PATH,

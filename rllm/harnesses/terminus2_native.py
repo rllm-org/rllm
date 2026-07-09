@@ -53,7 +53,9 @@ class Terminus2NativeHarness(Terminus2Harness):
 
     def build_env(self, task: Task, config: AgentConfig) -> dict[str, str]:
         env = super().build_env(task, config)
-        env["RLLM_TERMINUS_ENABLE_SUMMARIZE"] = "1" if self.enable_summarize else "0"
+        # Host env wins (mirrors RLLM_TERMINUS_CONTEXT_LIMIT below); don't
+        # clobber the parent's env-aware value with the class attribute.
+        env["RLLM_TERMINUS_ENABLE_SUMMARIZE"] = os.environ.get("RLLM_TERMINUS_ENABLE_SUMMARIZE") or ("1" if self.enable_summarize else "0")
         env["RLLM_TERMINUS_PROACTIVE_THRESHOLD"] = str(self.proactive_summarization_threshold)
         # Host env wins over the class attribute so eval runs can pin the
         # model's real limit (e.g. 240000 for v4 on Fireworks) without a code
