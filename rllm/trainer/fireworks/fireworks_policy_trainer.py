@@ -623,20 +623,30 @@ class FireworksPolicyTrainer:
             for i in range(len(advantages)):
                 advantages[i] /= max(1, num_loss_tokens[i])
 
-        # Proximal logprobs
+        # Proximal (pi_old) logprobs. Default bypass_mode=True on this managed path: it runs
+        # ONE optimizer step per batch (no inner PPO epochs), so a recomputed proximal is
+        # identical to the current policy (pi_old == pi_theta) -> the clip ratio is ~1 and
+        # inert, and the recompute is a wasted forward. Using the rollout logprobs as pi_old
+        # (bypass) makes the clip a real pi_theta/pi_rollout trust region against the actual
+        # behavior policy (matching DPPO/SAO, and what fireworks_backend already assumes).
+        # Set rollout_correction.bypass_mode=false only for multi-update-per-batch PPO.
+        bypass = rc.bypass_mode if rc.bypass_mode is not None else True
         t0 = time.perf_counter()
-        if rc.bypass_mode:
+        if bypass:
             prox_logprobs = inf_logprobs
         else:
             prox_logprobs = await self._compute_proximal_logprobs(clean_datums)
-        adv_metrics.update(
-            self._compute_offpolicy_metrics(
-                old_logprobs=prox_logprobs,
-                rollout_logprobs=inf_logprobs,
-                masks=[list(datum.loss_fn_inputs["mask"].data) for datum in raw_datums],
+            # offpolicy/* compares a real proximal (pi_old) against rollout; meaningless under
+            # bypass (prox == rollout -> all ratios 1). Only compute it when we did a real
+            # proximal forward.
+            adv_metrics.update(
+                self._compute_offpolicy_metrics(
+                    old_logprobs=prox_logprobs,
+                    rollout_logprobs=inf_logprobs,
+                    masks=[list(datum.loss_fn_inputs["mask"].data) for datum in raw_datums],
+                )
             )
-        )
-        adv_metrics["time/proximal_forward"] = time.perf_counter() - t0
+            adv_metrics["time/proximal_forward"] = time.perf_counter() - t0
 
         # Build datums for the builtin kernel.
         tis_config = TISConfig(level=rc.tis_mode or "token", cap=rc.tis_cap) if rc.tis_mode else None
