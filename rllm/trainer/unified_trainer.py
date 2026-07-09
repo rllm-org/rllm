@@ -604,7 +604,9 @@ class UnifiedTrainer:
             groups = [g.model_dump(mode="json") for g in trainer_state.trajectory_groups or []]
             with open(run_dir / "trajectory_groups.json", "w", encoding="utf-8") as fh:
                 json.dump(groups, fh, default=str)
-            logger.info("[TrainingLoop] Step %d: dumped batch (%d groups, %d episodes) to %s", trainer_state.global_step, len(trainer_state.trajectory_groups or []), len(trainer_state.episodes or []), run_dir)
+            logger.info(
+                "[TrainingLoop] Step %d: dumped batch (%d groups, %d episodes) to %s", trainer_state.global_step, len(trainer_state.trajectory_groups or []), len(trainer_state.episodes or []), run_dir
+            )
         except Exception:
             # Diagnostics must never kill a training step (an unserializable
             # field or full disk is a tooling problem, not a training failure).
