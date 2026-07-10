@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 import time
 from collections import deque
@@ -229,7 +230,28 @@ class FireworksSFTBackend(TinkerSFTBackend):
 
             if total_steps > start_step:
                 logger.info(f"Saving final checkpoint at step {total_steps}")
-                ckpt.save(f"step-{total_steps}", resumable=True, promotable=False)
+                # promotable=True writes a sampler (INFERENCE_LORA) row — the only
+                # artifact ``promote_latest`` accepts. Without it the trained LoRA
+                # is a resumable-only DCP blob that is garbage-collected after the
+                # job's ~30-day retention window; promotion turns it into a
+                # permanent, servable account model BEFORE ``finally: infra.close()``
+                # deletes the trainer job. Mirrors the RL path and the SDK sft recipe.
+                ckpt.save(f"step-{total_steps}", resumable=True, promotable=True)
+                experiment = config.trainer.get("experiment_name") or "default"
+                output_model_id = re.sub(r"[^a-z0-9-]+", "-", f"{config.trainer.get('project_name', 'rllm-sft')}-{experiment}".lower()).strip("-")[:63]
+                try:
+                    model = ckpt.promote_latest(output_model_id, config.model.name)
+                    logger.info("Promoted final LoRA -> %s", (model or {}).get("name", output_model_id))
+                except Exception:
+                    logger.exception(
+                        "Final LoRA promotion failed. The promotable sampler checkpoint for job %s "
+                        "survives job deletion for ~30 days; promote it manually via "
+                        "TrainerJobManager.promote_checkpoint(name=<row from list_checkpoints>, "
+                        "output_model_id=%r, base_model=%r).",
+                        getattr(infra, "policy_job_id", "<job>"),
+                        output_model_id,
+                        config.model.name,
+                    )
 
             tracking_logger.log(data={"status": "completed"}, step=total_steps)
             try:
