@@ -328,10 +328,8 @@ def dppo_tv(ctx: LossContext):
     delta = float(ctx.params.get("delta", ctx.params.get("eps_clip", 0.2)))
     delta_lo = float(ctx.params.get("delta_low", delta))
     delta_hi = float(ctx.params.get("delta_high", delta))
-    # C=inf: DPPO uses the *untruncated* importance ratio (paper Eq. 23, DPPO row). The
-    # divergence mask below is the trust region; truncating here would reintroduce the
-    # low-prob-token bias DPPO exists to avoid (paper Sec. 5.4, "Pitfalls of TIS"). _ratio still
-    # pre-clamps the log-ratio to +/-20 purely as inf protection. cispo/ppo_clip keep a finite C.
+    # C=inf: DPPO uses the untruncated ratio (paper Eq. 23) — the divergence mask is the trust
+    # region, so truncating would reintroduce the low-prob-token bias DPPO avoids (paper Sec. 5.4).
     tr = _ratio(ctx).detach()
     p_curr, p_old = ctx.logp_curr.exp(), ctx.logp_old.exp()
     keep = torch.where(ctx.advantages > 0, (p_curr - p_old) <= delta_hi, (p_curr - p_old) >= -delta_lo).detach().to(ctx.logp_curr.dtype)
@@ -348,10 +346,8 @@ def dppo_kl(ctx: LossContext):
 
     delta = float(ctx.params.get("delta", ctx.params.get("eps_clip", 0.2)))
     eps = 1e-6
-    # C=inf: DPPO uses the *untruncated* importance ratio (paper Eq. 23, DPPO row). The
-    # divergence mask below is the trust region; truncating here would reintroduce the
-    # low-prob-token bias DPPO exists to avoid (paper Sec. 5.4, "Pitfalls of TIS"). _ratio still
-    # pre-clamps the log-ratio to +/-20 purely as inf protection. cispo/ppo_clip keep a finite C.
+    # C=inf: DPPO uses the untruncated ratio (paper Eq. 23) — the divergence mask is the trust
+    # region, so truncating would reintroduce the low-prob-token bias DPPO avoids (paper Sec. 5.4).
     tr = _ratio(ctx).detach()
     p = ctx.logp_curr.exp().clamp(eps, 1.0 - eps)
     q = ctx.logp_old.exp().clamp(eps, 1.0 - eps)

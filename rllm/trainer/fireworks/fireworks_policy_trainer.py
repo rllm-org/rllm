@@ -556,10 +556,9 @@ class FireworksPolicyTrainer:
             algorithm_config=algorithm_config,
         )
 
-        # Every trajectory in this batch was dropped as malformed (e.g. empty logprobs from
-        # failed/overloaded generations that returned no completion). There is nothing to train
-        # on, and forward_backward([]) would raise "No data provided". Skip the pass; the
-        # training loop skips the optimizer step + weight sync when no sequences are produced.
+        # Whole batch dropped as malformed (e.g. empty logprobs from overloaded generations).
+        # forward_backward([]) would raise; skip the pass (the training loop then skips optim +
+        # weight sync when no sequences are produced).
         if not raw_datums:
             logger.warning(
                 "All %d trajectory group(s) dropped (no trainable sequences); skipping forward-backward for this batch. "
@@ -589,16 +588,13 @@ class FireworksPolicyTrainer:
             if algorithm_config.mu_source == "proximal":
                 logger.warning("mu_source='proximal' not yet supported on the Fireworks custom path; using inference log-probs (mu=sampling).")
 
-            # No proximal forward here: on the custom (DPPO) path mu = the inference log-probs
-            # already carried by the datums, so pi_old is never recomputed. offpolicy/* would
-            # cost an extra forward per pass purely for a diagnostic, so it's intentionally not
-            # logged (the loss still emits its own diagnostic, e.g. dppo_tv/mask_frac). The
-            # builtin path recomputes proximal because its ratio *requires* pi_old.
+            # Custom (DPPO) path: logp_old = the inference log-probs on the datums, so pi_old is
+            # never recomputed. offpolicy/* isn't logged (it needs a real proximal forward — a
+            # per-pass diagnostic cost); the loss emits its own (e.g. dppo_tv/mask_frac).
 
-            # server_normalized=True: the closure returns a RAW SUM over sequences; optim_step
-            # sets GradAccNormalization from resolved.agg_mode so the server normalizes across
-            # all grad-accumulation passes (invariant to fwd_bwd_group_size). A per-pass mean
-            # here + NONE at optim_step would scale the gradient by num_fwd_bwd_passes.
+            # server_normalized=True: the closure returns a RAW SUM; optim_step sets
+            # GradAccNormalization from resolved.agg_mode so the server normalizes once across all
+            # grad-accum passes. A per-pass mean here + NONE would scale the grad by num passes.
             stripped, loss_fn = build_custom_loss(resolved, raw_datums, server_normalized=True)
             fwd_bwd_result = await self._run_training_op(
                 self.training_client.forward_backward_custom,
@@ -624,22 +620,18 @@ class FireworksPolicyTrainer:
             for i in range(len(advantages)):
                 advantages[i] /= max(1, num_loss_tokens[i])
 
-        # Proximal (pi_old) logprobs. Default bypass_mode=True on this managed path: it runs
-        # ONE optimizer step per batch (no inner PPO epochs), so a recomputed proximal is
-        # identical to the current policy (pi_old == pi_theta) -> the clip ratio is ~1 and
-        # inert, and the recompute is a wasted forward. Using the rollout logprobs as pi_old
-        # (bypass) makes the clip a real pi_theta/pi_rollout trust region against the actual
-        # behavior policy (matching DPPO/SAO, and what fireworks_backend already assumes).
-        # Set rollout_correction.bypass_mode=false only for multi-update-per-batch PPO.
+        # bypass_mode defaults True: one optim step per batch means a recomputed proximal ==
+        # pi_theta, so the clip ratio is ~1 (inert) and the recompute is wasted. Using the rollout
+        # logprobs as pi_old makes the clip a real trust region vs the behavior policy (DPPO/SAO).
+        # Set bypass_mode=false only for multi-update-per-batch PPO.
         bypass = rc.bypass_mode if rc.bypass_mode is not None else True
         t0 = time.perf_counter()
         if bypass:
             prox_logprobs = inf_logprobs
         else:
             prox_logprobs = await self._compute_proximal_logprobs(clean_datums)
-            # offpolicy/* compares a real proximal (pi_old) against rollout; meaningless under
-            # bypass (prox == rollout -> all ratios 1). Only compute it when we did a real
-            # proximal forward.
+            # offpolicy/* compares a real proximal against rollout (meaningless under bypass,
+            # where prox == rollout), so only compute it when we did the proximal forward.
             adv_metrics.update(
                 self._compute_offpolicy_metrics(
                     old_logprobs=prox_logprobs,
