@@ -34,10 +34,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Mapping from rLLMAdvantageEstimator to their default Tinker loss function (overriding is allowed through config)
-# ECHO uses the same GRPO/`ppo` policy-gradient loss on action tokens; its extra
-# environment-prediction term is applied as a separate gradient-accumulated
-# ``cross_entropy`` pass (see ``_get_aux_loss_futures``).
+# Mapping from rLLMAdvantageEstimator to their default Tinker loss function (overriding is allowed through config).
+# ECHO selects the `echo` rLLM loss (set in AlgorithmConfig.__post_init__), which
+# runs on the forward_backward_custom path and folds the env-prediction term into one pass.
 ADV_TO_LOSS_FN_AUTO_MAP = {
     rLLMAdvantageEstimator.REINFORCE: "importance_sampling",
     rLLMAdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE: "importance_sampling",
@@ -170,71 +169,30 @@ class TinkerPolicyTrainer:
         )
 
     @require_training_client
-    async def _get_aux_loss_futures(
-        self,
-        training_datums: list[tinker.Datum] | dict[str, list[tinker.Datum]],
-        algorithm_config: AlgorithmConfig,
-    ) -> list[tinker.APIFuture]:
-        """Submit one ``cross_entropy`` pass per configured auxiliary loss (ECHO, ...).
-
-        Tinker accumulates gradients across ``forward_backward`` calls until the
-        next ``optim_step``, and its ``optim_step`` applies no extra normalization,
-        so each pass adds ``coef * grad(aux_loss)`` on top of the policy-gradient
-        pass without rescaling it. No extra rollout is needed — only one more
-        backward over the rollouts already collected. See
-        ``rllm.trainer.algorithms.aux_loss`` / ``design/auxiliary-losses.md``.
-        """
-        from rllm.trainer.algorithms import build_aux_losses
-        from rllm.trainer.tinker.aux_loss import aux_positions, build_aux_ce_datum
-
-        aux_losses = build_aux_losses(algorithm_config)
-        if not aux_losses:
-            return []
-        flat = [d for datums in training_datums.values() for d in datums] if isinstance(training_datums, dict) else training_datums
-
-        futures = []
-        for aux in aux_losses:
-            datums = []
-            for d in flat:
-                positions = aux_positions(aux, d.loss_fn_inputs["mask"].data)
-                # Tinker accumulates raw gradients, so the per-token weight is just
-                # the coefficient (matching how GRPO broadcasts a constant per-token
-                # advantage). Dynamic weights (design step 4) would replace this.
-                datum = build_aux_ce_datum(d.model_input, d.loss_fn_inputs["target_tokens"], positions, aux.coef)
-                if datum is not None:
-                    datums.append(datum)
-            if datums:
-                futures.append(await self.training_client.forward_backward_async(datums, loss_fn="cross_entropy"))  # type: ignore[attr-defined]
-        return futures
-
-    @staticmethod
-    async def _record_aux_loss_metrics(aux_futures: list[tinker.APIFuture], adv_metrics: dict) -> None:
-        """Await the auxiliary-loss futures (so their gradients are applied) and
-        surface any server-side metrics under ``train/aux_*``."""
-        if not aux_futures:
-            return
-        aux_results = await asyncio.gather(*aux_futures)
-        for aux_result in aux_results:
-            if aux_result.metrics:
-                for k, v in aux_result.metrics.items():
-                    if k.startswith("clock_cycle"):
-                        continue
-                    adv_metrics[f"train/aux_{k.replace(':', '/')}"] = v
-
-    @require_training_client
     async def _get_forward_backward_futures(
         self,
         training_datums: list[tinker.Datum] | dict[str, list[tinker.Datum]],
         estimator_map: dict[str, rLLMAdvantageEstimator | str],
         algorithm_config: AlgorithmConfig,
-    ) -> tuple[list[tinker.APIFuture], list[tinker.APIFuture]]:
-        """Submit the policy-gradient pass(es) plus any auxiliary-loss passes.
+    ) -> list[tinker.APIFuture]:
+        """Submit the policy-gradient forward/backward pass(es); returns their futures."""
+        # Custom-loss path: a single forward_backward_custom pass runs the rLLM loss
+        # (e.g. dppo_tv, or echo which folds in ECHO) over per-datum log-probs.
+        # Engaged when algorithm.loss_fn names an rLLM loss; else the native string path runs.
+        from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
 
-        Returns ``(policy_futures, aux_futures)``. The aux futures are submitted
-        *before* any subsequent ``optim_step`` so their gradients accumulate, but
-        are returned separately so callers extract training logprobs only from
-        the policy-gradient futures (keeping per-datum alignment).
-        """
+        # native-first: a loss Tinker has a server-side kernel for (importance_sampling/ppo/
+        # cispo/dro/cross_entropy) runs there; only non-native rLLM losses take the custom path.
+        resolved = resolve_loss(algorithm_config, native_losses=native_loss_names("tinker"))
+        if resolved is not None:
+            from rllm.trainer.tinker.custom_loss import build_custom_loss
+
+            flat = [d for datums in training_datums.values() for d in datums] if isinstance(training_datums, dict) else list(training_datums)
+            stripped, loss_fn = build_custom_loss(resolved, flat)
+            fwd_bwd_future = await self.training_client.forward_backward_custom_async(stripped, loss_fn)  # type: ignore[attr-defined]
+            logger.info("Tinker custom-loss pass: loss_fn=%s params=%s", resolved.name, resolved.params)
+            return [fwd_bwd_future]
+
         fwd_bwd_futures = []
         if isinstance(training_datums, dict):
             for group_role, datums in training_datums.items():
@@ -256,8 +214,7 @@ class TinkerPolicyTrainer:
             )
             fwd_bwd_futures.append(fwd_bwd_future)
 
-        aux_futures = await self._get_aux_loss_futures(training_datums, algorithm_config)
-        return fwd_bwd_futures, aux_futures
+        return fwd_bwd_futures
 
     @require_training_client
     async def forward_backward_from_trajectory_groups(
@@ -290,8 +247,22 @@ class TinkerPolicyTrainer:
             algorithm_config=algorithm_config,
         )
 
-        # Forward-backward pass (plus the optional ECHO env-prediction pass)
-        fwd_bwd_futures, aux_futures = await self._get_forward_backward_futures(
+        # Every trajectory dropped as malformed (e.g. empty logprobs from failed/overloaded
+        # generations) -> nothing to train on, and forward_backward([]) would raise "No data
+        # provided". Skip the pass; the training loop skips the optimizer step + weight sync
+        # when no sequences are produced. (training_datums is a list, or a dict keyed by role.)
+        is_empty = (not training_datums) if isinstance(training_datums, list) else (not any(training_datums.values()))
+        if is_empty:
+            logger.warning(
+                "All %d trajectory group(s) dropped (no trainable sequences); skipping forward-backward for this batch.",
+                len(trajectory_groups),
+            )
+            adv_metrics["train/num_sequences"] = 0
+            adv_metrics["train/dropped_all_sequences"] = 1.0
+            return training_datums, [], adv_metrics
+
+        # Forward-backward pass
+        fwd_bwd_futures = await self._get_forward_backward_futures(
             training_datums=training_datums,
             estimator_map=algorithm_config.estimator_map,
             algorithm_config=algorithm_config,
@@ -304,6 +275,11 @@ class TinkerPolicyTrainer:
         training_logprobs = []
         for fwd_bwd_result in fwd_bwd_results:
             for output in fwd_bwd_result.loss_fn_outputs:
+                # The custom-loss path (forward_backward_custom) reproduces gradients via a
+                # weighted-CE pass whose outputs need not expose per-token logprobs; skip
+                # gracefully (downstream tolerates empty logprobs, as the Fireworks path does).
+                if "logprobs" not in output:
+                    continue
                 logprobs = output["logprobs"].to_torch()
                 training_logprobs.append(logprobs)
             # Capture server-side metrics (e.g. loss) under train/ prefix
@@ -312,8 +288,6 @@ class TinkerPolicyTrainer:
                     if k.startswith("clock_cycle"):
                         continue
                     adv_metrics[f"train/{k.replace(':', '/')}"] = v
-
-        await self._record_aux_loss_metrics(aux_futures, adv_metrics)
 
         return training_datums, training_logprobs, adv_metrics
 
@@ -365,11 +339,8 @@ class TinkerPolicyTrainer:
             algorithm_config=self.algorithm_config,
         )
 
-        # Forward-backward and optimizer future together. The ECHO env-prediction
-        # pass (if enabled) is submitted inside _get_forward_backward_futures —
-        # i.e. before the optim_step below — so its gradient accumulates into the
-        # same step.
-        fwd_bwd_futures, aux_futures = await self._get_forward_backward_futures(
+        # Forward-backward and optimizer future together.
+        fwd_bwd_futures = await self._get_forward_backward_futures(
             training_datums=training_datums,
             estimator_map=self.algorithm_config.estimator_map,
             algorithm_config=self.algorithm_config,
@@ -390,6 +361,11 @@ class TinkerPolicyTrainer:
         training_logprobs = []
         for fwd_bwd_result in fwd_bwd_results:
             for output in fwd_bwd_result.loss_fn_outputs:
+                # The custom-loss path (forward_backward_custom) reproduces gradients via a
+                # weighted-CE pass whose outputs need not expose per-token logprobs; skip
+                # gracefully (downstream tolerates empty logprobs, as the Fireworks path does).
+                if "logprobs" not in output:
+                    continue
                 logprobs = output["logprobs"].to_torch()
                 training_logprobs.append(logprobs)
             if fwd_bwd_result.metrics:
@@ -397,8 +373,6 @@ class TinkerPolicyTrainer:
                     if k.startswith("clock_cycle"):
                         continue
                     adv_metrics[f"train/{k.replace(':', '/')}"] = v
-
-        await self._record_aux_loss_metrics(aux_futures, adv_metrics)
 
         return training_datums, training_logprobs, adv_metrics, scheduled_learning_rate
 

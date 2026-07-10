@@ -7,7 +7,7 @@ import sys
 
 from rllm.utils.logging import configure_logging_from_env
 
-__all__ = ["BaseAgent", "Action", "Step", "Trajectory", "Episode", "rollout", "evaluator", "Task"]
+__all__ = ["BaseAgent", "Action", "Step", "Trajectory", "Episode", "rollout", "evaluator", "Task", "register_loss", "LossContext"]
 
 configure_logging_from_env()
 
@@ -20,6 +20,14 @@ def __getattr__(name: str):
         _mod.rollout = rollout
         _mod.evaluator = evaluator
         return rollout if name == "rollout" else evaluator
+
+    if name in ("register_loss", "LossContext"):
+        from rllm.trainer.algorithms.loss import LossContext, register_loss
+
+        _mod = sys.modules[__name__]
+        _mod.register_loss = register_loss
+        _mod.LossContext = LossContext
+        return register_loss if name == "register_loss" else LossContext
 
     if name == "Task":
         from rllm.types import Task
