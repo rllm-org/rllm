@@ -51,6 +51,7 @@ Ported from verl 0.8 and verified against its kernels. Select any of these with 
 | `dppo_tv` / `dppo_kl` | **DPPO** ([arXiv:2602.04879](https://arxiv.org/abs/2602.04879)) — replaces ratio-clipping with a per-token divergence mask (total-variation / KL). Uses the untruncated ratio (`C=∞`) per the paper §5.4. |
 | `cispo` | **CISPO** ([arXiv:2506.13585](https://arxiv.org/abs/2506.13585)) — clips the importance-sampling weight (stop-grad) but keeps every token's gradient |
 | `gspo` | **GSPO** ([arXiv:2507.18071](https://arxiv.org/abs/2507.18071)) — sequence-level importance ratio via `seq_reduce`; pins `seq-mean-token-mean` |
+| `icepop` | **IcePop** ([arXiv:2510.18855](https://arxiv.org/abs/2510.18855)) — double-sided train/inference discrepancy mask: zeros a token's gradient when `exp(logp_curr − logp_rollout)` leaves `[icepop_alpha, icepop_beta]` (default `0.5`/`5.0`). Reports `icepop/ratio_{mean,min,max}` + `mask_frac`. |
 | `reinforce` | Clip-free REINFORCE-style policy gradient (verl `gpg`) |
 | `echo` | **ECHO** ([arXiv:2605.24517](https://arxiv.org/abs/2605.24517)) — PPO term plus an observation-token cross-entropy term, composed in one body |
 
@@ -115,29 +116,32 @@ def gspo(ctx): ...
 
 ## Writing a custom loss
 
-A loss is any function `(ctx) -> (scalar, metrics)`. Below is a complete, working example: **IcePop** ([arXiv:2510.18855](https://arxiv.org/abs/2510.18855)), which zeros a token's gradient when its importance ratio leaves a band `[alpha, beta]` — a double-sided divergence mask (masking out-of-range tokens rather than clipping them).
+A loss is any function `(ctx) -> (scalar, metrics)`. The example below is **IcePop** ([arXiv:2510.18855](https://arxiv.org/abs/2510.18855)) — it zeros a token's gradient when its train/inference ratio `exp(logp_curr − logp_rollout)` leaves a band `[alpha, beta]` (masking out-of-range tokens rather than clipping them). rLLM already ships this as the built-in `icepop` (see the table above); it's reproduced here under a different name as a template you can adapt.
 
 ```python
 # my_losses.py
 import rllm
 import torch
 
-@rllm.register_loss("icepop")
-def icepop(ctx: rllm.LossContext):
-    """Mask tokens whose importance ratio exp(logp_curr - logp_old) leaves [alpha, beta]."""
+@rllm.register_loss("my_icepop")
+def my_icepop(ctx: rllm.LossContext):
+    """Mask tokens whose train/inference ratio exp(logp_curr - logp_rollout) leaves [alpha, beta]."""
+    if ctx.logp_rollout is None:
+        raise ValueError("my_icepop needs rollout log-probs, but ctx.logp_rollout is None")
     alpha = float(ctx.params.get("alpha", 0.5))
     beta = float(ctx.params.get("beta", 5.0))
-    ratio = torch.exp(ctx.logp_curr - ctx.logp_old).detach()      # detached weight, no grad
+    ratio = torch.exp(ctx.logp_curr.detach() - ctx.logp_rollout)   # detached weight, no grad
     keep = ((ratio >= alpha) & (ratio <= beta)).to(ctx.logp_curr.dtype)
-    pg = -ctx.advantages * ratio * ctx.logp_curr * keep           # grad flows via logp_curr
+    pg = -ctx.advantages * ratio * ctx.logp_curr * keep            # grad flows via logp_curr
     am = ctx.action_mask
     mask_frac = ((1.0 - keep) * am).sum() / am.sum().clamp(min=1.0)
-    return ctx.aggregate(pg, am), {"icepop/mask_frac": mask_frac.item()}
+    return ctx.aggregate(pg, am), {"my_icepop/mask_frac": mask_frac.item()}
 ```
 
-Two conventions worth internalizing:
+Three conventions worth internalizing:
 
 - **`logp_curr` is the only differentiable term.** Anything used as a *weight* (the ratio, a mask) should be `.detach()`ed so gradient flows only through the score `logp_curr`.
+- **Use `logp_rollout` for the true sampling distribution** and guard on `None` rather than falling back to `logp_old` (which is the *proximal*, not the inference log-prob). It's always populated on the managed backends.
 - **Never reduce by hand.** Return `ctx.aggregate(per_token, mask)` so your loss inherits the configured aggregation and correct global normalization.
 
 ### Selecting and registering it
