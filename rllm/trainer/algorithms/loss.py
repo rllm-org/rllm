@@ -33,8 +33,9 @@ from __future__ import annotations
 
 import importlib
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # avoid a hard torch import at module load
     import torch
@@ -66,17 +67,17 @@ class LossContext:
         backend: "verl" | "tinker" | "fireworks".
     """
 
-    pi: "torch.Tensor"
-    mu: "torch.Tensor"
-    advantages: "torch.Tensor"
-    action_mask: "torch.Tensor"
-    obs_mask: "torch.Tensor"
-    aggregate: Callable[..., "torch.Tensor"]
-    ref: Optional["torch.Tensor"] = None
+    pi: torch.Tensor
+    mu: torch.Tensor
+    advantages: torch.Tensor
+    action_mask: torch.Tensor
+    obs_mask: torch.Tensor
+    aggregate: Callable[..., torch.Tensor]
+    ref: torch.Tensor | None = None
     params: dict[str, Any] = field(default_factory=dict)
     backend: str = ""
 
-    def seq_reduce(self, values: "torch.Tensor", mask: "torch.Tensor", reduction: str = "mean") -> "torch.Tensor":
+    def seq_reduce(self, values: torch.Tensor, mask: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
         """Reduce ``values`` over each sequence (masked) and broadcast back to per-token.
 
         A "sequence" is one row: verl tensors are ``(batch, seq_len)`` so this reduces over
@@ -84,7 +85,6 @@ class LossContext:
         it reduces over the whole vector. Enables sequence-level losses (GSPO/GMPO). The
         returned tensor has the same shape as ``values`` (each token holds its sequence's
         reduced value)."""
-        import torch
 
         summed = (values * mask).sum(dim=-1, keepdim=True)
         if reduction == "mean":
@@ -173,7 +173,11 @@ def get_loss(name: str) -> LossFn:
     if name not in RLLM_LOSS_REGISTRY:
         _discover_entry_point_losses()  # lazy: only pay discovery cost on a miss
     if name not in RLLM_LOSS_REGISTRY:
-        raise ValueError(f"Unknown loss {name!r}. Registered: {sorted(RLLM_LOSS_REGISTRY)}. Define one with @rllm.register_loss and make it importable — inline in your script, an `rllm.losses` entry point, or algorithm.loss_plugins.")
+        raise ValueError(
+            f"Unknown loss {name!r}. Registered: {sorted(RLLM_LOSS_REGISTRY)}. Define one with "
+            "@rllm.register_loss and make it importable — inline in your script, an `rllm.losses` "
+            "entry point, or algorithm.loss_plugins."
+        )
     return RLLM_LOSS_REGISTRY[name]
 
 
@@ -246,7 +250,7 @@ class ResolvedLoss:
     agg_mode: str = DEFAULT_LOSS_AGG_MODE  # one of LOSS_AGG_MODES; drives each backend's aggregate + normalization
 
 
-def resolve_loss(algorithm_config, native_losses: "set[str] | None" = None) -> ResolvedLoss | None:
+def resolve_loss(algorithm_config, native_losses: set[str] | None = None) -> ResolvedLoss | None:
     """Resolve ``algorithm.loss_fn`` to an rLLM loss, or None to let the backend run it.
 
     Routing is **native-first**: if ``native_losses`` (the backend's own fused-kernel menu)

@@ -762,10 +762,7 @@ class UnifiedTrainer:
                 logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: optimizer step")
                 await self.backend.update_policy(trainer_state)
             else:
-                logger.warning(
-                    f"[TrainingLoop] Step {trainer_state.global_step}: all {groups_consumed} groups dropped "
-                    f"(no trainable sequences); skipping optimizer step + weight sync."
-                )
+                logger.warning(f"[TrainingLoop] Step {trainer_state.global_step}: all {groups_consumed} groups dropped (no trainable sequences); skipping optimizer step + weight sync.")
             aggregator.record("async/trained_this_step", float(trained_this_step))
 
             # 3. Capture pre-sync metrics (before weight sync resets coordinator state)

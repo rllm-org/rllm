@@ -150,8 +150,9 @@ class FireworksBackend(TinkerBackend):
         cfg = self.full_config
         # Fail fast on loss misconfiguration before provisioning any
         # (expensive, slow-to-create) remote infrastructure.
-        from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
         from training.utils.rl.losses import validate_loss_path
+
+        from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
 
         algorithm_config = kwargs.get("algorithm_config") or AlgorithmConfig.from_config(cfg.rllm.algorithm)
         # A custom rLLM loss (e.g. dppo_tv) runs on the client forward_backward_custom path,

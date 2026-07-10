@@ -9,16 +9,16 @@ from omegaconf import OmegaConf
 
 torch = pytest.importorskip("torch")
 
-from rllm.trainer.algorithms.config import AlgorithmConfig
-from rllm.trainer.algorithms.loss import (
+from rllm.trainer.algorithms.config import AlgorithmConfig  # noqa: E402
+from rllm.trainer.algorithms.loss import (  # noqa: E402
     RLLM_LOSS_REGISTRY,
     LossContext,
     ResolvedLoss,
     dppo_tv,
+    echo,
     get_loss,
     is_custom_loss,
     ppo_clip,
-    echo,
     register_loss,
     resolve_loss,
 )

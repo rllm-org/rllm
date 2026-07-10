@@ -144,7 +144,7 @@ class CustomPPOLoss:
         if self.pad_token_id is not None:
             non_pad = data["responses"] != self.pad_token_id
         else:
-            non_pad = data["attention_mask"][:, -response_mask.shape[-1]:].to(torch.bool)
+            non_pad = data["attention_mask"][:, -response_mask.shape[-1] :].to(torch.bool)
 
         def aggregate(per_token, mask, mode=None):
             return agg_loss(loss_mat=per_token, loss_mask=mask, loss_agg_mode=(mode or self.config.loss_agg_mode), **gbi)
