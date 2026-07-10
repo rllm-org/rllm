@@ -141,8 +141,8 @@ def calculate_echo_advantages(rewards: list[np.ndarray], algorithm_config: Algor
     """ECHO (arXiv:2605.24517): advantages are identical to GRPO.
 
     ECHO's only departure from GRPO is an auxiliary cross-entropy loss on
-    environment-observation tokens, added in each backend's loss path and gated
-    by ``algorithm_config.env_loss_coef``. The advantage estimation here is just
+    environment-observation tokens, added by the ``echo`` loss and scaled by its
+    ``env_loss_coef`` (from ``loss_params``). The advantage estimation here is just
     GRPO so the policy-gradient term is unchanged.
     """
     return calculate_grpo_advantages(rewards, algorithm_config, **kwargs)
