@@ -98,16 +98,22 @@ def test_dppo_tv_matches_verl_formula():
     pi = (torch.rand(n) * -2).requires_grad_(True)
     mu = torch.rand(n) * -2
     adv = torch.randn(n)
+    # Force one kept token to a large importance ratio (pi-mu >> 0 -> exp() >> 20) to exercise
+    # DPPO's C=inf: the ratio must pass through untruncated (paper Eq. 23). Negative adv keeps it
+    # unmasked. If truncation ever regresses in, `ours` would cap this token and diverge.
+    mu.data[0] = -6.0  # pi[0]-mu[0] in [4,6] -> ratio in ~[55,400], well above the old cap of 20
+    adv.data[0] = -1.0
     delta = 0.2
     ctx = LossContext(pi=pi, mu=mu, advantages=adv, action_mask=torch.ones(n), obs_mask=torch.zeros(n), aggregate=_agg_sum, params={"delta": delta})
     ours, _ = dppo_tv(ctx)  # = sum over all tokens of the per-token pg
 
-    # verl reference (core_algos.compute_policy_loss_dppo_tv), summed.
+    # Reference formula (DPPO, C=inf): untruncated ratio as a detached weight on the score. The
+    # +/-20 clamp on the log-ratio is pure inf protection, not variance truncation.
     ratio = torch.exp(torch.clamp(pi.detach() - mu, -20.0, 20.0))
-    tr = torch.clamp(ratio, max=20.0).detach()
+    tr = ratio.detach()
     valid = torch.where(adv > 0, (pi.detach().exp() - mu.exp()) <= delta, (pi.detach().exp() - mu.exp()) >= -delta).float()
-    verl = (-adv * tr * pi.detach() * valid).sum()
-    assert torch.allclose(ours.detach(), verl, atol=1e-5)
+    ref = (-adv * tr * pi.detach() * valid).sum()
+    assert torch.allclose(ours.detach(), ref, atol=1e-5)
 
 
 def test_dppo_tv_gradient_masked_tokens_get_no_grad():

@@ -300,12 +300,6 @@ def _ratio(ctx: LossContext):
     return torch.exp(torch.clamp(ctx.pi - ctx.mu, min=-_RATIO_CLAMP, max=_RATIO_CLAMP))
 
 
-def _truncated_is(ratio, params):
-    import torch
-
-    return torch.clamp(ratio, max=params.get("clip_ratio_c", _RATIO_CLAMP)).detach()
-
-
 @register_loss("ppo_clip")
 def ppo_clip(ctx: LossContext):
     """Standard PPO/GRPO clipped surrogate."""
@@ -334,7 +328,11 @@ def dppo_tv(ctx: LossContext):
     delta = float(ctx.params.get("delta", ctx.params.get("eps_clip", 0.2)))
     delta_lo = float(ctx.params.get("delta_low", delta))
     delta_hi = float(ctx.params.get("delta_high", delta))
-    tr = _truncated_is(_ratio(ctx), ctx.params)
+    # C=inf: DPPO uses the *untruncated* importance ratio (paper Eq. 23, DPPO row). The
+    # divergence mask below is the trust region; truncating here would reintroduce the
+    # low-prob-token bias DPPO exists to avoid (paper Sec. 5.4, "Pitfalls of TIS"). _ratio still
+    # pre-clamps the log-ratio to +/-20 purely as inf protection. cispo/ppo_clip keep a finite C.
+    tr = _ratio(ctx).detach()
     pi_p, mu_p = ctx.pi.exp(), ctx.mu.exp()
     keep = torch.where(ctx.advantages > 0, (pi_p - mu_p) <= delta_hi, (pi_p - mu_p) >= -delta_lo).detach().to(ctx.pi.dtype)
     pg = -ctx.advantages * tr * ctx.pi * keep
@@ -350,7 +348,11 @@ def dppo_kl(ctx: LossContext):
 
     delta = float(ctx.params.get("delta", ctx.params.get("eps_clip", 0.2)))
     eps = 1e-6
-    tr = _truncated_is(_ratio(ctx), ctx.params)
+    # C=inf: DPPO uses the *untruncated* importance ratio (paper Eq. 23, DPPO row). The
+    # divergence mask below is the trust region; truncating here would reintroduce the
+    # low-prob-token bias DPPO exists to avoid (paper Sec. 5.4, "Pitfalls of TIS"). _ratio still
+    # pre-clamps the log-ratio to +/-20 purely as inf protection. cispo/ppo_clip keep a finite C.
+    tr = _ratio(ctx).detach()
     p = ctx.pi.exp().clamp(eps, 1.0 - eps)
     q = ctx.mu.exp().clamp(eps, 1.0 - eps)
     d_kl = q * (q / p).log() + (1.0 - q) * ((1.0 - q) / (1.0 - p)).log()
