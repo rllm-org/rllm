@@ -17,6 +17,7 @@ from rllm.trainer.algorithms.loss import (  # noqa: E402
     dppo_tv,
     echo,
     get_loss,
+    icepop,
     is_custom_loss,
     ppo_clip,
     register_loss,
@@ -220,6 +221,52 @@ def test_gspo_gradient_flows_per_token():
     ctx = LossContext(logp_curr=logp_curr, logp_old=logp_old, advantages=adv, action_mask=mask, obs_mask=torch.zeros(1, 3), aggregate=_agg_sum, params={"eps_clip": 0.2})
     gspo(ctx)[0].backward()
     assert logp_curr.grad is not None and (logp_curr.grad != 0).all()  # every token in the sequence gets a gradient
+
+
+# --------------------------------------------------------------------------- IcePop discrepancy mask
+def test_icepop_masks_out_of_band_and_reports_ratio():
+    """d = exp(logp_curr - logp_rollout) per token = [0.3, 1.0, 10.0]; band [0.5, 5.0] keeps only
+    the middle. Masked tokens get no gradient; ratio min/max/mean reflect the raw batch ratios."""
+    import math
+
+    logp_curr = torch.tensor([-0.5, -0.5, -0.5], requires_grad=True)
+    # rollout = logp_curr - ln(d) so exp(logp_curr - rollout) hits the target ratios exactly.
+    rollout = torch.tensor([-0.5 - math.log(0.3), -0.5 - math.log(1.0), -0.5 - math.log(10.0)])
+    ctx = LossContext(
+        logp_curr=logp_curr,
+        logp_old=rollout,
+        logp_rollout=rollout,
+        advantages=torch.tensor([1.0, 1.0, 1.0]),
+        action_mask=torch.ones(3),
+        obs_mask=torch.zeros(3),
+        aggregate=_agg_sum,
+        params={"icepop_alpha": 0.5, "icepop_beta": 5.0},
+    )
+    loss, m = icepop(ctx)
+    loss.backward()
+
+    assert m["icepop/mask_frac"] == pytest.approx(2 / 3)  # tokens 0 (d<α) and 2 (d>β) masked
+    assert m["icepop/ratio_min"] == pytest.approx(0.3, abs=1e-4)
+    assert m["icepop/ratio_max"] == pytest.approx(10.0, abs=1e-4)
+    assert m["icepop/ratio_mean"] == pytest.approx((0.3 + 1.0 + 10.0) / 3, abs=1e-4)
+    assert logp_curr.grad[0].item() == 0.0 and logp_curr.grad[2].item() == 0.0  # out-of-band → no grad
+    assert logp_curr.grad[1].item() != 0.0  # in-band token trains
+
+
+def test_icepop_requires_logp_rollout():
+    """No silent fall back to logp_old (the proximal): a missing rollout log-prob is a loud error."""
+    ctx = LossContext(
+        logp_curr=torch.tensor([-0.5]),
+        logp_old=torch.tensor([-0.5]),
+        logp_rollout=None,
+        advantages=torch.tensor([1.0]),
+        action_mask=torch.ones(1),
+        obs_mask=torch.zeros(1),
+        aggregate=_agg_sum,
+        params={},
+    )
+    with pytest.raises(ValueError, match="rollout"):
+        icepop(ctx)
 
 
 # --------------------------------------------------------------------------- ECHO as one loss function
