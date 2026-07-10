@@ -54,8 +54,11 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--lora-rank", type=int, default=32)
-    ap.add_argument("--batch-size", type=int, default=8)
-    ap.add_argument("--max-length", type=int, default=32768)
+    ap.add_argument("--batch-size", type=int, default=4)
+    # terminus2 rows are long (p50~27k, p90~68k cumulative tokens); the dataset
+    # builder drops rows over this, so it MUST match the builder's --max-length
+    # or surviving rows still get right-truncated (target lost).
+    ap.add_argument("--max-length", type=int, default=131072)
     ap.add_argument("--replica-count", type=int, default=1)
     ap.add_argument("--experiment", default=None)
     args = ap.parse_args()

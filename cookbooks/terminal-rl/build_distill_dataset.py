@@ -33,6 +33,11 @@ import os
 from rllm import paths
 from rllm.data import DatasetRegistry
 
+# Tokenization for length filtering — MUST match the SFT config so a row that
+# survives here also fits at train time (same tokenizer + renderer + masking).
+_RENDERER = "deepseekv3_thinking"
+_TOKENIZER_DIR = os.path.expanduser("~/.rllm/tokenizers/deepseek-v4-flash")
+
 
 def _fold_reasoning(msg: dict) -> dict:
     reasoning = (msg.get("reasoning_content") or msg.get("reasoning") or "").strip()
@@ -62,9 +67,17 @@ def _resolve_run_dir(ref: str) -> str:
     raise SystemExit(f"no episodes/ under {ref!r} (or under eval_results/{ref})")
 
 
-def build(run_dir: str, include_incorrect: bool) -> list[dict]:
+def build(run_dir: str, include_incorrect: bool, max_length: int) -> list[dict]:
+    # datum truncation is right-side, so a row longer than max_length loses its
+    # TARGET (weights all zero) and trains on nothing. Drop such rows here so the
+    # dataset is clean at any max_length rather than silently no-op'ing 30%+.
+    from tinker_cookbook.renderers import TrainOnWhat, get_renderer
+    from tinker_cookbook.tokenizer_utils import get_tokenizer
+
+    renderer = get_renderer(_RENDERER, get_tokenizer(_TOKENIZER_DIR))
+
     rows: list[dict] = []
-    n_ep = n_kept = 0
+    n_ep = n_kept = n_dropped_len = 0
     for f in sorted(glob.glob(os.path.join(run_dir, "episodes", "*.json"))):
         ep = json.load(open(f))
         n_ep += 1
@@ -81,8 +94,12 @@ def build(run_dir: str, include_incorrect: bool) -> list[dict]:
                 messages = [_clean(m) for m in cc[:last]] + [_fold_reasoning(cc[last])]
                 if not any(m["role"] != "assistant" for m in messages[:-1]):
                     continue  # need a user/tool message before the target
+                mi, _ = renderer.build_supervised_example(messages, train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE)
+                if mi.length > max_length:
+                    n_dropped_len += 1
+                    continue
                 rows.append({"messages": messages, "task_id": task_id, "reward": traj.get("reward")})
-    print(f"episodes seen={n_ep} kept={n_kept} -> {len(rows)} step-rows")
+    print(f"episodes seen={n_ep} kept={n_kept} -> {len(rows)} step-rows (dropped {n_dropped_len} over max_length={max_length})")
     return rows
 
 
@@ -92,10 +109,11 @@ def main() -> None:
     ap.add_argument("--name", required=True, help="registered dataset name for `rllm sft`")
     ap.add_argument("--split", default="train")
     ap.add_argument("--include-incorrect", action="store_true")
+    ap.add_argument("--max-length", type=int, default=131072, help="drop rows whose rendered length exceeds this (MUST match `rllm sft --max-length`)")
     args = ap.parse_args()
 
     run_dir = _resolve_run_dir(args.run)
-    rows = build(run_dir, args.include_incorrect)
+    rows = build(run_dir, args.include_incorrect, args.max_length)
     if not rows:
         raise SystemExit("no rows produced")
     DatasetRegistry.register_dataset(

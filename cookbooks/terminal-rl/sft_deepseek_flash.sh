@@ -29,12 +29,16 @@ DATASET_NAME="${DATASET_NAME:-tb2-dsv4-distill}"
 export EPOCHS="${EPOCHS:-1}"
 export LR="${LR:-1e-5}"
 export LORA_RANK="${LORA_RANK:-32}"
-export BATCH_SIZE="${BATCH_SIZE:-8}"
-export MAX_LENGTH="${MAX_LENGTH:-32768}"
+export BATCH_SIZE="${BATCH_SIZE:-4}"
+# terminus2 rows are long; MAX_LENGTH must be identical for the builder's row
+# filter and the SFT max_length (right-truncation drops the target otherwise).
+# Lower to 65536 to cut cost (keeps ~88% of rows) at the price of the longest
+# late-step trajectories.
+export MAX_LENGTH="${MAX_LENGTH:-131072}"
 export REPLICA_COUNT="${REPLICA_COUNT:-1}"
 
-echo "== 1/2: building thinking-SFT dataset '${DATASET_NAME}' from ${EVAL_RUN} =="
-python build_distill_dataset.py "${EVAL_RUN}" --name "${DATASET_NAME}"
+echo "== 1/2: building thinking-SFT dataset '${DATASET_NAME}' from ${EVAL_RUN} (max_length=${MAX_LENGTH}) =="
+python build_distill_dataset.py "${EVAL_RUN}" --name "${DATASET_NAME}" --max-length "${MAX_LENGTH}"
 
 echo "== 2/2: launching Fireworks SFT of deepseek-v4-flash =="
 python sft_deepseek_flash.py "${DATASET_NAME}" \
