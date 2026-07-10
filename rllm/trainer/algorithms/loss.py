@@ -20,9 +20,9 @@ Public API — same decorator style as ``@rllm.rollout`` / ``@rllm.evaluator``:
 
     @rllm.register_loss("my_dppo")
     def my_dppo(ctx: rllm.LossContext):
-        ratio = (ctx.pi - ctx.mu).exp()
+        ratio = (ctx.logp_curr - ctx.logp_old).exp()
         keep = (...).detach()
-        pg = -ctx.advantages * ratio.clamp(max=20).detach() * ctx.pi * keep
+        pg = -ctx.advantages * ratio.clamp(max=20).detach() * ctx.logp_curr * keep
         return ctx.aggregate(pg, ctx.action_mask), {"mask_frac": ...}
 
     # config:  algorithm: { loss_fn: my_dppo, loss_params: {delta: 0.2} }
@@ -52,9 +52,9 @@ class LossContext:
     loops). Loss bodies are written shape-agnostically (elementwise math + ``aggregate``).
 
     Attributes:
-        pi: current-policy per-token log-probs (``requires_grad=True``) — the only
+        logp_curr: current-policy per-token log-probs (``requires_grad=True``) — the only
             differentiable input.
-        mu: behavior/old-policy per-token log-probs (importance-ratio denominator). verl:
+        logp_old: behavior/old-policy per-token log-probs (importance-ratio denominator). verl:
             ``old_log_probs``; managed: sampling (inference) log-probs by default.
         advantages: per-token advantage estimates.
         action_mask: 1.0 on assistant/action tokens (the policy gradient).
@@ -62,18 +62,18 @@ class LossContext:
         aggregate: ``(per_token_loss, mask, mode=None) -> scalar`` reducer injected by the
             backend. ``mode`` overrides the aggregation (e.g. GSPO forces
             "seq-mean-token-mean"); None uses the backend/config default.
-        ref: reference-policy log-probs for a KL term, or None.
+        logp_ref: reference-policy log-probs for a KL term, or None.
         params: loss hyperparameters (``delta``/``eps_clip``, ``env_loss_coef``, ...).
         backend: "verl" | "tinker" | "fireworks".
     """
 
-    pi: torch.Tensor
-    mu: torch.Tensor
+    logp_curr: torch.Tensor
+    logp_old: torch.Tensor
     advantages: torch.Tensor
     action_mask: torch.Tensor
     obs_mask: torch.Tensor
     aggregate: Callable[..., torch.Tensor]
-    ref: torch.Tensor | None = None
+    logp_ref: torch.Tensor | None = None
     params: dict[str, Any] = field(default_factory=dict)
     backend: str = ""
 
@@ -297,7 +297,7 @@ _RATIO_CLAMP = 20.0
 def _ratio(ctx: LossContext):
     import torch
 
-    return torch.exp(torch.clamp(ctx.pi - ctx.mu, min=-_RATIO_CLAMP, max=_RATIO_CLAMP))
+    return torch.exp(torch.clamp(ctx.logp_curr - ctx.logp_old, min=-_RATIO_CLAMP, max=_RATIO_CLAMP))
 
 
 @register_loss("ppo_clip")
@@ -312,7 +312,7 @@ def ppo_clip(ctx: LossContext):
     clipped = torch.clamp(ratio, 1.0 - eps, 1.0 + eps_hi)
     pg = -torch.minimum(ratio * ctx.advantages, clipped * ctx.advantages)
     am = ctx.action_mask
-    clip_frac = ((clipped != ratio).to(ctx.pi.dtype) * am).sum() / am.sum().clamp(min=1.0)
+    clip_frac = ((clipped != ratio).to(ctx.logp_curr.dtype) * am).sum() / am.sum().clamp(min=1.0)
     return ctx.aggregate(pg, am), {"ppo/clip_frac": clip_frac.item()}
 
 
@@ -321,7 +321,7 @@ def dppo_tv(ctx: LossContext):
     """DPPO with a binary total-variation divergence mask (Eq. 12, TV variant).
 
     Replaces PPO ratio-clipping: zero the gradient only when the update pushes the token
-    *away* from the behavior policy AND ``|exp(pi)-exp(mu)|`` exceeds ``delta`` (defaults
+    *away* from the behavior policy AND ``|exp(logp_curr)-exp(logp_old)|`` exceeds ``delta`` (defaults
     to ``eps_clip``)."""
     import torch
 
@@ -333,9 +333,9 @@ def dppo_tv(ctx: LossContext):
     # low-prob-token bias DPPO exists to avoid (paper Sec. 5.4, "Pitfalls of TIS"). _ratio still
     # pre-clamps the log-ratio to +/-20 purely as inf protection. cispo/ppo_clip keep a finite C.
     tr = _ratio(ctx).detach()
-    pi_p, mu_p = ctx.pi.exp(), ctx.mu.exp()
-    keep = torch.where(ctx.advantages > 0, (pi_p - mu_p) <= delta_hi, (pi_p - mu_p) >= -delta_lo).detach().to(ctx.pi.dtype)
-    pg = -ctx.advantages * tr * ctx.pi * keep
+    p_curr, p_old = ctx.logp_curr.exp(), ctx.logp_old.exp()
+    keep = torch.where(ctx.advantages > 0, (p_curr - p_old) <= delta_hi, (p_curr - p_old) >= -delta_lo).detach().to(ctx.logp_curr.dtype)
+    pg = -ctx.advantages * tr * ctx.logp_curr * keep
     am = ctx.action_mask
     mask_frac = ((1.0 - keep) * am).sum() / am.sum().clamp(min=1.0)
     return ctx.aggregate(pg, am), {"dppo_tv/mask_frac": mask_frac.item()}
@@ -353,12 +353,12 @@ def dppo_kl(ctx: LossContext):
     # low-prob-token bias DPPO exists to avoid (paper Sec. 5.4, "Pitfalls of TIS"). _ratio still
     # pre-clamps the log-ratio to +/-20 purely as inf protection. cispo/ppo_clip keep a finite C.
     tr = _ratio(ctx).detach()
-    p = ctx.pi.exp().clamp(eps, 1.0 - eps)
-    q = ctx.mu.exp().clamp(eps, 1.0 - eps)
+    p = ctx.logp_curr.exp().clamp(eps, 1.0 - eps)
+    q = ctx.logp_old.exp().clamp(eps, 1.0 - eps)
     d_kl = q * (q / p).log() + (1.0 - q) * ((1.0 - q) / (1.0 - p)).log()
     moving_away = torch.where(ctx.advantages > 0, p > q, p < q)
-    keep = (~(moving_away & (d_kl > delta))).detach().to(ctx.pi.dtype)
-    pg = -ctx.advantages * tr * ctx.pi * keep
+    keep = (~(moving_away & (d_kl > delta))).detach().to(ctx.logp_curr.dtype)
+    pg = -ctx.advantages * tr * ctx.logp_curr * keep
     am = ctx.action_mask
     mask_frac = ((1.0 - keep) * am).sum() / am.sum().clamp(min=1.0)
     return ctx.aggregate(pg, am), {"dppo_kl/mask_frac": mask_frac.item()}
@@ -376,9 +376,9 @@ def cispo(ctx: LossContext):
     eps_hi = float(eps_hi) if eps_hi is not None else eps_lo
     ratio = _ratio(ctx)
     clipped = torch.clamp(ratio, 1.0 - eps_lo, 1.0 + eps_hi)
-    pg = -clipped.detach() * ctx.advantages * ctx.pi
+    pg = -clipped.detach() * ctx.advantages * ctx.logp_curr
     am = ctx.action_mask
-    clip_frac = ((ratio != clipped).to(ctx.pi.dtype) * am).sum() / am.sum().clamp(min=1.0)
+    clip_frac = ((ratio != clipped).to(ctx.logp_curr.dtype) * am).sum() / am.sum().clamp(min=1.0)
     return ctx.aggregate(pg, am), {"cispo/clip_frac": clip_frac.item()}
 
 
@@ -394,13 +394,13 @@ def gspo(ctx: LossContext):
     eps_lo = float(ctx.params.get("eps_clip", 0.2))
     eps_hi = ctx.params.get("eps_clip_high")
     eps_hi = float(eps_hi) if eps_hi is not None else eps_lo
-    seq_log_ratio = ctx.seq_reduce(ctx.pi - ctx.mu, ctx.action_mask, "mean")  # per-token = seq mean log-ratio
-    # s_{i,t} = sg[s_i] · π_θ,t / sg[π_θ,t]  ⇒  value = seq ratio, gradient flows through pi.
-    log_s = torch.clamp(ctx.pi - ctx.pi.detach() + seq_log_ratio.detach(), max=10.0)
+    seq_log_ratio = ctx.seq_reduce(ctx.logp_curr - ctx.logp_old, ctx.action_mask, "mean")  # per-token = seq mean log-ratio
+    # s_{i,t} = sg[s_i] · π_θ,t / sg[π_θ,t]  ⇒  value = seq ratio, gradient flows through logp_curr.
+    log_s = torch.clamp(ctx.logp_curr - ctx.logp_curr.detach() + seq_log_ratio.detach(), max=10.0)
     s = torch.exp(log_s)
     pg = torch.maximum(-ctx.advantages * s, -ctx.advantages * torch.clamp(s, 1.0 - eps_lo, 1.0 + eps_hi))
     am = ctx.action_mask
-    clip_frac = ((-ctx.advantages * torch.clamp(s, 1.0 - eps_lo, 1.0 + eps_hi) > -ctx.advantages * s).to(ctx.pi.dtype) * am).sum() / am.sum().clamp(min=1.0)
+    clip_frac = ((-ctx.advantages * torch.clamp(s, 1.0 - eps_lo, 1.0 + eps_hi) > -ctx.advantages * s).to(ctx.logp_curr.dtype) * am).sum() / am.sum().clamp(min=1.0)
     return ctx.aggregate(pg, am, mode="seq-mean-token-mean"), {"gspo/clip_frac": clip_frac.item()}
 
 
@@ -410,7 +410,7 @@ def reinforce(ctx: LossContext):
     importance ratio, no clip, no trust region (on-policy). This is the exact loss verl
     registers as ``gpg`` and Fireworks as ``reinforce``. Pair with any advantage estimator
     (grpo/rloo/reinforce); the group normalization, if any, lives in the estimator."""
-    return ctx.aggregate(-ctx.advantages * ctx.pi, ctx.action_mask), {}
+    return ctx.aggregate(-ctx.advantages * ctx.logp_curr, ctx.action_mask), {}
 
 
 @register_loss("echo")
@@ -424,6 +424,6 @@ def echo(ctx: LossContext):
     loss, metrics = ppo_clip(ctx)
     coef = float(ctx.params.get("env_loss_coef", 0.05))
     if coef:
-        loss = loss + coef * ctx.aggregate(-ctx.pi, ctx.obs_mask)
+        loss = loss + coef * ctx.aggregate(-ctx.logp_curr, ctx.obs_mask)
         metrics["echo/coef"] = coef
     return loss, metrics

@@ -91,12 +91,12 @@ def build_custom_loss(
         n = len(logprobs_list)
         num_tokens = 0.0
         num_seqs = 0.0
-        for i, pi in enumerate(logprobs_list):
-            action_mask = torch.tensor(action_mask_list[i], dtype=pi.dtype)
+        for i, logp_curr in enumerate(logprobs_list):
+            action_mask = torch.tensor(action_mask_list[i], dtype=logp_curr.dtype)
             ctx = LossContext(
-                pi=pi,
-                mu=torch.tensor(mu_list[i], dtype=pi.dtype),
-                advantages=torch.tensor(adv_list[i], dtype=pi.dtype),
+                logp_curr=logp_curr,
+                logp_old=torch.tensor(mu_list[i], dtype=logp_curr.dtype),
+                advantages=torch.tensor(adv_list[i], dtype=logp_curr.dtype),
                 action_mask=action_mask,
                 obs_mask=1.0 - action_mask,
                 aggregate=aggregate,

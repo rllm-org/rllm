@@ -150,13 +150,13 @@ class CustomPPOLoss:
             return agg_loss(loss_mat=per_token, loss_mask=mask, loss_agg_mode=(mode or self.config.loss_agg_mode), **gbi)
 
         ctx = LossContext(
-            pi=log_prob,
-            mu=padded["old_log_probs"],
+            logp_curr=log_prob,
+            logp_old=padded["old_log_probs"],
             advantages=padded["advantages"],
             action_mask=response_mask.to(log_prob.dtype),
             obs_mask=(non_pad & (~response_mask)).to(log_prob.dtype),
             aggregate=aggregate,
-            ref=padded.get("ref_log_prob", None),
+            logp_ref=padded.get("ref_log_prob", None),
             params={**self.loss_params, "clip_ratio_c": self.config.get("clip_ratio_c", 20.0)},
             backend="verl",
         )
