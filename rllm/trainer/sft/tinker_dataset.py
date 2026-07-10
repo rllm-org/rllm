@@ -18,14 +18,34 @@ from tinker_cookbook.supervised.types import SupervisedDataset
 logger = logging.getLogger(__name__)
 
 
+def _ensure_trainable(conversation: list[Message], last_only: bool) -> list[Message]:
+    """Ensure every message carries a ``trainable`` flag, so the renderer can
+    always use tinker's ``CUSTOMIZED`` mode — the data alone decides the mask.
+
+    Self-describing rows (e.g. from ``from-eval``'s automerge) already carry the
+    flag and are returned untouched. A row without flags gets a derived default:
+    assistant messages train (only the *last* when ``last_only``), reproducing the
+    legacy ``ALL_ASSISTANT_MESSAGES`` / ``LAST_ASSISTANT_MESSAGE`` behavior.
+    """
+    if conversation and isinstance(conversation[0], dict) and "trainable" in conversation[0]:
+        return conversation
+    last_asst = max((i for i, m in enumerate(conversation) if m.get("role") == "assistant"), default=-1)
+    return [{**m, "trainable": m.get("role") == "assistant" and (not last_only or i == last_asst)} for i, m in enumerate(conversation)]
+
+
 def conversation_to_datum(
     conversation: list[Message],
     renderer: Renderer,
     max_length: int | None,
-    train_on_what: TrainOnWhat = TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+    last_only: bool = False,
 ) -> tinker.Datum:
-    """Convert a conversation (list of messages) to a Tinker Datum."""
-    model_input, weights = renderer.build_supervised_example(conversation, train_on_what=train_on_what)
+    """Convert a conversation (list of messages) to a Tinker Datum.
+
+    Always renders with ``CUSTOMIZED`` masking, driven by each message's
+    ``trainable`` flag (derived via :func:`_ensure_trainable` when absent).
+    """
+    conversation = _ensure_trainable(conversation, last_only)
+    model_input, weights = renderer.build_supervised_example(conversation, train_on_what=TrainOnWhat.CUSTOMIZED)
     return datum_from_model_input_weights(model_input, weights, max_length)
 
 
@@ -43,13 +63,13 @@ class TinkerSFTDataset(SupervisedDataset):
         renderer: Renderer,
         batch_size: int,
         max_length: int | None = None,
-        train_on_what: TrainOnWhat = TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+        last_only: bool = False,
         max_samples: int = -1,
     ):
         self.renderer = renderer
         self.batch_size = batch_size
         self.max_length = max_length
-        self.train_on_what = train_on_what
+        self.last_only = last_only
 
         if isinstance(dataset_or_files, str | list):
             if isinstance(dataset_or_files, str):
@@ -67,7 +87,7 @@ class TinkerSFTDataset(SupervisedDataset):
             logger.info(f"Limited dataset to {max_samples} samples")
 
         logger.info(f"Loaded {len(self.dataset)} examples from {source}")
-        logger.info(f"Training on: {train_on_what}")
+        logger.info(f"Masking: CUSTOMIZED (derive last_only={last_only} for flag-less rows)")
 
     def get_batch(self, index: int) -> list[tinker.Datum]:
         start_idx = index * self.batch_size
@@ -75,7 +95,7 @@ class TinkerSFTDataset(SupervisedDataset):
         datums = []
         for i in range(start_idx, end_idx):
             row = self.dataset[i]
-            datums.append(conversation_to_datum(row["messages"], self.renderer, self.max_length, self.train_on_what))
+            datums.append(conversation_to_datum(row["messages"], self.renderer, self.max_length, self.last_only))
         return datums
 
     def set_epoch(self, seed: int = 0):
@@ -93,7 +113,7 @@ def create_tinker_sft_datasets(
     batch_size: int,
     val_batch_size: int | None = None,
     max_length: int | None = None,
-    train_on_what: TrainOnWhat = TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+    last_only: bool = False,
     max_train_samples: int = -1,
     max_val_samples: int = -1,
 ) -> tuple[TinkerSFTDataset, TinkerSFTDataset | None]:
@@ -106,7 +126,7 @@ def create_tinker_sft_datasets(
         renderer=renderer,
         batch_size=batch_size,
         max_length=max_length,
-        train_on_what=train_on_what,
+        last_only=last_only,
         max_samples=max_train_samples,
     )
 
@@ -117,7 +137,7 @@ def create_tinker_sft_datasets(
             renderer=renderer,
             batch_size=val_batch_size,
             max_length=max_length,
-            train_on_what=train_on_what,
+            last_only=last_only,
             max_samples=max_val_samples,
         )
 

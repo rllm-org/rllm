@@ -29,17 +29,6 @@ logger = logging.getLogger(__name__)
 _CONFIG_FILE = Path(__file__).resolve().parent / "config" / "tinker.yaml"
 
 
-def resolve_train_on_what(tokenize_method: str):
-    """Map rLLM's tokenize_and_mask_method to tinker's TrainOnWhat."""
-    from tinker_cookbook.renderers import TrainOnWhat
-
-    if tokenize_method == "stepwise":
-        return TrainOnWhat.LAST_ASSISTANT_MESSAGE
-    if tokenize_method not in ("cumulative", "hf_template"):
-        logger.warning(f"Unknown tokenize_and_mask_method '{tokenize_method}', defaulting to ALL_ASSISTANT_MESSAGES")
-    return TrainOnWhat.ALL_ASSISTANT_MESSAGES
-
-
 def build_sft_data(config, train_data, val_data):
     """Build (tokenizer, train_dataset, val_dataset) from a backend config.
 
@@ -57,9 +46,13 @@ def build_sft_data(config, train_data, val_data):
     tokenizer = get_tokenizer(tokenizer_name)
     renderer_name = config.data.get("renderer_name", "role_colon")
     renderer = get_renderer(renderer_name, tokenizer)
-    tokenize_method = config.data.get("rllm", {}).get("tokenize_and_mask_method", "cumulative")
-    train_on_what = resolve_train_on_what(tokenize_method)
-    logger.info(f"Using renderer: {renderer_name}, train_on_what: {train_on_what}")
+    # Masking is always CUSTOMIZED, driven by each message's ``trainable`` flag:
+    # rows from ``from-eval``'s automerge carry the flags directly; flag-less rows
+    # (e.g. an external ``--train-file``) get a derived default in the dataset
+    # loader. ``tokenize_and_mask_method=stepwise`` only selects that default
+    # (train just the last assistant turn) rather than the all-assistant default.
+    last_only = config.data.get("rllm", {}).get("tokenize_and_mask_method", "cumulative") == "stepwise"
+    logger.info(f"Using renderer: {renderer_name}, masking: CUSTOMIZED (last_only={last_only})")
 
     train_batch_size = config.data.get("train_batch_size", 32)
     val_batch_size = config.data.get("micro_batch_size_per_gpu", train_batch_size)
@@ -70,7 +63,7 @@ def build_sft_data(config, train_data, val_data):
         batch_size=train_batch_size,
         val_batch_size=val_batch_size,
         max_length=config.data.get("max_length", None),
-        train_on_what=train_on_what,
+        last_only=last_only,
         max_train_samples=config.data.get("train_max_samples", -1),
         max_val_samples=config.data.get("val_max_samples", -1),
     )
