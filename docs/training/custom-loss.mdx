@@ -1,0 +1,155 @@
+---
+title: "Custom loss functions"
+description: "The built-in policy losses rLLM ships, and how to register your own — one function that runs unchanged on verl, Tinker, and Fireworks."
+---
+
+<Note>
+**Module**: `rllm.trainer.algorithms.loss` — exposed at top level as `rllm.register_loss` and `rllm.LossContext`.
+</Note>
+
+This page covers:
+
+1. How the loss hook works (one function, all three backends)
+2. Built-in losses and how to select one
+3. The `LossContext` contract and its reducers
+4. Loss-aggregation modes (`loss_agg_mode`)
+5. Writing and registering a custom loss (worked example: IcePop)
+
+## Core concept
+
+A **policy loss** is a single function that returns the **complete scalar objective** and does its own masking and aggregation — the same convention as verl's `POLICY_LOSS_REGISTRY`. You select it by name; there is no list of losses and no separate auxiliary-loss framework (an additive term is composed *inside* a loss body).
+
+The same function runs on every backend. It reads a normalized [`LossContext`](#the-losscontext-contract) and calls the reducer the backend injects, so a loss body never needs to know whether it is running in verl's in-process kernel or a Tinker/Fireworks `forward_backward_custom` pass.
+
+```python
+import rllm
+
+@rllm.register_loss("my_loss")                 # same decorator style as @rllm.rollout
+def my_loss(ctx: rllm.LossContext):
+    ratio = (ctx.logp_curr - ctx.logp_old).exp()
+    pg = -ctx.advantages * ratio.clamp(max=20).detach() * ctx.logp_curr
+    return ctx.aggregate(pg, ctx.action_mask), {"ratio_mean": ratio.mean().item()}
+```
+
+```yaml
+algorithm:
+  loss_fn: my_loss                    # single selector
+  loss_params: {clip: 0.2}            # loss-specific params → ctx.params
+  loss_agg_mode: seq-mean-token-mean  # one knob, same semantics on every backend
+  loss_plugins: ["my_pkg.losses"]     # imported at startup so @register_loss fires
+```
+
+A loss returns `(scalar_loss, metrics)` where `metrics` is a `dict[str, float]` logged under `actor/…` (verl) or `train/…` (managed backends).
+
+## Built-in losses
+
+Ported from verl 0.8 and verified against its kernels. Select any of these with `algorithm.loss_fn` — no plugin needed.
+
+| `loss_fn` | Description |
+|---|---|
+| `ppo_clip` | Standard PPO/GRPO clipped surrogate (verl `vanilla`) |
+| `dppo_tv` / `dppo_kl` | **DPPO** ([arXiv:2602.04879](https://arxiv.org/abs/2602.04879)) — replaces ratio-clipping with a per-token divergence mask (total-variation / KL). Uses the untruncated ratio (`C=∞`) per the paper §5.4. |
+| `cispo` | **CISPO** ([arXiv:2506.13585](https://arxiv.org/abs/2506.13585)) — clips the importance-sampling weight (stop-grad) but keeps every token's gradient |
+| `gspo` | **GSPO** ([arXiv:2507.18071](https://arxiv.org/abs/2507.18071)) — sequence-level importance ratio via `seq_reduce`; pins `seq-mean-token-mean` |
+| `reinforce` | Clip-free REINFORCE-style policy gradient (verl `gpg`) |
+| `echo` | **ECHO** ([arXiv:2605.24517](https://arxiv.org/abs/2605.24517)) — PPO term plus an observation-token cross-entropy term, composed in one body |
+
+Common hyperparameters (`eps_clip`, `eps_clip_high`, `kl_beta`) come from the top-level `algorithm` config; anything else goes under `algorithm.loss_params` and lands in `ctx.params`.
+
+## The `LossContext` contract
+
+Every loss receives a `LossContext` with these fields (all tensors share a shape — `(batch, response_len)` on verl, `(num_tokens,)` per datum on the managed path):
+
+| Field | Meaning | verl analog |
+|---|---|---|
+| `logp_curr` | Current policy log-probs — **the only gradient-carrying input** | `log_prob` |
+| `logp_old` | The importance-ratio denominator (old/behavior policy) | `old_log_probs` |
+| `advantages` | Per-token advantage estimates | — |
+| `action_mask` | `1.0` on assistant/action tokens (where the PG applies) | — |
+| `obs_mask` | `1.0` on environment-observation tokens (for ECHO-style terms) | — |
+| `logp_ref` | Reference-policy log-probs for a KL term, or `None` | `ref_log_prob` |
+| `params` | Loss hyperparameters from `loss_params` | — |
+
+<Note>
+Only `logp_curr` carries gradient; everything else is a detached constant. That is what lets the managed backends reproduce `dL/dθ` from your loss with a `forward_backward_custom` surrogate.
+</Note>
+
+Two reducers are injected on the context:
+
+- **`ctx.aggregate(per_token, mask, mode=None)`** — collapses a per-token tensor to the scalar objective, realizing the configured `loss_agg_mode` with **global** normalization spanning the whole optimizer step. Pass `mode=` to force a specific reduction regardless of config (GSPO does this).
+- **`ctx.seq_reduce(values, mask, reduction)`** — reduces per sequence and broadcasts back to per-token (a row on verl's `(B, T)`; the whole datum on the managed path). This is what enables sequence-level losses like GSPO.
+
+Write the loss body shape-agnostically: elementwise math on the fields, then `ctx.aggregate`.
+
+## Loss-aggregation modes
+
+`loss_agg_mode` is a single, backend-agnostic knob using verl's names. The loss body just calls `ctx.aggregate`; each backend realizes the mode with global normalization over the *entire* optimizer step (all micro-batches, grad-accumulation passes, and DP ranks).
+
+| Mode | Semantics |
+|---|---|
+| `seq-mean-token-mean` (default) | Mean within each sequence, then mean over sequences — every sequence weighted equally |
+| `token-mean` | Every token weighted equally across the batch |
+| `seq-mean-token-sum` | Sum within each sequence, then mean over sequences |
+
+A loss whose math *requires* a specific reduction pins it at registration and ignores the config:
+
+```python
+@rllm.register_loss("gspo", agg_mode="seq-mean-token-mean")
+def gspo(ctx): ...
+```
+
+## How each backend runs it
+
+`loss_fn` resolution is **native-first**: if the backend has a fused kernel for that name, rLLM uses it; only losses without a native kernel take the custom path.
+
+| Backend | Mechanism |
+|---|---|
+| **verl** | Runs in-process over a `LossContext`; `aggregate` wraps verl's `agg_loss` (global-batch norm); `logp_old` = `old_log_probs`. Native kernels still handle non-rLLM `loss_fn`. |
+| **Tinker** | A `forward_backward_custom` closure, single pass; `logp_old` = the sampling log-probs; normalized client-side. |
+| **Fireworks** | The same `forward_backward_custom`; the client returns a raw sum and `optim_step` normalizes server-side from the resolved `loss_agg_mode` (accumulation-invariant). |
+
+## Writing a custom loss
+
+A loss is any function `(ctx) -> (scalar, metrics)`. Below is a complete, working example: **IcePop** ([arXiv:2510.18855](https://arxiv.org/abs/2510.18855)), which zeros a token's gradient when its importance ratio leaves a band `[alpha, beta]` — a double-sided divergence mask (masking out-of-range tokens rather than clipping them).
+
+```python
+# my_losses.py
+import rllm
+import torch
+
+@rllm.register_loss("icepop")
+def icepop(ctx: rllm.LossContext):
+    """Mask tokens whose importance ratio exp(logp_curr - logp_old) leaves [alpha, beta]."""
+    alpha = float(ctx.params.get("alpha", 0.5))
+    beta = float(ctx.params.get("beta", 5.0))
+    ratio = torch.exp(ctx.logp_curr - ctx.logp_old).detach()      # detached weight, no grad
+    keep = ((ratio >= alpha) & (ratio <= beta)).to(ctx.logp_curr.dtype)
+    pg = -ctx.advantages * ratio * ctx.logp_curr * keep           # grad flows via logp_curr
+    am = ctx.action_mask
+    mask_frac = ((1.0 - keep) * am).sum() / am.sum().clamp(min=1.0)
+    return ctx.aggregate(pg, am), {"icepop/mask_frac": mask_frac.item()}
+```
+
+Two conventions worth internalizing:
+
+- **`logp_curr` is the only differentiable term.** Anything used as a *weight* (the ratio, a mask) should be `.detach()`ed so gradient flows only through the score `logp_curr`.
+- **Never reduce by hand.** Return `ctx.aggregate(per_token, mask)` so your loss inherits the configured aggregation and correct global normalization.
+
+### Selecting and registering it
+
+Point `loss_fn` at the registered name and list the defining module in `loss_plugins` so rLLM imports it at startup (which runs the `@register_loss` decorator on every worker):
+
+```yaml
+algorithm:
+  loss_fn: icepop
+  loss_params: {alpha: 0.5, beta: 5.0}
+  loss_plugins: ["my_losses"]        # importable module path
+```
+
+Alternatively, expose the module through an `rllm.losses` entry point in your package, or simply import it before constructing the trainer — any of these makes the name resolvable.
+
+## Notes
+
+- **`bypass_mode` (async).** With one optimizer step per batch, a recomputed proximal equals the current policy, so `logp_old` defaults to the rollout log-probs (`bypass_mode=True` on Fireworks) — making the ratio a real trust region against the behavior policy. Set `false` only for multi-update-per-batch PPO. This is training infrastructure, not part of a loss body.
+- **Sequence-level losses** need `ctx.seq_reduce`; see `gspo` for the pattern (length-normalized sequence ratio, then applied per token via the stop-gradient identity).
+- **Tinker normalization** is exact only when `fwd_bwd_group_size == mini_batch_size`; under grad accumulation the divisor is per-pass. Fireworks and verl normalize globally and are accumulation-invariant.
