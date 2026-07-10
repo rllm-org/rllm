@@ -208,9 +208,10 @@ def build_trace_record(
     if "completion_tokens" in usage:
         token_counts["completion"] = usage["completion_tokens"]
 
-    response_weight_version = extract_weight_version(response_body)
-    if response_weight_version is not None:
-        weight_version = response_weight_version
+    # Proxy's fanned-out version wins; the engine-stamped response value is only a fallback.
+    # (A multi-worker subprocess's rebuilt engine stamps a stale version that must not override it.)
+    if weight_version is None:
+        weight_version = extract_weight_version(response_body)
 
     return TraceRecord(
         trace_id=str(uuid.uuid4()),

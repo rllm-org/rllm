@@ -532,3 +532,51 @@ class TestTrajectoryToDataEdgeCases:
         # Sequence: [1, 2], after [1:] shift: length 1
         mask_data = datums[0].loss_fn_inputs["mask"].data
         assert mask_data == [1.0]  # Only the response token remains after shift
+
+
+# =============================================================================
+# Empty / all-malformed batch (forward-backward guard trigger)
+# =============================================================================
+
+
+class TestAllMalformedBatch:
+    """When every trajectory is malformed (empty logprobs — e.g. failed/overloaded
+    generations that returned no completion), transform drops them all and returns empty
+    datums. forward_backward_from_trajectory_groups keys on this to skip the pass, and the
+    training loop skips optim+sync, instead of crashing with 'No data provided'."""
+
+    def _alg(self):
+        from omegaconf import OmegaConf
+
+        from rllm.trainer.algorithms.config import AlgorithmConfig
+
+        return AlgorithmConfig.from_config(OmegaConf.create({"adv_estimator": "grpo"}))
+
+    def test_all_empty_logprobs_yield_empty_datums(self):
+        from rllm.agents.agent import TrajectoryGroup
+        from rllm.trainer.tinker.transform import transform_trajectory_groups_to_datums
+
+        # response_tokens/logprobs empty = the malformed case that raises inside
+        # trajectory_to_datums -> dropped.
+        bad = [Trajectory(steps=[make_step(prompt_ids=[1, 2, 3], response_tokens=[], response_logprobs=[])]) for _ in range(3)]
+        group = TrajectoryGroup(group_id="g0", trajectories=bad)
+
+        datums, metrics = transform_trajectory_groups_to_datums([group], algorithm_config=self._alg())
+
+        assert datums == []  # nothing trainable -> guard returns early, no forward_backward([])
+        assert metrics["batch/dropped_malformed_sequences"] == 3
+        assert not datums  # the guard's list-emptiness check
+
+    def test_mixed_batch_keeps_valid_trajectories(self):
+        from rllm.agents.agent import TrajectoryGroup
+        from rllm.trainer.tinker.transform import transform_trajectory_groups_to_datums
+
+        good = Trajectory(steps=[make_step(prompt_ids=[1, 2, 3], response_tokens=[4, 5], response_logprobs=[-0.5, -0.8])])
+        bad = Trajectory(steps=[make_step(prompt_ids=[1, 2, 3], response_tokens=[], response_logprobs=[])])
+        group = TrajectoryGroup(group_id="g1", trajectories=[good, bad])
+
+        datums, metrics = transform_trajectory_groups_to_datums([group], algorithm_config=self._alg())
+
+        assert len(datums) == 1  # only the valid trajectory survives
+        assert metrics["batch/dropped_malformed_sequences"] == 1
+        assert datums  # non-empty -> loop runs optim as usual
