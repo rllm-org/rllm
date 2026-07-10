@@ -68,7 +68,12 @@ Every loss receives a `LossContext` with these fields (all tensors share a shape
 | `action_mask` | `1.0` on assistant/action tokens (where the PG applies) | — |
 | `obs_mask` | `1.0` on environment-observation tokens (for ECHO-style terms) | — |
 | `logp_ref` | Reference-policy log-probs for a KL term, or `None` | `ref_log_prob` |
+| `logp_rollout` | Raw inference/sampling log-probs from the rollout (behavior policy), or `None` | `rollout_log_probs` |
 | `params` | Loss hyperparameters from `loss_params` | — |
+
+<Note>
+`logp_rollout` is the true sampling distribution and equals `logp_old` under `bypass_mode`; they differ only when a proximal old-policy was recomputed (non-bypass). Reach for it when a loss must reference the rollout distribution independently of the ratio denominator — e.g. train/inference-mismatch corrections like TIS or IcePop.
+</Note>
 
 <Note>
 Only `logp_curr` carries gradient; everything else is a detached constant. That is what lets the managed backends reproduce `dL/dθ` from your loss with a `forward_backward_custom` surrogate.

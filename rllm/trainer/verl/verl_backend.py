@@ -137,6 +137,8 @@ class CustomPPOLoss:
         fields = ["response_mask", "old_log_probs", "advantages"]
         if "ref_log_prob" in data:
             fields.append("ref_log_prob")
+        if "rollout_log_probs" in data:
+            fields.append("rollout_log_probs")
         padded = data.select(*fields).to_padded_tensor()
         response_mask = padded["response_mask"].to(torch.bool)
 
@@ -157,6 +159,7 @@ class CustomPPOLoss:
             obs_mask=(non_pad & (~response_mask)).to(log_prob.dtype),
             aggregate=aggregate,
             logp_ref=padded.get("ref_log_prob", None),
+            logp_rollout=padded.get("rollout_log_probs", None),
             params={**self.loss_params, "clip_ratio_c": self.config.get("clip_ratio_c", 20.0)},
             backend="verl",
         )

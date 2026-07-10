@@ -390,6 +390,31 @@ def test_managed_closure_runs_single_loss_and_backprops():
     assert metrics["custom_loss/num_datums"] == 1.0
 
 
+def test_managed_logp_rollout_populated_and_distinct_from_old():
+    """logp_rollout always exposes the datum's raw sampling log-probs; with a proximal mu_arrays
+    override it differs from logp_old (the non-bypass case a custom loss may need to see)."""
+    pytest.importorskip("tinker")
+    from rllm.trainer.tinker.custom_loss import build_custom_loss
+
+    captured = {}
+
+    @register_loss("_capture_rollout")
+    def _capture(ctx):
+        captured["rollout"] = ctx.logp_rollout.tolist()
+        captured["old"] = ctx.logp_old.tolist()
+        return ctx.aggregate(-ctx.advantages * ctx.logp_curr, ctx.action_mask), {}
+
+    rollout_lp, proximal_lp = [-0.7, -0.3], [-0.1, -0.9]
+    d = _make_datum(target=[2, 3], logprobs=rollout_lp, adv=[1.0, 1.0], mask=[1.0, 1.0])
+    resolved = ResolvedLoss(name="_capture_rollout", fn=get_loss("_capture_rollout"), params={})
+    stripped, loss_fn = build_custom_loss(resolved, [d], mu_arrays=[proximal_lp])
+    loss_fn(stripped, [torch.tensor([-0.5, -0.5])])
+
+    assert captured["rollout"] == pytest.approx(rollout_lp)  # raw inference log-probs, not the override
+    assert captured["old"] == pytest.approx(proximal_lp)  # the proximal override
+    assert captured["rollout"] != captured["old"]  # distinct when a proximal is supplied (non-bypass)
+
+
 def test_managed_echo_trains_observation_tokens():
     pytest.importorskip("tinker")
     from rllm.trainer.tinker.custom_loss import build_custom_loss

@@ -60,6 +60,8 @@ def build_custom_loss(
             advantages, mask} (1.0 = action token, 0.0 = observation/prompt).
         mu_arrays: optional override for μ per datum (e.g. Fireworks proximal log-probs);
             defaults to each datum's sampling ``logprobs`` (inference μ — tmax default).
+            ``ctx.logp_rollout`` always exposes the raw sampling ``logprobs`` regardless of this
+            override, so a loss can reach the behavior policy even when μ is a proximal.
         server_normalized: True on Fireworks — return a raw cross-sequence sum and let the
             server divide (via GradAccNormalization) across the whole accumulation window.
             False on Tinker — divide by this pass's global count client-side.
@@ -67,7 +69,8 @@ def build_custom_loss(
     Returns:
         ``(stripped_datums, loss_fn)`` — pass both to ``forward_backward_custom``.
     """
-    mu_list = mu_arrays if mu_arrays is not None else [list(d.loss_fn_inputs["logprobs"].data) for d in datums]
+    rollout_list = [list(d.loss_fn_inputs["logprobs"].data) for d in datums]  # raw inference log-probs (behavior policy)
+    mu_list = mu_arrays if mu_arrays is not None else rollout_list
     adv_list = [list(d.loss_fn_inputs["advantages"].data) for d in datums]
     action_mask_list = [list(d.loss_fn_inputs["mask"].data) for d in datums]
     stripped = [_strip_to_target_tokens(d) for d in datums]
@@ -96,6 +99,7 @@ def build_custom_loss(
             ctx = LossContext(
                 logp_curr=logp_curr,
                 logp_old=torch.tensor(mu_list[i], dtype=logp_curr.dtype),
+                logp_rollout=torch.tensor(rollout_list[i], dtype=logp_curr.dtype),
                 advantages=torch.tensor(adv_list[i], dtype=logp_curr.dtype),
                 action_mask=action_mask,
                 obs_mask=1.0 - action_mask,

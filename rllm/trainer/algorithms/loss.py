@@ -55,7 +55,8 @@ class LossContext:
         logp_curr: current-policy per-token log-probs (``requires_grad=True``) — the only
             differentiable input.
         logp_old: behavior/old-policy per-token log-probs (importance-ratio denominator). verl:
-            ``old_log_probs``; managed: sampling (inference) log-probs by default.
+            ``old_log_probs``; managed: sampling (inference) log-probs by default. Equals
+            ``logp_rollout`` under bypass_mode.
         advantages: per-token advantage estimates.
         action_mask: 1.0 on assistant/action tokens (the policy gradient).
         obs_mask: 1.0 on environment-observation tokens (e.g. for ECHO).
@@ -63,6 +64,11 @@ class LossContext:
             backend. ``mode`` overrides the aggregation (e.g. GSPO forces
             "seq-mean-token-mean"); None uses the backend/config default.
         logp_ref: reference-policy log-probs for a KL term, or None.
+        logp_rollout: raw inference/sampling log-probs from the rollout (the behavior policy the
+            tokens were drawn from), or None if unavailable. Distinct from ``logp_old`` only when
+            a proximal old-policy was recomputed (non-bypass); under bypass_mode they coincide.
+            Use this when a loss must reference the true sampling distribution independently of
+            the ratio denominator (e.g. train/inference-mismatch corrections like TIS/IcePop).
         params: loss hyperparameters (``delta``/``eps_clip``, ``env_loss_coef``, ...).
         backend: "verl" | "tinker" | "fireworks".
     """
@@ -74,6 +80,7 @@ class LossContext:
     obs_mask: torch.Tensor
     aggregate: Callable[..., torch.Tensor]
     logp_ref: torch.Tensor | None = None
+    logp_rollout: torch.Tensor | None = None
     params: dict[str, Any] = field(default_factory=dict)
     backend: str = ""
 
