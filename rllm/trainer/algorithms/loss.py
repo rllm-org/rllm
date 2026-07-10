@@ -65,10 +65,13 @@ class LossContext:
             "seq-mean-token-mean"); None uses the backend/config default.
         logp_ref: reference-policy log-probs for a KL term, or None.
         logp_rollout: raw inference/sampling log-probs from the rollout (the behavior policy the
-            tokens were drawn from), or None if unavailable. Distinct from ``logp_old`` only when
-            a proximal old-policy was recomputed (non-bypass); under bypass_mode they coincide.
-            Use this when a loss must reference the true sampling distribution independently of
-            the ratio denominator (e.g. train/inference-mismatch corrections like TIS/IcePop).
+            tokens were drawn from). Always populated on the managed (tinker/fireworks) path;
+            on verl it is None unless rollout log-probs were captured into the batch. Distinct
+            from ``logp_old`` only when a proximal old-policy was recomputed (non-bypass); under
+            bypass_mode they coincide. Use this when a loss must reference the true sampling
+            distribution independently of the ratio denominator (train/inference-mismatch
+            corrections like TIS/IcePop) — a loss that requires it should guard on None rather
+            than fall back to ``logp_old`` (which is the proximal, not the inference log-prob).
         params: loss hyperparameters (``delta``/``eps_clip``, ``env_loss_coef``, ...).
         backend: "verl" | "tinker" | "fireworks".
     """
@@ -364,6 +367,49 @@ def dppo_kl(ctx: LossContext):
     am = ctx.action_mask
     mask_frac = ((1.0 - keep) * am).sum() / am.sum().clamp(min=1.0)
     return ctx.aggregate(pg, am), {"dppo_kl/mask_frac": mask_frac.item()}
+
+
+@register_loss("icepop")
+def icepop(ctx: LossContext):
+    """IcePop (arXiv:2510.18855, Ring-1T): double-sided train/inference discrepancy mask.
+
+    Zero a token's gradient when its importance ratio ``d = exp(logp_curr - logp_rollout)``
+    (current training policy vs the recorded inference/behavior policy) leaves ``[alpha, beta]``;
+    inside the band, weight the score by ``d`` (paper's ``M(k)=k·1[alpha<=k<=beta]``). Masks
+    out-of-range tokens rather than clipping them (unlike TIS/CISPO), and is non-directional
+    (unlike DPPO's advantage-conditioned divergence mask).
+
+    Uses ``logp_rollout`` (the true sampling distribution, correct per-token even across weight
+    versions in a partial rollout) rather than ``logp_old``, so no proximal forward is needed —
+    ``logp_curr`` is the training forward computed for the gradient anyway. Defaults alpha=0.5,
+    beta=5.0 (paper's default range).
+    """
+    import torch
+
+    if ctx.logp_rollout is None:
+        raise ValueError(
+            "icepop needs rollout (inference) log-probs, but ctx.logp_rollout is None. The managed "
+            "backends (tinker/fireworks) always provide them; on verl, enable rollout log-prob "
+            "capture so rollout_log_probs is in the batch."
+        )
+    alpha = float(ctx.params.get("icepop_alpha", 0.5))
+    beta = float(ctx.params.get("icepop_beta", 5.0))
+    d = torch.exp(ctx.logp_curr.detach() - ctx.logp_rollout)  # detached weight; grad flows via logp_curr
+    keep = ((d >= alpha) & (d <= beta)).to(ctx.logp_curr.dtype)
+    pg = -ctx.advantages * d * ctx.logp_curr * keep
+    am = ctx.action_mask
+    mask_frac = ((1.0 - keep) * am).sum() / am.sum().clamp(min=1.0)
+    # Ratio diagnostics over trainable tokens. On the managed per-datum path the loss runs once
+    # per sequence, so min/max are per-sequence and the adapter averages them across the batch
+    # (mean is a good batch-mean proxy); on verl the whole (B,T) batch is one call → true stats.
+    active = am > 0
+    d_active = d[active] if active.any() else d.new_ones(1)
+    return ctx.aggregate(pg, am), {
+        "icepop/mask_frac": mask_frac.item(),
+        "icepop/ratio_mean": d_active.mean().item(),
+        "icepop/ratio_min": d_active.min().item(),
+        "icepop/ratio_max": d_active.max().item(),
+    }
 
 
 @register_loss("cispo")
