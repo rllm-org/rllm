@@ -427,10 +427,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         self.algorithm_config = kwargs.get("algorithm_config")
 
         # Install the custom actor loss. If algorithm.loss_fn names an rLLM loss it runs
-        # in-process over a LossContext; otherwise verl's native kernel runs. loss_params
-        # (clip/kl/env_loss_coef + algorithm.loss_params) reach the loss via ctx.params;
-        # pad_token_id lets it identify environment-observation tokens. Installed after
-        # algorithm_config is resolved so loss_fn / env_loss_coef defaults are reflected.
+        # in-process over a LossContext; otherwise verl's native kernel runs. Params
+        # (clip/kl + algorithm.loss_params) reach the loss via ctx.params; pad_token_id lets
+        # it identify environment-observation tokens. Installed after algorithm_config is
+        # resolved so the loss_fn default (e.g. echo) is reflected.
         if hasattr(self.actor_rollout_wg, "set_loss_fn"):
             from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
 

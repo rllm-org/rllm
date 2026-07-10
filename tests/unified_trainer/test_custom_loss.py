@@ -230,6 +230,15 @@ def test_echo_zero_coef_equals_ppo_clip():
     assert torch.allclose(base, same)
 
 
+def test_echo_coef_defaults_to_paper_value():
+    """env_loss_coef is a normal loss_params entry: absent from params → echo uses 0.05."""
+    args = dict(logp_curr=[-0.5, -0.6, -0.7], logp_old=[-0.5, -0.6, -0.7], adv=[1.0, 1.0, 0.0], action_mask=[1.0, 1.0, 0.0], obs_mask=[0.0, 0.0, 1.0])
+    default_loss, metrics = echo(_ctx(**args, eps_clip=0.2))  # no env_loss_coef in params
+    explicit_loss, _ = echo(_ctx(**args, eps_clip=0.2, env_loss_coef=0.05))
+    assert metrics["echo/coef"] == 0.05
+    assert torch.allclose(default_loss, explicit_loss)
+
+
 def test_echo_adds_observation_ce():
     # obs token (idx2) is non-action; ECHO must put gradient on it, ppo_clip must not.
     args = dict(logp_old=[-0.5, -0.6, -0.7], adv=[1.0, 1.0, 0.0], action_mask=[1.0, 1.0, 0.0], obs_mask=[0.0, 0.0, 1.0])
@@ -283,9 +292,13 @@ def test_loss_params_merged():
 
 def test_echo_estimator_defaults_to_echo():
     alg = _alg(adv_estimator="echo")
-    assert alg.loss_fn == "echo" and alg.env_loss_coef == 0.05
+    assert alg.loss_fn == "echo"  # estimator default
     r = resolve_loss(alg)
-    assert r.name == "echo" and r.params["env_loss_coef"] == 0.05
+    assert r.name == "echo"
+    assert "env_loss_coef" not in r.params  # not a special param; defaults in the loss body
+    # env_loss_coef flows like any loss param when set:
+    r2 = resolve_loss(_alg(loss_fn="echo", loss_params={"env_loss_coef": 0.1}))
+    assert r2.params["env_loss_coef"] == 0.1
 
 
 # --------------------------------------------------------------------------- loss_agg_mode

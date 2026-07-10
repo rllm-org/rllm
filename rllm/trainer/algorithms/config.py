@@ -287,6 +287,13 @@ class rLLMAdvantageEstimator(str, Enum):
         return cls.OTHER
 
 
+# Default rLLM loss for an advantage estimator when the user doesn't set loss_fn. ECHO pairs
+# with its `echo` loss (which reads its own env_loss_coef from loss_params, like any other loss).
+_ESTIMATOR_DEFAULT_LOSS: dict[rLLMAdvantageEstimator, str] = {
+    rLLMAdvantageEstimator.ECHO: "echo",
+}
+
+
 @dataclass
 class AlgorithmConfig:
     """Configuration for algorithm parameters.
@@ -318,22 +325,13 @@ class AlgorithmConfig:
     # native kernel; an rLLM-registered name (`dppo_tv`, `ppo_clip`, `echo`, or a
     # user `@rllm.register_loss`) runs the rLLM loss. null = backend default.
     loss_fn: str | None = None
-    # Loss-specific hyperparameters passed to an rLLM loss via ctx.params (verl-style:
-    # like verl's policy_loss sub-fields). Merged with eps_clip/eps_clip_high/kl_beta/
-    # env_loss_coef. Example: {delta: 0.2} for dppo_tv.
+    # Loss-specific hyperparameters passed to an rLLM loss via ctx.params (verl-style: like
+    # verl's policy_loss sub-fields), merged with eps_clip/eps_clip_high/kl_beta. Examples:
+    # {delta: 0.2} for dppo_tv, {env_loss_coef: 0.05} for echo.
     loss_params: dict = field(default_factory=dict)
-    # ECHO (arXiv:2605.24517) environment-prediction coefficient (lambda), read by the
-    # `echo` loss as ctx.params["env_loss_coef"]: total = L_GRPO + lambda * L_env,
-    # L_env = length-normalized cross-entropy on observation tokens. None = auto: 0.05 when
-    # adv_estimator=echo (which also defaults loss_fn to `echo`), else 0.0.
-    env_loss_coef: float | None = None
     # Modules imported at startup so their @register_loss decorators run (lets a blackbox
     # `pip install rllm` user define custom losses without editing rllm).
     loss_plugins: list = field(default_factory=list)
-    # Which log-probs play the importance-ratio denominator (mu) for custom losses on the
-    # managed backends: "inference" (sampling/vLLM log-probs — the tmax DPPO default, masks
-    # the train/inference gap) or "proximal" (old-policy forward-pass log-probs).
-    mu_source: Literal["inference", "proximal"] = "inference"
     lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
     warmup_steps: int = -1
     warmup_steps_ratio: float = 0.0
@@ -377,10 +375,8 @@ class AlgorithmConfig:
             norm_adv_by_std_in_grpo=algorithm_config.get("norm_adv_by_std_in_grpo", True),
             use_precomputed_advantage=algorithm_config.get("use_precomputed_advantage", False),
             loss_fn=algorithm_config.get("loss_fn", None),
-            env_loss_coef=algorithm_config.get("env_loss_coef", None),
             loss_params=dict(algorithm_config.get("loss_params", None) or {}),
             loss_plugins=_to_plain_list(algorithm_config.get("loss_plugins", None)),
-            mu_source=algorithm_config.get("mu_source", "inference"),
             lr_schedule=algorithm_config.get("lr_schedule", "constant"),
             warmup_steps=algorithm_config.get("warmup_steps", -1),
             warmup_steps_ratio=algorithm_config.get("warmup_steps_ratio", 0.0),
@@ -402,13 +398,10 @@ class AlgorithmConfig:
                 stacklevel=2,
             )
 
-        # ECHO: `adv_estimator=echo` uses GRPO advantages plus the env-prediction loss.
-        # Default lambda to 0.05 (unless set) and select the `echo` loss (unless
-        # the user picked a loss_fn). Any other estimator defaults env_loss_coef to 0.0.
-        if self.env_loss_coef is None:
-            self.env_loss_coef = 0.05 if self.estimator == rLLMAdvantageEstimator.ECHO else 0.0
-        if self.estimator == rLLMAdvantageEstimator.ECHO and self.loss_fn is None:
-            self.loss_fn = "echo"
+        # Default loss_fn from the estimator when the user didn't pick one (e.g. echo → `echo`,
+        # whose env_loss_coef comes from loss_params like any other loss's hyperparameters).
+        if self.loss_fn is None:
+            self.loss_fn = _ESTIMATOR_DEFAULT_LOSS.get(self.estimator)
 
         # Normalize estimator_map: split (estimator, loss_fn) tuples.
         normalized_map: dict[str, rLLMAdvantageEstimator | str] = {}

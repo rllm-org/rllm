@@ -585,9 +585,6 @@ class FireworksPolicyTrainer:
         if resolved is not None:
             from rllm.trainer.tinker.custom_loss import build_custom_loss
 
-            if algorithm_config.mu_source == "proximal":
-                logger.warning("mu_source='proximal' not yet supported on the Fireworks custom path; using inference log-probs (mu=sampling).")
-
             # Custom (DPPO) path: logp_old = the inference log-probs on the datums, so pi_old is
             # never recomputed. offpolicy/* isn't logged (it needs a real proximal forward — a
             # per-pass diagnostic cost); the loss emits its own (e.g. dppo_tv/mask_frac).

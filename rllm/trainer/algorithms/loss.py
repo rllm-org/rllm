@@ -267,10 +267,10 @@ def resolve_loss(algorithm_config, native_losses: set[str] | None = None) -> Res
     back to the rLLM custom path (verl in-process; tinker/fireworks ``forward_backward_custom``).
 
     First imports ``algorithm.loss_plugins`` so user losses are registered. Params passed to
-    the loss are the standard clip/kl fields plus ``env_loss_coef`` and anything under
-    ``algorithm.loss_params`` (verl-style loss-specific config). Note: a loss that routes to a
-    native kernel takes its hyperparameters from the backend-native config (e.g.
-    ``eps_clip``→``clip_ratio``), not ``loss_params``."""
+    the loss are the standard clip/kl fields plus anything under ``algorithm.loss_params``
+    (verl-style loss-specific config, e.g. ``delta`` for dppo_tv or ``env_loss_coef`` for echo).
+    Note: a loss that routes to a native kernel takes its hyperparameters from the backend-native
+    config (e.g. ``eps_clip``→``clip_ratio``), not ``loss_params``."""
     load_loss_plugins(list(getattr(algorithm_config, "loss_plugins", None) or []))
     name = getattr(algorithm_config, "loss_fn", None)
     if name is None:
@@ -283,7 +283,6 @@ def resolve_loss(algorithm_config, native_losses: set[str] | None = None) -> Res
         "eps_clip": getattr(algorithm_config, "eps_clip", 0.2),
         "eps_clip_high": getattr(algorithm_config, "eps_clip_high", None),
         "kl_beta": getattr(algorithm_config, "kl_beta", 0.0),
-        "env_loss_coef": float(getattr(algorithm_config, "env_loss_coef", 0.0) or 0.0),
         **dict(getattr(algorithm_config, "loss_params", None) or {}),
     }
     # Aggregation mode: the loss's own pin (GSPO) wins; else the config; else the canonical
