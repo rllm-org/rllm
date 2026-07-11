@@ -4,7 +4,12 @@ Common utilities for rLLM trainers.
 This module provides shared functionality across different trainer backends (verl, tinker, etc.).
 """
 
-from rllm.trainer.algorithms.advantage import collect_reward_and_advantage_from_trajectory_groups
+from rllm.trainer.algorithms.advantage import (
+    RLLM_ADV_ESTIMATOR_REGISTRY,
+    collect_reward_and_advantage_from_trajectory_groups,
+    get_adv_estimator,
+    register_adv_estimator,
+)
 from rllm.trainer.algorithms.config import (
     AlgorithmConfig,
     AsyncTrainingConfig,
@@ -54,6 +59,9 @@ __all__ = [
     # Advantage computation
     "rLLMAdvantageEstimator",
     "collect_reward_and_advantage_from_trajectory_groups",
+    "register_adv_estimator",
+    "get_adv_estimator",
+    "RLLM_ADV_ESTIMATOR_REGISTRY",
     # Custom losses (single-selector, verl-style)
     "register_loss",
     "get_loss",
