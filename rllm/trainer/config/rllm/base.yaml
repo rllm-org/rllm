@@ -73,8 +73,9 @@ trainer:
 
 # Algorithm Configuration
 algorithm:
-  adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo, echo]
+  adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo, echo, pkpo]
   norm_adv_by_std_in_grpo: true
+  pass_at_k: 1  # k for adv_estimator=pkpo (arXiv:2505.15201); k=1 == standard pass@1
   use_rllm: null  # deprecated, unified trainer only support rllm advantage estimators
   use_precomputed_advantage: false # use pre-computed step.advantage from the workflow (e.g. distillation)
   loss_fn: null           # backend-specific values; null = backend default. adv_estimator=echo defaults this to `echo`.
