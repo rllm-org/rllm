@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import gc
 import logging
 import os
 import uuid
@@ -193,6 +194,7 @@ def create_app(
         local_handler=local_handler,
         cumulative_token_mode=config.cumulative_token_mode,
         renderer=renderer,
+        worker_label=str(config.port) if config.port else "",
     )
     sessions = SessionManager(store)
 
@@ -559,15 +561,40 @@ def main() -> None:
         default=None,
         help="Path to a JSON file passed to --handler-factory.",
     )
+    parser.add_argument(
+        "--front",
+        action="store_true",
+        default=False,
+        help="Run as a thin session-sharding reverse proxy over the --worker gateways (the front for rllm.gateway.num_workers>1). Routes by session_id; no local engine.",
+    )
 
     args = parser.parse_args()
     config = _load_config(args)
 
     logging.basicConfig(level=getattr(logging, config.log_level.upper(), logging.INFO))
 
-    local_handler = _load_handler_factory(args.handler_factory, args.handler_config) if args.handler_factory else None
+    # httpx emits one INFO line per request; at high concurrency (especially the
+    # front's per-request forwards to workers, and workers' calls to Fireworks)
+    # that floods. Silence it unless debugging — our own INFO logs are separate.
+    if config.log_level.lower() != "debug":
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-    app = create_app(config, local_handler=local_handler)
+    if args.front:
+        from rllm_model_gateway.front import create_front_app
+
+        app = create_front_app(getattr(args, "worker", None) or [])
+    else:
+        local_handler = _load_handler_factory(args.handler_factory, args.handler_config) if args.handler_factory else None
+        app = create_app(config, local_handler=local_handler)
+
+    # Standalone gateway process only (main() never runs for the in-trainer
+    # thread-mode gateway, so this can't perturb the trainer's GC). Freeze the
+    # static tokenizer/renderer/sampler out of GC's scan set and make gen-2 sweeps
+    # rare, so cyclic GC on the event-loop thread stops stalling request handling.
+    gc.collect()
+    gc.freeze()
+    gc.set_threshold(50_000, 500, 500)
 
     import uvicorn
 

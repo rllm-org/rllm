@@ -22,7 +22,7 @@ logger.addFilter(DuplicateLoggingFilter())  # prevent duplicate logging messages
 RLLM_ADV_ESTIMATOR_REGISTRY: dict[str, Callable] = {}
 
 
-def register_rllm_adv_estimator(name: str | rLLMAdvantageEstimator) -> Callable:
+def register_adv_estimator(name: str | rLLMAdvantageEstimator) -> Callable:
     """Register a rLLM advantage estimator — either built-in or custom.
 
     Registered estimators must follow the canonical signature:
@@ -60,18 +60,24 @@ def register_rllm_adv_estimator(name: str | rLLMAdvantageEstimator) -> Callable:
     return decorator
 
 
-def get_rllm_adv_estimator(name: str | rLLMAdvantageEstimator) -> Callable:
+def get_adv_estimator(name: str | rLLMAdvantageEstimator) -> Callable:
     """Get a rLLM advantage estimator by name.
 
     Args:
         name: Name of the advantage estimator.
     """
     if name not in RLLM_ADV_ESTIMATOR_REGISTRY:
-        raise ValueError(f"Unknown advantage estimator {name}. If you have a custom advantage estimator, please register it using `register_rllm_adv_estimator`.")
+        raise ValueError(f"Unknown advantage estimator {name}. If you have a custom advantage estimator, please register it using `register_adv_estimator`.")
     return RLLM_ADV_ESTIMATOR_REGISTRY[name]
 
 
-@register_rllm_adv_estimator(rLLMAdvantageEstimator.GRPO)
+# Backwards-compatible aliases for the pre-rename names. Prefer the shorter
+# `register_adv_estimator` / `get_adv_estimator` (mirrors `register_loss` / `get_loss`).
+register_rllm_adv_estimator = register_adv_estimator
+get_rllm_adv_estimator = get_adv_estimator
+
+
+@register_adv_estimator(rLLMAdvantageEstimator.GRPO)
 def calculate_grpo_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
     norm_adv_by_std_in_grpo = algorithm_config.norm_adv_by_std_in_grpo
     advantages_by_group, returns_by_group = zip(
@@ -82,13 +88,13 @@ def calculate_grpo_advantages(rewards: list[np.ndarray], algorithm_config: Algor
     return advantages_by_group, returns_by_group
 
 
-@register_rllm_adv_estimator(rLLMAdvantageEstimator.REINFORCE)
+@register_adv_estimator(rLLMAdvantageEstimator.REINFORCE)
 def calculate_reinforce_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """REINFORCE: advantage = reward (no baseline)"""
     return rewards, rewards
 
 
-@register_rllm_adv_estimator(rLLMAdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE)
+@register_adv_estimator(rLLMAdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE)
 def calculate_reinforce_plus_plus_baseline_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, epsilon: float = 1e-6, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """REINFORCE++ baseline estimator.
 
@@ -111,7 +117,7 @@ def calculate_reinforce_plus_plus_baseline_advantages(rewards: list[np.ndarray],
     return advantages_by_group, advantages_by_group
 
 
-@register_rllm_adv_estimator(rLLMAdvantageEstimator.PRPO)
+@register_adv_estimator(rLLMAdvantageEstimator.PRPO)
 def calculate_prpo_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, epsilon: float = 1e-6, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """PRPO advantage estimator, centering and normalizing rewards across the batch. See https://rllm-project.com/post.html?post=continual_learning.md
 
@@ -129,20 +135,20 @@ def calculate_prpo_advantages(rewards: list[np.ndarray], algorithm_config: Algor
     return advantages_by_group, advantages_by_group
 
 
-@register_rllm_adv_estimator(rLLMAdvantageEstimator.RLOO)
+@register_adv_estimator(rLLMAdvantageEstimator.RLOO)
 def calculate_rloo_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Reinforce Leave-one-out (RLOO): https://arxiv.org/abs/2402.14740"""
     advantages_by_group, returns_by_group = zip(*[calculate_rloo_advantages_per_group(group_rewards) for group_rewards in rewards], strict=True)
     return advantages_by_group, returns_by_group
 
 
-@register_rllm_adv_estimator(rLLMAdvantageEstimator.ECHO)
+@register_adv_estimator(rLLMAdvantageEstimator.ECHO)
 def calculate_echo_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """ECHO (arXiv:2605.24517): advantages are identical to GRPO.
 
     ECHO's only departure from GRPO is an auxiliary cross-entropy loss on
-    environment-observation tokens, added in each backend's loss path and gated
-    by ``algorithm_config.env_loss_coef``. The advantage estimation here is just
+    environment-observation tokens, added by the ``echo`` loss and scaled by its
+    ``env_loss_coef`` (from ``loss_params``). The advantage estimation here is just
     GRPO so the policy-gradient term is unchanged.
     """
     return calculate_grpo_advantages(rewards, algorithm_config, **kwargs)
@@ -228,7 +234,7 @@ def collect_reward_and_advantage_from_trajectory_groups(
 
     if collect_advantage:
         for group_role, traj_groups in traj_groups_by_role.items():
-            advantage_fn = get_rllm_adv_estimator(algorithm_config.estimator_map.get(group_role, algorithm_config.estimator))
+            advantage_fn = get_adv_estimator(algorithm_config.estimator_map.get(group_role, algorithm_config.estimator))
             traj_rewards = traj_rewards_by_role[group_role]
             advantages_by_group, _ = advantage_fn(  # ignore returns here
                 rewards=traj_rewards,

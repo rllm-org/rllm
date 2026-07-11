@@ -6,6 +6,7 @@ Reference implementations:
 """
 
 import asyncio
+import hashlib
 import logging
 from collections import OrderedDict
 from typing import Protocol
@@ -99,6 +100,40 @@ class StickyLeastLoadedPolicy:
 
     def on_worker_change(self, workers: list[WorkerInfo]) -> None:
         self._cache.clear()
+
+
+class ConsistentHashPolicy:
+    """Deterministic ``session_id`` -> worker mapping for multi-worker sharding.
+
+    Each gateway worker holds a shard of per-session state (TokenAccumulator,
+    traces, sampling params), so a session's chat turns AND its trace/session
+    control ops must always land on the *same* worker. We therefore hash the
+    session id (stable ``sha256``, not the salted builtin ``hash``) over the
+    **fixed registered worker set** in a stable order — health churn does not
+    change the mapping (a dead worker's sessions fail cleanly rather than
+    silently remapping to another worker that lacks their state).
+
+    Sessionless requests fall back to least-loaded over the (healthy) pool.
+    """
+
+    def __init__(self) -> None:
+        self._ordered: list[WorkerInfo] = []
+
+    def on_worker_change(self, workers: list[WorkerInfo]) -> None:
+        # Stable order so hash % N is deterministic; url is unique + stable.
+        self._ordered = sorted(workers, key=lambda w: w.url)
+
+    def select_worker(
+        self,
+        workers: list[WorkerInfo],
+        session_id: str | None,
+        active_counts: dict[str, int],
+    ) -> WorkerInfo:
+        if not session_id:
+            return min(workers, key=lambda w: active_counts.get(w.url, 0))
+        pool = self._ordered or sorted(workers, key=lambda w: w.url)
+        digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+        return pool[int(digest, 16) % len(pool)]
 
 
 # ------------------------------------------------------------------
