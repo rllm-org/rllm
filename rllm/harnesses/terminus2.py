@@ -24,6 +24,7 @@ builds the trajectory. Reward comes from rLLM's per-task verifier, not here.
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
@@ -110,6 +111,14 @@ class Terminus2Harness(BaseCliHarness):
     # Asciinema recording needs an extra dep and a writable trial dir; off by
     # default since rLLM scores from the verifier, not the cast.
     record_terminal_session: bool = False
+    # Keep each turn's reasoning_content in the chat history and resend it on
+    # subsequent requests (Harbor's ``interleaved_thinking``). Off by default —
+    # matching Harbor — so past thinking is stripped from the assistant history
+    # messages the model sees. Whether the serving stack re-injects the resent
+    # reasoning into the prompt depends on its chat template. The env default
+    # lets ``rllm eval`` toggle it without a constructor: export
+    # RLLM_TERMINUS_INTERLEAVED_THINKING=1.
+    interleaved_thinking: bool = os.environ.get("RLLM_TERMINUS_INTERLEAVED_THINKING", "0") == "1"
     # Context summarization ("compaction"). Harbor's Terminus-2 enables this by
     # default: it spawns summarization subagents to compress history when the
     # context fills, which fragments the trajectory the gateway captures. Set
@@ -145,6 +154,7 @@ class Terminus2Harness(BaseCliHarness):
             "RLLM_TERMINUS_TEMPERATURE": str(self.temperature),
             "RLLM_TERMINUS_RECORD": "1" if self.record_terminal_session else "0",
             "RLLM_TERMINUS_ENABLE_SUMMARIZE": "1" if self.enable_summarize else "0",
+            "RLLM_TERMINUS_INTERLEAVED_THINKING": "1" if self.interleaved_thinking else "0",
             "RLLM_TERMINUS_INSTRUCTION_FILE": _INSTRUCTION_PATH,
             "RLLM_TERMINUS_LOGS_DIR": _LOGS_DIR,
             "RLLM_TERMINUS_OUTCOME_FILE": _OUTCOME_PATH,
@@ -345,6 +355,8 @@ async def _main():
     # Compaction toggle: unset defaults to Harbor's own default (on). "0" turns
     # off both proactive and context-limit summarization.
     enable_summarize = os.environ.get("RLLM_TERMINUS_ENABLE_SUMMARIZE", "1") == "1"
+    # Keep reasoning_content in chat history and resend it on later requests.
+    interleaved_thinking = os.environ.get("RLLM_TERMINUS_INTERLEAVED_THINKING", "0") == "1"
     logs_dir = Path(os.environ.get("RLLM_TERMINUS_LOGS_DIR", "/tmp/terminus2/logs"))
     logs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -362,6 +374,7 @@ async def _main():
         temperature=temperature,
         record_terminal_session=record,
         enable_summarize=enable_summarize,
+        interleaved_thinking=interleaved_thinking,
         model_info=model_info,
         suppress_max_turns_warning=True,
     )
