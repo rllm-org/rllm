@@ -269,6 +269,201 @@ def test_icepop_requires_logp_rollout():
         icepop(ctx)
 
 
+# --------------------------------------------------------------------------- REINFORCE + KL-to-sampler
+def test_reinforce_kl_matches_doc_formula():
+    """L = -sg[r]·A·logp + bwd·(-log r + r - 1) + fwd·(r·log r - r + 1), with r = p/q against
+    the SAMPLER (logp_rollout) — logp_old (the proximal) must be ignored entirely."""
+    from rllm.trainer.algorithms.loss import reinforce_kl
+
+    torch.manual_seed(4)
+    n = 16
+    logp_curr = (torch.rand(n) * -2).requires_grad_(True)
+    logp_rollout = torch.rand(n) * -2
+    adv = torch.randn(n)
+    ctx = LossContext(
+        logp_curr=logp_curr,
+        logp_old=torch.zeros(n),  # garbage on purpose: q is the sampler, not the proximal
+        logp_rollout=logp_rollout,
+        advantages=adv,
+        action_mask=torch.ones(n),
+        obs_mask=torch.zeros(n),
+        aggregate=_agg_sum,
+        params={"fwd_kl_coef": 0.3, "bwd_kl_coef": 0.7},
+    )
+    ours, m = reinforce_kl(ctx)
+
+    log_r = logp_curr.detach() - logp_rollout
+    r = torch.exp(torch.clamp(log_r, -20.0, 20.0))
+    pg = -r * adv * logp_curr.detach()
+    kl_bwd = -log_r + r - 1.0
+    kl_fwd = r * log_r - r + 1.0
+    ref = (pg + 0.7 * kl_bwd + 0.3 * kl_fwd).sum()
+    assert torch.allclose(ours.detach(), ref, atol=1e-5)
+    # metrics: masked means of the per-token estimators, each sample-wise non-negative
+    assert m["reinforce_kl/kl_bwd"] == pytest.approx(kl_bwd.mean().item(), abs=1e-5)
+    assert m["reinforce_kl/kl_fwd"] == pytest.approx(kl_fwd.mean().item(), abs=1e-5)
+    assert m["reinforce_kl/ratio_mean"] == pytest.approx(r.mean().item(), abs=1e-5)
+    assert m["reinforce_kl/kl_bwd"] >= 0.0 and m["reinforce_kl/kl_fwd"] >= 0.0
+
+
+def test_reinforce_kl_default_coefs_are_zero():
+    """Both KL coefficients default to 0.0: the default loss is pure IS-weighted REINFORCE,
+    and a KL term only activates when its coef is set explicitly (e.g. bwd_kl_coef=0.0025)."""
+    from rllm.trainer.algorithms.loss import reinforce_kl
+
+    def _make(**params):
+        return LossContext(
+            logp_curr=torch.tensor([-0.5, -1.2], requires_grad=True),
+            logp_old=torch.zeros(2),
+            logp_rollout=torch.tensor([-0.9, -0.4]),
+            advantages=torch.tensor([1.0, -1.0]),
+            action_mask=torch.ones(2),
+            obs_mask=torch.zeros(2),
+            aggregate=_agg_sum,
+            params=params,
+        )
+
+    default_loss, _ = reinforce_kl(_make())
+    pg_only, _ = reinforce_kl(_make(fwd_kl_coef=0.0, bwd_kl_coef=0.0))
+    with_bwd, _ = reinforce_kl(_make(bwd_kl_coef=0.0025))
+    assert torch.allclose(default_loss, pg_only)
+    assert not torch.allclose(default_loss, with_bwd)
+
+
+def test_reinforce_kl_keeps_gradient_where_ppo_clip_drops_it():
+    """The doc's REINFORCE-vs-GRPO/PPO contrast: at ratio 1.8 (>1+eps) with adv>0 PPO clip
+    zeros the gradient; here the token still trains, weighted by the full detached IS ratio."""
+    from rllm.trainer.algorithms.loss import reinforce_kl
+
+    logp_q = [float(torch.tensor(0.5).log())]
+    a = torch.tensor([float(torch.tensor(0.9).log())], requires_grad=True)
+    ppo_clip(LossContext(logp_curr=a, logp_old=torch.tensor(logp_q), advantages=torch.tensor([1.0]), action_mask=torch.ones(1), obs_mask=torch.zeros(1), aggregate=_agg_sum, params={"eps_clip": 0.2}))[
+        0
+    ].backward()
+
+    b = torch.tensor([float(torch.tensor(0.9).log())], requires_grad=True)
+    reinforce_kl(
+        LossContext(
+            logp_curr=b,
+            logp_old=torch.zeros(1),
+            logp_rollout=torch.tensor(logp_q),
+            advantages=torch.tensor([1.0]),
+            action_mask=torch.ones(1),
+            obs_mask=torch.zeros(1),
+            aggregate=_agg_sum,
+            params={"fwd_kl_coef": 0.0, "bwd_kl_coef": 0.0},
+        )
+    )[0].backward()
+
+    assert a.grad[0].item() == 0.0  # PPO clip: out-of-band, no gradient
+    assert b.grad[0].item() == pytest.approx(-1.8, abs=1e-4)  # -sg[r]·A: unclipped weight, grad via log p only
+
+
+def test_reinforce_kl_kl_gradients_match_analytic_forms():
+    """The KL terms must keep the ratio differentiable: with A=0, backward KL's gradient is
+    (r-1)·∇logp and forward KL's is r·log r·∇logp — both pull p toward the sampler q.
+    (Detaching r inside the estimators would break this and de-regularize the loss.)"""
+    from rllm.trainer.algorithms.loss import reinforce_kl
+
+    logp_rollout = torch.tensor([-1.0, -0.5])
+
+    def _make(logp_curr, **params):
+        return LossContext(
+            logp_curr=logp_curr, logp_old=torch.zeros(2), logp_rollout=logp_rollout, advantages=torch.zeros(2), action_mask=torch.ones(2), obs_mask=torch.zeros(2), aggregate=_agg_sum, params=params
+        )
+
+    log_r = torch.tensor([0.5, -0.5])  # logp_curr - logp_rollout below
+    r = log_r.exp()
+
+    bwd = torch.tensor([-0.5, -1.0], requires_grad=True)
+    reinforce_kl(_make(bwd, bwd_kl_coef=1.0, fwd_kl_coef=0.0))[0].backward()
+    assert torch.allclose(bwd.grad, r - 1.0, atol=1e-5)
+
+    fwd = torch.tensor([-0.5, -1.0], requires_grad=True)
+    reinforce_kl(_make(fwd, bwd_kl_coef=0.0, fwd_kl_coef=1.0))[0].backward()
+    assert torch.allclose(fwd.grad, r * log_r, atol=1e-5)
+
+
+def test_reinforce_kl_ratio_clamp_bounds_pg_weight():
+    """ratio_clamp_min/max bound the detached PG weight CISPO-style: with adv=1 and KL off,
+    grad = -clamp(r) — clamped tokens still train (unlike a mask). Default None = raw ratio."""
+    import math
+
+    from rllm.trainer.algorithms.loss import reinforce_kl
+
+    # rollout = logp_curr - ln(d) so r = exp(logp_curr - rollout) hits [0.2, 5.0] exactly.
+    rollout = torch.tensor([-0.5 - math.log(0.2), -0.5 - math.log(5.0)])
+
+    def _run(**params):
+        logp_curr = torch.tensor([-0.5, -0.5], requires_grad=True)
+        ctx = LossContext(
+            logp_curr=logp_curr,
+            logp_old=torch.zeros(2),
+            logp_rollout=rollout,
+            advantages=torch.tensor([1.0, 1.0]),
+            action_mask=torch.ones(2),
+            obs_mask=torch.zeros(2),
+            aggregate=_agg_sum,
+            params={"fwd_kl_coef": 0.0, "bwd_kl_coef": 0.0, **params},
+        )
+        loss, m = reinforce_kl(ctx)
+        loss.backward()
+        return logp_curr.grad, m
+
+    grad, m = _run(ratio_clamp_min=0.5, ratio_clamp_max=2.0)
+    assert torch.allclose(grad, torch.tensor([-0.5, -2.0]), atol=1e-4)  # both bounded, both still train
+    assert m["reinforce_kl/clamp_frac"] == pytest.approx(1.0)
+
+    grad, m = _run()  # default None/None: raw detached ratio, faithful to the doc
+    assert torch.allclose(grad, torch.tensor([-0.2, -5.0]), atol=1e-4)
+    assert m["reinforce_kl/clamp_frac"] == 0.0
+
+    grad, m = _run(ratio_clamp_max=2.0)  # one-sided: min stays unbounded
+    assert torch.allclose(grad, torch.tensor([-0.2, -2.0]), atol=1e-4)
+    assert m["reinforce_kl/clamp_frac"] == pytest.approx(0.5)
+
+
+def test_reinforce_kl_ratio_clamp_leaves_kl_terms_alone():
+    """The clamp applies to the PG weight only: the KL estimators must keep the TRUE r, or a
+    tight clamp would silently weaken the regularizer. With A=0 and a clamp band around 1,
+    backward KL's gradient must still be (r-1) with the unclamped r."""
+    from rllm.trainer.algorithms.loss import reinforce_kl
+
+    logp_curr = torch.tensor([-0.5, -1.0], requires_grad=True)
+    ctx = LossContext(
+        logp_curr=logp_curr,
+        logp_old=torch.zeros(2),
+        logp_rollout=torch.tensor([-1.0, -0.5]),  # log r = [0.5, -0.5]
+        advantages=torch.zeros(2),
+        action_mask=torch.ones(2),
+        obs_mask=torch.zeros(2),
+        aggregate=_agg_sum,
+        params={"bwd_kl_coef": 1.0, "fwd_kl_coef": 0.0, "ratio_clamp_min": 0.9, "ratio_clamp_max": 1.1},
+    )
+    reinforce_kl(ctx)[0].backward()
+    r = torch.tensor([0.5, -0.5]).exp()
+    assert torch.allclose(logp_curr.grad, r - 1.0, atol=1e-5)  # NOT clamp(r) - 1 = [0.1, -0.1]
+
+
+def test_reinforce_kl_requires_logp_rollout():
+    """q is the sampler distribution: a missing rollout log-prob is a loud error, not a
+    silent fallback to logp_old (same contract as icepop)."""
+    from rllm.trainer.algorithms.loss import reinforce_kl
+
+    ctx = LossContext(
+        logp_curr=torch.tensor([-0.5]),
+        logp_old=torch.tensor([-0.5]),
+        logp_rollout=None,
+        advantages=torch.tensor([1.0]),
+        action_mask=torch.ones(1),
+        obs_mask=torch.zeros(1),
+        aggregate=_agg_sum,
+        params={},
+    )
+    with pytest.raises(ValueError, match="rollout"):
+        reinforce_kl(ctx)
+
+
 # --------------------------------------------------------------------------- ECHO as one loss function
 def test_echo_zero_coef_equals_ppo_clip():
     args = dict(logp_curr=[-0.5, -0.6, -0.7], logp_old=[-0.5, -0.6, -0.7], adv=[1.0, 1.0, 0.0], action_mask=[1.0, 1.0, 0.0], obs_mask=[0.0, 0.0, 1.0])
