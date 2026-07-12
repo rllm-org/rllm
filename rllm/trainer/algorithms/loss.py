@@ -461,6 +461,67 @@ def reinforce(ctx: LossContext):
     return ctx.aggregate(-ctx.advantages * ctx.logp_curr, ctx.action_mask), {}
 
 
+@register_loss("reinforce_kl")
+def reinforce_kl(ctx: LossContext):
+    """IS-weighted REINFORCE plus forward/backward KL to the **sampler** policy.
+
+    Per token, with ``r = p/q = exp(logp_curr - logp_rollout)`` (trainer ``p`` vs sampler
+    ``q``), ``sg`` = stop-gradient and ``A`` the advantage::
+
+        L = -sg[r]·A·logp_curr + bwd_kl_coef·(-log r + r - 1) + fwd_kl_coef·(r·log r - r + 1)
+
+    The PG term is REINFORCE with a detached, *unclipped* importance weight: unlike PPO's
+    clip (zeros out-of-band gradients) or CISPO/IcePop (clamp/mask the weight), every token
+    always keeps its gradient. The trust region is instead enforced softly by the KL terms,
+    which penalize divergence from the *behavior* policy ``q = logp_rollout`` — not a frozen
+    reference — using the sample-wise non-negative unbiased estimators under ``q`` (Schulman,
+    http://joschu.net/blog/kl-approx.html): backward KL(q‖p) is k3 ``-log r + r - 1``;
+    forward KL(p‖q) is ``r·log r - r + 1`` (each has mean KL and minimum 0 at ``r = 1``
+    since ``E_q[r] = 1``). Both coefficients default to 0.0 (pure IS-weighted REINFORCE);
+    enable a term explicitly, e.g. ``loss_params: {bwd_kl_coef: 0.0025}``.
+
+    ``ratio_clamp_min`` / ``ratio_clamp_max`` (default None = raw ratio, faithful to the
+    doc) optionally bound the detached PG weight CISPO-style — a clamped token keeps its
+    gradient, and the KL terms always see the true ``r``.
+
+    Ignores ``logp_old`` entirely, so it needs no proximal forward — pair with
+    ``rollout_correction.bypass_mode: true``.
+    """
+    import torch
+
+    if ctx.logp_rollout is None:
+        raise ValueError(
+            "reinforce_kl needs rollout (inference) log-probs, but ctx.logp_rollout is None. The managed "
+            "backends (tinker/fireworks) always provide them; on verl, enable rollout log-prob "
+            "capture so rollout_log_probs is in the batch."
+        )
+    fwd_coef = float(ctx.params.get("fwd_kl_coef", 0.0))
+    bwd_coef = float(ctx.params.get("bwd_kl_coef", 0.0))
+    clamp_min = ctx.params.get("ratio_clamp_min")
+    clamp_max = ctx.params.get("ratio_clamp_max")
+
+    log_r = ctx.logp_curr - ctx.logp_rollout
+    r = torch.exp(torch.clamp(log_r, min=-_RATIO_CLAMP, max=_RATIO_CLAMP))  # clamp = inf protection only
+
+    w = r.detach()
+    if clamp_min is not None or clamp_max is not None:
+        w = w.clamp(min=clamp_min, max=clamp_max)  # bounds the PG weight only; KL terms keep the true r
+    pg = -w * ctx.advantages * ctx.logp_curr
+    # r must stay differentiable here — the estimators' gradients, (r-1)·∇logp and
+    # r·log r·∇logp, are what pull p toward q; detaching r degenerates bwd into -∇logp.
+    kl_bwd = -log_r + r - 1.0
+    kl_fwd = r * log_r - r + 1.0
+
+    am = ctx.action_mask
+    denom = am.sum().clamp(min=1.0)
+    return ctx.aggregate(pg + bwd_coef * kl_bwd + fwd_coef * kl_fwd, am), {
+        "reinforce_kl/kl_bwd": ((kl_bwd.detach() * am).sum() / denom).item(),
+        "reinforce_kl/kl_fwd": ((kl_fwd.detach() * am).sum() / denom).item(),
+        "reinforce_kl/ratio_mean": ((r.detach() * am).sum() / denom).item(),
+        "reinforce_kl/clamp_frac": (((w != r.detach()).to(log_r.dtype) * am).sum() / denom).item(),
+    }
+
+
 @register_loss("echo")
 def echo(ctx: LossContext):
     """ECHO (arXiv:2605.24517) in the verl-style single-loss model: PPO/GRPO plus a
