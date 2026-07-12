@@ -270,9 +270,9 @@ def test_icepop_requires_logp_rollout():
 
 
 # --------------------------------------------------------------------------- REINFORCE + KL-to-sampler
-def test_reinforce_kl_matches_doc_formula():
-    """L = -sg[r]·A·logp + bwd·(-log r + r - 1) + fwd·(r·log r - r + 1), with r = p/q against
-    the SAMPLER (logp_rollout) — logp_old (the proximal) must be ignored entirely."""
+def test_reinforce_kl_matches_doc_formula_approx():
+    """kl_approx=True: L = -sg[r]·A·logp + bwd·(-log r + r - 1) + fwd·(r·log r - r + 1), with
+    r = p/q against the SAMPLER (logp_rollout) — logp_old (the proximal) is ignored entirely."""
     from rllm.trainer.algorithms.loss import reinforce_kl
 
     torch.manual_seed(4)
@@ -288,7 +288,7 @@ def test_reinforce_kl_matches_doc_formula():
         action_mask=torch.ones(n),
         obs_mask=torch.zeros(n),
         aggregate=_agg_sum,
-        params={"fwd_kl_coef": 0.3, "bwd_kl_coef": 0.7},
+        params={"fwd_kl_coef": 0.3, "bwd_kl_coef": 0.7, "kl_approx": True},
     )
     ours, m = reinforce_kl(ctx)
 
@@ -304,6 +304,48 @@ def test_reinforce_kl_matches_doc_formula():
     assert m["reinforce_kl/kl_fwd"] == pytest.approx(kl_fwd.mean().item(), abs=1e-5)
     assert m["reinforce_kl/ratio_mean"] == pytest.approx(r.mean().item(), abs=1e-5)
     assert m["reinforce_kl/kl_bwd"] >= 0.0 and m["reinforce_kl/kl_fwd"] >= 0.0
+
+
+def test_reinforce_kl_default_kl_is_exact_gradient_form():
+    """kl_approx defaults to False: backward KL is plain CE on the sampled tokens (-logp,
+    grad = -1 — the exact ∇KL(q‖p) under q), NOT the k3 form's (r-1). Forward KL is
+    sg[r·log r]·logp — same gradient as the approx form (r·log r) but a different loss value.
+    Metrics always report the non-negative estimator values regardless of the knob."""
+    from rllm.trainer.algorithms.loss import reinforce_kl
+
+    logp_rollout = torch.tensor([-1.0, -0.5])
+
+    def _make(logp_curr, **params):
+        return LossContext(
+            logp_curr=logp_curr, logp_old=torch.zeros(2), logp_rollout=logp_rollout, advantages=torch.zeros(2), action_mask=torch.ones(2), obs_mask=torch.zeros(2), aggregate=_agg_sum, params=params
+        )
+
+    log_r = torch.tensor([0.5, -0.5])  # logp_curr - logp_rollout below
+    r = log_r.exp()
+
+    # backward, default (exact): grad = -coef per token, independent of r
+    bwd = torch.tensor([-0.5, -1.0], requires_grad=True)
+    loss_bwd, m = reinforce_kl(_make(bwd, bwd_kl_coef=1.0, fwd_kl_coef=0.0))
+    loss_bwd.backward()
+    assert torch.allclose(bwd.grad, torch.tensor([-1.0, -1.0]), atol=1e-5)
+    # default == explicit kl_approx=False; != the approx variant
+    bwd2 = torch.tensor([-0.5, -1.0], requires_grad=True)
+    explicit, _ = reinforce_kl(_make(bwd2, bwd_kl_coef=1.0, fwd_kl_coef=0.0, kl_approx=False))
+    assert torch.allclose(loss_bwd.detach(), explicit.detach())
+    approx, _ = reinforce_kl(_make(torch.tensor([-0.5, -1.0], requires_grad=True), bwd_kl_coef=1.0, fwd_kl_coef=0.0, kl_approx=True))
+    assert not torch.allclose(loss_bwd.detach(), approx.detach())
+
+    # forward, default (exact): grad = r·log r (identical to approx), value differs from approx
+    fwd = torch.tensor([-0.5, -1.0], requires_grad=True)
+    loss_fwd, _ = reinforce_kl(_make(fwd, bwd_kl_coef=0.0, fwd_kl_coef=1.0))
+    loss_fwd.backward()
+    assert torch.allclose(fwd.grad, r * log_r, atol=1e-5)
+    approx_fwd, _ = reinforce_kl(_make(torch.tensor([-0.5, -1.0], requires_grad=True), bwd_kl_coef=0.0, fwd_kl_coef=1.0, kl_approx=True))
+    assert not torch.allclose(loss_fwd.detach(), approx_fwd.detach())
+
+    # metrics stay the estimator values (comparable across the knob)
+    assert m["reinforce_kl/kl_bwd"] == pytest.approx((-log_r + r - 1.0).mean().item(), abs=1e-5)
+    assert m["reinforce_kl/kl_fwd"] == pytest.approx((r * log_r - r + 1.0).mean().item(), abs=1e-5)
 
 
 def test_reinforce_kl_default_coefs_are_zero():
@@ -360,9 +402,9 @@ def test_reinforce_kl_keeps_gradient_where_ppo_clip_drops_it():
 
 
 def test_reinforce_kl_kl_gradients_match_analytic_forms():
-    """The KL terms must keep the ratio differentiable: with A=0, backward KL's gradient is
-    (r-1)·∇logp and forward KL's is r·log r·∇logp — both pull p toward the sampler q.
-    (Detaching r inside the estimators would break this and de-regularize the loss.)"""
+    """kl_approx=True: the estimator terms must keep the ratio differentiable — with A=0,
+    backward KL's gradient is (r-1)·∇logp and forward KL's is r·log r·∇logp, both pulling p
+    toward the sampler q. (Detaching r inside them would break this and de-regularize.)"""
     from rllm.trainer.algorithms.loss import reinforce_kl
 
     logp_rollout = torch.tensor([-1.0, -0.5])
@@ -376,11 +418,11 @@ def test_reinforce_kl_kl_gradients_match_analytic_forms():
     r = log_r.exp()
 
     bwd = torch.tensor([-0.5, -1.0], requires_grad=True)
-    reinforce_kl(_make(bwd, bwd_kl_coef=1.0, fwd_kl_coef=0.0))[0].backward()
+    reinforce_kl(_make(bwd, bwd_kl_coef=1.0, fwd_kl_coef=0.0, kl_approx=True))[0].backward()
     assert torch.allclose(bwd.grad, r - 1.0, atol=1e-5)
 
     fwd = torch.tensor([-0.5, -1.0], requires_grad=True)
-    reinforce_kl(_make(fwd, bwd_kl_coef=0.0, fwd_kl_coef=1.0))[0].backward()
+    reinforce_kl(_make(fwd, bwd_kl_coef=0.0, fwd_kl_coef=1.0, kl_approx=True))[0].backward()
     assert torch.allclose(fwd.grad, r * log_r, atol=1e-5)
 
 
@@ -438,7 +480,7 @@ def test_reinforce_kl_ratio_clamp_leaves_kl_terms_alone():
         action_mask=torch.ones(2),
         obs_mask=torch.zeros(2),
         aggregate=_agg_sum,
-        params={"bwd_kl_coef": 1.0, "fwd_kl_coef": 0.0, "ratio_clamp_min": 0.9, "ratio_clamp_max": 1.1},
+        params={"bwd_kl_coef": 1.0, "fwd_kl_coef": 0.0, "ratio_clamp_min": 0.9, "ratio_clamp_max": 1.1, "kl_approx": True},
     )
     reinforce_kl(ctx)[0].backward()
     r = torch.tensor([0.5, -0.5]).exp()

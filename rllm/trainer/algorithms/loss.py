@@ -468,17 +468,30 @@ def reinforce_kl(ctx: LossContext):
     Per token, with ``r = p/q = exp(logp_curr - logp_rollout)`` (trainer ``p`` vs sampler
     ``q``), ``sg`` = stop-gradient and ``A`` the advantage::
 
-        L = -sg[r]·A·logp_curr + bwd_kl_coef·(-log r + r - 1) + fwd_kl_coef·(r·log r - r + 1)
+        L = -sg[r]·A·logp_curr + bwd_kl_coef·KL_bwd + fwd_kl_coef·KL_fwd
 
     The PG term is REINFORCE with a detached, *unclipped* importance weight: unlike PPO's
     clip (zeros out-of-band gradients) or CISPO/IcePop (clamp/mask the weight), every token
     always keeps its gradient. The trust region is instead enforced softly by the KL terms,
     which penalize divergence from the *behavior* policy ``q = logp_rollout`` — not a frozen
-    reference — using the sample-wise non-negative unbiased estimators under ``q`` (Schulman,
-    http://joschu.net/blog/kl-approx.html): backward KL(q‖p) is k3 ``-log r + r - 1``;
-    forward KL(p‖q) is ``r·log r - r + 1`` (each has mean KL and minimum 0 at ``r = 1``
-    since ``E_q[r] = 1``). Both coefficients default to 0.0 (pure IS-weighted REINFORCE);
-    enable a term explicitly, e.g. ``loss_params: {bwd_kl_coef: 0.0025}``.
+    reference. Both coefficients default to 0.0 (pure IS-weighted REINFORCE); enable a term
+    explicitly, e.g. ``loss_params: {bwd_kl_coef: 0.0025}``.
+
+    ``kl_approx`` selects the KL term form (default False):
+
+    * False — score-function forms whose gradients are the *exact* KL gradients in
+      expectation under ``q``: backward ``-logp`` (∇ = -∇logp = ∇KL(q‖p); plain
+      cross-entropy on the sampled tokens) and forward ``sg[r·log r]·logp``
+      (∇ = r·log r·∇logp = ∇KL(p‖q), using ``E_q[r·∇logp] = 0``). The term *values*
+      are not KL estimates.
+    * True — Schulman's sample-wise non-negative unbiased value estimators
+      (http://joschu.net/blog/kl-approx.html): backward k3 ``-log r + r - 1``
+      (∇ = (r-1)·∇logp — the exact gradient plus the zero-mean control variate
+      ``r·∇logp``), forward ``r·log r - r + 1`` (identical per-token gradient to the
+      False form; each has mean KL and minimum 0 at ``r = 1`` since ``E_q[r] = 1``).
+
+    The ``reinforce_kl/kl_bwd``/``kl_fwd`` metrics always report the estimator values,
+    so logged KLs are comparable across the knob.
 
     ``ratio_clamp_min`` / ``ratio_clamp_max`` (default None = raw ratio, faithful to the
     doc) optionally bound the detached PG weight CISPO-style — a clamped token keeps its
@@ -497,6 +510,7 @@ def reinforce_kl(ctx: LossContext):
         )
     fwd_coef = float(ctx.params.get("fwd_kl_coef", 0.0))
     bwd_coef = float(ctx.params.get("bwd_kl_coef", 0.0))
+    kl_approx = bool(ctx.params.get("kl_approx", False))
     clamp_min = ctx.params.get("ratio_clamp_min")
     clamp_max = ctx.params.get("ratio_clamp_max")
 
@@ -507,16 +521,26 @@ def reinforce_kl(ctx: LossContext):
     if clamp_min is not None or clamp_max is not None:
         w = w.clamp(min=clamp_min, max=clamp_max)  # bounds the PG weight only; KL terms keep the true r
     pg = -w * ctx.advantages * ctx.logp_curr
-    # r must stay differentiable here — the estimators' gradients, (r-1)·∇logp and
-    # r·log r·∇logp, are what pull p toward q; detaching r degenerates bwd into -∇logp.
-    kl_bwd = -log_r + r - 1.0
-    kl_fwd = r * log_r - r + 1.0
+    # Metrics always use the estimator forms (mean = KL, per-sample >= 0), whichever
+    # variant drives the loss, so logged KLs are comparable across the knob.
+    kl_bwd_est = (-log_r + r - 1.0).detach()
+    kl_fwd_est = (r * log_r - r + 1.0).detach()
+    if kl_approx:
+        # Estimator terms as the loss: r must stay differentiable here — the gradients,
+        # (r-1)·∇logp and r·log r·∇logp, are what pull p toward q; detaching r would
+        # degenerate bwd into -∇logp without its control variate.
+        kl_bwd = -log_r + r - 1.0
+        kl_fwd = r * log_r - r + 1.0
+    else:
+        # Exact-gradient (score-function) forms; values are not KL estimates.
+        kl_bwd = -ctx.logp_curr  # ∇ = -∇logp = ∇KL(q‖p): CE on the sampled tokens
+        kl_fwd = (r * log_r).detach() * ctx.logp_curr  # ∇ = r·log r·∇logp = ∇KL(p‖q)
 
     am = ctx.action_mask
     denom = am.sum().clamp(min=1.0)
     return ctx.aggregate(pg + bwd_coef * kl_bwd + fwd_coef * kl_fwd, am), {
-        "reinforce_kl/kl_bwd": ((kl_bwd.detach() * am).sum() / denom).item(),
-        "reinforce_kl/kl_fwd": ((kl_fwd.detach() * am).sum() / denom).item(),
+        "reinforce_kl/kl_bwd": ((kl_bwd_est * am).sum() / denom).item(),
+        "reinforce_kl/kl_fwd": ((kl_fwd_est * am).sum() / denom).item(),
         "reinforce_kl/ratio_mean": ((r.detach() * am).sum() / denom).item(),
         "reinforce_kl/clamp_frac": (((w != r.detach()).to(log_r.dtype) * am).sum() / denom).item(),
     }
