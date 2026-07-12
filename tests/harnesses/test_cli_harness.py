@@ -734,3 +734,42 @@ def test_run_exec_timeout_without_sentinel_stays_timeout():
     result = h.run(_make_task(), _make_config(), env=sandbox)
 
     assert result.termination_reason == TerminationReason.TIMEOUT
+
+
+# ---------------------------------------------------------------------------
+# Terminus2Harness — env knob toggles
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("host_env", "expected_summarize", "expected_interleaved"),
+    [
+        # No host overrides → Harbor-matching defaults.
+        ({}, "1", "0"),
+        # Both knobs flipped from their defaults. RLLM_TERMINUS_ENABLE_SUMMARIZE=0
+        # used to be silently ignored (the class default never read the env var,
+        # and build_env then hard-coded "1" into the sandbox), so eval runs
+        # compacted their trajectories despite the operator turning it off.
+        ({"RLLM_TERMINUS_ENABLE_SUMMARIZE": "0", "RLLM_TERMINUS_INTERLEAVED_THINKING": "1"}, "0", "1"),
+    ],
+)
+def test_terminus2_env_knobs_reach_the_sandbox(monkeypatch, host_env, expected_summarize, expected_interleaved):
+    """The RLLM_TERMINUS_* toggles set on the host where ``rllm eval`` runs must
+    land in the sandbox env verbatim — build_env overwrites the vars from the
+    class attributes, so those defaults must read the host env (at import time,
+    like every knob here; reload simulates a fresh launch)."""
+    import importlib
+
+    import rllm.harnesses.terminus2 as t2
+
+    with monkeypatch.context() as m:
+        for var in ("RLLM_TERMINUS_ENABLE_SUMMARIZE", "RLLM_TERMINUS_INTERLEAVED_THINKING"):
+            m.delenv(var, raising=False)
+        for var, value in host_env.items():
+            m.setenv(var, value)
+        mod = importlib.reload(t2)
+        env = mod.Terminus2Harness().build_env(_make_task(), _make_config())
+    importlib.reload(t2)  # restore class defaults from the real host env
+
+    assert env["RLLM_TERMINUS_ENABLE_SUMMARIZE"] == expected_summarize
+    assert env["RLLM_TERMINUS_INTERLEAVED_THINKING"] == expected_interleaved

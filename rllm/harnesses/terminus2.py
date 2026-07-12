@@ -124,8 +124,12 @@ class Terminus2Harness(BaseCliHarness):
     # context fills, which fragments the trajectory the gateway captures. Set
     # ``enable_summarize=False`` (e.g. via the harness constructor) to turn both
     # proactive and context-limit summarization off — the agent then simply hits
-    # its context limit instead of compacting.
-    enable_summarize: bool = True
+    # its context limit instead of compacting. The env default lets ``rllm eval``
+    # toggle it without a constructor, mirroring interleaved_thinking above:
+    # export RLLM_TERMINUS_ENABLE_SUMMARIZE=0. (build_env re-exports this
+    # attribute into the sandbox, so a plain ``True`` default silently
+    # overwrote the operator's host env var with "1".)
+    enable_summarize: bool = os.environ.get("RLLM_TERMINUS_ENABLE_SUMMARIZE", "1") == "1"
 
     def install_script(self) -> str:
         return _install_script(self.harbor_version, self.terminus_python)
