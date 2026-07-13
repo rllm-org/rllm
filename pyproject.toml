@@ -92,10 +92,12 @@ tinker = [
 ]
 
 fireworks = [
-    # a87 tracks cookbook HEAD's floor (>=1.2.0a86); ==1.2.0a83 made the extra
-    # unresolvable against an unpinned cookbook.
+    # SDK and cookbook move in LOCKSTEP — bump both together, deliberately.
+    # The cookbook pin is the last commit declaring fireworks-ai>=1.2.0a87
+    # before HEAD started targeting a newer SDK (inactivity_timeout ->
+    # TypeError under a87); an unpinned cookbook breaks on any resync.
     "fireworks-ai[training]==1.2.0a87 ; python_version >= '3.11'",
-    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git#subdirectory=training ; python_version >= '3.11'",
+    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git@6b1232504fdacd1149895acf63b388ae792cb062#subdirectory=training ; python_version >= '3.11'",
 ]
 
 opentelemetry = [
