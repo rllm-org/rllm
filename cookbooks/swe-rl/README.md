@@ -68,6 +68,14 @@ SWE_SANDBOX_BACKEND=docker bash cookbooks/swe-rl/train_tinker.sh \
     rllm.workflow.n_parallel_tasks=32
 ```
 
+**Agent harness** — the harness is selectable by registry name via `SWE_HARNESS` (default `terminus2`); any agent in `rllm/registry/agents.json` works (`mini-swe-agent`, `react`, `oracle`, …):
+
+```bash
+SWE_HARNESS=mini-swe-agent bash cookbooks/swe-rl/train_tinker.sh
+```
+
+> Note: `mini-swe-agent` uses litellm's native tool-calling and needs the serving backend to return structured `tool_calls`; raw open-weights samplers (e.g. Tinker) return the tool call as text, so `terminus2` (which parses actions from text) is the reliable default there.
+
 For a simpler on-policy loop (generate a full batch, then one optimizer step — easier to debug), use the synchronous variant:
 
 ```bash

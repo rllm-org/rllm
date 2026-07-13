@@ -21,6 +21,8 @@
 set -euo pipefail
 
 export SWE_SANDBOX_BACKEND="${SWE_SANDBOX_BACKEND:-modal}"
+# Agent harness by registry name (terminus2 | mini-swe-agent | react | oracle | ...).
+export SWE_HARNESS="${SWE_HARNESS:-terminus2}"
 export SWE_VAL_MAX="${SWE_VAL_MAX:-16}"
 # Per-rollout turn cap for terminus2 (read by train.py). Empty = uncapped.
 export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"

@@ -51,6 +51,8 @@
 set -euo pipefail
 
 export SWE_SANDBOX_BACKEND="${SWE_SANDBOX_BACKEND:-modal}"
+# Agent harness by registry name (terminus2 | mini-swe-agent | react | oracle | ...).
+export SWE_HARNESS="${SWE_HARNESS:-terminus2}"
 # Sandbox resources: pin to Modal's minimum reservation. Every scaleswe task.toml
 # uniformly declares cpus=4 / memory_mb=16384 / storage_mb=30720; these caps clamp
 # those baked-in values DOWN at runtime (min(declared, cap)) with no dataset rebuild.
