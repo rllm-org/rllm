@@ -74,6 +74,14 @@ TERMINUS_MAX_TURNS = int(_terminus_max_turns) if _terminus_max_turns and int(_te
 # TERMINUS_ENABLE_SUMMARIZE=0 to disable it. Unset = Harbor's default (on).
 TERMINUS_ENABLE_SUMMARIZE = os.environ.get("TERMINUS_ENABLE_SUMMARIZE", "1").strip().lower() not in ("0", "false", "no", "off")
 
+# Interleaved thinking: keep each turn's reasoning_content in the chat history
+# and resend it on later requests (Harbor's ``interleaved_thinking``). Off by
+# default, matching Harbor; the train_*.sh scripts set
+# TERMINUS_INTERLEAVED_THINKING=1 so reasoning-model rollouts train on the same
+# thinking-in-context distribution they sample from. Whether the serving stack
+# re-injects the resent reasoning into the prompt depends on its chat template.
+TERMINUS_INTERLEAVED_THINKING = os.environ.get("TERMINUS_INTERLEAVED_THINKING", "0").strip().lower() in ("1", "true", "yes", "on")
+
 
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig) -> None:
@@ -95,7 +103,12 @@ def main(config: DictConfig) -> None:
     # enable_summarize controls Terminus-2 context compaction; the train_*.sh
     # scripts set TERMINUS_ENABLE_SUMMARIZE=0 to turn it off so summarization
     # subagents don't fragment the captured trajectory during training.
-    agent_flow = Terminus2Harness(sandbox_backend=SANDBOX_BACKEND, max_turns=TERMINUS_MAX_TURNS, enable_summarize=TERMINUS_ENABLE_SUMMARIZE)
+    agent_flow = Terminus2Harness(
+        sandbox_backend=SANDBOX_BACKEND,
+        max_turns=TERMINUS_MAX_TURNS,
+        enable_summarize=TERMINUS_ENABLE_SUMMARIZE,
+        interleaved_thinking=TERMINUS_INTERLEAVED_THINKING,
+    )
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),

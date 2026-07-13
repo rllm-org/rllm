@@ -33,6 +33,9 @@ export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
 # Plain ReAct loop: no harbor summarization — a context overflow ends the episode.
 # (read by train.py and passed to the harness as enable_summarize)
 export TERMINUS_ENABLE_SUMMARIZE="${TERMINUS_ENABLE_SUMMARIZE:-0}"
+# Keep each turn's reasoning in chat history and resend it (interleaved
+# thinking; read by train.py, passed to the harness). Set to 0 to strip.
+export TERMINUS_INTERLEAVED_THINKING="${TERMINUS_INTERLEAVED_THINKING:-1}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-3600}"
 # Modal sandbox LIFETIME (not idle time). Must exceed the agent run timeout
 # above plus setup/verify, or sandboxes get reaped mid-rollout — surfacing as

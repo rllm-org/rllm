@@ -53,6 +53,9 @@ export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
 # Disable Terminus-2 context compaction (summarization) so it doesn't fragment
 # the captured trajectory during training. Set to 1 to re-enable.
 export TERMINUS_ENABLE_SUMMARIZE="${TERMINUS_ENABLE_SUMMARIZE:-0}"
+# Keep each turn's reasoning in chat history and resend it (interleaved
+# thinking; read by train.py, passed to the harness). Set to 0 to strip.
+export TERMINUS_INTERLEAVED_THINKING="${TERMINUS_INTERLEAVED_THINKING:-1}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
 # Modal sandbox LIFETIME (not idle time). Must exceed the agent run timeout
 # above plus setup/verify, or sandboxes get reaped mid-rollout — surfacing as
