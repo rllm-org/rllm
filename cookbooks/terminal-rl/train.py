@@ -74,6 +74,14 @@ TERMINUS_MAX_TURNS = int(_terminus_max_turns) if _terminus_max_turns and int(_te
 # TERMINUS_ENABLE_SUMMARIZE=0 to disable it. Unset = Harbor's default (on).
 TERMINUS_ENABLE_SUMMARIZE = os.environ.get("TERMINUS_ENABLE_SUMMARIZE", "1").strip().lower() not in ("0", "false", "no", "off")
 
+# Interleaved thinking: keep each turn's reasoning_content in the chat history
+# and resend it on later requests (Harbor's ``interleaved_thinking``). Off by
+# default, matching Harbor; the train_*.sh scripts set
+# TERMINUS_INTERLEAVED_THINKING=1 so reasoning-model rollouts train on the same
+# thinking-in-context distribution they sample from. Whether the serving stack
+# re-injects the resent reasoning into the prompt depends on its chat template.
+TERMINUS_INTERLEAVED_THINKING = os.environ.get("TERMINUS_INTERLEAVED_THINKING", "0").strip().lower() in ("1", "true", "yes", "on")
+
 
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig) -> None:
@@ -82,10 +90,15 @@ def main(config: DictConfig) -> None:
 
     if train_dataset is None:
         raise RuntimeError(f"Dataset '{TRAIN_DATASET}' not found. Run: python cookbooks/terminal-rl/prepare_data.py")
-    if val_dataset is None:
-        raise RuntimeError(f"Dataset '{VAL_DATASET}' not found. Run: rllm dataset pull harbor:{VAL_DATASET} (or: python cookbooks/terminal-rl/prepare_data.py)")
 
-    if TB_VAL_MAX > 0 and TB_VAL_MAX < len(val_dataset):
+    # The val dataset is only needed when validation actually runs
+    # (val_before_train, or a positive test_freq). A run with validation
+    # disabled must not fail on a missing val dataset.
+    validation_enabled = bool(config.rllm.trainer.get("val_before_train", False)) or config.rllm.trainer.get("test_freq", 0) > 0
+    if val_dataset is None and validation_enabled:
+        raise RuntimeError(f"Dataset '{VAL_DATASET}' not found. Run: rllm dataset pull harbor:{VAL_DATASET} (or: python cookbooks/terminal-rl/prepare_data.py) — or disable validation (rllm.trainer.test_freq=-1).")
+
+    if val_dataset is not None and TB_VAL_MAX > 0 and TB_VAL_MAX < len(val_dataset):
         val_dataset = val_dataset.select(range(TB_VAL_MAX))
 
     # terminus2 as a SandboxedAgentFlow. Passing ``agent_flow`` (with no
@@ -95,7 +108,12 @@ def main(config: DictConfig) -> None:
     # enable_summarize controls Terminus-2 context compaction; the train_*.sh
     # scripts set TERMINUS_ENABLE_SUMMARIZE=0 to turn it off so summarization
     # subagents don't fragment the captured trajectory during training.
-    agent_flow = Terminus2Harness(sandbox_backend=SANDBOX_BACKEND, max_turns=TERMINUS_MAX_TURNS, enable_summarize=TERMINUS_ENABLE_SUMMARIZE)
+    agent_flow = Terminus2Harness(
+        sandbox_backend=SANDBOX_BACKEND,
+        max_turns=TERMINUS_MAX_TURNS,
+        enable_summarize=TERMINUS_ENABLE_SUMMARIZE,
+        interleaved_thinking=TERMINUS_INTERLEAVED_THINKING,
+    )
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),

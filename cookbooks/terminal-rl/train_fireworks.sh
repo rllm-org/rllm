@@ -53,11 +53,22 @@ export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
 # Disable Terminus-2 context compaction (summarization) so it doesn't fragment
 # the captured trajectory during training. Set to 1 to re-enable.
 export TERMINUS_ENABLE_SUMMARIZE="${TERMINUS_ENABLE_SUMMARIZE:-0}"
+# Keep each turn's reasoning in chat history and resend it (interleaved
+# thinking; read by train.py, passed to the harness). Set to 0 to strip.
+export TERMINUS_INTERLEAVED_THINKING="${TERMINUS_INTERLEAVED_THINKING:-1}"
+# Cap sandbox resources below each task's declared ask (Modal bills reserved
+# CPU+memory per second; a cap only LOWERS a task's declared value, never
+# raises it). tb-v2 tasks declare up to 8 CPUs — capping at 0.25 cuts the CPU
+# bill ~32x. Memory/storage caps exist too but can OOM compile-heavy graders;
+# opt in explicitly when needed:
+#   export RLLM_SANDBOX_MAX_MEMORY_MB=4096
+#   export RLLM_SANDBOX_MAX_STORAGE_MB=8192
+export RLLM_SANDBOX_MAX_CPUS="${RLLM_SANDBOX_MAX_CPUS:-0.25}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
-# Modal sandbox LIFETIME (not idle time). Must exceed the agent run timeout
+# Sandbox LIFETIME floor, provider-agnostic (not idle time). Must exceed the agent run timeout
 # above plus setup/verify, or sandboxes get reaped mid-rollout — surfacing as
 # "Sandbox has already shut down" (NotFoundError) and exit-137 kills.
-export RLLM_MODAL_SANDBOX_TIMEOUT_S="${RLLM_MODAL_SANDBOX_TIMEOUT_S:-4800}"
+export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-4800}"
 
 python -u train.py \
     rllm/backend=fireworks \

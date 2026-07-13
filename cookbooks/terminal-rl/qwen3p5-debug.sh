@@ -25,6 +25,14 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
+# Fireworks key: an exported FIREWORKS_API_KEY wins; otherwise fall back to the
+# key on file in ~/.rllm/config.json (written by `rllm model setup`).
+export FIREWORKS_API_KEY="${FIREWORKS_API_KEY:-$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.rllm/config.json')))['api_keys']['fireworks'])" 2>/dev/null || true)}"
+if [ -z "${FIREWORKS_API_KEY}" ]; then
+    echo "FIREWORKS_API_KEY is not set and ~/.rllm/config.json has no api_keys.fireworks (run: rllm model setup)" >&2
+    exit 1
+fi
+
 export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-modal}"
 # Train dataset (DatasetRegistry name). Pull it first: rllm dataset pull <name>
 export TB_TRAIN_DATASET="${TB_TRAIN_DATASET:-tb-v2-debug}"
@@ -33,11 +41,22 @@ export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
 # Plain ReAct loop: no harbor summarization — a context overflow ends the episode.
 # (read by train.py and passed to the harness as enable_summarize)
 export TERMINUS_ENABLE_SUMMARIZE="${TERMINUS_ENABLE_SUMMARIZE:-0}"
+# Keep each turn's reasoning in chat history and resend it (interleaved
+# thinking; read by train.py, passed to the harness). Set to 0 to strip.
+export TERMINUS_INTERLEAVED_THINKING="${TERMINUS_INTERLEAVED_THINKING:-1}"
+# Cap sandbox resources below each task's declared ask (Modal bills reserved
+# CPU+memory per second; a cap only LOWERS a task's declared value, never
+# raises it). tb-v2 tasks declare up to 8 CPUs — capping at 0.25 cuts the CPU
+# bill ~32x. Memory/storage caps exist too but can OOM compile-heavy graders;
+# opt in explicitly when needed:
+#   export RLLM_SANDBOX_MAX_MEMORY_MB=4096
+#   export RLLM_SANDBOX_MAX_STORAGE_MB=8192
+export RLLM_SANDBOX_MAX_CPUS="${RLLM_SANDBOX_MAX_CPUS:-0.25}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-3600}"
-# Modal sandbox LIFETIME (not idle time). Must exceed the agent run timeout
+# Sandbox LIFETIME floor, provider-agnostic (not idle time). Must exceed the agent run timeout
 # above plus setup/verify, or sandboxes get reaped mid-rollout — surfacing as
 # "Sandbox has already shut down" (NotFoundError) and exit-137 kills.
-export RLLM_MODAL_SANDBOX_TIMEOUT_S="${RLLM_MODAL_SANDBOX_TIMEOUT_S:-4800}"
+export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-4800}"
 
 python -u train.py \
     rllm/backend=fireworks \
@@ -76,16 +95,16 @@ python -u train.py \
     rllm.workflow.n_parallel_tasks=256 \
     rllm.workflow.raise_on_error=false \
     rllm.rejection_sample.filter_uniform_groups=true \
-    rllm.gateway.port=9091 \
+    rllm.gateway.port=9090 \
     rllm.gateway.num_workers=4 \
     rllm.gateway.cumulative_token_mode=true \
     rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=100 \
-    rllm.trainer.dump_batch_dir=train_batches/qwen3p5-35b-a3b-tb-v2-debug \
+    rllm.trainer.dump_batch_dir=train_batches/qwen3p5-35b-a3b-tb-v2-debug-no-sum-interleave \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='terminal-rl' \
     rllm.trainer.experiment_name='qwen3p5-35b-a3b-tb-v2-debug' \
     rllm.trainer.val_before_train=false \
-    rllm.trainer.test_freq=50 \
+    rllm.trainer.test_freq=-1 \
     rllm.trainer.save_freq=10 \
     "$@"

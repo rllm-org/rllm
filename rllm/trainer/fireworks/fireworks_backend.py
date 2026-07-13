@@ -18,7 +18,10 @@ from fireworks.training.sdk import (
     WeightSyncer,
 )
 from omegaconf import DictConfig, OmegaConf
-from training.provision import FireworksProvisionInfra, init_fireworks_infra
+
+# The pinned cookbook (see pyproject) does not re-export these from the
+# package __init__; import straight from the submodule.
+from training.provision.provision import FireworksProvisionInfra, init_fireworks_infra
 from training.utils import ReconnectableClient, load_deployment_tokenizer
 
 from rllm.engine.rollout import FireworksEngine, RolloutEngine
@@ -122,7 +125,7 @@ class FireworksBackend(TinkerBackend):
         from pathlib import Path
 
         import yaml
-        from training.provision import load_yaml_provision
+        from training.provision.provision import load_yaml_provision
 
         cfg = self.full_config
         doc = OmegaConf.to_container(cfg.fireworks_infra, resolve=True)
@@ -152,8 +155,13 @@ class FireworksBackend(TinkerBackend):
         # (expensive, slow-to-create) remote infrastructure.
         from training.utils.rl.losses import validate_loss_path
 
+        from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
+
         algorithm_config = kwargs.get("algorithm_config") or AlgorithmConfig.from_config(cfg.rllm.algorithm)
-        validate_loss_path(builtin_loss_args(algorithm_config))
+        # A custom rLLM loss (e.g. dppo_tv) runs on the client forward_backward_custom path,
+        # not a Fireworks builtin kernel, so the builtin-loss validation does not apply.
+        if resolve_loss(algorithm_config, native_losses=native_loss_names("fireworks")) is None:
+            validate_loss_path(builtin_loss_args(algorithm_config))
 
         provision_cfg = self._build_provision_config(algorithm_config)
 
