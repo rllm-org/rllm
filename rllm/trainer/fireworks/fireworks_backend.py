@@ -18,7 +18,11 @@ from fireworks.training.sdk import (
     WeightSyncer,
 )
 from omegaconf import DictConfig, OmegaConf
-from training.provision import FireworksProvisionInfra, init_fireworks_infra
+
+try:
+    from training.provision import FireworksProvisionInfra, init_fireworks_infra
+except ImportError:  # cookbook HEAD no longer re-exports from the package __init__
+    from training.provision.provision import FireworksProvisionInfra, init_fireworks_infra
 from training.utils import ReconnectableClient, load_deployment_tokenizer
 
 from rllm.engine.rollout import FireworksEngine, RolloutEngine
@@ -122,7 +126,11 @@ class FireworksBackend(TinkerBackend):
         from pathlib import Path
 
         import yaml
-        from training.provision import load_yaml_provision
+
+        try:
+            from training.provision import load_yaml_provision
+        except ImportError:  # cookbook HEAD no longer re-exports from the package __init__
+            from training.provision.provision import load_yaml_provision
 
         cfg = self.full_config
         doc = OmegaConf.to_container(cfg.fireworks_infra, resolve=True)
