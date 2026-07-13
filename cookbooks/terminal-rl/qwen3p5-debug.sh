@@ -46,12 +46,12 @@ export TERMINUS_ENABLE_SUMMARIZE="${TERMINUS_ENABLE_SUMMARIZE:-0}"
 export TERMINUS_INTERLEAVED_THINKING="${TERMINUS_INTERLEAVED_THINKING:-1}"
 # Cap sandbox resources below each task's declared ask (Modal bills reserved
 # CPU+memory per second; a cap only LOWERS a task's declared value, never
-# raises it). tb-v2 tasks declare up to 8 CPUs — capping at 0.25 cuts the CPU
-# bill ~32x. Memory/storage caps exist too but can OOM compile-heavy graders;
-# opt in explicitly when needed:
-#   export RLLM_SANDBOX_MAX_MEMORY_MB=4096
+# raises it). tb-v2 tasks declare up to 8 CPUs — capping at 0.125 cuts the CPU
+# bill ~64x. Memory/storage caps can OOM compile-heavy graders; storage stays
+# opt-in:
 #   export RLLM_SANDBOX_MAX_STORAGE_MB=8192
-export RLLM_SANDBOX_MAX_CPUS="${RLLM_SANDBOX_MAX_CPUS:-0.25}"
+export RLLM_SANDBOX_MAX_CPUS="${RLLM_SANDBOX_MAX_CPUS:-0.125}"
+export RLLM_SANDBOX_MAX_MEMORY_MB="${RLLM_SANDBOX_MAX_MEMORY_MB:-256}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-3600}"
 # Sandbox LIFETIME floor, provider-agnostic (not idle time). Must exceed the agent run timeout
 # above plus setup/verify, or sandboxes get reaped mid-rollout — surfacing as
