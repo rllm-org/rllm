@@ -299,7 +299,7 @@ class ModalSandbox:
                     command[:200],
                 )
                 raise SandboxCommandTimeout(f"Command hit its {int(timeout)}s timeout in sandbox {self.name} (killed after {elapsed:.0f}s)")
-            logger.warning(
+            logger.debug(
                 "Command failed in sandbox %s: %s\nstderr: %s",
                 self.name,
                 command,
@@ -316,7 +316,11 @@ class ModalSandbox:
         argv-sized chunks and streamed from there.
         """
         if len(b64) <= _B64_ARGV_LIMIT:
-            self._exec_unchecked(f"echo '{b64}' | {consume}")
+            # Checked: a failed write here means the upload silently no-ops,
+            # and a broken environment's reward-0 would train as a legitimate
+            # failure. Callers (setup hooks / evaluator) classify the raise as
+            # SANDBOX_ERROR / AddTestsDirError.
+            self.exec(f"echo '{b64}' | {consume}")
             return
         import uuid as _uuid
 
@@ -326,7 +330,8 @@ class ModalSandbox:
             self._exec_unchecked(f"printf %s '{b64[i : i + _B64_ARGV_LIMIT]}' >> {tmp}")
         # Brace group so the stdin redirect feeds the FIRST pipeline member
         # (`cmd1 | cmd2 < f` would bind f to cmd2 and leave cmd1 blocked).
-        self._exec_unchecked(f"{{ {consume}; }} < {tmp}; rc=$?; rm -f {tmp}; exit $rc")
+        # Checked (see above): the script propagates the consume rc on purpose.
+        self.exec(f"{{ {consume}; }} < {tmp}; rc=$?; rm -f {tmp}; exit $rc")
 
     def upload_file(self, local_path: str, remote_path: str) -> None:
         """Upload a single file into the Modal sandbox.
