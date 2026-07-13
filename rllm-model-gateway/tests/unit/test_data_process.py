@@ -232,3 +232,39 @@ class TestBuildTraceRecord:
         assert trace.response_message["content"] == "Hi there"
         assert trace.finish_reason == "stop"
         assert trace.token_counts == {"prompt": 3, "completion": 2}
+
+
+# ------------------------------------------------------------------
+# weight_version precedence (async staleness instrumentation)
+# ------------------------------------------------------------------
+
+
+class TestBuildTraceRecordWeightVersion:
+    """The proxy's tracked version (fanned out to every worker via
+    /admin/weight_version) is authoritative; the engine-stamped value in the
+    response is only a fallback. A multi-worker subprocess rebuilds its own
+    rollout engine whose weight_version stays 0, so preferring the response
+    would stamp every trace 0 and make async staleness read the full
+    weight_version."""
+
+    _REQ = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+    _RESP = {"choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]}
+
+    def test_proxy_version_wins_over_stale_response(self):
+        resp = {**self._RESP, "weight_version": 0}  # stale engine stamp
+        t = build_trace_record("s", self._REQ, resp, 1.0, weight_version=17)
+        assert t.weight_version == 17
+
+    def test_base_version_zero_not_clobbered(self):
+        resp = {**self._RESP, "weight_version": 0}
+        t = build_trace_record("s", self._REQ, resp, 1.0, weight_version=0)
+        assert t.weight_version == 0  # valid base version, distinct from None
+
+    def test_falls_back_to_response_when_proxy_untracked(self):
+        resp = {**self._RESP, "weight_version": 5}
+        t = build_trace_record("s", self._REQ, resp, 1.0, weight_version=None)
+        assert t.weight_version == 5
+
+    def test_none_when_neither_present(self):
+        t = build_trace_record("s", self._REQ, self._RESP, 1.0, weight_version=None)
+        assert t.weight_version is None

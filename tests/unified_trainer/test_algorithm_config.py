@@ -69,13 +69,13 @@ def test_warmup_steps_from_algorithm():
 # --- ECHO (arXiv:2605.24517) -------------------------------------------------
 
 
-def _echo_config(adv_estimator: str = "echo", env_loss_coef=None):
+def _echo_config(adv_estimator: str = "echo", loss_fn=None):
     section = {
         "adv_estimator": adv_estimator,
         "norm_adv_by_std_in_grpo": True,
     }
-    if env_loss_coef is not None:
-        section["env_loss_coef"] = env_loss_coef
+    if loss_fn is not None:
+        section["loss_fn"] = loss_fn
     return OmegaConf.create({"rllm": {"algorithm": section, "stepwise_advantage": {"mode": "broadcast"}}})
 
 
@@ -86,25 +86,19 @@ def test_echo_estimator_resolves():
     assert algo_config.estimator == rLLMAdvantageEstimator.ECHO
 
 
-def test_echo_defaults_lambda_to_paper_value():
-    """echo with no explicit coef defaults env_loss_coef to the paper's 0.05."""
+def test_echo_defaults_loss_fn_to_echo():
+    """adv_estimator=echo defaults loss_fn to the `echo` loss (env_loss_coef now lives in loss_params)."""
     algo_config = AlgorithmConfig.from_config(_echo_config().rllm.algorithm)
-    assert algo_config.env_loss_coef == 0.05
+    assert algo_config.loss_fn == "echo"
 
 
-def test_grpo_disables_env_loss_by_default():
-    """Non-echo estimators leave env_loss_coef at 0.0 (plain GRPO, no env loss)."""
+def test_grpo_leaves_loss_fn_unset():
+    """Non-echo estimators get no default loss_fn (backend default / native kernel)."""
     algo_config = AlgorithmConfig.from_config(_echo_config(adv_estimator="grpo").rllm.algorithm)
-    assert algo_config.env_loss_coef == 0.0
+    assert algo_config.loss_fn is None
 
 
-def test_echo_explicit_coef_overrides_default():
-    """An explicit env_loss_coef wins over the echo default."""
-    algo_config = AlgorithmConfig.from_config(_echo_config(env_loss_coef=0.02).rllm.algorithm)
-    assert algo_config.env_loss_coef == 0.02
-
-
-def test_env_loss_coef_can_enable_on_grpo():
-    """env_loss_coef is the real switch: it can enable the env loss with adv_estimator=grpo."""
-    algo_config = AlgorithmConfig.from_config(_echo_config(adv_estimator="grpo", env_loss_coef=0.05).rllm.algorithm)
-    assert algo_config.env_loss_coef == 0.05
+def test_explicit_loss_fn_overrides_estimator_default():
+    """An explicit loss_fn wins over the estimator's default (echo → dppo_tv here)."""
+    algo_config = AlgorithmConfig.from_config(_echo_config(loss_fn="dppo_tv").rllm.algorithm)
+    assert algo_config.loss_fn == "dppo_tv"

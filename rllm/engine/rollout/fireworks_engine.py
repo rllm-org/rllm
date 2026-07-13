@@ -22,6 +22,7 @@ import contextvars
 import dataclasses
 import functools
 import logging
+import ssl
 import time
 from typing import Any
 
@@ -60,6 +61,7 @@ _TRANSIENT_ERROR_MARKERS = (
     "502",
     "503",
     "425",
+    "429",
     "Connection",
     "incomplete chunked read",
     "_SSETruncationError",
@@ -116,8 +118,8 @@ def _install_httpx_orjson_patch() -> None:
     """
     try:
         import httpx._content as _hc
-        from httpx._content import ByteStream
         import orjson
+        from httpx._content import ByteStream
     except Exception:  # noqa: BLE001 - httpx/orjson layout unknown → skip patch
         return
 
@@ -557,6 +559,7 @@ class FireworksEngine(TinkerEngine):
         (response_dict, server_metrics_dict)."""
 
         start = time.monotonic()
+        first_failure: float | None = None
         for attempt in range(_MAX_SAMPLE_ATTEMPTS):
             try:
                 token = _per_request_headers.set(session_headers) if session_headers else None
@@ -582,15 +585,22 @@ class FireworksEngine(TinkerEngine):
                 err = str(exc)
                 exc_name = exc.__class__.__name__
                 # Timeouts/transport errors have an empty str(exc), so the string
-                # markers below miss them; classify by type instead.
-                is_network_error = isinstance(exc, httpx.TimeoutException | httpx.TransportError)
+                # markers below miss them; classify by type instead. Raw
+                # ssl.SSLError (e.g. bad_record_mac) escapes the SDK's SSE
+                # stream unwrapped by httpx.
+                is_network_error = isinstance(exc, httpx.TimeoutException | httpx.TransportError | ssl.SSLError)
                 transient = isinstance(exc, _EmptyCompletionIdsError) or is_network_error or any(marker in err or marker in exc_name for marker in _TRANSIENT_ERROR_MARKERS)
                 elapsed = time.monotonic() - start
+                if first_failure is None:
+                    first_failure = time.monotonic()
                 wait = min(10 * (attempt + 1), _RETRY_BACKOFF_CAP_S)
                 # Retry only while there's budget left to both back off and make
                 # another attempt worthwhile — else fail fast so the held client
                 # connection is released instead of stalled past its tolerance.
-                budget_left = elapsed + wait < _RETRY_BUDGET_S
+                # The budget clock starts at the FIRST FAILURE, not request start:
+                # a long healthy generation that dies mid-stream must not have its
+                # own streaming time charged against the retry budget.
+                budget_left = (time.monotonic() - first_failure) + wait < _RETRY_BUDGET_S
                 if transient and attempt < _MAX_SAMPLE_ATTEMPTS - 1 and budget_left:
                     logger.debug(
                         "Attempt %d/%d failed (%s: %s) after %.1fs, retrying in %ds...",
@@ -603,16 +613,19 @@ class FireworksEngine(TinkerEngine):
                     )
                     await asyncio.sleep(wait)
                     continue
-                resp_text = getattr(getattr(exc, "response", None), "text", None)
+                resp = getattr(exc, "response", None)
+                resp_text = getattr(resp, "text", None)
+                resp_headers = dict(getattr(resp, "headers", None) or {})
                 give_up = "retry budget exhausted" if (transient and not budget_left) else "permanent"
                 logger.error(
-                    "Sampling failed (%s) after %d attempts / %.1fs (%s): %s\n%s",
+                    "Sampling failed (%s) after %d attempts / %.1fs (%s): %s\n%s\nheaders: %s",
                     give_up,
                     attempt + 1,
                     elapsed,
                     exc_name,
                     exc,
                     resp_text or "",
+                    resp_headers,
                 )
                 raise
         raise RuntimeError("unreachable")
