@@ -1,12 +1,12 @@
 """Pull the train + eval datasets for the swe-rl cookbook.
 
 Both are sandbox-format benchmarks (per-task ``environment/Dockerfile`` +
-``tests/test.sh`` verifier). The training set is rLLM's native
-``r2egym`` (R2E-Gym Subset, 4,578 bug-fix tasks across 12 Python repos,
-each shipped as a per-instance Docker image graded by the image's own
-``/testbed/run_tests.sh``). The eval set is ``harbor:swebench-verified``
-(500 real-world GitHub issues, evaluated against the official SWE-bench
-harness inside the sandbox).
+``tests/test.sh`` verifier). The training set is ``scaleswe`` (Scale-SWE,
+``AweAI-Team/Scale-SWE``, arXiv:2602.09892 — ~20K real-world Python bug-fix
+tasks, each shipped as a per-instance Docker image graded SWE-bench-style
+over ``FAIL_TO_PASS`` ∪ ``PASS_TO_PASS``). The eval set is
+``harbor:swebench-verified`` (500 real-world GitHub issues, evaluated against
+the official SWE-bench harness inside the sandbox).
 
 This script is a thin wrapper around ``rllm dataset pull`` so the
 cookbook can be used end-to-end with a single command. Re-runs are
@@ -25,7 +25,7 @@ import argparse
 import subprocess
 import sys
 
-TRAIN_DATASET = "r2egym"
+TRAIN_DATASET = "scaleswe"
 VAL_DATASET = "harbor:swebench-verified"
 
 
@@ -43,7 +43,7 @@ def main() -> None:
         "--train-limit",
         type=int,
         default=None,
-        help="Cap training tasks (default: full ~4.6K). Useful for smoke runs.",
+        help="Cap training tasks (default: full ~20K). Useful for smoke runs.",
     )
     ap.add_argument(
         "--val-limit",

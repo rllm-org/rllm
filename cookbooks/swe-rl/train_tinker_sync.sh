@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train an SWE agent on R2E-Gym with the tinker backend in SYNCHRONOUS mode.
+# Train an SWE agent on Scale-SWE with the tinker backend in SYNCHRONOUS mode.
 #
 # This is the simpler, on-policy variant of train_tinker.sh (which uses
 # fully-async GRPO). Each step generates a full batch of rollouts, then takes
@@ -52,7 +52,7 @@ python -u train.py \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='swe-rl' \
-    rllm.trainer.experiment_name='r2egym-terminus2-qwen3.5-4b-sync' \
+    rllm.trainer.experiment_name='scaleswe-terminus2-qwen3.5-4b-sync' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=10 \
     rllm.trainer.save_freq=10 \

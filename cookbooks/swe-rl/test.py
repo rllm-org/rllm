@@ -25,12 +25,13 @@ def _load_catalog() -> dict:
 
 
 def test_train_dataset_in_catalog():
-    """r2egym must be registered as a sandbox dataset using mini-swe-agent."""
+    """scaleswe must be registered as a sandbox dataset using mini-swe-agent."""
     catalog = _load_catalog()
-    entry = catalog["datasets"]["r2egym"]
+    entry = catalog["datasets"]["scaleswe"]
     assert entry["category"] == "code"
     assert entry["default_agent"] == "mini-swe-agent"
     assert "train" in entry["splits"]
+    assert entry["builder"] == "rllm.data.scaleswe_builder:build_benchmark"
 
 
 def test_val_dataset_resolvable():
@@ -62,6 +63,6 @@ def test_train_module_imports():
     if str(script_dir) not in sys.path:
         sys.path.insert(0, str(script_dir))
     mod = importlib.import_module("train")
-    assert mod.TRAIN_DATASET == "r2egym"
+    assert mod.TRAIN_DATASET == "scaleswe"
     assert mod.VAL_DATASET == "swebench-verified"
     assert callable(mod.main)

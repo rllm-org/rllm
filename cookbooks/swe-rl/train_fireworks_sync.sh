@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train an SWE agent on R2E-Gym with the Fireworks backend in SYNCHRONOUS mode.
+# Train an SWE agent on Scale-SWE with the Fireworks backend in SYNCHRONOUS mode.
 #
 # This is the simpler, on-policy variant of train_fireworks.sh (which uses
 # fully-async GRPO). Each step generates a full batch of rollouts, then takes
@@ -77,7 +77,7 @@ python -u train.py \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='swe-rl' \
-    rllm.trainer.experiment_name='r2egym-terminus2-qwen3p5-9b-fireworks-sync' \
+    rllm.trainer.experiment_name='scaleswe-terminus2-qwen3p5-9b-fireworks-sync' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=10 \
     rllm.trainer.save_freq=10 \

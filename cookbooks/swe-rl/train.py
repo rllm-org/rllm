@@ -1,4 +1,4 @@
-"""Train an SWE agent on R2E-Gym, validate on SWE-bench Verified.
+"""Train an SWE agent on Scale-SWE, validate on SWE-bench Verified.
 
 This cookbook deliberately ships no custom AgentFlow or evaluator:
 
@@ -9,11 +9,11 @@ This cookbook deliberately ships no custom AgentFlow or evaluator:
   intercepts every LLM call, so the trainer sees full trajectories without
   the harness knowing it's being trained.
 * The **evaluator** is each task's own verifier (sandbox-shell), resolved
-  per-task by :class:`rllm.hooks.SandboxTaskHooks`. For r2egym it runs the
-  image's own ``/testbed/run_tests.sh`` and checks pytest-output equality
-  against the row's expected output; for the Verified split it runs the
-  task's bundled ``tests/test.sh``. The verifier writes a reward that rLLM
-  reads back.
+  per-task by :class:`rllm.hooks.SandboxTaskHooks`. For scaleswe it applies
+  the row's synthetic ``test_fail_to_pass.py`` + ``f2p_patch`` and runs pytest
+  over ``FAIL_TO_PASS`` ∪ ``PASS_TO_PASS`` (reward 1.0 iff all pass); for the
+  Verified split it runs the task's bundled ``tests/test.sh``. The verifier
+  writes a reward that rLLM reads back.
 
 Because we pass an ``agent_flow`` (and no explicit ``evaluator``/``hooks``),
 :class:`AgentTrainer` runs the **rLLM-native SandboxedAgentFlow path**
@@ -43,7 +43,7 @@ from rllm.data.dataset import DatasetRegistry
 from rllm.harnesses.terminus2 import Terminus2Harness
 from rllm.trainer import AgentTrainer
 
-TRAIN_DATASET = "r2egym"
+TRAIN_DATASET = "scaleswe"
 VAL_DATASET = "swebench-verified"
 
 # Sandbox backend for the SandboxedAgentFlow path: docker | local | modal | daytona.
@@ -60,6 +60,10 @@ SWE_VAL_MAX = int(os.environ.get("SWE_VAL_MAX", "0"))
 # TERMINUS_MAX_TURNS=N to override (empty/0 = uncapped).
 _terminus_max_turns = os.environ.get("TERMINUS_MAX_TURNS")
 TERMINUS_MAX_TURNS = int(_terminus_max_turns) if _terminus_max_turns and int(_terminus_max_turns) > 0 else None
+
+# Terminus-2 context summarization/compaction. Harbor enables it by default; set
+# TERMINUS_ENABLE_SUMMARIZE=0 to turn it off (the harness forwards it into the sandbox).
+TERMINUS_ENABLE_SUMMARIZE = os.environ.get("TERMINUS_ENABLE_SUMMARIZE", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
@@ -79,7 +83,7 @@ def main(config: DictConfig) -> None:
     # explicit evaluator/hooks) makes AgentTrainer auto-wire SandboxTaskHooks
     # for the sandbox lifecycle + per-task verifier, and route rollouts through
     # AgentFlowEngine — rLLM's own runtime, not the remote Harbor runtime.
-    agent_flow = Terminus2Harness(sandbox_backend=SANDBOX_BACKEND, max_turns=TERMINUS_MAX_TURNS)
+    agent_flow = Terminus2Harness(sandbox_backend=SANDBOX_BACKEND, max_turns=TERMINUS_MAX_TURNS, enable_summarize=TERMINUS_ENABLE_SUMMARIZE)
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),

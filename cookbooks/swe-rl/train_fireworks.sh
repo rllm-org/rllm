@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train an SWE agent on R2E-Gym, eval on SWE-bench Verified — Fireworks backend.
+# Train an SWE agent on Scale-SWE, eval on SWE-bench Verified — Fireworks backend.
 #
 # Prerequisites:
 #   1. Install rllm with fireworks extras:  uv pip install -e ".[fireworks]"
@@ -82,7 +82,7 @@ python -u train.py \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='swe-rl' \
-    rllm.trainer.experiment_name='r2egym-terminus2-qwen3p5-9b-fireworks' \
+    rllm.trainer.experiment_name='scaleswe-terminus2-qwen3p5-9b-fireworks' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=10 \
     rllm.trainer.save_freq=10 \

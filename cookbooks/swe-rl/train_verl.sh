@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train an SWE agent on R2E-Gym with the verl (distributed) backend.
+# Train an SWE agent on Scale-SWE with the verl (distributed) backend.
 #
 # Prerequisites:
 #   1. Install rllm with verl extras:     uv pip install -e ".[verl]"
@@ -71,7 +71,7 @@ python -u train.py \
     rllm.gateway.port=9090 \
     trainer.logger="['console','wandb']" \
     trainer.project_name=swe-rl \
-    trainer.experiment_name=r2egym-terminus2-qwen3.5-4b-verl \
+    trainer.experiment_name=scaleswe-terminus2-qwen3.5-4b-verl \
     trainer.val_before_train=true \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
