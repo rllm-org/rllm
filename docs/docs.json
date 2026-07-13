@@ -117,6 +117,7 @@
               "core-concepts/rl-algorithms",
               "training/capability-matrix",
               "training/advantage-estimator",
+              "training/custom-loss",
               "training/precompute-advantage"
             ]
           }
