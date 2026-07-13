@@ -25,6 +25,14 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
+# Fireworks key: an exported FIREWORKS_API_KEY wins; otherwise fall back to the
+# key on file in ~/.rllm/config.json (written by `rllm model setup`).
+export FIREWORKS_API_KEY="${FIREWORKS_API_KEY:-$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.rllm/config.json')))['api_keys']['fireworks'])" 2>/dev/null || true)}"
+if [ -z "${FIREWORKS_API_KEY}" ]; then
+    echo "FIREWORKS_API_KEY is not set and ~/.rllm/config.json has no api_keys.fireworks (run: rllm model setup)" >&2
+    exit 1
+fi
+
 export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-modal}"
 # Train dataset (DatasetRegistry name). Pull it first: rllm dataset pull <name>
 export TB_TRAIN_DATASET="${TB_TRAIN_DATASET:-tb-v2-debug}"
