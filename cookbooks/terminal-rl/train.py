@@ -90,10 +90,15 @@ def main(config: DictConfig) -> None:
 
     if train_dataset is None:
         raise RuntimeError(f"Dataset '{TRAIN_DATASET}' not found. Run: python cookbooks/terminal-rl/prepare_data.py")
-    if val_dataset is None:
-        raise RuntimeError(f"Dataset '{VAL_DATASET}' not found. Run: rllm dataset pull harbor:{VAL_DATASET} (or: python cookbooks/terminal-rl/prepare_data.py)")
 
-    if TB_VAL_MAX > 0 and TB_VAL_MAX < len(val_dataset):
+    # The val dataset is only needed when validation actually runs
+    # (val_before_train, or a positive test_freq). A run with validation
+    # disabled must not fail on a missing val dataset.
+    validation_enabled = bool(config.rllm.trainer.get("val_before_train", False)) or config.rllm.trainer.get("test_freq", 0) > 0
+    if val_dataset is None and validation_enabled:
+        raise RuntimeError(f"Dataset '{VAL_DATASET}' not found. Run: rllm dataset pull harbor:{VAL_DATASET} (or: python cookbooks/terminal-rl/prepare_data.py) — or disable validation (rllm.trainer.test_freq=-1).")
+
+    if val_dataset is not None and TB_VAL_MAX > 0 and TB_VAL_MAX < len(val_dataset):
         val_dataset = val_dataset.select(range(TB_VAL_MAX))
 
     # terminus2 as a SandboxedAgentFlow. Passing ``agent_flow`` (with no

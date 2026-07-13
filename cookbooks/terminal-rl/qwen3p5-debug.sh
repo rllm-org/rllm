@@ -95,16 +95,16 @@ python -u train.py \
     rllm.workflow.n_parallel_tasks=256 \
     rllm.workflow.raise_on_error=false \
     rllm.rejection_sample.filter_uniform_groups=true \
-    rllm.gateway.port=9091 \
+    rllm.gateway.port=9090 \
     rllm.gateway.num_workers=4 \
     rllm.gateway.cumulative_token_mode=true \
     rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=100 \
-    rllm.trainer.dump_batch_dir=train_batches/qwen3p5-35b-a3b-tb-v2-debug \
+    rllm.trainer.dump_batch_dir=train_batches/qwen3p5-35b-a3b-tb-v2-debug-no-sum-interleave \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='terminal-rl' \
     rllm.trainer.experiment_name='qwen3p5-35b-a3b-tb-v2-debug' \
     rllm.trainer.val_before_train=false \
-    rllm.trainer.test_freq=50 \
+    rllm.trainer.test_freq=-1 \
     rllm.trainer.save_freq=10 \
     "$@"
