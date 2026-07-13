@@ -251,10 +251,11 @@ def _build_groups(runs: list[_RunData], metric: str) -> list[AttemptGroup]:
 # don't. This is deterministic — no flag decides it:
 #   - A NON-thinking trajectory (each turn's history-form == its target-form) is
 #     one prefix chain and merges into a single row training every turn.
-#   - A THINKING trajectory splits at every turn: a turn's reasoning is stripped
-#     when it becomes history, so a reasoning target cannot survive as a mergeable
-#     prefix. Per-turn rows are the faithful form; at inference the harness strips
-#     prior-turn thinking, matching each row's stripped history.
+#   - A THINKING trajectory follows what the data shows: when the harness strips a
+#     turn's reasoning from history (non-interleaved runs), the reasoning-aware
+#     prefix breaks and each turn becomes its own row; when history RETAINS
+#     reasoning (interleaved-thinking runs), steps keep merging and context keeps
+#     its ThinkingParts. Either way rows match what the model saw at inference.
 # Every turn is a trained target; only a step with no assistant turn is skipped.
 # Reasoning is preserved MODEL-AGNOSTICALLY as a structured ``ThinkingPart`` (not
 # a hardcoded ``<think>`` string) so the model's renderer picks the reasoning
@@ -277,26 +278,47 @@ def _text_content(content) -> str:
     return ""
 
 
-def _step_target(msg: dict) -> dict:
-    """An assistant turn as a trained target — model-agnostic.
+def _parts_thinking(content) -> str:
+    """The thinking-text view of a parts-list content."""
+    if isinstance(content, list):
+        return "".join(p.get("thinking", "") for p in content if isinstance(p, dict) and p.get("type") == "thinking")
+    return ""
 
-    Reasoning is preserved as a structured ``ThinkingPart`` (NOT a hardcoded
-    ``<think>`` string): the model's *renderer* decides the reasoning format at
-    training time (deepseek ``<think>``, qwen, harmony, ...). A turn with no
-    reasoning is a plain ``TextPart``. Content is always a list of parts so the
-    dataset's content column stays a uniform type for parquet.
+
+def _passthrough(out: dict, msg: dict) -> dict:
+    """Carry provider fields (tool calls etc.) through to the rebuilt message."""
+    for k in ("tool_calls", "tool_call_id", "name"):
+        if msg.get(k) is not None:
+            out[k] = msg[k]
+    return out
+
+
+def _to_parts(msg: dict) -> list[dict]:
+    """Message content as a parts list, reasoning preserved as a ``ThinkingPart``.
+
+    NOT a hardcoded ``<think>`` string: the model's *renderer* decides the
+    reasoning format at training time (deepseek ``<think>``, qwen, harmony, ...).
+    Content is always a list of parts so the dataset's content column stays a
+    uniform type for parquet.
     """
     parts: list[dict] = []
     rc = _reasoning(msg).strip()
     if rc:
         parts.append({"type": "thinking", "thinking": rc})
     parts.append({"type": "text", "text": msg.get("content") or ""})
-    return {"role": "assistant", "content": parts, "trainable": True}
+    return parts
+
+
+def _step_target(msg: dict) -> dict:
+    """An assistant turn as a trained target — model-agnostic."""
+    return _passthrough({"role": "assistant", "content": _to_parts(msg), "trainable": True}, msg)
 
 
 def _step_context(msg: dict) -> dict:
-    """A history/context message: never trained, reasoning-free ``TextPart``."""
-    return {"role": msg["role"], "content": [{"type": "text", "text": msg.get("content") or ""}], "trainable": False}
+    """A history/context message: never trained. Reasoning stays a ThinkingPart
+    when the episode data carries it (interleaved-thinking runs), so context
+    matches what the model actually saw."""
+    return _passthrough({"role": msg["role"], "content": _to_parts(msg), "trainable": False}, msg)
 
 
 def _step_has_content(msg: dict) -> bool:
@@ -304,10 +326,12 @@ def _step_has_content(msg: dict) -> bool:
 
 
 def _prefix_matches(seg_messages: list[dict], step_cc: list[dict]) -> bool:
-    """Whether the running segment's turns appear identically at the start of the
-    new step's conversation (a context reset — summarization — breaks this)."""
-    seg_view = [(m["role"], _text_content(m["content"])) for m in seg_messages]
-    step_view = [(m.get("role"), _text_content(m.get("content") or "")) for m in step_cc[: len(seg_view)]]
+    """Whether the running segment's turns appear identically — text, reasoning,
+    and tool calls — at the start of the new step's conversation. A context reset
+    (summarization) breaks this, and so does a turn whose thinking the harness
+    stripped from history (non-interleaved runs)."""
+    seg_view = [(m["role"], _text_content(m["content"]), _parts_thinking(m["content"]), str(m.get("tool_calls"))) for m in seg_messages]
+    step_view = [(m.get("role"), _text_content(m.get("content") or ""), _reasoning(m).strip(), str(m.get("tool_calls"))) for m in step_cc[: len(seg_view)]]
     return len(step_cc) >= len(seg_view) and step_view == seg_view
 
 
@@ -315,11 +339,11 @@ def _episode_to_step_message_lists(episode: dict, trajectory_name: str | None) -
     """Extract per-turn (automerged) training conversations from an episode.
 
     Returns one message-list per segment; every message carries ``trainable``.
-    A segment merges the next step iff (a) its turns are a text-prefix of the new
-    step (no context reset) AND (b) it holds no reasoning target yet — a reasoning
-    turn's thinking is stripped from history, so once one is added the segment is
-    sealed and the next turn starts a new row. This is model-agnostic: it keys on
-    whether the turn *has* reasoning, not on any format.
+    A segment merges the next step iff its turns — text, reasoning, and tool
+    calls — appear identically as the new step's history. Purely data-driven:
+    a context reset splits, and a turn whose thinking was stripped from history
+    (non-interleaved harness) splits, while interleaved-thinking histories keep
+    merging with their ThinkingParts intact. No flag or format string decides it.
     """
     trajs = episode.get("trajectories") or []
     traj = None
@@ -332,15 +356,13 @@ def _episode_to_step_message_lists(episode: dict, trajectory_name: str | None) -
 
     segments: list[list[dict]] = []
     seg: list[dict] | None = None
-    seg_sealed = False  # a reasoning target seals the segment (its thinking won't survive as history)
     for step in traj.get("steps") or []:
         cc = step.get("chat_completions") or []
         last = next((i for i in range(len(cc) - 1, -1, -1) if cc[i].get("role") == "assistant"), -1)
         if last < 0:
             continue  # no assistant turn to train
         target = _step_target(cc[last])
-        target_has_reasoning = bool(_reasoning(cc[last]).strip())
-        if seg is not None and not seg_sealed and _prefix_matches(seg, cc):
+        if seg is not None and _prefix_matches(seg, cc):
             tail = [_step_context(m) for m in cc[len(seg) : last] if _step_has_content(m) or m.get("tool_calls")]
             seg = seg + tail + [target]
         else:
@@ -348,7 +370,6 @@ def _episode_to_step_message_lists(episode: dict, trajectory_name: str | None) -
                 segments.append(seg)
             history = [_step_context(m) for m in cc[:last] if _step_has_content(m) or m.get("tool_calls")]
             seg = history + [target]
-        seg_sealed = target_has_reasoning
     if seg is not None:
         segments.append(seg)
     return segments

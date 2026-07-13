@@ -94,6 +94,54 @@ def test_context_reset_splits_no_loss():
     assert trained == ["a1", "a2", "a3"]  # no turn lost
 
 
+def test_interleaved_history_merges_and_keeps_thinking():
+    # Interleaved-thinking run: history RETAINS each turn's reasoning, so the data
+    # shows history == target form -> steps keep merging into one row (matching
+    # inference, where past thinking stays in context).
+    ep = _ep(
+        [_u("task"), _a("act1", "plan1")],
+        [_u("task"), _a("act1", "plan1"), _u("obs1"), _a("act2", "plan2")],
+    )
+    segs = _episode_to_step_message_lists(ep, None)
+    assert len(segs) == 1
+    seg = segs[0]
+    assert [(_text_content(m["content"]), _thinking(m)) for m in seg if m["trainable"]] == [("act1", ["plan1"]), ("act2", ["plan2"])]
+
+
+def test_interleaved_context_after_split_keeps_thinking():
+    # A context reset still splits; the new row's interleaved history keeps its
+    # ThinkingParts as untrained context — matching what the model actually saw.
+    ep = _ep(
+        [_u("A"), _a("a1", "r1")],
+        [_u("RESET"), _a("a1", "r1"), _u("o"), _a("a2", "r2")],
+    )
+    segs = _episode_to_step_message_lists(ep, None)
+    assert len(segs) == 2
+    ctx_asst = [m for m in segs[1] if m["role"] == "assistant" and not m["trainable"]]
+    assert [_thinking(m) for m in ctx_asst] == [["r1"]]
+
+
+def test_tool_call_fields_preserved():
+    # tool_calls / tool_call_id / name must survive the rebuild on both context
+    # and target messages (native tool-calling harnesses).
+    tc = [{"id": "call_1", "type": "function", "function": {"name": "run", "arguments": "{}"}}]
+    tc2 = [{"id": "call_2", "type": "function", "function": {"name": "stop", "arguments": "{}"}}]
+    ep = _ep(
+        [
+            _u("q"),
+            {"role": "assistant", "content": "", "tool_calls": tc},
+            {"role": "tool", "tool_call_id": "call_1", "name": "run", "content": "out"},
+            {"role": "assistant", "content": "done", "tool_calls": tc2},
+        ]
+    )
+    (seg,) = _episode_to_step_message_lists(ep, None)
+    asst_ctx = next(m for m in seg if m["role"] == "assistant" and not m["trainable"])
+    tool_msg = next(m for m in seg if m["role"] == "tool")
+    assert asst_ctx["tool_calls"] == tc
+    assert tool_msg["tool_call_id"] == "call_1" and tool_msg["name"] == "run"
+    assert seg[-1]["trainable"] and seg[-1]["tool_calls"] == tc2
+
+
 def test_prefix_matches_primitive():
     seg = [
         {"role": "user", "content": [{"type": "text", "text": "task"}], "trainable": False},
