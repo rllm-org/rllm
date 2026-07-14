@@ -39,6 +39,25 @@ def _flatten_token_input(token_input: TinkerTokenInput) -> TinkerTokenInput:
     return flattened
 
 
+def _trajectory_oov_token(traj: Trajectory, vocab_size: int) -> int | None:
+    """Return the first out-of-vocab token id (>= ``vocab_size``) in the trajectory, or None.
+
+    Sampled ids come back raw from the serving stack; a rare corrupt id past the
+    trainer's vocab (e.g. a padded-lm-head slot drawn under full-distribution
+    sampling) fails the whole forward_backward with "Invalid token id", so such
+    trajectories are dropped up front. Prompt ids are scanned too — in cumulative
+    token mode past sampled turns are echoed back inside later prompts.
+    """
+    for step in traj.steps:
+        for t in step.response_ids or []:
+            if isinstance(t, int) and t >= vocab_size:
+                return t
+        for elem in _flatten_token_input(cast(TinkerTokenInput, step.prompt_ids or [])):
+            if isinstance(elem, int) and elem >= vocab_size:
+                return elem
+    return None
+
+
 def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[tinker.Datum]:
     """
     Return one or more Datum objects corresponding to the trajectory.
@@ -139,6 +158,7 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
 def transform_trajectory_groups_to_datums(
     trajectory_groups: list[TrajectoryGroup],
     algorithm_config: AlgorithmConfig,
+    vocab_size: int | None = None,
 ) -> tuple[list[tinker.Datum] | dict[str, list[tinker.Datum]], dict]:
     """
     Transform a list of TrajectoryGroup objects to a list of Tinker Datum objects. Two things are done here:
@@ -184,9 +204,24 @@ def transform_trajectory_groups_to_datums(
     step_response_lengths = []
     action_token_ratios = []
     total_agent_steps = 0
+    total_trajectories = 0
     dropped_malformed_sequences = 0
+    dropped_oov_sequences = 0
     for group in trajectory_groups:
         for traj_idx, trajectory in enumerate(group.trajectories):
+            total_trajectories += 1
+            if vocab_size is not None:
+                bad_token = _trajectory_oov_token(trajectory, vocab_size)
+                if bad_token is not None:
+                    dropped_oov_sequences += 1
+                    logger.warning(
+                        "Dropping trajectory with out-of-vocab token id %d (vocab_size=%d) group_id=%s traj_idx=%d: corrupt sampled id from the serving stack",
+                        bad_token,
+                        vocab_size,
+                        group.group_id,
+                        traj_idx,
+                    )
+                    continue
             try:
                 traj_datums = trajectory_to_datums(trajectory, router_replay=(algorithm_config.router_replay == "R3"))
             except AssertionError as e:
@@ -220,6 +255,8 @@ def transform_trajectory_groups_to_datums(
                 datums.extend(traj_datums)
 
     adv_metrics["batch/dropped_malformed_sequences"] = dropped_malformed_sequences
+    adv_metrics["batch/dropped_oov_sequences"] = dropped_oov_sequences
+    adv_metrics["batch/oov_drop_rate"] = dropped_oov_sequences / max(1, total_trajectories)
 
     if steps_per_traj:
         import numpy as _np
