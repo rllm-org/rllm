@@ -53,42 +53,24 @@ set -euo pipefail
 export SWE_SANDBOX_BACKEND="${SWE_SANDBOX_BACKEND:-modal}"
 # Agent harness by registry name (terminus2 | mini-swe-agent | react | oracle | ...).
 export SWE_HARNESS="${SWE_HARNESS:-terminus2}"
-# Sandbox resources: pin to Modal's minimum reservation. Every scaleswe task.toml
-# uniformly declares cpus=4 / memory_mb=16384 / storage_mb=30720; these caps clamp
-# those baked-in values DOWN at runtime (min(declared, cap)) with no dataset rebuild.
-# rLLM passes cpu/memory to Modal as scalars => SOFT requests (milli_cpu_max=None,
-# memory_mb_max=0 = no hard limit), so the container still BURSTS to whatever CPU/RAM
-# the host has spare — this only lowers the reserved/billed floor, it cannot OOM or
-# hard-throttle. 0.125 cores is Modal's minimum reservation. Modal ignores storage
-# (billed as part of compute), so RLLM_SANDBOX_MAX_STORAGE_MB is a no-op here.
+# Clamp sandboxes to Modal's minimum reservation (task.toml bakes in 4 CPU / 16 GB).
+# These are soft/burstable requests — can't OOM, just lower the billed floor. Storage
+# is ignored by Modal.
 export RLLM_SANDBOX_MAX_CPUS="${RLLM_SANDBOX_MAX_CPUS:-0.125}"
 export RLLM_SANDBOX_MAX_MEMORY_MB="${RLLM_SANDBOX_MAX_MEMORY_MB:-128}"
 # Eval budget: validate on the first N swebench-verified tasks (0/unset = all 500).
 export SWE_VAL_MAX="${SWE_VAL_MAX:-250}"
 # Per-rollout turn cap for terminus2 (read by train.py). Empty = uncapped.
 export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-50}"
-# Disable Terminus-2 context summarization/compaction. swe-rl train.py reads this and
-# passes enable_summarize to Terminus2Harness, which forwards RLLM_TERMINUS_ENABLE_SUMMARIZE
-# into the sandbox where the driver honors it (needs terminal-rl >= b342c9c7, this branch's base).
+# Disable Terminus-2 context summarization/compaction (0 = off).
 export TERMINUS_ENABLE_SUMMARIZE="${TERMINUS_ENABLE_SUMMARIZE:-0}"
-# Keep prior-turn reasoning in the agent's chat history instead of dropping it
-# (Harbor's interleaved_thinking; off by default in Terminus2Harness). Read at import
-# from RLLM_TERMINUS_INTERLEAVED_THINKING (train.py doesn't forward it via a ctor arg).
-# NOTE: with cumulative_token_mode on (below), this is mostly belt-and-braces. The
-# gateway rebuilds each turn's prompt from the PRIOR turn's *sampled* token ids
-# (prev_completion_ids = choices[0].token_ids, which already include the generated
-# <think>) and DROPS the assistant message from the delta it re-renders — so prior
-# reasoning stays in both the model's input and the training tokens regardless of this
-# flag. It only bites on the fallback chat path taken after an accumulator reset
-# (compaction/prefix-change), where the full message array is re-rendered.
+# Keep prior-turn reasoning in chat history (Harbor's interleaved_thinking). Mostly
+# moot under cumulative_token_mode, which stitches the real sampled tokens anyway.
 export RLLM_TERMINUS_INTERLEAVED_THINKING="${RLLM_TERMINUS_INTERLEAVED_THINKING:-1}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
-# Cap the verifier at 300s. SWE-bench Verified tasks declare verifier.timeout_sec=3000,
-# which is far longer than needed for fast iteration and bloats the sandbox lifetime.
+# Cap the verifier at 300s (Verified declares 3000s — overkill for iteration).
 export RLLM_HARNESS_VERIFIER_TIMEOUT_S="${RLLM_HARNESS_VERIFIER_TIMEOUT_S:-300}"
-# Sandbox lifetime is auto-derived (no env needed): the effective agent timeout
-# (RLLM_HARNESS_RUN_TIMEOUT_S caps the task's own) + verifier + install + slack —
-# ~3600s here from the 1800s agent cap. Set RLLM_SANDBOX_TIMEOUT_S to override.
+# Sandbox lifetime auto-derives from agent + verifier timeouts; RLLM_SANDBOX_TIMEOUT_S overrides.
 
 python -u train.py \
     rllm/backend=fireworks \
@@ -100,24 +82,24 @@ python -u train.py \
     fireworks_config.rollout_deployment_replica_count=4 \
     training.group_size=16 \
     training.learning_rate=2e-5 \
-    training.max_length=65536 \
+    training.max_length=131072 \
     rllm.rollout.train.temperature=1.0 \
-    rllm.rollout.train.top_p=0.95 \
+    rllm.rollout.train.top_p=1.0 \
     rllm.rollout.val.temperature=1.0 \
-    rllm.rollout.val.top_p=0.95 \
-    data.max_prompt_length=57344 \
+    rllm.rollout.val.top_p=1.0 \
+    data.max_prompt_length=122876 \
     data.max_response_length=8192 \
     data.train_batch_size=1 \
     data.val_batch_size=-1 \
-    rllm.data.max_prompt_length=57344 \
+    rllm.data.max_prompt_length=122876 \
     rllm.data.max_response_length=8192 \
     rllm.data.train_batch_size=1 \
     rllm.data.val_batch_size=-1 \
-    rllm.compact_filtering.enable=true \
+    rllm.compact_filtering.enable=false \
     rllm.algorithm.adv_estimator=grpo \
     rllm.algorithm.norm_adv_by_std_in_grpo=true \
     rllm.algorithm.loss_fn=dppo_tv \
-    rllm.algorithm.loss_agg_mode=seq-mean-token-mean \
+    rllm.algorithm.loss_agg_mode=token-mean \
     rllm.algorithm.eps_clip=0.15 \
     rllm.async_training.enable=true \
     rllm.async_training.mini_batch_size=16 \
