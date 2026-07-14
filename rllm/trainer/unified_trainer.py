@@ -359,6 +359,20 @@ class UnifiedTrainer:
             estimator_map=self.traj_group_adv_estimator_map,
         )
 
+    @property
+    def _run_stamp(self) -> str:
+        """Per-run UTC timestamp shared by all of this run's artifact trees.
+
+        Run outputs follow ``<experiment dir>/<stamp>/<content>`` so relaunches
+        with the same project/experiment name never clobber or interleave with
+        an earlier run's artifacts.
+        """
+        stamp = getattr(self, "_run_stamp_cache", None)
+        if stamp is None:
+            stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+            self._run_stamp_cache = stamp
+        return stamp
+
     def _setup_logging(self):
         """Setup up both the tracking and episode logging."""
         # create episode logger if enabled in config
@@ -368,6 +382,8 @@ class UnifiedTrainer:
                 "episode_log_dir",
                 f"logs/{self.rllm_config.trainer.project_name}/{self.rllm_config.trainer.experiment_name}",
             )
+            # <experiment dir>/<run stamp>/episodes — relaunches never clobber.
+            episode_log_dir = f"{episode_log_dir}/{self._run_stamp}"
             self.episode_logger = EpisodeLogger(base_dir=episode_log_dir, subdirectory="episodes")
 
         source_metadata = extract_source_metadata(

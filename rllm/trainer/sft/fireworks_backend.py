@@ -137,6 +137,16 @@ class FireworksSFTBackend(TinkerSFTBackend):
             raise SFTConfigError("FIREWORKS_API_KEY is not set; required for the fireworks SFT backend.")
         base_url = os.environ.get("FIREWORKS_BASE_URL", config.get("fireworks_base_url", "https://api.fireworks.ai"))
 
+        # <local dir>/<experiment>/<run stamp>/ — the template default is a fixed
+        # shared /tmp path, and even an explicit --output collides across
+        # relaunches; a per-run stamp keeps every run's logs/metadata separate.
+        # Safe here: Fireworks SFT resume is server-side (job DCP), not local.
+        run_stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+        config.trainer.default_local_dir = os.path.join(
+            config.trainer.default_local_dir,
+            config.trainer.get("experiment_name") or "default",
+            run_stamp,
+        )
         os.makedirs(config.trainer.default_local_dir, exist_ok=True)
         lora_rank = config.model.get("lora_rank", 32)
 
