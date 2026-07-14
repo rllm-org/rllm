@@ -121,6 +121,26 @@ class FireworksPolicyTrainer:
         self.algorithm_config = algorithm_config or AlgorithmConfig.from_config(self.config.rllm.algorithm)
         self.resolve_builtin_loss(self.algorithm_config)
 
+    def _get_vocab_size(self) -> int | None:
+        """Tokenizer vocab bound for the out-of-vocab trajectory filter (None = disabled).
+
+        The serving stack can (rarely) return a sampled token id past the trainer's
+        embedding (a padded-lm-head slot); one such id fails the whole
+        forward_backward with "Invalid token id", so the transform drops those
+        trajectories up front. The tokenizer is the authority on the bound —
+        the served model path is not HF-resolvable, but ``model.tokenizer_model`` is.
+        """
+        if not hasattr(self, "_vocab_size_cache"):
+            try:
+                from transformers import AutoTokenizer
+
+                tok_name = OmegaConf.select(self.config, "model.tokenizer_model")
+                self._vocab_size_cache = len(AutoTokenizer.from_pretrained(tok_name)) if tok_name else None
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Out-of-vocab trajectory filter disabled (could not resolve tokenizer vocab size): %s", e)
+                self._vocab_size_cache = None
+        return self._vocab_size_cache
+
     # ------------------------------------------------------------------
     # Transient-fault tolerance for training-client RPCs
     # ------------------------------------------------------------------
@@ -554,6 +574,7 @@ class FireworksPolicyTrainer:
         raw_datums, adv_metrics = transform_trajectory_groups_to_datums(
             trajectory_groups,
             algorithm_config=algorithm_config,
+            vocab_size=self._get_vocab_size(),
         )
 
         # Whole batch dropped as malformed (e.g. empty logprobs from overloaded generations).
