@@ -245,6 +245,7 @@ class TinkerPolicyTrainer:
         training_datums, adv_metrics = transform_trajectory_groups_to_datums(
             trajectory_groups,
             algorithm_config=algorithm_config,
+            vocab_size=self._get_vocab_size(),
         )
 
         # Every trajectory dropped as malformed (e.g. empty logprobs from failed/overloaded
@@ -337,6 +338,7 @@ class TinkerPolicyTrainer:
         training_datums, adv_metrics = transform_trajectory_groups_to_datums(
             trajectory_groups,
             algorithm_config=self.algorithm_config,
+            vocab_size=self._get_vocab_size(),
         )
 
         # Forward-backward and optimizer future together.
@@ -448,6 +450,21 @@ class TinkerPolicyTrainer:
     def get_tokenizer(self) -> Tokenizer:
         """Get tokenizer from training client."""
         return self.training_client.get_tokenizer()  # type: ignore[attr-defined]
+
+    def _get_vocab_size(self) -> int | None:
+        """Tokenizer vocab bound for the out-of-vocab trajectory filter (None = disabled).
+
+        A rare corrupt sampled id past the trainer's vocab fails the whole
+        forward_backward with "Invalid token id"; the transform drops those
+        trajectories up front (metric: ``batch/oov_drop_rate``).
+        """
+        if not hasattr(self, "_vocab_size_cache"):
+            try:
+                self._vocab_size_cache = len(self.get_tokenizer())
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Out-of-vocab trajectory filter disabled (could not resolve tokenizer vocab size): %s", e)
+                self._vocab_size_cache = None
+        return self._vocab_size_cache
 
 
 """
