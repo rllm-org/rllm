@@ -580,3 +580,73 @@ class TestAllMalformedBatch:
         assert len(datums) == 1  # only the valid trajectory survives
         assert metrics["batch/dropped_malformed_sequences"] == 1
         assert datums  # non-empty -> loop runs optim as usual
+
+
+class TestOutOfVocabDrop:
+    """A trajectory containing a token id >= vocab_size is dropped whole, before
+    datum construction — one such id fails the entire forward_backward with
+    'Invalid token id' server-side (padded-lm-head slot sampled under full-
+    distribution sampling). Drop rate is logged as batch/oov_drop_rate."""
+
+    def _alg(self):
+        from omegaconf import OmegaConf
+
+        from rllm.trainer.algorithms.config import AlgorithmConfig
+
+        return AlgorithmConfig.from_config(OmegaConf.create({"adv_estimator": "grpo"}))
+
+    def test_oov_response_token_drops_trajectory(self):
+        from rllm.agents.agent import TrajectoryGroup
+        from rllm.trainer.tinker.transform import transform_trajectory_groups_to_datums
+
+        good = Trajectory(steps=[make_step(prompt_ids=[1, 2, 3], response_tokens=[4, 5], response_logprobs=[-0.5, -0.8])])
+        bad = Trajectory(steps=[make_step(prompt_ids=[1, 2, 3], response_tokens=[4, 248090], response_logprobs=[-0.5, -0.8])])
+        group = TrajectoryGroup(group_id="g0", trajectories=[good, bad])
+
+        datums, metrics = transform_trajectory_groups_to_datums([group], algorithm_config=self._alg(), vocab_size=248077)
+
+        assert len(datums) == 1  # only the clean trajectory survives
+        assert metrics["batch/dropped_oov_sequences"] == 1
+        assert metrics["batch/oov_drop_rate"] == 0.5
+
+    def test_oov_prompt_token_drops_trajectory(self):
+        # Cumulative token mode echoes past sampled turns inside later prompts,
+        # so prompt ids are scanned too.
+        from rllm.agents.agent import TrajectoryGroup
+        from rllm.trainer.tinker.transform import transform_trajectory_groups_to_datums
+
+        bad = Trajectory(steps=[make_step(prompt_ids=[1, 248090, 3], response_tokens=[4, 5], response_logprobs=[-0.5, -0.8])])
+        group = TrajectoryGroup(group_id="g1", trajectories=[bad])
+
+        datums, metrics = transform_trajectory_groups_to_datums([group], algorithm_config=self._alg(), vocab_size=248077)
+
+        assert datums == []
+        assert metrics["batch/dropped_oov_sequences"] == 1
+        assert metrics["batch/oov_drop_rate"] == 1.0
+
+    def test_disabled_without_vocab_size(self):
+        # vocab_size=None (unresolvable tokenizer) leaves behavior unchanged.
+        from rllm.agents.agent import TrajectoryGroup
+        from rllm.trainer.tinker.transform import transform_trajectory_groups_to_datums
+
+        bad = Trajectory(steps=[make_step(prompt_ids=[1, 2, 3], response_tokens=[4, 248090], response_logprobs=[-0.5, -0.8])])
+        group = TrajectoryGroup(group_id="g2", trajectories=[bad])
+
+        datums, metrics = transform_trajectory_groups_to_datums([group], algorithm_config=self._alg())
+
+        assert len(datums) == 1  # passes through (would fail server-side, as before)
+        assert metrics["batch/dropped_oov_sequences"] == 0
+        assert metrics["batch/oov_drop_rate"] == 0.0
+
+    def test_boundary_token_not_dropped(self):
+        from rllm.agents.agent import TrajectoryGroup
+        from rllm.trainer.tinker.transform import transform_trajectory_groups_to_datums
+
+        # highest valid id (vocab_size - 1) must NOT be dropped
+        edge = Trajectory(steps=[make_step(prompt_ids=[1, 2, 3], response_tokens=[248076, 5], response_logprobs=[-0.5, -0.8])])
+        group = TrajectoryGroup(group_id="g3", trajectories=[edge])
+
+        datums, metrics = transform_trajectory_groups_to_datums([group], algorithm_config=self._alg(), vocab_size=248077)
+
+        assert len(datums) == 1
+        assert metrics["batch/dropped_oov_sequences"] == 0
