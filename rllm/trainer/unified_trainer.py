@@ -603,7 +603,7 @@ class UnifiedTrainer:
             base = Path(dump_dir).expanduser()
             if not base.is_absolute():
                 base = Path(paths.rllm_path(str(base)))
-            run_root = base / datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+            run_root = base / self._run_stamp
             self._dump_batch_run_root = run_root
         run_dir = run_root / f"step_{trainer_state.global_step:05d}"
         try:
