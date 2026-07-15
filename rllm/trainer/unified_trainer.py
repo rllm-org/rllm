@@ -579,14 +579,14 @@ class UnifiedTrainer:
         Reuses eval's :class:`EvalEpisodeStore` layout — one run dir per
         optimizer step (``step_<N>/episodes/episode_*.json`` + ``meta.json``),
         so ``rllm view <dump_batch_dir>`` browses training steps exactly like
-        eval runs. The trajectory groups (the training data proper: steps,
-        token ids, masks, rewards) go to ``trajectory_groups.json`` alongside;
-        the viewer ignores that file.
+        eval runs. Episodes already carry the training view of each step
+        (token ids, logprobs, advantages, weight_version), so no separate
+        trajectory-group dump is written — a prior ``trajectory_groups.json``
+        byte-duplicated the episodes at ~1GB/step and nothing consumed it.
         """
         dump_dir = self.rllm_config.trainer.get("dump_batch_dir")
         if not dump_dir:
             return
-        import json
         from pathlib import Path
 
         from rllm.eval.episode_store import EvalEpisodeStore
@@ -616,9 +616,6 @@ class UnifiedTrainer:
             )
             for idx, episode in enumerate(trainer_state.episodes or []):
                 store.write(idx, episode)
-            groups = [g.model_dump(mode="json") for g in trainer_state.trajectory_groups or []]
-            with open(run_dir / "trajectory_groups.json", "w", encoding="utf-8") as fh:
-                json.dump(groups, fh, default=str)
             logger.info(
                 "[TrainingLoop] Step %d: dumped batch (%d groups, %d episodes) to %s", trainer_state.global_step, len(trainer_state.trajectory_groups or []), len(trainer_state.episodes or []), run_dir
             )
