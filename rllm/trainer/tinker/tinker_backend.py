@@ -258,7 +258,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         """Process the backend batch by running forward-backward pass.
 
         For Tinker, this performs:
-        1. Transform trajectory groups to datums (includes advantage computation)
+        1. Transform trajectory groups with precomputed advantages to datums
         2. Run forward-backward pass on the training client
         3. Store logprobs for KL metrics computation
 
@@ -319,17 +319,9 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         algorithm_config: AlgorithmConfig,
         **kwargs,
     ) -> None:
-        """Compute advantages from trajectory groups.
-
-        For Tinker, advantage computation is done in process_backend_batch via
-        transform_trajectory_groups_to_datums. This method stores the algorithm
-        config for use in process_backend_batch.
-
-        Note: This is called BEFORE process_backend_batch in the pipeline,
-        so we just store the config here.
-        """
-        # Store algorithm config for use in process_backend_batch
+        """Materialize token advantages before Tinker builds its datums."""
         self._algorithm_config = algorithm_config
+        await super().compute_advantages(trainer_state, algorithm_config, **kwargs)
 
     async def update_policy(
         self,

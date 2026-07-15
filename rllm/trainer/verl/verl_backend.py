@@ -33,11 +33,10 @@ from rllm.data.utils import interleave_tasks
 from rllm.engine.rollout import RolloutEngine, VerlEngine
 from rllm.trainer.algorithms import (
     AlgorithmConfig,
-    collect_reward_and_advantage_from_trajectory_groups,
     simple_timer,
 )
 from rllm.trainer.backend_protocol import BackendProtocol
-from rllm.trainer.verl import transform_episodes_to_dataproto, transform_trajectory_groups_to_dataproto, update_dataproto_with_advantages
+from rllm.trainer.verl import transform_episodes_to_dataproto, transform_trajectory_groups_to_dataproto
 from rllm.trainer.verl.metrics import calculate_debug_metrics_compat
 from rllm.trainer.verl.utils import (
     balance_batch,
@@ -560,9 +559,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             return batch
 
         assert trainer_state.trajectory_groups is not None, "Either episodes or trajectory_groups must be set"
-        batch = transform_trajectory_groups_to_dataproto(trainer_state.trajectory_groups, self.rollout_engine, max_prompt_length, max_total_length)
-        mode = self.algorithm_config.stepwise_advantage_mode if self.algorithm_config is not None else "broadcast"
-        return update_dataproto_with_advantages(batch, trainer_state.trajectory_groups, mode=mode)
+        return transform_trajectory_groups_to_dataproto(trainer_state.trajectory_groups, self.rollout_engine, max_prompt_length, max_total_length)
 
     def _remove_padding(self, batch: DataProto) -> DataProto:
         """Removes padded steps from the batch"""
@@ -664,9 +661,8 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         batch.meta_info["rllm_actor_num_updates"] = r
         batch.meta_info["rllm_actor_rows_pre_pad"] = n_rows
 
-        # Neutralise the padded rows. `advantages=0` (set by
-        # update_dataproto_with_advantages via is_pad_step) zeros the loss
-        # numerator; zeroing `response_mask` keeps pad tokens out of the loss.
+        # Neutralise the padded rows. Zeroing `response_mask` keeps pad tokens
+        # out of the loss (and therefore zeros the masked advantage numerator).
         # The seq-mean denominator (global_batch_size = gbs) is a fixed rollout
         # count, not a live row/token count, so pad rows do not dilute it at r=1.
         # At r>1 the single chunk holding the pad rows is under-scaled by ~pad/m
@@ -810,23 +806,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             batch = batch[~mask]
 
         trainer_state.backend_batch = batch
-
-    async def compute_advantages(self, trainer_state: TrainerState, algorithm_config: AlgorithmConfig, **kwargs) -> None:
-        """Compute advantages from trajectory groups.
-
-        Note: This is async for protocol compatibility but operations are sync.
-        """
-        assert trainer_state.episodes is not None, "Episodes are not set"
-        assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
-        episodes, trajectory_groups = trainer_state.episodes, trainer_state.trajectory_groups
-        batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
-
-        with simple_timer("adv", trainer_state.timing_dict):
-            adv_metrics = collect_reward_and_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
-            updated_batch = update_dataproto_with_advantages(batch, episodes, mode=algorithm_config.stepwise_advantage_mode)
-
-        trainer_state.metrics.update(adv_metrics)
-        trainer_state.backend_batch = updated_batch
 
     async def update_policy(self, trainer_state: TrainerState, **kwargs) -> None:
         """Update actor and critic policies.

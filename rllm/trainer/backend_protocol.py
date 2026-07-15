@@ -128,7 +128,6 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         """
         raise NotImplementedError("Subclasses must implement this method.")
 
-    @abstractmethod
     async def compute_advantages(
         self,
         trainer_state: TrainerState,
@@ -137,8 +136,9 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
     ) -> None:
         """Compute advantages from trajectory groups.
 
-        Default implementation uses rLLM-native advantage computation.
-        Backends can override for custom advantage computation.
+        The default implementation uses rLLM-native advantage computation and
+        materializes token-aligned ``Step.advantage`` values. The unified
+        trainer calls this before backend transformation.
 
         Args:
             trainer_state: The trainer state.

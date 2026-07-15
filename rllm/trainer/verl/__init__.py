@@ -7,7 +7,6 @@ __all__ = [
     # data transformation (lazy — requires verl + torch)
     "transform_episodes_to_dataproto",
     "transform_trajectory_groups_to_dataproto",
-    "update_dataproto_with_advantages",
     # dataclass
     "AccumulatedData",
     "ProcessedStepData",
@@ -22,7 +21,6 @@ def __getattr__(name):
     if name in {
         "transform_episodes_to_dataproto",
         "transform_trajectory_groups_to_dataproto",
-        "update_dataproto_with_advantages",
     }:
         from . import transform as _t
 

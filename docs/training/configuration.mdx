@@ -100,7 +100,7 @@ RL algorithm and advantage estimation settings.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `adv_estimator` | `str` | `grpo` | Advantage estimator (options: `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, `rloo`) |
+| `adv_estimator` | `str` | `grpo` | Advantage estimator (options include `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, `rloo`, `minus_length_weighted_mean`) |
 | `norm_adv_by_std_in_grpo` | `bool` | `True` | Whether to normalize advantages by standard deviation in GRPO |
 | `loss_fn` | `str \| null` | `null` | Loss function for Tinker backend (options: `importance_sampling`, `ppo`, `cispo`, `dro`, `cross_entropy`) |
 

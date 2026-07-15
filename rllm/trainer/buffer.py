@@ -33,6 +33,11 @@ from rllm.types import INFRA_ERROR_REASONS, Episode, TerminationReason, Trajecto
 logger = logging.getLogger(__name__)
 
 
+def _advantage_is_nonzero(advantage: list[float] | None, epsilon: float = 1e-8) -> bool:
+    """Return whether a token-level target contains learning signal."""
+    return advantage is not None and any(abs(value) > epsilon for value in advantage)
+
+
 @dataclass
 class TaskBatch:
     """All trajectory groups produced from one task's episodes, plus stripped episodes for UI logging."""
@@ -234,7 +239,7 @@ class TrajectoryGroupBuffer:
         filtered_zero_adv = 0
         if self._rs_config.filter_uniform_groups:
             before_adv = len(traj_groups)
-            traj_groups = [g for g in traj_groups if any(abs(step.advantage) > 1e-8 for traj in g.trajectories for step in traj.steps if step.advantage is not None)]
+            traj_groups = [g for g in traj_groups if any(_advantage_is_nonzero(step.advantage) for traj in g.trajectories for step in traj.steps)]
             filtered_zero_adv = before_adv - len(traj_groups)
         self._aggregator.record("groups/dropped_zero_adv", filtered_zero_adv)
 

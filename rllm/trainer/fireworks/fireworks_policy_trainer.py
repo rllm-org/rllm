@@ -363,13 +363,13 @@ class FireworksPolicyTrainer:
     @staticmethod
     def _process_datums(
         raw_datums: list[tinker.Datum],
-    ) -> tuple[list[tinker.Datum], list[float], list[list[float]], list[int], list[int]]:
+    ) -> tuple[list[tinker.Datum], list[list[float]], list[list[float]], list[int], list[int]]:
         """Extract rollout data and rebuild clean datums matching cookbook format.
 
-        Returns (clean_datums, advantages, inf_logprobs, prompt_lens, num_loss_tokens).
+        Returns clean datums plus per-token targets and rollout metadata.
         """
         clean_datums: list[tinker.Datum] = []
-        advantages: list[float] = []
+        advantages: list[list[float]] = []
         inf_logprobs: list[list[float]] = []
         prompt_lens: list[int] = []
         num_loss_tokens: list[int] = []
@@ -379,14 +379,12 @@ class FireworksPolicyTrainer:
             mask = datum.loss_fn_inputs["mask"].data
             adv_data = datum.loss_fn_inputs["advantages"].data
             prompt_len = len(mask) + 1
-            scalar = 0.0
             for i, m in enumerate(mask):
                 if m != 0:
                     prompt_len = i + 1
-                    scalar = float(adv_data[i])
                     break
             prompt_lens.append(prompt_len)
-            advantages.append(scalar)
+            advantages.append([float(value) for value in adv_data])
             num_loss_tokens.append(int(sum(mask)))
 
             # Rebuild clean datum: target_tokens + loss_mask only
@@ -396,6 +394,26 @@ class FireworksPolicyTrainer:
             clean_datums.append(tinker.Datum(model_input=datum.model_input, loss_fn_inputs=inputs))
 
         return clean_datums, advantages, inf_logprobs, prompt_lens, num_loss_tokens
+
+    @staticmethod
+    def _apply_token_advantages(datums: list[tinker.Datum], advantages: list[list[float]]) -> list[tinker.Datum]:
+        """Multiply native TIS/mask weights by the original per-token targets."""
+        if len(datums) != len(advantages):
+            raise ValueError("datum and advantage batch sizes must match")
+
+        result = []
+        for datum, token_advantages in zip(datums, advantages, strict=True):
+            native_weights = datum.loss_fn_inputs["advantages"].data
+            if len(native_weights) != len(token_advantages):
+                raise ValueError("native and rLLM token advantage lengths must match")
+            inputs = dict(datum.loss_fn_inputs)
+            inputs["advantages"] = tinker.TensorData(
+                data=[float(weight) * target for weight, target in zip(native_weights, token_advantages, strict=True)],
+                dtype="float32",
+                shape=[len(token_advantages)],
+            )
+            result.append(tinker.Datum(model_input=datum.model_input, loss_fn_inputs=inputs))
+        return result
 
     async def _compute_proximal_logprobs(
         self,
@@ -565,7 +583,8 @@ class FireworksPolicyTrainer:
         # at optim_step gives seq-mean-token-mean overall.
         if algorithm_config.loss_agg_mode == "seq-mean-token-mean":
             for i in range(len(advantages)):
-                advantages[i] /= max(1, num_loss_tokens[i])
+                divisor = max(1, num_loss_tokens[i])
+                advantages[i] = [value / divisor for value in advantages[i]]
 
         # bypass_mode defaults True: one optim step per batch means a recomputed proximal ==
         # pi_theta, so the clip ratio is ~1 (inert) and the recompute is wasted. Using the rollout
@@ -592,13 +611,14 @@ class FireworksPolicyTrainer:
         tis_config = TISConfig(level=rc.tis_mode or "token", cap=rc.tis_cap) if rc.tis_mode else None
         builtin_datums = build_builtin_loss_datums(
             clean_datums,
-            advantages,
+            [1.0] * len(advantages),
             prox_logprobs,
             inf_logprobs,
             prompt_lens,
             tis_config=tis_config,
             policy_loss=algorithm_config.loss_fn or "grpo",
         )
+        builtin_datums = self._apply_token_advantages(builtin_datums, advantages)
 
         kernel_loss, kernel_config = self._builtin_loss
         fwd_bwd_result = await self._run_training_op(

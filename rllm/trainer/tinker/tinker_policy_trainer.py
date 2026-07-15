@@ -42,6 +42,7 @@ ADV_TO_LOSS_FN_AUTO_MAP = {
     rLLMAdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE: "importance_sampling",
     rLLMAdvantageEstimator.GRPO: "ppo",
     rLLMAdvantageEstimator.RLOO: "importance_sampling",
+    rLLMAdvantageEstimator.MINUS_LENGTH_WEIGHTED_MEAN: "importance_sampling",
     rLLMAdvantageEstimator.ECHO: "ppo",
     rLLMAdvantageEstimator.OTHER: "importance_sampling",
 }

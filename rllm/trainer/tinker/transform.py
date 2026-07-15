@@ -123,7 +123,9 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
         assert len(output_logprobs) > 0, "output_logprobs is empty. Cannot build Tinker Datum for training."
         assert step.advantage is not None, "step.advantage is None. This indicates that advantage computation has not been performed yet."
 
-        # build advantage list -- match length of token_output.tokens
+        # The collector's canonical form is a token-aligned list. Retain scalar
+        # expansion here for callers that invoke this low-level transform with
+        # legacy Step data.
         if isinstance(step.advantage, list):
             assert len(step.advantage) == len(output_token_ids), "length mismatch between step.advantage and token_output.tokens"
             advantages = step.advantage
@@ -162,14 +164,14 @@ def transform_trajectory_groups_to_datums(
 ) -> tuple[list[tinker.Datum] | dict[str, list[tinker.Datum]], dict]:
     """
     Transform a list of TrajectoryGroup objects to a list of Tinker Datum objects. Two things are done here:
-    1. Compute the advantages for each group
+    1. Ensure advantages exist (normally computed by the trainer beforehand)
     2. Build the Tinker Datum objects for each group
 
     If the `estimator_map` is used in the algorithm config, we return a dictionary of datums, keyed by the trajectory group role.
     Otherwise, we return a list of datums.
     """
-    # step 1: compute advantages (skip if already pre-computed by buffer)
-    has_advantages = any(step.advantage is not None for group in trajectory_groups for traj in group.trajectories for step in traj.steps)
+    # Direct callers may not have gone through the trainer's compute stage.
+    has_advantages = all(step.advantage is not None for group in trajectory_groups for traj in group.trajectories for step in traj.steps)
     if has_advantages:
         adv_metrics = {}
     else:
