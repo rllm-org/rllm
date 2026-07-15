@@ -102,7 +102,7 @@ python -u train.py \
     rllm.rejection_sample.filter_uniform_groups=true \
     rllm.gateway.port=9091 \
     "rllm.gateway.tunnel=${RLLM_TUNNEL_SPEC}" \
-    rllm.gateway.num_workers=4 \
+    rllm.gateway.num_workers=8 \
     rllm.gateway.cumulative_token_mode=true \
     rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=200 \

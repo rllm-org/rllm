@@ -7,7 +7,7 @@
 #                                           LORA_TRAINER only); same 4x B200-180GB per replica
 #   - training.learning_rate=1e-6        -> ~20x below the LoRA 2e-5; full-param updates every
 #                                           weight directly and destabilizes at LoRA-tuned LRs
-#   - gateway port 9101 (workers 9102-9105) so it can run CONCURRENTLY with the LoRA script
+#   - gateway port 9101 (workers 9102-9109) so it can run CONCURRENTLY with the LoRA script
 # Weight sync uses the full-weight base+arc_v2 delta chain (no LoRA addon); checkpoints promote
 # to a servable HF_BASE_MODEL. NOTE: full-param + KL (rllm.algorithm.kl_beta>0) additionally
 # needs a reference trainer (see backend fireworks.yaml `reference_trainer`) — GRPO with
@@ -111,7 +111,7 @@ python -u train.py \
     rllm.rejection_sample.filter_uniform_groups=true \
     rllm.gateway.port=9101 \
     "rllm.gateway.tunnel=${RLLM_TUNNEL_SPEC}" \
-    rllm.gateway.num_workers=4 \
+    rllm.gateway.num_workers=8 \
     rllm.gateway.cumulative_token_mode=true \
     rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=200 \
