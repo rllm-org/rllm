@@ -172,6 +172,7 @@ def offpolicy_metrics(
         "offpolicy/rollout_ppl": torch.exp(-rollout_seq).mean().item(),
     }
 
+
 # Canonical loss-aggregation modes, shared across backends (verl's names). A loss body stays
 # agnostic and just calls ``ctx.aggregate``; each backend's injected ``aggregate`` (+ its
 # optimizer-step normalization) realizes these semantics with GLOBAL normalization spanning
