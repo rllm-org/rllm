@@ -93,6 +93,10 @@ async def _token_prompt_completion(
     finish_reason = model_output.finish_reason or "stop"
     prompt_len = model_output.prompt_length or len(out_prompt_ids)
     completion_len = model_output.completion_length or len(completion_ids)
+    # R3 router replay: read matrices off the TokenOutput (assemble_model_output
+    # drops them) and carry on the choice like the chat path, else the trace loses
+    # them every cumulative turn.
+    routing_matrices = getattr(token_output, "routing_matrices", None)
 
     return {
         "id": f"cmpl-{uuid.uuid4().hex[:12]}",
@@ -105,6 +109,7 @@ async def _token_prompt_completion(
                 "text": text,
                 "token_ids": completion_ids,
                 "finish_reason": finish_reason,
+                "routing_matrices": routing_matrices,
                 "logprobs": {"token_logprobs": logprobs},
             }
         ],
