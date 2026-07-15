@@ -90,6 +90,9 @@ python -u train.py \
     rllm.compact_filtering.mask_max_turns_exceeded=false \
     rllm.algorithm.adv_estimator=grpo \
     rllm.algorithm.router_replay=R3 \
+    rllm.algorithm.loss_fn=reinforce_kl \
+    '+rllm.algorithm.loss_params.bwd_kl_coef=0.0025' \
+    rllm.algorithm.rollout_correction.bypass_mode=true \
     rllm.algorithm.norm_adv_by_std_in_grpo=true \
     rllm.async_training.enable=true \
     rllm.async_training.mini_batch_size=8 \
