@@ -98,6 +98,7 @@ python -u train.py \
     rllm.compact_filtering.mask_max_prompt_length_exceeded=false \
     rllm.compact_filtering.mask_max_turns_exceeded=false \
     rllm.algorithm.adv_estimator=grpo \
+    rllm.algorithm.router_replay=R3 \
     rllm.algorithm.norm_adv_by_std_in_grpo=true \
     rllm.async_training.enable=true \
     rllm.async_training.mini_batch_size=8 \
