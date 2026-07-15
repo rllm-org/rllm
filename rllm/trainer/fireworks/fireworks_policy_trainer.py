@@ -532,9 +532,10 @@ class FireworksPolicyTrainer:
             from rllm.trainer.tinker.custom_loss import build_custom_loss
 
             # Custom (DPPO) path: logp_old = the inference log-probs on the datums, so pi_old is
-            # never recomputed. offpolicy/* IS logged: the closure compares logp_curr (the
-            # current-policy forward this pass already runs) against the rollout log-probs, so
-            # the train/inference mismatch is free — no proximal forward needed.
+            # never recomputed. offpolicy/* IS logged even under bypass_mode: the closure compares
+            # logp_curr (the current-policy forward this pass already runs) against the rollout
+            # log-probs — the off-policy gap (staleness + train/inference mismatch), free, no
+            # proximal forward. (The bypass gate below only applies to the native builtin path.)
 
             # server_normalized=True: the closure returns a RAW SUM; optim_step sets
             # GradAccNormalization from resolved.agg_mode so the server normalizes once across all
