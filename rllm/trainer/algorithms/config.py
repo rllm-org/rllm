@@ -276,6 +276,11 @@ class rLLMAdvantageEstimator(str, Enum):
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
     PRPO = "prpo"
     RLOO = "rloo"
+    # Baseline = length-weighted mean of shaped rewards over the batch pool; in
+    # token mode (steps carrying metadata["per_token_rewards"]) the baseline is
+    # the mean per-token reward over ALL tokens in the pool and advantages are
+    # emitted per token.
+    MINUS_LENGTH_WEIGHTED_MEAN = "minus_length_weighted_mean"
     # ECHO (arXiv:2605.24517): GRPO advantages + an auxiliary cross-entropy loss
     # on environment-observation tokens. The advantage math is identical to GRPO;
     # selecting `echo` flips on the env-loss term (see `env_loss_coef`).

@@ -142,6 +142,81 @@ def calculate_rloo_advantages(rewards: list[np.ndarray], algorithm_config: Algor
     return advantages_by_group, returns_by_group
 
 
+@register_adv_estimator(rLLMAdvantageEstimator.MINUS_LENGTH_WEIGHTED_MEAN)
+def calculate_minus_length_weighted_mean_advantages(
+    rewards: list[np.ndarray],
+    algorithm_config: AlgorithmConfig,
+    traj_groups: list[TrajectoryGroup] | None = None,
+    **kwargs,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """MinusLengthWeightedMean: baseline = length-weighted mean over the batch pool.
+
+    Outcome mode (default)::
+
+        baseline     = sum_i(shaped_reward_i * L_i) / sum_i(L_i)
+        advantage_i  = shaped_reward_i - baseline
+
+    Token mode — when a step carries ``metadata["per_token_rewards"]`` (a list
+    aligned to ``response_ids``), the baseline is the mean per-token reward over
+    ALL tokens in the pool, and advantages are emitted **per token**::
+
+        baseline              = sum_i sum_t ptr[i,t] / sum_i L_i
+        token_advantage[i,t]  = ptr[i,t] - baseline
+        sample_advantage[i]   = shaped_reward_i - baseline   (metrics/tracking)
+
+    The two modes are one formula: a step without per-token rewards contributes
+    its trajectory's shaped reward at every token, which makes the pooled token
+    mean exactly the length-weighted mean of scalar rewards — so mixed batches
+    compose. ``shaped_reward`` is ``traj.reward`` (shaping happens upstream).
+    ``L_i`` counts response (action) tokens. The pool is every trajectory passed
+    to this call (all groups of the role), matching "the entire generation pool".
+
+    Unlike the other estimators, this one writes ``step.advantage`` itself
+    (per-token lists); the caller's scalar broadcast is skipped via the
+    ``writes_step_advantages`` attribute. Returned scalars are the
+    ``sample_advantage`` values, used for advantage/* metrics.
+    """
+    assert traj_groups is not None, "minus_length_weighted_mean needs traj_groups (per-token rewards and lengths live on the steps)"
+
+    def _step_ptr(step) -> list[float]:
+        ptr = (step.metadata or {}).get("per_token_rewards") if step.metadata else None
+        n = len(step.response_ids)
+        if ptr is not None and len(ptr) != n:
+            logger.warning("per_token_rewards length %d != response_ids length %d; falling back to the trajectory reward for this step", len(ptr), n)
+            ptr = None
+        return [float(x) for x in ptr] if ptr is not None else None
+
+    # Pool pass: baseline over every token of every trajectory in the batch.
+    total_reward, total_tokens = 0.0, 0
+    for group, group_rewards in zip(traj_groups, rewards, strict=True):
+        for traj, r in zip(group.trajectories, group_rewards, strict=True):
+            for step in traj.steps:
+                ptr = _step_ptr(step)
+                n = len(step.response_ids)
+                total_reward += sum(ptr) if ptr is not None else float(r) * n
+                total_tokens += n
+    baseline = total_reward / total_tokens if total_tokens else 0.0
+
+    # Write per-token advantages onto the steps; return scalar sample advantages.
+    advantages_by_group: list[np.ndarray] = []
+    for group, group_rewards in zip(traj_groups, rewards, strict=True):
+        for traj, r in zip(group.trajectories, group_rewards, strict=True):
+            for step in traj.steps:
+                ptr = _step_ptr(step)
+                if ptr is not None:
+                    step.advantage = [p - baseline for p in ptr]
+                else:
+                    step.advantage = [float(r) - baseline] * len(step.response_ids)
+        advantages_by_group.append(np.asarray(group_rewards, dtype=np.float64) - baseline)
+
+    return advantages_by_group, advantages_by_group
+
+
+# The estimator assigns per-token step.advantage lists itself; the caller must
+# not overwrite them with the broadcast scalar.
+calculate_minus_length_weighted_mean_advantages.writes_step_advantages = True
+
+
 @register_adv_estimator(rLLMAdvantageEstimator.ECHO)
 def calculate_echo_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """ECHO (arXiv:2605.24517): advantages are identical to GRPO.
@@ -242,9 +317,16 @@ def collect_reward_and_advantage_from_trajectory_groups(
                 traj_groups=traj_groups,
             )
             assert len(advantages_by_group) == len(traj_groups), "length mismatch between advantages and trajectory groups"
+            # Estimators that emit per-token advantages set step.advantage
+            # themselves (e.g. minus_length_weighted_mean); skip the scalar
+            # broadcast so their lists survive. Scalar returns still feed the
+            # advantage/* metrics below either way.
+            estimator_writes_steps = getattr(advantage_fn, "writes_step_advantages", False)
             for traj_group, advantages_by_traj in zip(traj_groups, advantages_by_group, strict=True):
                 assert len(advantages_by_traj) == len(traj_group.trajectories), "length mismatch between trajectory rewards and computed advantages"
                 advantages_by_role[group_role].extend(np.asarray(advantages_by_traj).tolist())  # for metrics calculation
+                if estimator_writes_steps:
+                    continue
                 for traj, advantage in zip(traj_group.trajectories, advantages_by_traj, strict=True):
                     for step in traj.steps:
                         step.advantage = float(advantage)
