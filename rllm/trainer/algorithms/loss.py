@@ -105,6 +105,66 @@ class LossContext:
 # A loss: (ctx) -> (scalar_loss, metrics)
 LossFn = Callable[[LossContext], "tuple[torch.Tensor, dict[str, float]]"]
 
+
+def offpolicy_metrics(
+    curr: list,
+    rollout: list,
+    masks: list,
+    *,
+    safety_bound: float = 20.0,
+) -> dict[str, float]:
+    """Train/inference-mismatch diagnostics: current policy vs rollout (sampling) log-probs.
+
+    Samples are drawn from the rollout policy; every metric compares the current policy
+    against it over action tokens. On the managed path ``curr`` is ``ctx.logp_curr`` (the
+    genuine current-policy forward the loss pass already ran) — distinct from ``logp_rollout``
+    even under bypass_mode, so this is well-defined for free without a proximal forward pass.
+
+    Args:
+        curr / rollout / masks: parallel lists of per-datum per-token log-probs and action
+            masks (1-D tensors or float lists). ``masks`` is 1.0 on action tokens.
+
+    Returns ``{}`` when no active tokens. Keys are ``offpolicy/*``.
+    """
+    import torch
+
+    seq_curr_means, seq_rollout_means, tok_curr, tok_rollout = [], [], [], []
+    for c, r, m in zip(curr, rollout, masks, strict=False):
+        c = torch.as_tensor(c, dtype=torch.float32)
+        r = torch.as_tensor(r, dtype=torch.float32)
+        m = torch.as_tensor(m, dtype=torch.float32) > 0
+        if not bool(m.any()):
+            continue
+        c, r = c[m], r[m]
+        seq_curr_means.append(c.mean())
+        seq_rollout_means.append(r.mean())
+        tok_curr.append(c)
+        tok_rollout.append(r)
+
+    if not tok_curr:
+        return {}
+
+    curr_flat = torch.cat(tok_curr)
+    rollout_flat = torch.cat(tok_rollout)
+    log_ratio = curr_flat - rollout_flat  # log(pi_curr / pi_rollout)
+    ratio = torch.exp(torch.clamp(log_ratio, min=-safety_bound, max=safety_bound))
+    curr_seq = torch.stack(seq_curr_means)
+    rollout_seq = torch.stack(seq_rollout_means)
+
+    return {
+        # KL(rollout || curr): k1 is signed (drift direction), k3 is the low-variance estimate
+        "offpolicy/kl": (rollout_flat - curr_flat).mean().item(),
+        "offpolicy/k3_kl": (torch.exp(log_ratio) - log_ratio - 1).mean().item(),
+        # importance weight pi_curr/pi_rollout: center (~1) + worst-case tail
+        "offpolicy/ratio/mean": ratio.mean().item(),
+        "offpolicy/ratio/max": ratio.max().item(),
+        # chi-square divergence = variance of the IS weight (stability)
+        "offpolicy/chi2_token": (ratio.square().mean() - 1.0).item(),
+        # absolute per-sequence confidence (catches temperature mismatch / collapse)
+        "offpolicy/training_ppl": torch.exp(-curr_seq).mean().item(),
+        "offpolicy/rollout_ppl": torch.exp(-rollout_seq).mean().item(),
+    }
+
 # Canonical loss-aggregation modes, shared across backends (verl's names). A loss body stays
 # agnostic and just calls ``ctx.aggregate``; each backend's injected ``aggregate`` (+ its
 # optimizer-step normalization) realizes these semantics with GLOBAL normalization spanning
