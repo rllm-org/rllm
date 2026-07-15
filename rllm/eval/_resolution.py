@@ -335,7 +335,8 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
     Harbor task.toml declares ``cpus`` / ``memory_mb`` / ``storage_mb``; without
     these a remote sandbox runs at the backend default (Daytona: 1 GiB), which
     OOM-kills compile-heavy graders (e.g. ``go test ./...``). Modal takes memory
-    in MB; Daytona takes memory/disk in GB. Docker/local ignore the values.
+    in MB; Daytona takes memory/disk in GB; Sailboxes takes memory/disk in GiB.
+    Docker/local ignore the values.
 
     Those per-task values are baked into ``task.toml`` at dataset-build time, so
     an over-provisioned default can only be shrunk by rebuilding the dataset.
@@ -429,6 +430,15 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
         # 30-min idle can reap a long task, e.g. during a stalled LLM call that
         # looks idle). Express the shared lifetime floor in minutes, rounded up.
         kw["auto_stop_interval"] = (lifetime_s + 59) // 60
+    elif backend == "sailboxes":
+        # Sailboxes takes memory/disk in GiB; vCPU derives from the size tier, so
+        # ``cpus`` is not mapped. Sailboxes are persistent (no lifetime cap), so
+        # ``lifetime_s`` doesn't translate to a create knob — boot-wait uses the
+        # backend default.
+        if mem_mb:
+            kw["memory_gib"] = max(1, round(mem_mb / 1024))
+        if disk_mb:
+            kw["disk_gib"] = max(1, round(disk_mb / 1024))
     return kw
 
 

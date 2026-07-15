@@ -22,7 +22,7 @@ class SandboxedAgentFlow(ABC):
     """Base class for agents that run against a sandboxed execution environment.
 
     The sandbox backend is pluggable via ``sandbox_backend``:
-    ``"docker"`` | ``"local"`` | ``"modal"`` | ``"daytona"``.
+    ``"docker"`` | ``"local"`` | ``"modal"`` | ``"daytona"`` | ``"sailboxes"``.
 
     Subclasses implement :meth:`run` and may override :meth:`get_image`
     for per-task images.
@@ -87,8 +87,12 @@ def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
         from rllm.sandbox.backends.daytona import DaytonaSandbox
 
         return DaytonaSandbox(name=name, image=image, **kwargs)
+    elif backend == "sailboxes":
+        from rllm.sandbox.backends.sailboxes import SailboxesSandbox
+
+        return SailboxesSandbox(name=name, image=image, **kwargs)
     else:
-        raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal, daytona")
+        raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal, daytona, sailboxes")
 
 
 def build_snapshot(backend: str, task: Task, key: str, prior_ref: str | None = None, *, force: bool = False, install_script: str = "") -> str | None:
@@ -108,6 +112,10 @@ def build_snapshot(backend: str, task: Task, key: str, prior_ref: str | None = N
         from rllm.sandbox.backends.daytona import build_daytona_snapshot
 
         return build_daytona_snapshot(task, key, force=force, install_script=install_script)
+    elif backend == "sailboxes":
+        from rllm.sandbox.backends.sailboxes import build_sailboxes_snapshot
+
+        return build_sailboxes_snapshot(task, key, prior_ref, force=force, install_script=install_script)
     return None
 
 
@@ -121,6 +129,10 @@ def delete_snapshot(backend: str, ref: str) -> bool:
         from rllm.sandbox.backends.daytona import delete_daytona_snapshot
 
         return delete_daytona_snapshot(ref)
+    elif backend == "sailboxes":
+        from rllm.sandbox.backends.sailboxes import delete_sailboxes_snapshot
+
+        return delete_sailboxes_snapshot(ref)
     return False
 
 
@@ -138,4 +150,8 @@ def snapshot_absent(backend: str, ref: str) -> bool:
         from rllm.sandbox.backends.daytona import _daytona_ref_absent
 
         return _daytona_ref_absent(ref)
+    elif backend == "sailboxes":
+        from rllm.sandbox.backends.sailboxes import _sailboxes_ref_absent
+
+        return _sailboxes_ref_absent(ref)
     return False
