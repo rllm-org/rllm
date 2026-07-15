@@ -437,14 +437,15 @@ class FireworksPolicyTrainer:
 
     @staticmethod
     def _compute_offpolicy_metrics(
-        old_logprobs: list[list[float]],
+        curr_logprobs: list[list[float]],
         rollout_logprobs: list[list[float]],
         masks: list[list[int]],
     ) -> dict[str, float]:
-        # Non-bypass builtin path: old_logprobs is the proximal forward (current policy at
-        # batch start). Delegate to the shared helper so this and the custom-loss path emit
-        # the same curated offpolicy/* set.
-        return offpolicy_metrics(old_logprobs, rollout_logprobs, masks)
+        # Non-bypass builtin path: curr_logprobs is the proximal forward, i.e. the current
+        # policy at batch start (a single pre-optimizer-step forward, so proximal == current).
+        # Delegate to the shared helper so this and the custom-loss path emit the same curated
+        # offpolicy/* set (current vs rollout).
+        return offpolicy_metrics(curr_logprobs, rollout_logprobs, masks)
 
     def resolve_builtin_loss(self, algorithm_config: AlgorithmConfig, profile=None):
         """Resolve the builtin server-side loss kernel at setup time.
@@ -579,7 +580,7 @@ class FireworksPolicyTrainer:
             # where prox == rollout), so only compute it when we did the proximal forward.
             adv_metrics.update(
                 self._compute_offpolicy_metrics(
-                    old_logprobs=prox_logprobs,
+                    curr_logprobs=prox_logprobs,
                     rollout_logprobs=inf_logprobs,
                     masks=[list(datum.loss_fn_inputs["mask"].data) for datum in raw_datums],
                 )
