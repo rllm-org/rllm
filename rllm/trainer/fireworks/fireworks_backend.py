@@ -380,7 +380,11 @@ class FireworksBackend(TinkerBackend):
                     await self.policy_trainer.save_dcp_checkpoint(global_step)
                 if snapshot_name:
                     experiment = self.full_config.rllm.trainer.get("experiment_name", "default")
-                    output_model_id = f"{experiment}-step-{global_step}"
+                    # Embed the snapshot name (step-N-<job suffix>) rather than the bare
+                    # step number: model ids are account-global, and a relaunch with the
+                    # same experiment_name would otherwise collide with the previous
+                    # run's promotions at every matching step (ALREADY_EXISTS).
+                    output_model_id = f"{experiment}-{snapshot_name}"
                     try:
                         await self.policy_trainer.promote_checkpoint(
                             snapshot_name,
