@@ -31,7 +31,7 @@ from collections import defaultdict
 
 import tinker
 
-from rllm.trainer.algorithms.loss import LossContext, ResolvedLoss
+from rllm.trainer.algorithms.loss import LossContext, ResolvedLoss, offpolicy_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,7 @@ def build_custom_loss(
         n = len(logprobs_list)
         num_tokens = 0.0
         num_seqs = 0.0
+        offp_curr, offp_rollout, offp_mask = [], [], []  # for off-policy diagnostics
         for i, logp_curr in enumerate(logprobs_list):
             action_mask = torch.tensor(action_mask_list[i], dtype=logp_curr.dtype)
             ctx = LossContext(
@@ -114,6 +115,9 @@ def build_custom_loss(
             num_seqs += 1.0 if tok > 0 else 0.0
             for k, v in metrics_i.items():
                 metric_sums[k] += float(v)
+            offp_curr.append(logp_curr.detach())
+            offp_rollout.append(ctx.logp_rollout)
+            offp_mask.append(action_mask)
 
         if server_normalized:
             loss = total  # server divides by NUM_LOSS_TOKENS / NUM_SEQUENCES across the window
@@ -124,6 +128,10 @@ def build_custom_loss(
 
         out = {k: v / max(1, n) for k, v in metric_sums.items()}
         out["custom_loss/num_datums"] = float(n)
+        # off-policy gap: current policy (logp_curr) vs rollout — captures staleness +
+        # train/inference mismatch. Free here (no proximal forward) and non-zero even under
+        # bypass_mode, where logp_old == logp_rollout.
+        out.update(offpolicy_metrics(offp_curr, offp_rollout, offp_mask))
         return loss, out
 
     return stripped, loss_fn
