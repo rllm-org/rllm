@@ -30,7 +30,7 @@ from rllm.trainer.algorithms import (
     CompactFilteringConfig,
     TransformConfig,
 )
-from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
+from rllm.trainer.algorithms.loss import native_loss_names, offpolicy_metrics, resolve_loss
 from rllm.trainer.tinker.tinker_policy_trainer import (
     compute_schedule_lr_multiplier,
     require_training_client,
@@ -437,90 +437,15 @@ class FireworksPolicyTrainer:
 
     @staticmethod
     def _compute_offpolicy_metrics(
-        old_logprobs: list[list[float]],
+        curr_logprobs: list[list[float]],
         rollout_logprobs: list[list[float]],
         masks: list[list[int]],
     ) -> dict[str, float]:
-        import torch
-
-        safety_bound = 20.0
-        training_means = []
-        rollout_means = []
-        log_ratio_sums = []
-        token_old = []
-        token_rollout = []
-
-        for old_lp, rollout_lp, mask in zip(old_logprobs, rollout_logprobs, masks, strict=False):
-            active_old = []
-            active_rollout = []
-            for old, rollout, m in zip(old_lp, rollout_lp, mask, strict=False):
-                if m:
-                    active_old.append(float(old))
-                    active_rollout.append(float(rollout))
-            if not active_old:
-                continue
-
-            old_t = torch.tensor(active_old, dtype=torch.float32)
-            rollout_t = torch.tensor(active_rollout, dtype=torch.float32)
-            training_means.append(old_t.mean())
-            rollout_means.append(rollout_t.mean())
-            log_ratio_sums.append((old_t - rollout_t).sum())
-            token_old.append(old_t)
-            token_rollout.append(rollout_t)
-
-        if not token_old:
-            return {}
-
-        mean_log_prob_training = torch.stack(training_means)
-        mean_log_prob_rollout = torch.stack(rollout_means)
-        old_flat = torch.cat(token_old)
-        rollout_flat = torch.cat(token_rollout)
-        log_ratio = old_flat - rollout_flat
-        logprob_abs_diff = log_ratio.abs()
-        old_prob = torch.exp(old_flat)
-        rollout_prob = torch.exp(rollout_flat)
-        prob_abs_diff = (old_prob - rollout_prob).abs()
-        log_ratio_safe = torch.clamp(log_ratio, min=-safety_bound, max=safety_bound)
-        ratio = torch.exp(log_ratio_safe)
-        log_ppl_diff = mean_log_prob_rollout - mean_log_prob_training
-
-        metrics = {
-            "offpolicy/kl": (rollout_flat - old_flat).mean().item(),
-            "offpolicy/k3_kl": (torch.exp(log_ratio) - log_ratio - 1).mean().item(),
-            "offpolicy/logprob_abs_diff/mean": logprob_abs_diff.mean().item(),
-            "offpolicy/logprob_abs_diff/min": logprob_abs_diff.min().item(),
-            "offpolicy/logprob_abs_diff/max": logprob_abs_diff.max().item(),
-            "offpolicy/prob_abs_diff/mean": prob_abs_diff.mean().item(),
-            "offpolicy/prob_abs_diff/min": prob_abs_diff.min().item(),
-            "offpolicy/prob_abs_diff/max": prob_abs_diff.max().item(),
-            "offpolicy/training_ppl": torch.exp(-mean_log_prob_training).mean().item(),
-            "offpolicy/training_log_ppl": (-mean_log_prob_training).mean().item(),
-            "offpolicy/rollout_ppl": torch.exp(-mean_log_prob_rollout).mean().item(),
-            "offpolicy/rollout_log_ppl": (-mean_log_prob_rollout).mean().item(),
-            "offpolicy/log_ppl_diff": log_ppl_diff.mean().item(),
-            "offpolicy/log_ppl_abs_diff": log_ppl_diff.abs().mean().item(),
-            "offpolicy/log_ppl_diff_min": log_ppl_diff.min().item(),
-            "offpolicy/log_ppl_diff_max": log_ppl_diff.max().item(),
-            "offpolicy/ppl_ratio": torch.exp(log_ppl_diff).mean().item(),
-            "offpolicy/ratio/mean": ratio.mean().item(),
-            "offpolicy/ratio/min": ratio.min().item(),
-            "offpolicy/ratio/max": ratio.max().item(),
-        }
-
-        if old_prob.numel() > 1:
-            old_centered = old_prob - old_prob.mean()
-            rollout_centered = rollout_prob - rollout_prob.mean()
-            denom = torch.sqrt(old_centered.square().sum() * rollout_centered.square().sum())
-            if denom.item() > 0.0:
-                metrics["offpolicy/prob_pearson_corr"] = ((old_centered * rollout_centered).sum() / denom).item()
-
-        metrics["offpolicy/chi2_token"] = (ratio.square().mean() - 1.0).item()
-
-        log_ratio_sum = torch.stack(log_ratio_sums)
-        log_ratio_sum_safe = torch.clamp(log_ratio_sum, min=-safety_bound, max=safety_bound)
-        metrics["offpolicy/chi2_seq"] = (torch.exp(2.0 * log_ratio_sum_safe).mean() - 1.0).item()
-
-        return metrics
+        # Non-bypass builtin path: curr_logprobs is the proximal forward, i.e. the current
+        # policy at batch start (a single pre-optimizer-step forward, so proximal == current).
+        # Delegate to the shared helper so this and the custom-loss path emit the same curated
+        # offpolicy/* set (current vs rollout).
+        return offpolicy_metrics(curr_logprobs, rollout_logprobs, masks)
 
     def resolve_builtin_loss(self, algorithm_config: AlgorithmConfig, profile=None):
         """Resolve the builtin server-side loss kernel at setup time.
@@ -607,8 +532,10 @@ class FireworksPolicyTrainer:
             from rllm.trainer.tinker.custom_loss import build_custom_loss
 
             # Custom (DPPO) path: logp_old = the inference log-probs on the datums, so pi_old is
-            # never recomputed. offpolicy/* isn't logged (it needs a real proximal forward — a
-            # per-pass diagnostic cost); the loss emits its own (e.g. dppo_tv/mask_frac).
+            # never recomputed. offpolicy/* IS logged even under bypass_mode: the closure compares
+            # logp_curr (the current-policy forward this pass already runs) against the rollout
+            # log-probs — the off-policy gap (staleness + train/inference mismatch), free, no
+            # proximal forward. (The bypass gate below only applies to the native builtin path.)
 
             # server_normalized=True: the closure returns a RAW SUM; optim_step sets
             # GradAccNormalization from resolved.agg_mode so the server normalizes once across all
@@ -623,8 +550,10 @@ class FireworksPolicyTrainer:
             )
             if hasattr(fwd_bwd_result, "metrics") and fwd_bwd_result.metrics:
                 for k, v in fwd_bwd_result.metrics.items():
-                    if k not in self._METRIC_SKIP_KEYS:
-                        adv_metrics[f"train/{k}"] = v
+                    if k in self._METRIC_SKIP_KEYS:
+                        continue
+                    # keep the offpolicy/ namespace consistent with the builtin path
+                    adv_metrics[k if k.startswith("offpolicy/") else f"train/{k}"] = v
             logger.info("Fireworks custom-loss pass: loss_fn=%s agg_mode=%s params=%s", resolved.name, resolved.agg_mode, resolved.params)
             return raw_datums, [], adv_metrics
 
@@ -652,7 +581,7 @@ class FireworksPolicyTrainer:
             # where prox == rollout), so only compute it when we did the proximal forward.
             adv_metrics.update(
                 self._compute_offpolicy_metrics(
-                    old_logprobs=prox_logprobs,
+                    curr_logprobs=prox_logprobs,
                     rollout_logprobs=inf_logprobs,
                     masks=[list(datum.loss_fn_inputs["mask"].data) for datum in raw_datums],
                 )
