@@ -1,17 +1,5 @@
 #!/usr/bin/env bash
-# qwen3p5-debug-fullft — FULL-PARAMETER counterpart of qwen3p5-debug.sh
-# (Qwen3.5-35B-A3B debug run on tb-v2-debug, 8 tasks). Differences from the LoRA script:
-#   - model.lora_rank=0                  -> full fine-tuning (0 is the SDK's full-param signal;
-#                                           never null — it breaks the weight syncer)
-#   - shape qwen3p5-35b-a3b-256k         -> POLICY_TRAINER-validated (the -lora shape is
-#                                           LORA_TRAINER only); same 4x B200-180GB per replica
-#   - training.learning_rate=1e-6        -> ~20x below the LoRA 2e-5; full-param updates every
-#                                           weight directly and destabilizes at LoRA-tuned LRs
-#   - gateway port 9101 (workers 9102-9109) so it can run CONCURRENTLY with the LoRA script
-# Weight sync uses the full-weight base+arc_v2 delta chain (no LoRA addon); checkpoints promote
-# to a servable HF_BASE_MODEL. NOTE: full-param + KL (rllm.algorithm.kl_beta>0) additionally
-# needs a reference trainer (see backend fireworks.yaml `reference_trainer`) — GRPO with
-# kl_beta=0 (this script) does not.
+# qwen3p5-debug_lora_r3 — Qwen3.5-35B-A3B LoRA + R3 router-replay debug run on the tb-v2-debug dataset (8 tasks).
 #
 # Fireworks backend + Modal sandboxes + terminus2. Snapshot of the tuned config:
 #   - 32 rollouts per task (training.group_size) — GRPO/ECHO group of 32
@@ -23,14 +11,16 @@
 #     and DELETED at shutdown (also true for a reattached deployment_id)
 #
 # Before running:
-#   export FIREWORKS_API_KEY=...     # training reads the env var (falls back to ~/.rllm/config.json)
+#   export FIREWORKS_API_KEY=...     # training reads the env var
 #   rllm dataset pull tb-v2-debug    # no-op once pulled
+#   rllm tunnel up                   # Modal sandboxes reach the gateway (port 9090)
 #
-# Run (from anywhere; the script cd's itself). Give the job its own tunnel so it
-# never collides with other jobs' gateways (reserved ngrok domain or cloudflared):
-#   bash cookbooks/terminal-rl/qwen3p5-debug-fullft.sh 'rllm.gateway.tunnel=ngrok:thw2.ngrok.app'
+# Run (from anywhere; the script cd's itself):
+#   bash cookbooks/terminal-rl/qwen3p5-debug_lora_r3.sh
 # Override anything by appending Hydra args, e.g.:
-#   bash qwen3p5-debug-fullft.sh fireworks_config.rollout_deployment_replica_count=4
+#   bash qwen3p5-debug_lora_r3.sh fireworks_config.rollout_deployment_replica_count=4
+# Reattach an existing rollout deployment (it is still deleted at shutdown):
+#   bash qwen3p5-debug_lora_r3.sh fireworks_infra.deployments.rollout.deployment_id=accounts/rllm-project/deployments/<id>
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -63,8 +53,9 @@ export TERMINUS_INTERLEAVED_THINKING="${TERMINUS_INTERLEAVED_THINKING:-1}"
 export RLLM_SANDBOX_MAX_CPUS="${RLLM_SANDBOX_MAX_CPUS:-0.125}"
 export RLLM_SANDBOX_MAX_MEMORY_MB="${RLLM_SANDBOX_MAX_MEMORY_MB:-256}"
 # Per-job tunnel endpoint: every concurrent job needs its OWN tunnel (reserved
-# ngrok domain or "cloudflared"); the LoRA script uses thw1.ngrok.app.
-export RLLM_TUNNEL_SPEC="${RLLM_TUNNEL_SPEC:-ngrok:thw2.ngrok.app}"
+# ngrok domain or "cloudflared"); sharing one endpoint misroutes sandbox traffic.
+# The full-FT counterpart (qwen3p5-debug_fullft_r3.sh) uses thw2.ngrok.app.
+export RLLM_TUNNEL_SPEC="${RLLM_TUNNEL_SPEC:-ngrok:thw1.ngrok.app}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-3600}"
 # Sandbox LIFETIME floor, provider-agnostic (not idle time). Must exceed the agent run timeout
 # above plus setup/verify, or sandboxes get reaped mid-rollout — surfacing as
@@ -75,12 +66,12 @@ python -u train.py \
     rllm/backend=fireworks \
     model.name=accounts/fireworks/models/qwen3p5-35b-a3b \
     model.tokenizer_model=Qwen/Qwen3.5-35B-A3B \
-    model.lora_rank=0 \
-    fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3p5-35b-a3b-256k \
+    model.lora_rank=32 \
+    fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3p5-35b-a3b-256k-lora \
     fireworks_config.policy_trainer_replica_count=2 \
     fireworks_config.rollout_deployment_replica_count=4 \
     training.group_size=32 \
-    training.learning_rate=1e-6 \
+    training.learning_rate=2e-5 \
     training.max_length=133072 \
     rllm.rollout.train.temperature=1.0 \
     rllm.rollout.train.top_p=1.0 \
@@ -109,16 +100,16 @@ python -u train.py \
     rllm.workflow.n_parallel_tasks=256 \
     rllm.workflow.raise_on_error=false \
     rllm.rejection_sample.filter_uniform_groups=true \
-    rllm.gateway.port=9101 \
+    rllm.gateway.port=9091 \
     "rllm.gateway.tunnel=${RLLM_TUNNEL_SPEC}" \
     rllm.gateway.num_workers=8 \
     rllm.gateway.cumulative_token_mode=true \
     rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=200 \
-    rllm.trainer.dump_batch_dir=train_batches/qwen3p5-35b-a3b-tb-v2-debug-fullft \
+    rllm.trainer.dump_batch_dir=train_batches/qwen3p5-35b-a3b-tb-v2-debug-lora-r3 \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='terminal-rl' \
-    rllm.trainer.experiment_name='qwen3p5-35b-a3b-tb-v2-debug-fullft' \
+    rllm.trainer.experiment_name='qwen3p5-35b-a3b-tb-v2-debug-lora-r3' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=-1 \
     rllm.trainer.save_freq=10 \
