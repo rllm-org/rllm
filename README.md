@@ -156,6 +156,7 @@ Under the hood:
 - [TherapyGym](https://therapygym.stanford.edu/) - Evaluating and Aligning Clinical Fidelity and Safety in Therapy Chatbots
 - [SandMLE](https://arxiv.org/pdf/2604.04872) - Synthetic Sandbox for Training MLE Agents
 - [AxPO](https://byungkwanlee.github.io/AXPO-page/) - Agent Explorative Policy Optimization for Multimodal Agentic Reasoning
+- [Remember When It Matters](https://arxiv.org/abs/2607.08716) — Proactive Memory Agent for Long-Horizon Agents
   
 ## Articles & Blog Posts
 
