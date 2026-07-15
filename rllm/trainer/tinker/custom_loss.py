@@ -128,8 +128,9 @@ def build_custom_loss(
 
         out = {k: v / max(1, n) for k, v in metric_sums.items()}
         out["custom_loss/num_datums"] = float(n)
-        # current-policy (logp_curr) vs rollout mismatch — free here (no proximal forward),
-        # and meaningful even under bypass_mode where logp_old == logp_rollout.
+        # off-policy gap: current policy (logp_curr) vs rollout — captures staleness +
+        # train/inference mismatch. Free here (no proximal forward) and non-zero even under
+        # bypass_mode, where logp_old == logp_rollout.
         out.update(offpolicy_metrics(offp_curr, offp_rollout, offp_mask))
         return loss, out
 

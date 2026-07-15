@@ -113,12 +113,19 @@ def offpolicy_metrics(
     *,
     safety_bound: float = 20.0,
 ) -> dict[str, float]:
-    """Train/inference-mismatch diagnostics: current policy vs rollout (sampling) log-probs.
+    """Off-policy diagnostics: current policy (training engine) vs the rollout/behavior
+    distribution, over action tokens (samples are drawn from the rollout policy).
 
-    Samples are drawn from the rollout policy; every metric compares the current policy
-    against it over action tokens. On the managed path ``curr`` is ``ctx.logp_curr`` (the
-    genuine current-policy forward the loss pass already ran) — distinct from ``logp_rollout``
-    even under bypass_mode, so this is well-defined for free without a proximal forward pass.
+    The current-vs-rollout gap has two sources, which these metrics do NOT separate:
+      * staleness — the current weights have drifted from the sampler snapshot that generated
+        the rollout (gradient steps taken since sampling; this is *why* the rollout log-probs
+        are off-policy in the first place), and
+      * train/inference mismatch — the training forward and the inference sampler disagree
+        even at identical weights (precision / kernel / implementation differences).
+
+    On the managed path ``curr`` is ``ctx.logp_curr`` (the genuine current-policy forward the
+    loss pass already ran) — distinct from ``logp_rollout`` even under bypass_mode, so this is
+    well-defined for free without a proximal forward pass.
 
     Args:
         curr / rollout / masks: parallel lists of per-datum per-token log-probs and action
