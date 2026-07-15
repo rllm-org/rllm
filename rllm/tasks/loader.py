@@ -282,7 +282,12 @@ def _merge_task_toml_metadata(task_dir: Path, base: dict) -> dict:
     merged["agent_user"] = raw.get("agent", {}).get("user", merged.get("agent_user"))
     merged["verifier_user"] = raw.get("verifier", {}).get("user", merged.get("verifier_user"))
     merged["verifier_timeout"] = raw.get("verifier", {}).get("timeout_sec", merged.get("verifier_timeout", 600.0))
-    merged["agent_timeout"] = raw.get("agent", {}).get("timeout_sec", merged.get("agent_timeout", 600.0))
+    # Only set agent_timeout when the task actually declares one; otherwise leave
+    # it unset so the harness run timeout governs the rollout (see
+    # cli_harness._effective_timeout) rather than an invented per-task cap.
+    _agent_timeout = raw.get("agent", {}).get("timeout_sec")
+    if _agent_timeout is not None:
+        merged["agent_timeout"] = _agent_timeout
     rllm_section = raw.get("rllm", {}) or {}
     merged["setup_commands"] = rllm_section.get("setup_commands", merged.get("setup_commands", [])) or []
     return merged
@@ -552,7 +557,12 @@ def _load_task_from_dir(
     metadata["agent_user"] = raw.get("agent", {}).get("user")
     metadata["verifier_user"] = raw.get("verifier", {}).get("user")
     metadata["verifier_timeout"] = raw.get("verifier", {}).get("timeout_sec", 600.0)
-    metadata["agent_timeout"] = raw.get("agent", {}).get("timeout_sec", 600.0)
+    # Only set agent_timeout when the task declares one; otherwise leave it unset
+    # so the harness run timeout governs the rollout (cli_harness._effective_timeout)
+    # rather than an invented per-task cap.
+    _agent_timeout = raw.get("agent", {}).get("timeout_sec")
+    if _agent_timeout is not None:
+        metadata["agent_timeout"] = _agent_timeout
     rllm_section = raw.get("rllm", {}) or {}
     metadata["setup_commands"] = rllm_section.get("setup_commands", []) or []
 

@@ -69,8 +69,10 @@ _DEFAULT_RESOURCES = {
     "build_timeout_sec": 1800.0,
 }
 
+# Scale-SWE rows carry no per-task agent budget, so we don't invent one: the
+# task.toml omits [agent].timeout_sec and the per-rollout wall-clock is governed
+# by the harness run timeout (RLLM_HARNESS_RUN_TIMEOUT_S, default 3600) instead.
 _DEFAULT_TIMEOUTS = {
-    "agent_timeout_sec": 1800.0,
     "verifier_timeout_sec": 1800.0,
 }
 
@@ -233,9 +235,6 @@ def _build_task_toml(
         f"storage_mb = {_DEFAULT_RESOURCES['storage_mb']}",
         f"build_timeout_sec = {_DEFAULT_RESOURCES['build_timeout_sec']}",
         "allow_internet = true",
-        "",
-        "[agent]",
-        f"timeout_sec = {_DEFAULT_TIMEOUTS['agent_timeout_sec']}",
         "",
         "[verifier]",
         f"timeout_sec = {_DEFAULT_TIMEOUTS['verifier_timeout_sec']}",
