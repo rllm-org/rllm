@@ -240,7 +240,7 @@ def create_app(
     # path-scoped (only touches /v1/responses) so passing through when other
     # requests arrive is free.
     if os.getenv("RLLM_API_FORMAT", "chat") == "responses":
-        from rllm_model_gateway.middleware import ResponsesAdapterMiddleware
+        from rllm_model_gateway.responses_middleware import ResponsesAdapterMiddleware
 
         app.add_middleware(ResponsesAdapterMiddleware, session_manager=sessions)
 
