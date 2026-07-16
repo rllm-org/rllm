@@ -444,6 +444,42 @@ def test_codex_invocation_uses_exec_with_bypass_flags_and_bare_model_id():
     assert "</dev/null" in cmd
 
 
+def test_codex_invocation_adds_image_flag_from_task_metadata():
+    """When task.metadata has 'image_file', the invocation must include
+    --image <path> before --model so Codex encodes it as input_image."""
+    h = CodexHarness()
+    task = Task(id="t-img", instruction="describe the chart", metadata={"image_file": "chart.png"})
+    cmd = h.build_invocation("describe the chart", task, _make_config(model="openai/Qwen3.5-9B"))
+    assert "--image chart.png" in cmd
+    assert cmd.index("--image") < cmd.index("--model")
+
+
+def test_codex_invocation_adds_multiple_image_flags():
+    """When task.metadata has 'image_files' (list), each gets its own --image flag."""
+    h = CodexHarness()
+    task = Task(id="t-multi", instruction="compare", metadata={"image_files": ["a.png", "b.png"]})
+    cmd = h.build_invocation("compare", task, _make_config(model="openai/Qwen3.5-9B"))
+    assert "--image a.png" in cmd
+    assert "--image b.png" in cmd
+    assert cmd.index("--image b.png") < cmd.index("--model")
+
+
+def test_codex_invocation_no_image_flag_without_metadata():
+    """Without image metadata, no --image flag appears (regression guard)."""
+    h = CodexHarness()
+    task = Task(id="t-plain", instruction="fix bug", metadata={})
+    cmd = h.build_invocation("fix bug", task, _make_config(model="openai/gpt-5"))
+    assert "--image" not in cmd
+
+
+def test_codex_invocation_image_path_with_spaces_is_quoted():
+    """File paths with spaces must be shell-quoted to avoid splitting."""
+    h = CodexHarness()
+    task = Task(id="t-sp", instruction="read", metadata={"image_file": "my chart.png"})
+    cmd = h.build_invocation("read", task, _make_config(model="openai/Qwen3.5-9B"))
+    assert "--image 'my chart.png'" in cmd
+
+
 # ---------------------------------------------------------------------------
 # QwenCodeHarness — env-only routing, --yolo for unattended runs
 # ---------------------------------------------------------------------------

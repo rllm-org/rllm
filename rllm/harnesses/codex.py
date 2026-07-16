@@ -150,12 +150,22 @@ class CodexHarness(BaseCliHarness):
         # The ``--`` is load-bearing: without it Codex tries to parse the
         # instruction as flags when it starts with ``-``.
         _, model_id, _ = self.ensure_provider_prefix(config.model)
+
+        image_flags = ""
+        if task.metadata:
+            image_file = task.metadata.get("image_file")
+            if image_file:
+                image_flags = f"--image {shlex.quote(image_file)} "
+            elif task.metadata.get("image_files"):
+                image_flags = " ".join(f"--image {shlex.quote(f)}" for f in task.metadata["image_files"]) + " "
+
         return (
             f"{self._cd_prefix(task)}"
             f". $HOME/.nvm/nvm.sh 2>/dev/null; "
             f"codex exec "
             f"--dangerously-bypass-approvals-and-sandbox "
             f"--skip-git-repo-check "
+            f"{image_flags}"
             f"--model {shlex.quote(model_id)} "
             f"--json "
             f"--enable unified_exec "
