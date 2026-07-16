@@ -22,6 +22,10 @@ class SessionManager:
         self._metadata: dict[str, dict[str, Any]] = {}
         self._created_at: dict[str, float] = {}
         self._sampling_params: dict[str, dict[str, Any]] = {}
+        # Data URLs for images seen on this session's Responses requests.
+        # Populated by ResponsesAdapterMiddleware; consumed by proxy's cumulative
+        # path to reconstruct multi_modal_data. See vlm_tito.apply_vlm_tito.
+        self._session_images: dict[str, list[str]] = {}
 
     def ensure_session(self, session_id: str, metadata: dict[str, Any] | None = None) -> str:
         """Ensure a session exists (create if needed).  Returns session_id."""
@@ -49,6 +53,19 @@ class SessionManager:
     def get_sampling_params(self, session_id: str) -> dict[str, Any] | None:
         """Return sampling params for a session, or None if not set."""
         return self._sampling_params.get(session_id)
+
+    def set_images(self, session_id: str, data_urls: list[str]) -> None:
+        """Replace this session's image history with ``data_urls``.
+
+        Codex CLI's Responses API is cumulative — each turn resends the full
+        input history (including prior ``input_image`` blocks). Using ``set``
+        rather than ``append`` prevents duplicate accumulation across turns.
+        """
+        self._session_images[session_id] = list(data_urls)
+
+    def get_images(self, session_id: str) -> list[str]:
+        """Return accumulated data URLs for a session (empty list if none)."""
+        return self._session_images.get(session_id, [])
 
     async def get_session_info(self, session_id: str) -> SessionInfo | None:
         """Return session info including trace count."""
@@ -87,4 +104,5 @@ class SessionManager:
         self._metadata.pop(session_id, None)
         self._created_at.pop(session_id, None)
         self._sampling_params.pop(session_id, None)
+        self._session_images.pop(session_id, None)
         return await self.store.delete_session(session_id)

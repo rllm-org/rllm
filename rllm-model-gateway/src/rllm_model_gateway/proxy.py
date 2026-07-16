@@ -29,6 +29,7 @@ from rllm_model_gateway.token_accumulator import (
     TokenAccumulator,
     extract_new_messages,
 )
+from rllm_model_gateway.vlm_tito import apply_vlm_tito, resolve_image_pad_token_id
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +287,15 @@ class ReverseProxy:
         completions_body = {k: v for k, v in request_body.items() if k not in ("messages", "stream", "stream_options", "tools", "tool_choice")}
         completions_body["prompt"] = token_ids
         completions_body["add_special_tokens"] = False
+
+        # VLM TITO: dedup pad tokens + inject multi_modal_data. No-op unless the
+        # SessionManager has images accumulated for this session (populated by
+        # ResponsesAdapterMiddleware on input_image blocks). Text-only paths
+        # short-circuit inside apply_vlm_tito.
+        sm = getattr(request.app.state, "session_manager", None)
+        images = sm.get_images(session_id) if sm is not None else []
+        pad_id = resolve_image_pad_token_id(acc.renderer) if acc.renderer is not None else None
+        apply_vlm_tito(completions_body, images, pad_token_id=pad_id)
 
         if is_stream:
             return await self._handle_cumulative_streaming(request, request_body, completions_body, session_id, acc, token_ids)

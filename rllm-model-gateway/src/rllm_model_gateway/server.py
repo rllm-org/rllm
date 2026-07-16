@@ -232,6 +232,18 @@ def create_app(
         model=config.model,
     )
 
+    # ResponsesAdapterMiddleware runs OUTERMOST (added last -> wraps outer).
+    # Client → ResponsesAdapter (translate /v1/responses → /v1/chat/completions)
+    #        → SessionRoutingMiddleware (strip /sessions/{sid} + inject params)
+    #        → proxy.
+    # Only registered when RLLM_API_FORMAT=responses; the middleware itself is
+    # path-scoped (only touches /v1/responses) so passing through when other
+    # requests arrive is free.
+    if os.getenv("RLLM_API_FORMAT", "chat") == "responses":
+        from rllm_model_gateway.middleware import ResponsesAdapterMiddleware
+
+        app.add_middleware(ResponsesAdapterMiddleware, session_manager=sessions)
+
     # -- Health endpoints --------------------------------------------------
 
     @app.get("/health")
@@ -438,6 +450,10 @@ def create_app(
     app.state.router = router  # type: ignore[attr-defined]
     app.state.proxy = proxy  # type: ignore[attr-defined]
     app.state.sessions = sessions  # type: ignore[attr-defined]
+    # ``session_manager`` alias — proxy._handle_cumulative_turn reads this to
+    # fetch per-session image state for VLM TITO. Same object as ``sessions``;
+    # aliased for readability at consumption sites.
+    app.state.session_manager = sessions  # type: ignore[attr-defined]
     app.state.store = store  # type: ignore[attr-defined]
 
     return app
