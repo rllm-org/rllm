@@ -10,6 +10,9 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
+# ninja is required for flashinfer JIT compilation (used by vLLM tool calling)
+which ninja >/dev/null 2>&1 || apt-get install -y ninja-build
+
 MODEL_PATH=Qwen/Qwen3.5-9B
 
 python3 -m examples.codex_code.train \
@@ -17,7 +20,7 @@ python3 -m examples.codex_code.train \
     +model.name=$MODEL_PATH \
     data.train_batch_size=8 \
     data.max_prompt_length=1024 \
-    data.max_response_length=2048 \
+    data.max_response_length=4096 \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -46,6 +49,8 @@ python3 -m examples.codex_code.train \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm.enable_auto_tool_choice=True \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm.tool_call_parser=qwen3_xml \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=5120 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
@@ -58,14 +63,14 @@ python3 -m examples.codex_code.train \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='rllm-codex-code' \
-    trainer.experiment_name='codex_code_bwrap_9b' \
+    trainer.experiment_name='codex_code_bwrap_9b_v2' \
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=1000 \
     trainer.test_freq=5 \
-    trainer.log_episodes=True \
-    trainer.episode_log_dir=/local-ssd/rllm-output/episode_logs \
+    ++rllm.episode_logging.log_episodes=True \
+    ++rllm.episode_logging.episode_log_dir=/local-ssd/rllm-output/episode_logs \
     trainer.default_hdfs_dir=null \
     trainer.total_epochs=50
 
