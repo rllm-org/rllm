@@ -147,7 +147,7 @@ def _decode_json_list(value: Any) -> list[str]:
         except (SyntaxError, ValueError):
             logger.warning("[scaleswe] could not parse list-valued field: %r", text[:120])
             return []
-    if isinstance(loaded, (list, tuple)):
+    if isinstance(loaded, list | tuple):
         return [str(v) for v in loaded]
     return [str(loaded)]
 
@@ -414,19 +414,8 @@ def _build_solution_script(workdir: str, parent_commit: str, has_patch: bool) ->
         return "#!/bin/bash\necho 'oracle solve.sh: no gold patch in row' >&2\nexit 1\n"
     reset = ""
     if parent_commit:
-        reset = (
-            f'git checkout -f "{parent_commit}"\n'
-            f'git reset --hard "{parent_commit}"\n'
-            "git clean -fd >/dev/null 2>&1 || true\n"
-        )
-    return (
-        "#!/bin/bash\n"
-        "set -e\n"
-        f"cd {wd}\n"
-        f'git config --global --add safe.directory {wd} 2>/dev/null || true\n'
-        f"{reset}"
-        "git apply -v /solution/gold.patch || git apply --3way -v /solution/gold.patch\n"
-    )
+        reset = f'git checkout -f "{parent_commit}"\ngit reset --hard "{parent_commit}"\ngit clean -fd >/dev/null 2>&1 || true\n'
+    return f"#!/bin/bash\nset -e\ncd {wd}\ngit config --global --add safe.directory {wd} 2>/dev/null || true\n{reset}git apply -v /solution/gold.patch || git apply --3way -v /solution/gold.patch\n"
 
 
 def _write_dataset_toml(out: Path, *, name: str, split: str, description: str, default_agent: str) -> None:
@@ -464,7 +453,6 @@ def _materialize_task(task_dir: Path, row: dict) -> dict:
     parent_commit = row.get("parent_commit") or ""
     image_url = row.get("image_url") or ""
     workdir = row.get("workdir") or "/workspace"
-    pre_commands = row.get("pre_commands") or ""
 
     (task_dir / "task.toml").write_text(
         _build_task_toml(
@@ -613,9 +601,7 @@ def build_benchmark(
             no_patch += 1
         written += 1
 
-    description = (catalog_entry or {}).get("description") or (
-        f"Scale-SWE ({hf_repo_id}): real-world Python SWE tasks with per-instance Docker images and SWE-bench-style F2P/P2P pytest grading."
-    )
+    description = (catalog_entry or {}).get("description") or (f"Scale-SWE ({hf_repo_id}): real-world Python SWE tasks with per-instance Docker images and SWE-bench-style F2P/P2P pytest grading.")
     _write_dataset_toml(out, name=name, split=split, description=description, default_agent=default_agent)
     logger.info("[scaleswe] wrote %d task dirs to %s (skipped %d, no oracle patch %d)", written, out, skipped, no_patch)
 
