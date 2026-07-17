@@ -282,7 +282,13 @@ def register(name: str, file_path: str, split: str, category: str | None, descri
 @dataset.command(name="import")
 @click.argument("file_path", type=click.Path(exists=True))
 @click.option("--name", required=True, help="Name to register the imported SFT dataset under.")
-@click.option("--format", "fmt", type=click.Choice(["messages", "think-tags"]), default="messages", help="Source row format: plain OpenAI 'messages' (default) or sijun-style 'think-tags'.")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["messages", "think-tags"]),
+    default="messages",
+    help="Source row format: 'messages' (plain OpenAI, default) or 'think-tags' (assistant `<think>...</think>` blocks).",
+)
 @click.option("--split", default="train", help="Split name to register the rows under (default: train).")
 @click.option("--train-on", type=click.Choice(["all", "last"]), default="all", help="[messages] Derive the loss mask over 'all' assistant turns (default) or only the 'last'.")
 @click.option("--no-explode", is_flag=True, help="[think-tags] Emit one row per conversation instead of one row per assistant turn.")
@@ -300,7 +306,7 @@ def import_data(ctx: click.Context, file_path: str, name: str, fmt: str, split: 
     Examples:
       rllm dataset import data.jsonl --name my-sft
       rllm dataset import data.jsonl --name my-sft --train-on last
-      rllm dataset import sijun.jsonl --name opus-sft --format think-tags
+      rllm dataset import traces.jsonl --name distill-traces --format think-tags
     """
     from rllm.data import Dataset, DatasetRegistry
     from rllm.data.sft_bridges import get_bridge

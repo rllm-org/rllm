@@ -8,17 +8,19 @@ tinker loader can render with ``CUSTOMIZED`` masking:
 - ``messages`` — plain OpenAI ``{"messages": [...]}`` rows. Delegates straight to
   :func:`rllm.data.sft_schema.normalize_rows`, deriving the ``trainable`` mask
   from ``train_on`` (``"all"`` assistant turns, or only the ``"last"`` one).
-- ``think-tags`` — sijun-style rows whose assistant turns carry a leading
-  ``<think>...</think>`` block. The chain-of-thought is split into a
-  :class:`ThinkingPart`; row-level metadata is mapped off the underscore keys
-  (``_task -> task_id``, ``_reward -> reward``, ``_group -> group``,
-  ``_model -> model``). By default the conversation is *exploded* into one row
-  per assistant turn (history CoT stripped, single trainable target), which is
-  the shape a next-token SFT loss wants.
+- ``think-tags`` — rows whose assistant turns carry a leading
+  ``<think>...</think>`` block, a common convention for distilled reasoning
+  traces (R1-style exports, many HF distill datasets). The chain-of-thought is
+  split into a :class:`ThinkingPart`; every non-``messages`` top-level key is
+  carried through verbatim as row-level metadata. By default the conversation is
+  *exploded* into one row per assistant turn (history CoT stripped, single
+  trainable target), which is the shape a next-token SFT loss wants.
 
 Both bridges return ``list[SFTRow]``; callers persist ``[r.to_record() for r in
 rows]``. Malformed rows raise :class:`SFTSchemaError` naming the failing row
-index.
+index. Row metadata is passed through as-is; if you want canonical column names
+(``task_id``, ``reward``, ...) rename the keys in your own bridge or preprocess
+the file first.
 """
 
 from __future__ import annotations
@@ -42,14 +44,6 @@ from rllm.data.sft_schema import (
 # ``match`` + ``\s*`` — a ``<think>`` that is not the leading token is left as
 # plain text.
 _THINK_RE = re.compile(r"\s*<think>(.*?)</think>(.*)", re.DOTALL)
-
-# Sijun underscore metadata -> canonical row-level field names.
-_EXTRA_KEY_MAP = {
-    "_task": "task_id",
-    "_reward": "reward",
-    "_group": "group",
-    "_model": "model",
-}
 
 
 # --- shared helpers ----------------------------------------------------------
@@ -103,25 +97,18 @@ def _make_message(raw_msg: dict, parts: list[dict], trainable: bool, idx: int) -
 
 
 def _row_fields(row: dict) -> dict:
-    """Map underscore metadata onto canonical names; carry other plain fields.
+    """Carry every non-``messages`` top-level key through as row-level metadata.
 
-    ``_task``/``_reward``/``_group``/``_model`` are renamed; any other
-    non-``messages``, non-underscore key is passed through verbatim; unknown
-    underscore keys are dropped.
+    Keys are passed through verbatim — underscore-prefixed keys included, no
+    renames and no silent drops. :class:`SFTRow` is ``extra=allow`` so these land
+    unchanged in ``to_record()``. Callers who want canonical column names
+    (``task_id``, ``reward``, ...) should rename keys before/after the bridge.
     """
-    fields: dict = {}
-    for key, value in row.items():
-        if key == "messages":
-            continue
-        if key in _EXTRA_KEY_MAP:
-            fields[_EXTRA_KEY_MAP[key]] = value
-        elif not key.startswith("_"):
-            fields[key] = value
-    return fields
+    return {key: value for key, value in row.items() if key != "messages"}
 
 
 def _bridge_think_row(row: dict, explode: bool) -> list[SFTRow]:
-    """Bridge one sijun-style row into one (no-explode) or many (explode) rows."""
+    """Bridge one think-tagged row into one (no-explode) or many (explode) rows."""
     if not isinstance(row, dict):
         raise SFTSchemaError(f"row must be a dict with a 'messages' field, got {type(row).__name__}.")
     if "messages" not in row:
@@ -164,7 +151,7 @@ def bridge_messages(rows: Sequence[dict], *, train_on: str = "all") -> list[SFTR
 
 
 def bridge_think_tags(rows: Sequence[dict], *, explode: bool = True) -> list[SFTRow]:
-    """Bridge sijun-style ``<think>``-tagged rows into schema rows.
+    """Bridge ``<think>``-tagged rows into schema rows.
 
     ``explode=True`` (default) emits one row per assistant turn: history turns
     are non-trainable with their CoT stripped, and the single final assistant

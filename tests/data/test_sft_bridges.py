@@ -1,9 +1,8 @@
 """Contract tests for the SFT ingestion bridges (``rllm.data.sft_bridges``).
 
-Bridges turn raw dataset rows (plain OpenAI ``messages`` or sijun-style
-``<think>``-tagged assistant turns) into schema ``SFTRow`` objects. Fixtures are
-built inline — we never touch the real (40MB/800KB) sijun files. RED today: the
-module does not exist yet, so the import below fails at collection.
+Bridges turn raw dataset rows (plain OpenAI ``messages`` or ``<think>``-tagged
+assistant turns) into schema ``SFTRow`` objects. Fixtures are built inline. RED
+today: the module does not exist yet, so the import below fails at collection.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ import pytest
 from rllm.data.sft_bridges import BRIDGES, bridge_messages, bridge_think_tags, get_bridge
 from rllm.data.sft_schema import SFTRow, TextPart, ThinkingPart
 
-# Two sijun-style rows: one multi-turn think-tagged conversation, plus a row whose
+# Two think-tagged rows: one multi-turn think-tagged conversation, plus a row whose
 # assistant turn carries NO think tag.
 ROW_THINK = {
     "messages": [
@@ -114,21 +113,21 @@ def test_no_explode_single_row_all_assistant_trainable():
             assert m.trainable is False
 
 
-# --- row-level extras mapping ------------------------------------------------
+# --- row-level extras passthrough --------------------------------------------
 
 
-def test_extras_mapping_to_record():
+def test_extras_passthrough_to_record():
     row = bridge_think_tags([ROW_THINK], explode=False)[0]
     rec = row.to_record()
-    assert rec["task_id"] == "t1"  # _task -> task_id
-    assert rec["reward"] == 1  # _reward -> reward
-    assert rec["group"] == "g"  # _group -> group
-    assert rec["model"] == "opus"  # _model -> model
+    assert rec["_task"] == "t1"  # passed through verbatim
+    assert rec["_reward"] == 1  # no rename
+    assert rec["_group"] == "g"
+    assert rec["_model"] == "opus"
 
 
 def test_extras_carried_onto_exploded_rows():
     for r in bridge_think_tags([ROW_THINK]):
-        assert r.to_record()["task_id"] == "t1"
+        assert r.to_record()["_task"] == "t1"
 
 
 # --- bridge_messages: plain OpenAI rows --------------------------------------

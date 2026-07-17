@@ -97,13 +97,13 @@ If an attempt produces many trained steps but zero merges, curation logs a **deg
 `import` bridges a local file of `{"messages": [...]}` rows into the canonical schema and registers it. Choose the source shape with `--format` (`rllm/cli/dataset.py`, bridges in `rllm/data/sft_bridges.py`):
 
 ```bash
-rllm dataset import data.jsonl --name my-sft                          # --format messages (default)
-rllm dataset import data.jsonl --name my-sft --train-on last          # only train the final assistant turn
-rllm dataset import sijun.jsonl --name opus-sft --format think-tags   # split <think>...</think> into a thinking part
+rllm dataset import data.jsonl --name my-sft                             # --format messages (default)
+rllm dataset import data.jsonl --name my-sft --train-on last             # only train the final assistant turn
+rllm dataset import traces.jsonl --name distill-traces --format think-tags  # split <think>...</think> into a thinking part
 ```
 
 - **`messages`** — plain OpenAI rows. The loss mask is derived from `--train-on` (`all` assistant turns, default, or only the `last`).
-- **`think-tags`** — rows whose assistant turns start with a `<think>...</think>` block. The bridge splits that block into a `thinking` part and maps underscore metadata (`_task → task_id`, `_reward → reward`, `_group → group`, `_model → model`).
+- **`think-tags`** — rows whose assistant turns start with a `<think>...</think>` block (a common convention for distilled reasoning traces). The bridge splits that block into a `thinking` part and carries every non-`messages` top-level key through verbatim as row metadata.
 
 #### `--explode` (think-tags only, default ON)
 
@@ -152,22 +152,22 @@ qwen3 | qwen3_5 | deepseekv3 | llama3 | role_colon
 
 Fireworks subclasses the tinker backend and reuses the same rendering pipeline, so structured rows behave identically. The verl backend rejects structured rows — parts-list content or per-message `trainable` flags — with an actionable `SFTConfigError` (`_reject_structured_rows`, `rllm/trainer/sft/verl_backend.py`); plain `{role, content: str}` rows still train fine on verl. Structured SFT support on verl is planned.
 
-## Worked example: distilling Opus reasoning traces
+## Worked example: importing think-tagged teacher traces
 
-Starting from an external file of `<think>`-tagged Opus traces, distill them into `Qwen/Qwen3.5-4B` on tinker.
+Starting from an external file of `<think>`-tagged teacher traces, distill them into `Qwen/Qwen3.5-4B` on tinker.
 
 ```bash
 # 1. Import the think-tagged traces (exploded by default: one row per reasoning turn)
-rllm dataset import opus_sijun_800.jsonl \
-  --name opus-sft \
+rllm dataset import teacher_traces.jsonl \
+  --name distill-sft \
   --format think-tags \
-  --description "Opus reasoning traces (sijun)"
+  --description "Teacher reasoning traces"
 
 # 2. Inspect what got registered
-rllm dataset inspect opus-sft --split train
+rllm dataset inspect distill-sft --split train
 
 # 3. Fine-tune the student
-rllm sft opus-sft \
+rllm sft distill-sft \
   --model Qwen/Qwen3.5-4B \
   --backend tinker \
   --epochs 3 \

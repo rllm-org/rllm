@@ -83,7 +83,7 @@ def test_sft_verl_backend_dispatches_to_launcher(runner, tmp_rllm_home, monkeypa
 
 
 def test_dataset_import_think_tags(runner, tmp_rllm_home, tmp_path):
-    """`rllm dataset import FILE --format think-tags` bridges sijun-style rows and
+    """`rllm dataset import FILE --format think-tags` bridges think-tagged rows and
     registers them. Explode is ON by default: one row per assistant turn, each
     message carrying `trainable` + parts-list content.
 
@@ -118,7 +118,7 @@ def test_dataset_import_think_tags(runner, tmp_rllm_home, tmp_path):
             "_reward": 1,
         },
     ]
-    f = tmp_path / "sijun.jsonl"
+    f = tmp_path / "traces.jsonl"
     f.write_text("\n".join(json.dumps(r) for r in rows))
 
     result = runner.invoke(cli, ["dataset", "import", str(f), "--name", "x", "--format", "think-tags"])
