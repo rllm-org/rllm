@@ -4,6 +4,8 @@ A loss is a single function selected by name that returns a scalar via ``ctx.agg
 Backend-agnostic: pure torch on toy tensors, no GPU / verl / tinker server needed.
 """
 
+import math
+
 import pytest
 from omegaconf import OmegaConf
 
@@ -724,3 +726,41 @@ def test_managed_echo_trains_observation_tokens():
     loss, _ = loss_fn(stripped, [logp_curr])
     loss.backward()
     assert logp_curr.grad[0].item() != 0.0 and logp_curr.grad[3].item() != 0.0  # ECHO trains observation tokens
+
+
+def test_reinforce_kl_reports_ratio_extremes():
+    from rllm.trainer.algorithms.loss import reinforce_kl
+
+    def _rk_ctx(curr, rollout, action_mask):
+        n = len(curr)
+        return LossContext(
+            logp_curr=torch.tensor(curr, requires_grad=True),
+            logp_old=torch.zeros(n),  # ignored: q is the sampler
+            logp_rollout=torch.tensor(rollout),
+            advantages=torch.ones(n),
+            action_mask=torch.tensor(action_mask),
+            obs_mask=torch.zeros(n),
+            aggregate=_agg_sum,
+            params={},
+        )
+
+    # token 0: curr << rollout (ratio e^-2, sampler-overconfident); token 2: curr >> rollout (e^1)
+    _, m = reinforce_kl(_rk_ctx([-3.0, -1.0, -0.5], [-1.0, -1.0, -1.5], [1.0, 1.0, 1.0]))
+    assert m["reinforce_kl/ratio_min"] == pytest.approx(math.exp(-2.0), abs=1e-5)
+    assert m["reinforce_kl/ratio_max"] == pytest.approx(math.exp(1.0), abs=1e-5)
+
+    # masked token must not contribute to the extremes
+    _, m = reinforce_kl(_rk_ctx([-9.0, -1.0], [-1.0, -1.0], [0.0, 1.0]))
+    assert m["reinforce_kl/ratio_min"] == pytest.approx(1.0, abs=1e-5)
+    assert m["reinforce_kl/ratio_max"] == pytest.approx(1.0, abs=1e-5)
+
+
+def test_offpolicy_metrics_report_both_ratio_tails():
+    from rllm.trainer.algorithms.loss import offpolicy_metrics
+
+    curr = [torch.tensor([-5.0, -1.0, -1.0])]
+    rollout = [torch.tensor([-1.0, -1.0, -2.0])]
+    masks = [torch.ones(3)]
+    m = offpolicy_metrics(curr, rollout, masks)
+    assert m["offpolicy/ratio/min"] == pytest.approx(math.exp(-4.0), abs=1e-6)
+    assert m["offpolicy/ratio/max"] == pytest.approx(math.exp(1.0), abs=1e-6)
