@@ -149,3 +149,45 @@ def test_sft_renderer_flag(runner, tmp_rllm_home, monkeypatch):
     assert result.exit_code == 0, result.output
     spec = captured["spec"]
     assert spec.overrides["data"]["renderer_name"] == "qwen3"
+
+
+def test_sft_logger_flag_reaches_spec(runner, tmp_rllm_home, monkeypatch):
+    """`--logger wandb` resolves to ['console', 'wandb'] on the SFTSpec (UI auto-enable off)."""
+    monkeypatch.delenv("RLLM_API_KEY", raising=False)
+    from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
+
+    captured = {}
+    monkeypatch.setattr(AgentSFTTrainer, "train", lambda self: captured.setdefault("spec", self.spec))
+
+    name = _register_toy("logger-toy")
+    result = runner.invoke(cli, ["sft", name, "--backend", "tinker", "--logger", "wandb"])
+    assert result.exit_code == 0, result.output
+    assert captured["spec"].logger == ["console", "wandb"]
+
+
+def test_sft_no_logger_flags_leaves_spec_none(runner, tmp_rllm_home, monkeypatch):
+    """No --logger and UI auto-enable off -> spec.logger stays None (yaml default rules)."""
+    monkeypatch.delenv("RLLM_API_KEY", raising=False)
+    from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
+
+    captured = {}
+    monkeypatch.setattr(AgentSFTTrainer, "train", lambda self: captured.setdefault("spec", self.spec))
+
+    name = _register_toy("nologger-toy")
+    result = runner.invoke(cli, ["sft", name, "--backend", "tinker"])
+    assert result.exit_code == 0, result.output
+    assert captured["spec"].logger is None
+
+
+def test_sft_ui_flag_appends_ui(runner, tmp_rllm_home, monkeypatch):
+    """`--ui` appends 'ui' after console + any --logger values (deduped, order-preserving)."""
+    monkeypatch.delenv("RLLM_API_KEY", raising=False)
+    from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
+
+    captured = {}
+    monkeypatch.setattr(AgentSFTTrainer, "train", lambda self: captured.setdefault("spec", self.spec))
+
+    name = _register_toy("ui-toy")
+    result = runner.invoke(cli, ["sft", name, "--backend", "tinker", "--logger", "wandb", "--ui"])
+    assert result.exit_code == 0, result.output
+    assert captured["spec"].logger == ["console", "wandb", "ui"]

@@ -10,6 +10,7 @@ to the chosen backend. Pairs with ``rllm dataset from-eval`` (curated SFT data).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import click
@@ -43,6 +44,14 @@ from rllm.cli._ui import console, fail
 @click.option("--save-freq", default=20, type=int, help="Checkpoint every N steps (default: 20).")
 @click.option("--project", default="rllm-sft", help="Project name for logging (default: rllm-sft).")
 @click.option("--experiment", default=None, help="Experiment name (default: dataset name).")
+@click.option(
+    "--logger",
+    "loggers",
+    multiple=True,
+    type=click.Choice(["console", "wandb", "mlflow", "swanlab", "tensorboard", "file", "ui"]),
+    help="Tracking backend(s) for training metrics via rllm.utils.tracking (repeatable). 'console' is always on; e.g. --logger wandb (needs WANDB_API_KEY / wandb login).",
+)
+@click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live rLLM UI logging. Default: auto-enabled when logged in (see 'rllm login'). Not supported on the verl backend.")
 @click.option("--output", "output_dir", default=None, help="Checkpoint directory.")
 def sft_cmd(
     dataset: str | None,
@@ -66,6 +75,8 @@ def sft_cmd(
     save_freq: int,
     project: str,
     experiment: str | None,
+    loggers: tuple[str, ...],
+    enable_ui: bool | None,
     output_dir: str | None,
 ):
     """Fine-tune a model with supervised learning (SFT).
@@ -118,6 +129,30 @@ def sft_cmd(
     if experiment is None:
         experiment = dataset or (Path(train_file).stem if train_file else "sft")
 
+    # Resolve UI logging (mirrors `rllm train`): auto-enable when logged in
+    # (RLLM_API_KEY or a saved ui_api_key) unless --ui/--no-ui is explicit.
+    _ui_explicit = enable_ui is not None
+    if enable_ui is None:
+        from rllm.eval.config import load_ui_config
+
+        enable_ui = bool(os.environ.get("RLLM_API_KEY") or load_ui_config().get("ui_api_key"))
+    if enable_ui and not os.environ.get("RLLM_UI_URL"):
+        os.environ["RLLM_UI_URL"] = "https://ui.rllm-project.com"
+    if not enable_ui and not _ui_explicit:
+        console.print("  [blue]Tip: Try rllm UI for live monitoring! Run [bold]rllm login[/bold] to get started.[/]")
+
+    # Resolve tracking backends: start from console, add any --logger values, and
+    # append 'ui' when UI logging is on; dedupe preserving order. If the user asked
+    # for nothing and UI is off, leave logger=None so the backend yaml default rules.
+    resolved_logger: list[str] | None = None
+    if loggers or enable_ui:
+        seen: set[str] = set()
+        resolved_logger = []
+        for name in ["console", *loggers, *(["ui"] if enable_ui else [])]:
+            if name not in seen:
+                seen.add(name)
+                resolved_logger.append(name)
+
     # Backend-specific spec overrides:
     #   - verl runs under torchrun; route --gpus to its native trainer.n_gpus_per_node.
     #   - tinker/fireworks render via tinker_cookbook; route --renderer to
@@ -144,6 +179,7 @@ def sft_cmd(
         val_freq=val_freq,
         project=project,
         experiment=experiment,
+        logger=resolved_logger,
         output_dir=output_dir,
         overrides=overrides,
     )
@@ -176,6 +212,7 @@ def sft_cmd(
         ("Batch / epochs", f"[dim]{batch_size} / {epochs}[/]"),
         ("Max length", f"[dim]{max_length}[/]"),
         ("Tokenize", f"[dim]{tokenize_method}[/]"),
+        ("Logging", f"[dim]{', '.join(resolved_logger) if resolved_logger else 'console (yaml default)'}[/]"),
     ]
     # Renderer applies to the tinker/fireworks render path only (verl tokenizes
     # via its own dataset). null/omitted => the backend auto-detects it.

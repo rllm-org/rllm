@@ -110,6 +110,13 @@ class VerlSFTBackend(SFTBackend):
 
         lora_rank = int(spec.lora_rank or 0)
         max_token_len = max(int(spec.max_length), 8192)
+        # verl SFT delegates to verl's own Tracking (inside torchrun), which
+        # asserts on unknown backends and has no 'ui' logger — drop it with a
+        # warning rather than crash the launcher.
+        sft_logger = list(spec.logger) if spec.logger else ["console"]
+        if "ui" in sft_logger:
+            logger.warning("rllm UI logging is not supported on the verl SFT backend; dropping 'ui' from the logger list.")
+            sft_logger = [b for b in sft_logger if b != "ui"]
         overrides = OmegaConf.create(
             {
                 "model": {
@@ -141,7 +148,7 @@ class VerlSFTBackend(SFTBackend):
                     "test_freq": int(spec.val_freq),
                     "project_name": spec.project,
                     "experiment_name": spec.experiment or "default",
-                    "logger": ["console", "wandb"],
+                    "logger": sft_logger,
                     "default_local_dir": spec.output_dir or self._default_local_dir(),
                 },
             }

@@ -28,6 +28,9 @@ class SFTSpec:
         train_dataset: training data (a registered/loaded :class:`Dataset` with a
             ``messages`` column).
         val_dataset: optional validation data.
+        logger: tracking backend names for :class:`rllm.utils.tracking.Tracking`
+            (e.g. ``["console", "wandb", "ui"]``); ``None`` keeps the backend
+            yaml default.
         overrides: deep-merged into the backend's native config as an escape
             hatch for backend-specific knobs not surfaced as fields.
     """
@@ -46,5 +49,6 @@ class SFTSpec:
     val_freq: int = 10
     project: str = "rllm-sft"
     experiment: str | None = None
+    logger: list[str] | None = None
     output_dir: str | None = None
     overrides: dict | None = None

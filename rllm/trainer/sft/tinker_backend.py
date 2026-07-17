@@ -201,6 +201,17 @@ class TinkerSFTBackend(SFTBackend):
         """SFTSpec → the DictConfig shape the tinker/fireworks loop reads."""
         spec = self.spec
         base = OmegaConf.load(str(self._config_template()))
+        trainer_overrides: dict[str, Any] = {
+            "total_epochs": spec.epochs,
+            "save_freq": spec.save_freq,
+            "test_freq": spec.val_freq,
+            "project_name": spec.project,
+            "experiment_name": spec.experiment or "default",
+        }
+        # spec.logger=None keeps the yaml default (['console']); a set list selects
+        # tracking backends for rllm.utils.tracking.Tracking (wandb/mlflow/ui/...).
+        if spec.logger is not None:
+            trainer_overrides["logger"] = list(spec.logger)
         overrides = OmegaConf.create(
             {
                 "model": {"name": spec.model, "lora_rank": spec.lora_rank},
@@ -211,13 +222,7 @@ class TinkerSFTBackend(SFTBackend):
                     "rllm": {"tokenize_and_mask_method": spec.tokenize_method},
                 },
                 "optim": {"lr": spec.lr, "lr_scheduler": spec.lr_schedule},
-                "trainer": {
-                    "total_epochs": spec.epochs,
-                    "save_freq": spec.save_freq,
-                    "test_freq": spec.val_freq,
-                    "project_name": spec.project,
-                    "experiment_name": spec.experiment or "default",
-                },
+                "trainer": trainer_overrides,
             }
         )
         cfg = OmegaConf.merge(base, overrides)
@@ -268,123 +273,127 @@ class TinkerSFTBackend(SFTBackend):
             config=OmegaConf.to_container(config, resolve=True),
         )
 
-        tokenizer, train_dataset, val_dataset = build_sft_data(config, self.spec.train_dataset, self.spec.val_dataset)
-
-        resume_info = checkpoint_utils.get_last_checkpoint(config.trainer.default_local_dir)
-        if resume_info:
-            logger.info(f"Resuming from checkpoint: {resume_info}")
-            training_client = await service_client.create_training_client_from_state_async(resume_info["state_path"])
-            start_epoch = resume_info.get("epoch", 0)
-            start_batch = resume_info.get("batch", 0)
-        else:
-            logger.info("Starting training from scratch")
-            training_client = await service_client.create_lora_training_client_async(
-                base_model=config.model.name,
-                rank=config.model.get("lora_rank", 32),
-                train_unembed=OmegaConf.select(config, "model.train_unembed", default=True),
-                train_attn=OmegaConf.select(config, "model.train_attn", default=True),
-                train_mlp=OmegaConf.select(config, "model.train_mlp", default=True),
-            )
-            start_epoch = 0
-            start_batch = 0
-
-        # len(dataset) floors examples//batch_size; keep the final partial batch
-        # when the dataset is smaller than one batch (else 0 steps).
-        n_batches = max(1, len(train_dataset))
-        total_epochs = config.trainer.get("total_epochs", 1)
-        total_steps = n_batches * total_epochs
-        progress_denominator = total_steps if total_steps > 0 else 1
-        logger.info(f"Training for {n_batches} batches x {total_epochs} epochs = {total_steps} steps")
-
-        base_learning_rate = config.get("optim", {}).get("lr", 1e-5)
-        lr_schedule = config.get("optim", {}).get("lr_scheduler", "constant")
-        adam_betas = config.get("optim", {}).get("betas", [0.9, 0.95])
-        adam_eps = config.get("optim", {}).get("eps", 1e-8)
-        save_every = config.trainer.get("save_freq", 20)
-        eval_every = config.trainer.get("test_freq", 10)
-
-        async def submit_batch(epoch_idx: int, batch_idx: int) -> _SubmittedBatch:
-            step = epoch_idx * n_batches + batch_idx
-            batch_start_time = time.time()
-            metrics: dict[str, Any] = {"epoch": epoch_idx, "progress": step / progress_denominator}
-            learning_rate = base_learning_rate * compute_schedule_lr_multiplier(lr_schedule=lr_schedule, step=step, total_steps=total_steps)
-            metrics["learning_rate"] = learning_rate
-            adam_params = tinker.AdamParams(learning_rate=learning_rate, beta1=adam_betas[0], beta2=adam_betas[1], eps=adam_eps)
-
-            with timed("get_batch", metrics):
-                data = train_dataset.get_batch(batch_idx)
-            if data:
-                logger.info(colorize_example(data[0], tokenizer))
-
-            fwd_bwd_future = await training_client.forward_backward_async(data, loss_fn="cross_entropy")
-            optim_step_future = await training_client.optim_step_async(adam_params)
-            return _SubmittedBatch(fwd_bwd_future, optim_step_future, metrics, data, step, epoch_idx, batch_idx, batch_start_time)
-
-        async def finish_batch(submitted: _SubmittedBatch) -> None:
-            metrics = submitted.metrics
-            metrics["progress"] = min((submitted.step + 1) / progress_denominator, 1.0)
-            if save_every > 0 and submitted.step % save_every == 0 and submitted.step > 0:
-                with timed("save_checkpoint", metrics):
-                    await checkpoint_utils.save_checkpoint_async(
-                        training_client=training_client,
-                        name=f"{submitted.step:06d}",
-                        log_path=config.trainer.default_local_dir,
-                        loop_state={"epoch": submitted.epoch_idx, "batch": submitted.batch_idx},
-                        kind="both",
-                    )
-            with timed("step", metrics):
-                fwd_bwd_result = await submitted.fwd_bwd_future.result_async()
-                await submitted.optim_step_future.result_async()
-
-            logprobs = [x["logprobs"] for x in fwd_bwd_result.loss_fn_outputs]
-            weights = [datum.loss_fn_inputs["weights"] for datum in submitted.data]
-            train_nll = compute_mean_nll(logprobs, weights)
-            metrics.update(
-                num_sequences=len(submitted.data),
-                num_tokens=sum(datum.model_input.length for datum in submitted.data),
-                num_loss_tokens=sum(sum(datum.loss_fn_inputs["weights"].data) for datum in submitted.data),
-                train_mean_nll=train_nll,
-            )
-            metrics["time/total"] = time.time() - submitted.batch_start_time
-
-            if val_dataset and eval_every > 0 and submitted.step % eval_every == 0 and submitted.step > 0:
-                with timed("validation", metrics):
-                    val_metrics = await self._validate(training_client, val_dataset, compute_mean_nll)
-                metrics.update(val_metrics)
-
-            tracking_logger.log(data=metrics, step=submitted.step)
-            logger.info(f"Step {submitted.step}: train_nll={train_nll:.4f}, lr={metrics['learning_rate']:.2e}")
-
-        pending: _SubmittedBatch | None = None
-        for epoch_idx in range(start_epoch, total_epochs):
-            logger.info(f"Starting epoch {epoch_idx}")
-            train_dataset.set_epoch(seed=epoch_idx)
-            start_batch_idx = start_batch if epoch_idx == start_epoch else 0
-            for batch_idx in range(start_batch_idx, n_batches):
-                submitted = await submit_batch(epoch_idx, batch_idx)
-                if pending is not None:
-                    await finish_batch(pending)
-                pending = submitted
-        if pending is not None:
-            await finish_batch(pending)
-
-        if start_epoch < total_epochs:
-            await checkpoint_utils.save_checkpoint_async(
-                training_client=training_client,
-                name="final",
-                log_path=config.trainer.default_local_dir,
-                kind="both",
-                loop_state={"epoch": total_epochs, "batch": n_batches},
-            )
-        else:
-            logger.info("Training was already complete; nothing to do")
-
-        tracking_logger.log(data={"status": "completed"}, step=total_steps)
+        # Wrap the loop so tracking_logger.finish() runs even on failure: the 'ui'
+        # backend tees stdout/stderr and holds an open session until finish().
         try:
-            tracking_logger.finish()
-        except Exception:
-            pass
-        logger.info("Training completed successfully")
+            tokenizer, train_dataset, val_dataset = build_sft_data(config, self.spec.train_dataset, self.spec.val_dataset)
+
+            resume_info = checkpoint_utils.get_last_checkpoint(config.trainer.default_local_dir)
+            if resume_info:
+                logger.info(f"Resuming from checkpoint: {resume_info}")
+                training_client = await service_client.create_training_client_from_state_async(resume_info["state_path"])
+                start_epoch = resume_info.get("epoch", 0)
+                start_batch = resume_info.get("batch", 0)
+            else:
+                logger.info("Starting training from scratch")
+                training_client = await service_client.create_lora_training_client_async(
+                    base_model=config.model.name,
+                    rank=config.model.get("lora_rank", 32),
+                    train_unembed=OmegaConf.select(config, "model.train_unembed", default=True),
+                    train_attn=OmegaConf.select(config, "model.train_attn", default=True),
+                    train_mlp=OmegaConf.select(config, "model.train_mlp", default=True),
+                )
+                start_epoch = 0
+                start_batch = 0
+
+            # len(dataset) floors examples//batch_size; keep the final partial batch
+            # when the dataset is smaller than one batch (else 0 steps).
+            n_batches = max(1, len(train_dataset))
+            total_epochs = config.trainer.get("total_epochs", 1)
+            total_steps = n_batches * total_epochs
+            progress_denominator = total_steps if total_steps > 0 else 1
+            logger.info(f"Training for {n_batches} batches x {total_epochs} epochs = {total_steps} steps")
+
+            base_learning_rate = config.get("optim", {}).get("lr", 1e-5)
+            lr_schedule = config.get("optim", {}).get("lr_scheduler", "constant")
+            adam_betas = config.get("optim", {}).get("betas", [0.9, 0.95])
+            adam_eps = config.get("optim", {}).get("eps", 1e-8)
+            save_every = config.trainer.get("save_freq", 20)
+            eval_every = config.trainer.get("test_freq", 10)
+
+            async def submit_batch(epoch_idx: int, batch_idx: int) -> _SubmittedBatch:
+                step = epoch_idx * n_batches + batch_idx
+                batch_start_time = time.time()
+                metrics: dict[str, Any] = {"epoch": epoch_idx, "progress": step / progress_denominator}
+                learning_rate = base_learning_rate * compute_schedule_lr_multiplier(lr_schedule=lr_schedule, step=step, total_steps=total_steps)
+                metrics["learning_rate"] = learning_rate
+                adam_params = tinker.AdamParams(learning_rate=learning_rate, beta1=adam_betas[0], beta2=adam_betas[1], eps=adam_eps)
+
+                with timed("get_batch", metrics):
+                    data = train_dataset.get_batch(batch_idx)
+                if data:
+                    logger.info(colorize_example(data[0], tokenizer))
+
+                fwd_bwd_future = await training_client.forward_backward_async(data, loss_fn="cross_entropy")
+                optim_step_future = await training_client.optim_step_async(adam_params)
+                return _SubmittedBatch(fwd_bwd_future, optim_step_future, metrics, data, step, epoch_idx, batch_idx, batch_start_time)
+
+            async def finish_batch(submitted: _SubmittedBatch) -> None:
+                metrics = submitted.metrics
+                metrics["progress"] = min((submitted.step + 1) / progress_denominator, 1.0)
+                if save_every > 0 and submitted.step % save_every == 0 and submitted.step > 0:
+                    with timed("save_checkpoint", metrics):
+                        await checkpoint_utils.save_checkpoint_async(
+                            training_client=training_client,
+                            name=f"{submitted.step:06d}",
+                            log_path=config.trainer.default_local_dir,
+                            loop_state={"epoch": submitted.epoch_idx, "batch": submitted.batch_idx},
+                            kind="both",
+                        )
+                with timed("step", metrics):
+                    fwd_bwd_result = await submitted.fwd_bwd_future.result_async()
+                    await submitted.optim_step_future.result_async()
+
+                logprobs = [x["logprobs"] for x in fwd_bwd_result.loss_fn_outputs]
+                weights = [datum.loss_fn_inputs["weights"] for datum in submitted.data]
+                train_nll = compute_mean_nll(logprobs, weights)
+                metrics.update(
+                    num_sequences=len(submitted.data),
+                    num_tokens=sum(datum.model_input.length for datum in submitted.data),
+                    num_loss_tokens=sum(sum(datum.loss_fn_inputs["weights"].data) for datum in submitted.data),
+                    train_mean_nll=train_nll,
+                )
+                metrics["time/total"] = time.time() - submitted.batch_start_time
+
+                if val_dataset and eval_every > 0 and submitted.step % eval_every == 0 and submitted.step > 0:
+                    with timed("validation", metrics):
+                        val_metrics = await self._validate(training_client, val_dataset, compute_mean_nll)
+                    metrics.update(val_metrics)
+
+                tracking_logger.log(data=metrics, step=submitted.step)
+                logger.info(f"Step {submitted.step}: train_nll={train_nll:.4f}, lr={metrics['learning_rate']:.2e}")
+
+            pending: _SubmittedBatch | None = None
+            for epoch_idx in range(start_epoch, total_epochs):
+                logger.info(f"Starting epoch {epoch_idx}")
+                train_dataset.set_epoch(seed=epoch_idx)
+                start_batch_idx = start_batch if epoch_idx == start_epoch else 0
+                for batch_idx in range(start_batch_idx, n_batches):
+                    submitted = await submit_batch(epoch_idx, batch_idx)
+                    if pending is not None:
+                        await finish_batch(pending)
+                    pending = submitted
+            if pending is not None:
+                await finish_batch(pending)
+
+            if start_epoch < total_epochs:
+                await checkpoint_utils.save_checkpoint_async(
+                    training_client=training_client,
+                    name="final",
+                    log_path=config.trainer.default_local_dir,
+                    kind="both",
+                    loop_state={"epoch": total_epochs, "batch": n_batches},
+                )
+            else:
+                logger.info("Training was already complete; nothing to do")
+
+            tracking_logger.log(data={"status": "completed"}, step=total_steps)
+            logger.info("Training completed successfully")
+        finally:
+            try:
+                tracking_logger.finish()
+            except Exception:
+                pass
 
     @staticmethod
     async def _validate(training_client, val_dataset, compute_mean_nll) -> dict[str, float]:

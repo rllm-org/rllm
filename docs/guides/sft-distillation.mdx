@@ -123,6 +123,22 @@ rllm sft --train-file data.parquet --lr 1e-5 --backend fireworks
 
 Masking is always tinker's `CUSTOMIZED` mode, driven by each message's `trainable` flag — the data decides the loss mask (`rllm/trainer/sft/tinker_backend.py`, `build_sft_data`).
 
+### Logging training progress
+
+Per-step training metrics (loss, learning rate, progress) route through rLLM's unified tracking layer (`rllm.utils.tracking.Tracking`). `console` logging is always on; add more backends with `--logger`:
+
+```bash
+rllm sft my-sft --logger wandb                    # needs WANDB_API_KEY or `wandb login`
+rllm sft my-sft --logger wandb --logger tensorboard   # repeatable
+rllm sft my-sft --ui                              # live rLLM UI (see `rllm login`)
+```
+
+`--logger` accepts `console | wandb | mlflow | swanlab | tensorboard | file | ui`. `--project`/`--experiment` name the run in whichever backend you pick (default `rllm-sft` / the dataset name). `--ui` is auto-enabled when you're logged in; pass `--no-ui` to opt out.
+
+<Note>
+  Live rLLM UI logging (`--ui`) is supported on the **tinker** and **fireworks** backends only; on `--backend verl` it is dropped with a warning.
+</Note>
+
 ### Renderer auto-detection and `--renderer`
 
 The tinker/fireworks path renders rows through a tinker-cookbook renderer. rLLM auto-detects it from the model in this order (`_resolve_renderer_name`, `rllm/trainer/sft/tinker_backend.py`):

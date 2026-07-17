@@ -36,6 +36,36 @@ def test_build_config_maps_spec():
     assert cfg.data.rllm.tokenize_and_mask_method == "stepwise"
 
 
+def test_build_config_logger_override():
+    """spec.logger overrides the yaml default trainer.logger for tinker."""
+    cfg = TinkerSFTBackend(_spec(logger=["console", "wandb"])).build_config()
+    assert list(cfg.trainer.logger) == ["console", "wandb"]
+
+
+def test_build_config_logger_default_when_none():
+    """spec.logger=None keeps the tinker.yaml default (['console'])."""
+    cfg = TinkerSFTBackend(_spec()).build_config()
+    assert list(cfg.trainer.logger) == ["console"]
+
+
+def test_verl_build_config_filters_ui_logger():
+    """verl's Tracking can't do 'ui'; build_config drops it (keeps the rest)."""
+    pytest.importorskip("verl")
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    cfg = VerlSFTBackend(_spec(logger=["console", "wandb", "ui"])).build_config()
+    assert list(cfg.trainer.logger) == ["console", "wandb"]
+
+
+def test_verl_build_config_default_logger():
+    """verl falls back to ['console'] when spec.logger is None."""
+    pytest.importorskip("verl")
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    cfg = VerlSFTBackend(_spec()).build_config()
+    assert list(cfg.trainer.logger) == ["console"]
+
+
 def test_output_dir_and_checkpoint_dir():
     backend = TinkerSFTBackend(_spec(output_dir="/tmp/ckpt-xyz"))
     cfg = backend.build_config()
