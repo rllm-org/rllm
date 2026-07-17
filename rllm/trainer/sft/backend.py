@@ -42,6 +42,17 @@ def validate_messages_dataset(dataset, label: str = "train") -> None:
     if not isinstance(first, dict) or "role" not in first or "content" not in first:
         raise SFTConfigError(f"{label} dataset: each message must have 'role' and 'content' keys.")
 
+    # Cheap first-row schema sanity: normalize row 0 through the canonical SFT
+    # schema. Legacy flag-less str-content rows and structured (parts + flags)
+    # rows both normalize cleanly; only genuinely malformed messages fail here
+    # (the verl-vs-structured gate lives in the verl backend, not here).
+    from rllm.data.sft_schema import SFTSchemaError, normalize_row
+
+    try:
+        normalize_row(row)
+    except SFTSchemaError as e:
+        raise SFTConfigError(f"{label} dataset: row 0 does not match the SFT schema: {e}") from e
+
 
 class SFTBackend(ABC):
     """Owns one complete SFT run for a given backend.

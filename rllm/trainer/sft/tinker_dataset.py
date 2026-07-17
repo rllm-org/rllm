@@ -15,22 +15,32 @@ from tinker_cookbook.renderers import Message, Renderer, TrainOnWhat
 from tinker_cookbook.supervised.common import datum_from_model_input_weights
 from tinker_cookbook.supervised.types import SupervisedDataset
 
+from rllm.data.sft_schema import SFTSchemaError, normalize_messages
+from rllm.trainer.sft.backend import SFTConfigError
+
 logger = logging.getLogger(__name__)
 
 
 def _ensure_trainable(conversation: list[Message], last_only: bool) -> list[Message]:
-    """Ensure every message carries a ``trainable`` flag, so the renderer can
-    always use tinker's ``CUSTOMIZED`` mode — the data alone decides the mask.
+    """Legacy trainable-flag derivation (superseded by :mod:`rllm.data.sft_schema`).
 
-    Self-describing rows (e.g. from ``from-eval``'s automerge) already carry the
-    flag and are returned untouched. A row without flags gets a derived default:
-    assistant messages train (only the *last* when ``last_only``), reproducing the
-    legacy ``ALL_ASSISTANT_MESSAGES`` / ``LAST_ASSISTANT_MESSAGE`` behavior.
+    Retained as an importable helper for callers/tests that still reference it;
+    the render path below now normalizes via the schema instead. Self-describing
+    rows (e.g. from ``from-eval``'s automerge) already carry the flag and are
+    returned untouched. A row without flags gets a derived default: assistant
+    messages train (only the *last* when ``last_only``), reproducing the legacy
+    ``ALL_ASSISTANT_MESSAGES`` / ``LAST_ASSISTANT_MESSAGE`` behavior.
     """
     if conversation and isinstance(conversation[0], dict) and "trainable" in conversation[0]:
         return conversation
     last_asst = max((i for i, m in enumerate(conversation) if m.get("role") == "assistant"), default=-1)
     return [{**m, "trainable": m.get("role") == "assistant" and (not last_only or i == last_asst)} for i, m in enumerate(conversation)]
+
+
+def _row_context(conversation, limit: int = 400) -> str:
+    """A truncated repr of a failing conversation, for actionable errors."""
+    text = repr(conversation)
+    return text if len(text) <= limit else text[:limit] + "..."
 
 
 def conversation_to_datum(
@@ -41,11 +51,23 @@ def conversation_to_datum(
 ) -> tinker.Datum:
     """Convert a conversation (list of messages) to a Tinker Datum.
 
-    Always renders with ``CUSTOMIZED`` masking, driven by each message's
-    ``trainable`` flag (derived via :func:`_ensure_trainable` when absent).
+    Normalizes the raw messages through :mod:`rllm.data.sft_schema` (str/None
+    content coercion, parquet ``None``-artifact stripping, structured
+    ``tool_calls``, trainable-flag derivation) and renders with tinker's
+    ``CUSTOMIZED`` masking — each message's ``trainable`` flag alone decides the
+    loss mask. ``last_only`` selects the flag-less default (train just the last
+    assistant turn) rather than the all-assistant default.
+
+    Schema/validation failures are re-raised as :class:`SFTConfigError` with the
+    failing row's context.
     """
-    conversation = _ensure_trainable(conversation, last_only)
-    model_input, weights = renderer.build_supervised_example(conversation, train_on_what=TrainOnWhat.CUSTOMIZED)
+    default_trainable = "last" if last_only else "all"
+    try:
+        messages = normalize_messages(conversation, default_trainable=default_trainable)
+        tinker_messages = [m.to_tinker_message() for m in messages]
+    except SFTSchemaError as e:
+        raise SFTConfigError(f"SFT row failed schema normalization: {e}\n  row={_row_context(conversation)}") from e
+    model_input, weights = renderer.build_supervised_example(tinker_messages, train_on_what=TrainOnWhat.CUSTOMIZED)
     return datum_from_model_input_weights(model_input, weights, max_length)
 
 
@@ -95,7 +117,10 @@ class TinkerSFTDataset(SupervisedDataset):
         datums = []
         for i in range(start_idx, end_idx):
             row = self.dataset[i]
-            datums.append(conversation_to_datum(row["messages"], self.renderer, self.max_length, self.last_only))
+            try:
+                datums.append(conversation_to_datum(row["messages"], self.renderer, self.max_length, self.last_only))
+            except SFTConfigError as e:
+                raise SFTConfigError(f"dataset row {i}: {e}") from e
         return datums
 
     def set_epoch(self, seed: int = 0):
