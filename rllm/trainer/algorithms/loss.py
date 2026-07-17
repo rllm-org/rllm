@@ -162,9 +162,11 @@ def offpolicy_metrics(
         # KL(rollout || curr): k1 is signed (drift direction), k3 is the low-variance estimate
         "offpolicy/kl": (rollout_flat - curr_flat).mean().item(),
         "offpolicy/k3_kl": (torch.exp(log_ratio) - log_ratio - 1).mean().item(),
-        # importance weight pi_curr/pi_rollout: center (~1) + worst-case tail
+        # importance weight pi_curr/pi_rollout: center (~1) + both tails (min << 1 =
+        # sampler-overconfident tokens whose gradients get IS-suppressed)
         "offpolicy/ratio/mean": ratio.mean().item(),
         "offpolicy/ratio/max": ratio.max().item(),
+        "offpolicy/ratio/min": ratio.min().item(),
         # chi-square divergence = variance of the IS weight (stability)
         "offpolicy/chi2_token": (ratio.square().mean() - 1.0).item(),
         # absolute per-sequence confidence (catches temperature mismatch / collapse)
@@ -606,10 +608,17 @@ def reinforce_kl(ctx: LossContext):
 
     am = ctx.action_mask
     denom = am.sum().clamp(min=1.0)
+    # Ratio extremes over trainable tokens (same caveat as icepop: per-sequence on the
+    # managed per-datum path, true batch stats on verl). min << 1 flags sampler-overconfident
+    # tokens whose PG weight vanishes; max complements clamp_frac for the high tail.
+    active = am > 0
+    r_active = r.detach()[active] if active.any() else r.detach().new_ones(1)
     return ctx.aggregate(pg + bwd_coef * kl_bwd + fwd_coef * kl_fwd, am), {
         "reinforce_kl/kl_bwd": ((kl_bwd_est * am).sum() / denom).item(),
         "reinforce_kl/kl_fwd": ((kl_fwd_est * am).sum() / denom).item(),
         "reinforce_kl/ratio_mean": ((r.detach() * am).sum() / denom).item(),
+        "reinforce_kl/ratio_min": r_active.min().item(),
+        "reinforce_kl/ratio_max": r_active.max().item(),
         "reinforce_kl/clamp_frac": (((w != r.detach()).to(log_r.dtype) * am).sum() / denom).item(),
     }
 
