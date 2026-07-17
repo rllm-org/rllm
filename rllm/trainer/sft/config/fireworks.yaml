@@ -36,7 +36,7 @@ data:
   train_max_samples: -1
   val_max_samples: -1
   max_length: 2048
-  renderer_name: "role_colon"
+  renderer_name: null   # null = auto-detect from the model; set explicitly to override, e.g. qwen3 / qwen3_5 / deepseekv3 / role_colon
   rllm:
     tokenize_and_mask_method: cumulative
 

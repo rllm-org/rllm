@@ -29,6 +29,7 @@ from rllm.cli._ui import console, fail
 @click.option("--model", default="Qwen/Qwen3.5-4B", help="Model name/path (default: Qwen/Qwen3.5-4B).")
 @click.option("--backend", default="tinker", type=click.Choice(["tinker", "verl", "fireworks"]), help="SFT backend (default: tinker).")
 @click.option("--gpus", default=1, type=int, help="GPUs per node for the distributed (verl) backend's torchrun launcher (default: 1).")
+@click.option("--renderer", default=None, help="tinker/fireworks renderer name: qwen3 | qwen3_5 | deepseekv3 | llama3 | role_colon (default: auto-detect from the model).")
 @click.option("--lora-rank", default=32, type=int, help="LoRA rank; 0 = full fine-tuning (default: 32).")
 # Hyperparameters
 @click.option("--lr", default=1e-5, type=float, help="Learning rate (default: 1e-5).")
@@ -53,6 +54,7 @@ def sft_cmd(
     model: str,
     backend: str,
     gpus: int,
+    renderer: str | None,
     lora_rank: int,
     lr: float,
     batch_size: int,
@@ -116,9 +118,16 @@ def sft_cmd(
     if experiment is None:
         experiment = dataset or (Path(train_file).stem if train_file else "sft")
 
-    # The verl backend runs under torchrun; route --gpus to its native
-    # trainer.n_gpus_per_node (hosted backends ignore it).
-    overrides = {"trainer": {"n_gpus_per_node": gpus}} if backend == "verl" else None
+    # Backend-specific spec overrides:
+    #   - verl runs under torchrun; route --gpus to its native trainer.n_gpus_per_node.
+    #   - tinker/fireworks render via tinker_cookbook; route --renderer to
+    #     data.renderer_name (null/omitted => backend auto-detects from the model).
+    if backend == "verl":
+        overrides = {"trainer": {"n_gpus_per_node": gpus}}
+    elif renderer:
+        overrides = {"data": {"renderer_name": renderer}}
+    else:
+        overrides = None
 
     spec = SFTSpec(
         model=model,
@@ -168,6 +177,10 @@ def sft_cmd(
         ("Max length", f"[dim]{max_length}[/]"),
         ("Tokenize", f"[dim]{tokenize_method}[/]"),
     ]
+    # Renderer applies to the tinker/fireworks render path only (verl tokenizes
+    # via its own dataset). null/omitted => the backend auto-detects it.
+    if backend != "verl":
+        rows.append(("Renderer", f"[dim]{renderer or 'auto-detect'}[/]"))
     console.print()
     console.print(info_panel(rows, title="[bold]rLLM SFT[/]", border="brand"))
     console.print()

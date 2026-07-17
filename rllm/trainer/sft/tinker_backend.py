@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from omegaconf import DictConfig, OmegaConf
 
-from rllm.trainer.sft.backend import SFTBackend, validate_messages_dataset
+from rllm.trainer.sft.backend import SFTBackend, SFTConfigError, validate_messages_dataset
 
 if TYPE_CHECKING:
     import tinker
@@ -27,6 +27,94 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _CONFIG_FILE = Path(__file__).resolve().parent / "config" / "tinker.yaml"
+
+# Plain-text renderers that cannot represent reasoning (``<think>``) or tool-calls.
+_PLAIN_RENDERERS = {"role_colon", "llama3"}
+
+
+def _resolve_renderer_name(model_source: str, explicit: str | None) -> str:
+    """Resolve the tinker_cookbook renderer name for ``model_source``.
+
+    - ``explicit`` (a non-null ``data.renderer_name``) wins; a best-effort
+      ``warn_if_renderer_not_recommended`` advises if it looks off (never fails).
+    - otherwise auto-detect via ``model_info.get_recommended_renderer_name``;
+      tinker's map doesn't cover every model/size (e.g. ``Qwen3-0.6B`` raises
+      ``KeyError``), so on *any* exception fall back to a small family heuristic
+      on the lowercased model basename.
+
+    tinker imports stay lazy (inside the function), matching the rest of this
+    module. Every returned name is a real ``renderers.get_renderer`` entry.
+    """
+    from tinker_cookbook import model_info
+
+    if explicit:
+        try:
+            model_info.warn_if_renderer_not_recommended(model_source, explicit)
+        except Exception as e:  # noqa: BLE001 - advisory only, never fail resolution
+            logger.debug("warn_if_renderer_not_recommended(%r, %r) failed: %s", model_source, explicit, e)
+        logger.info("SFT renderer %r (explicit override for model %r)", explicit, model_source)
+        return explicit
+
+    # Auto-detect: tinker's recommendation map first.
+    try:
+        rec = model_info.get_recommended_renderer_name(model_source)
+        if rec:
+            logger.info("SFT renderer %r (auto-detected for model %r via tinker_cookbook)", rec, model_source)
+            return rec
+    except Exception as e:  # noqa: BLE001 - map doesn't cover every model/size
+        logger.debug("get_recommended_renderer_name(%r) failed (%s); using family heuristic", model_source, e)
+
+    # Minimal family heuristic on the lowercased model basename.
+    base = model_source.rsplit("/", 1)[-1].lower()
+    if "qwen3.5" in base or "qwen3_5" in base or "qwen3p5" in base:
+        name = "qwen3_5"
+    elif "qwen3" in base:
+        name = "qwen3"
+    elif "deepseek" in base:
+        name = "deepseekv3"
+    elif "llama-3" in base or "llama3" in base:
+        name = "llama3"
+    else:
+        logger.warning(
+            "Could not auto-detect a renderer for model %r; falling back to 'role_colon', which "
+            "CANNOT represent reasoning (<think>) or tool-calls. If your data has either, pass "
+            "--renderer (e.g. qwen3 / qwen3_5 / deepseekv3) to pin a renderer.",
+            model_source,
+        )
+        return "role_colon"
+    logger.info("SFT renderer %r (family heuristic for model %r)", name, model_source)
+    return name
+
+
+def _guard_plain_renderer(renderer_name: str, train_data) -> None:
+    """Fail fast if a plain-text renderer would silently drop structured content.
+
+    ``role_colon`` / ``llama3`` can't represent reasoning parts or tool-calls, so
+    if the in-memory dataset carries either, raise rather than render lossily.
+    Pure dict inspection (no coupling to the ``sft_schema`` module); samples up to
+    8 rows and only runs for in-memory datasets (``get_data()``).
+    """
+    if renderer_name not in _PLAIN_RENDERERS or not hasattr(train_data, "get_data"):
+        return
+    try:
+        rows = train_data.get_data()[:8]
+    except Exception:  # noqa: BLE001 - guard is best-effort
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for msg in row.get("messages") or []:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            has_thinking = isinstance(content, list) and any(isinstance(p, dict) and p.get("type") == "thinking" for p in content)
+            if has_thinking or msg.get("tool_calls"):
+                raise SFTConfigError(
+                    f"The {renderer_name!r} renderer cannot represent reasoning (<think>) or tool-calls, "
+                    "but the training data contains structured messages (thinking parts / tool_calls). "
+                    "Pass --renderer to pin a capable renderer (e.g. qwen3 / qwen3_5 / deepseekv3), or use "
+                    "a chat model whose default renderer supports them."
+                )
 
 
 def build_sft_data(config, train_data, val_data):
@@ -44,7 +132,11 @@ def build_sft_data(config, train_data, val_data):
     # not HF-resolvable, so render/tokenize from the HF tokenizer_model when set.
     tokenizer_name = config.model.get("tokenizer_model") or config.model.name
     tokenizer = get_tokenizer(tokenizer_name)
-    renderer_name = config.data.get("renderer_name", "role_colon")
+    # renderer_name=null (yaml default) -> auto-detect from the model; an explicit
+    # value (e.g. from --renderer) overrides. A plain renderer that would drop
+    # reasoning/tool-calls fails fast before we render.
+    renderer_name = _resolve_renderer_name(tokenizer_name, config.data.get("renderer_name", None))
+    _guard_plain_renderer(renderer_name, train_data)
     renderer = get_renderer(renderer_name, tokenizer)
     # Masking is always CUSTOMIZED, driven by each message's ``trainable`` flag:
     # rows from ``from-eval``'s automerge carry the flags directly; flag-less rows
