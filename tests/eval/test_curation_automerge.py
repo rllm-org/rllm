@@ -6,7 +6,17 @@ The builder is model-agnostic: reasoning is preserved as a structured
 
 from __future__ import annotations
 
-from rllm.eval.curation import _episode_to_step_message_lists, _prefix_matches, _text_content
+import json
+
+from rllm.eval.curation import (
+    CurationConfig,
+    CurationStats,
+    _episode_to_step_message_lists,
+    _prefix_matches,
+    _text_content,
+    curate,
+)
+from rllm.eval.results import EvalItem, EvalResult
 from rllm.trainer.sft.tinker_dataset import _ensure_trainable
 
 
@@ -159,3 +169,93 @@ def test_ensure_trainable_passthrough_and_derive():
     plain = [_u("q"), _a("a1"), _u("o"), _a("a2")]
     assert [m["trainable"] for m in _ensure_trainable(plain, last_only=False)] == [False, True, False, True]
     assert [m["trainable"] for m in _ensure_trainable(plain, last_only=True)] == [False, False, False, True]
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for confirmed automerge-walk bugs (PR #739). Each MUST FAIL
+# on current code for the documented reason and PASS once the planned fix lands.
+# ---------------------------------------------------------------------------
+
+
+def _write_eval_run(run_dir, *, attempts, rollouts):
+    """Write a run dir in the on-disk eval format from full episode dicts.
+
+    ``rollouts`` is a list of ``(task_idx, attempt, is_correct, episode_dict)``.
+    Mirrors ``tests/eval/test_curation.py::_write_run`` but lets each rollout
+    carry a full (possibly multi-step) episode instead of a single assistant
+    string.
+    """
+    run_dir.mkdir(parents=True, exist_ok=True)
+    episodes_dir = run_dir / "episodes"
+    episodes_dir.mkdir()
+    items = []
+    for task_idx, attempt, is_correct, episode in rollouts:
+        reward = 1.0 if is_correct else 0.0
+        items.append(EvalItem(idx=task_idx, attempt=attempt, reward=reward, is_correct=is_correct, signals={"accuracy": reward}))
+        eval_idx = task_idx * attempts + attempt
+        (episodes_dir / f"episode_{eval_idx:06d}_t{task_idx}.json").write_text(json.dumps(episode))
+    result = EvalResult.from_items("bench", "model", "agent", items, attempts=attempts)
+    result.save(str(run_dir / "results.json"))
+    return run_dir
+
+
+def test_empty_history_message_does_not_break_merge():
+    # F4: an empty (no-content, no-tool_calls) history message is dropped from the
+    # running segment, which is then compared positionally against the RAW step
+    # prefix -> the window desyncs and a clean prefix chain wrongly splits.
+    # Non-thinking throughout => must stay ONE merged row training all 3 turns.
+    empty_tool = {"role": "tool", "content": ""}
+    ep = _ep(
+        [_u("do task"), _a("run ls")],
+        [_u("do task"), _a("run ls"), empty_tool, _a("run cat")],
+        [_u("do task"), _a("run ls"), empty_tool, _a("run cat"), {"role": "tool", "content": "output"}, _a("done")],
+    )
+    segs = _episode_to_step_message_lists(ep, None)
+    assert len(segs) == 1  # current code desyncs on the dropped empty and returns 2
+    seg = segs[0]
+    assert sum(m["trainable"] for m in seg) == 3
+    assert [_text_content(m["content"]) for m in seg if m["trainable"]] == ["run ls", "run cat", "done"]
+
+
+def test_dedup_does_not_collapse_distinct_tasks_with_identical_assistant(tmp_path):
+    # F5: _assistant_signature hashes ONLY assistant content, so two different
+    # tasks (different prompts) that happen to emit the same assistant text
+    # collide under dedup and one task is silently dropped.
+    rd = _write_eval_run(
+        tmp_path / "cross",
+        attempts=1,
+        rollouts=[
+            (0, 0, True, _ep([_u("list files in /app"), _a("ls")])),
+            (1, 0, True, _ep([_u("show home dir"), _a("ls")])),
+        ],
+    )
+    rows, _ = curate([rd], CurationConfig(dedup=True))
+    assert len(rows) == 2  # current code dedups the two distinct tasks down to 1
+    assert sorted(r["task_id"] for r in rows) == ["t0", "t1"]
+
+
+def test_empty_final_assistant_not_trained():
+    # F6a: an assistant turn with empty content and no tool_calls carries no
+    # trainable signal and must not become a training target.
+    ep = _ep([_u("hi"), _a("")])
+    assert _episode_to_step_message_lists(ep, None) == []  # current code emits 1 empty-target segment
+
+
+def test_curation_stats_track_merges_and_splits(tmp_path):
+    # F6b: CurationStats must expose integer merge/split telemetry.
+    stats = CurationStats()
+    assert hasattr(stats, "segments_merged")
+    assert hasattr(stats, "segments_split")
+    assert stats.segments_merged == 0
+    assert stats.segments_split == 0
+
+    # A 3-step non-thinking episode is one clean prefix chain -> merges into a
+    # single row, so at least one merge must be recorded.
+    ep = _ep(
+        [_u("task"), _a("act1")],
+        [_u("task"), _a("act1"), _u("obs1"), _a("act2")],
+        [_u("task"), _a("act1"), _u("obs1"), _a("act2"), _u("obs2"), _a("act3")],
+    )
+    rd = _write_eval_run(tmp_path / "merge", attempts=1, rollouts=[(0, 0, True, ep)])
+    _, stats = curate([rd], CurationConfig())
+    assert stats.segments_merged >= 1

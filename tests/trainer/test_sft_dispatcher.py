@@ -211,3 +211,34 @@ def test_default_model_is_qwen35_4b():
     # SFTSpec default + both backend templates resolve to the same default model.
     assert SFTSpec(train_dataset=_ds()).model == "Qwen/Qwen3.5-4B"
     assert TinkerSFTBackend(SFTSpec(train_dataset=_ds())).build_config().model.name == "Qwen/Qwen3.5-4B"
+
+
+def _structured_ds(n: int = 2):
+    """T1-shape structured rows: parts-list content + per-message trainable flags.
+
+    This is the tinker-only schema (rendered via ``rllm.data.sft_schema``); verl's
+    parquet/messages path can't consume it, so verl must reject such a spec.
+    """
+    rows = [
+        {
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": f"q{i}"}], "trainable": False},
+                {"role": "assistant", "content": [{"type": "text", "text": f"a{i}"}], "trainable": True},
+            ]
+        }
+        for i in range(n)
+    ]
+    return Dataset(data=rows, name="structured", split="train")
+
+
+def test_verl_rejects_structured_rows():
+    """verl must reject structured (schema) rows and point at the tinker backend.
+
+    RED today: ``validate_spec`` only checks for role/content presence, and
+    structured rows have both (content is a parts list), so nothing is raised.
+    """
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    spec = _spec(train_dataset=_structured_ds())
+    with pytest.raises(SFTConfigError, match="tinker"):
+        VerlSFTBackend(spec).validate_spec()

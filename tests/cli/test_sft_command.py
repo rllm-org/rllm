@@ -80,3 +80,72 @@ def test_sft_verl_backend_dispatches_to_launcher(runner, tmp_rllm_home, monkeypa
     assert "not wired yet" not in result.output
     assert launched.get("name") == "verl"
     assert result.exit_code == 0
+
+
+def test_dataset_import_think_tags(runner, tmp_rllm_home, tmp_path):
+    """`rllm dataset import FILE --format think-tags` bridges sijun-style rows and
+    registers them. Explode is ON by default: one row per assistant turn, each
+    message carrying `trainable` + parts-list content.
+
+    RED today: the `dataset` group has no `import` subcommand (exit_code != 0).
+    """
+    import json
+
+    from rllm.data import DatasetRegistry
+
+    rows = [
+        {
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": '<think>\nplan A\n</think>\n\n{"cmd": "ls"}'},
+                {"role": "user", "content": "out1"},
+                {"role": "assistant", "content": "<think>\nplan B\n</think>\n\ndone"},
+            ],
+            "_task": "t1",
+            "_group": "g",
+            "_model": "opus",
+            "_reward": 1,
+        },
+        {
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "<think>\nthink\n</think>\n\nhi"},
+            ],
+            "_task": "t2",
+            "_group": "g",
+            "_model": "opus",
+            "_reward": 1,
+        },
+    ]
+    f = tmp_path / "sijun.jsonl"
+    f.write_text("\n".join(json.dumps(r) for r in rows))
+
+    result = runner.invoke(cli, ["dataset", "import", str(f), "--name", "x", "--format", "think-tags"])
+    assert result.exit_code == 0, result.output
+
+    ds = DatasetRegistry.load_dataset("x", "train")
+    assert ds is not None
+    total_assistant_turns = sum(1 for r in rows for m in r["messages"] if m["role"] == "assistant")
+    assert len(ds) == total_assistant_turns  # explode default ON
+    for row in ds.get_data():
+        for m in row["messages"]:
+            assert "trainable" in m
+            assert isinstance(m["content"], list)
+
+
+def test_sft_renderer_flag(runner, tmp_rllm_home, monkeypatch):
+    """`rllm sft ... --renderer qwen3` lands in SFTSpec.overrides['data']['renderer_name'].
+
+    RED today: there is no `--renderer` option, so Click errors with exit_code 2.
+    """
+    from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
+
+    captured = {}
+    monkeypatch.setattr(AgentSFTTrainer, "train", lambda self: captured.setdefault("spec", self.spec))
+
+    name = _register_toy("renderer-toy")
+    result = runner.invoke(cli, ["sft", name, "--backend", "tinker", "--renderer", "qwen3"])
+    assert result.exit_code == 0, result.output
+    spec = captured["spec"]
+    assert spec.overrides["data"]["renderer_name"] == "qwen3"
