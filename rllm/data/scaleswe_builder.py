@@ -197,8 +197,11 @@ def _build_task_toml(
     """Synthesize a Harbor-format ``task.toml``.
 
     The loader lifts ``[environment].docker_image`` / ``workdir`` / resources
-    into ``task.metadata``; ``replay_dockerfile`` is left at its default
-    (true) so the ``pre_commands`` RUN replays on non-docker backends.
+    into ``task.metadata``. ``replay_dockerfile`` is set explicitly to ``true``:
+    because an explicit ``docker_image`` is present, the loader would otherwise
+    force ``replay_dockerfile=False`` (``_normalize_env_section``), skipping the
+    Dockerfile's ``parent_commit`` checkout RUN on modal/daytona and grading
+    against the image's (older) shipped HEAD.
     """
     wd = workdir or "/workspace"
     lang = language or "python"
@@ -220,6 +223,10 @@ def _build_task_toml(
         "",
         "[environment]",
         f'docker_image = "{image_url}"',
+        # Explicit: with docker_image set, the loader defaults replay_dockerfile to
+        # False; we need the Dockerfile's parent_commit checkout RUN to replay on
+        # modal/daytona (docker runs it at build time).
+        "replay_dockerfile = true",
         f'workdir = "{wd}"',
         f"cpus = {_DEFAULT_RESOURCES['cpus']}",
         f"memory_mb = {_DEFAULT_RESOURCES['memory_mb']}",
