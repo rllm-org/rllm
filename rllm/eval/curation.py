@@ -81,6 +81,7 @@ class CurationStats:
     rows_emitted: int = 0
     rows_skipped_no_messages: int = 0  # attempts whose automerge walk yielded zero segments
     rows_deduped: int = 0
+    rows_invalid: int = 0  # rows dropped because they failed SFT schema validation
     # Automerge-walk telemetry (from-eval): how steps merged/split into rows.
     segments_merged: int = 0  # steps merged into an already-open segment
     segments_split: int = 0  # times a new segment was started while one was already open (same attempt)
@@ -469,8 +470,24 @@ def _make_row(ref: _AttemptRef, group: AttemptGroup, messages: list[dict]) -> di
 
 
 def _rows_for_attempt(ref: _AttemptRef, group: AttemptGroup, trajectory_name: str | None, stats: CurationStats | None = None) -> list[dict]:
-    """All rows one attempt (episode) contributes, via the automerge walk."""
-    return [_make_row(ref, group, seg) for seg in _load_step_message_lists(ref, trajectory_name, stats)]
+    """All rows one attempt (episode) contributes, via the automerge walk.
+
+    Each row is validated through the SFT schema (``rllm.data.sft_schema``)
+    before emission, so malformed provider payloads are caught here — at
+    creation time — rather than deep inside a training backend.
+    """
+    from rllm.data.sft_schema import SFTSchemaError, normalize_row
+
+    rows: list[dict] = []
+    for seg in _load_step_message_lists(ref, trajectory_name, stats):
+        raw = _make_row(ref, group, seg)
+        try:
+            rows.append(normalize_row(raw).to_record())
+        except SFTSchemaError as e:
+            logger.warning("Dropping curated row (task %s, attempt %d): %s", group.task_id, ref.attempt, e)
+            if stats is not None:
+                stats.rows_invalid += 1
+    return rows
 
 
 def _row_signature(row: dict) -> str:
