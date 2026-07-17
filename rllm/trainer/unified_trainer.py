@@ -307,6 +307,16 @@ class UnifiedTrainer:
         if self.rllm_config.rejection_sample.multiplier != 1:
             assert self.rllm_config.rejection_sample.enable is True, "rejection sampling is disabled, but rejection_sample.multiplier is not 1"
 
+        async_config = self.rllm_config.get("async_training", {})
+        if async_config.get("enable", False):
+            sync_interval = async_config.get("trigger_parameter_sync_step", 1)
+            if sync_interval < 1:
+                raise ValueError("async_training.trigger_parameter_sync_step must be at least 1")
+            for frequency_name in ("test_freq", "save_freq"):
+                frequency = self.rllm_config.trainer.get(frequency_name, -1)
+                if frequency > 0 and frequency % sync_interval != 0:
+                    raise ValueError(f"trainer.{frequency_name} ({frequency}) must be a multiple of async_training.trigger_parameter_sync_step ({sync_interval})")
+
         # validate backend-specific configs
         self.backend.validate_config()
 

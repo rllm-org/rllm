@@ -284,15 +284,6 @@ class FireworksBackend(TinkerBackend):
                 tis_mode,
             )
 
-        # save_freq must be a multiple of sync interval (save requires a sampler snapshot from sync)
-        save_freq = self.full_config.rllm.trainer.get("save_freq", -1)
-        if save_freq > 0:
-            async_cfg = self.full_config.rllm.get("async_training", {})
-            if async_cfg.get("enable", False):
-                sync_interval = async_cfg.get("trigger_parameter_sync_step", 1)
-                if sync_interval > 0 and save_freq % sync_interval != 0:
-                    raise ValueError(f"save_freq ({save_freq}) must be a multiple of trigger_parameter_sync_step ({sync_interval}). Promotion requires a sampler snapshot created at sync time.")
-
     # ------------------------------------------------------------------
     # Policy update (override: no fused path, uses ReconnectableClient)
     # ------------------------------------------------------------------
@@ -401,8 +392,10 @@ class FireworksBackend(TinkerBackend):
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
-        # In async mode, on_policy_updated already handled save/sync
-        if not self._policy_updated_this_step:
+        # Sync mode publishes after every batch; async mode publishes only when
+        # the coordinator reaches trigger_parameter_sync_step.
+        async_enabled = self.full_config.rllm.async_training.enable
+        if not async_enabled and not self._policy_updated_this_step:
             step = trainer_state.global_step
             save_freq = self.full_config.rllm.trainer.save_freq
             await self._save_and_sync(

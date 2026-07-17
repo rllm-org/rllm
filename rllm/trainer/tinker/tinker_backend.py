@@ -417,8 +417,10 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         """
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
-        # If on_policy_updated() wasn't called (sync mode), do checkpoint here
-        if not self._policy_updated_this_step:
+        # Sync mode publishes after every batch; async mode publishes only when
+        # the coordinator reaches trigger_parameter_sync_step.
+        async_enabled = self.full_config.rllm.async_training.enable
+        if not async_enabled and not self._policy_updated_this_step:
             with simple_timer("save_checkpoint", trainer_state.timing_dict):
                 logger.info(f"Saving state checkpoint and sampler at step {trainer_state.global_step}")
                 await self.on_policy_updated(trainer_state)
