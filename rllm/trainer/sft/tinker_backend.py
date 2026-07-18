@@ -194,7 +194,7 @@ class TinkerSFTBackend(SFTBackend):
     # -- contract -----------------------------------------------------------
 
     def validate_spec(self) -> None:
-        if self.spec.lora_rank == 0 and not self.supports_full_finetune:
+        if self._effective_lora_rank() == 0 and not self.supports_full_finetune:
             raise SFTConfigError(
                 f"--lora-rank 0 (full-parameter fine-tuning) is not supported by the {self.name!r} SFT backend: "
                 "the tinker SDK only exposes LoRA training clients. Use --lora-rank >= 1 here, or switch to "
@@ -203,6 +203,17 @@ class TinkerSFTBackend(SFTBackend):
         validate_messages_dataset(self.spec.train_dataset, "train")
         if self.spec.val_dataset is not None:
             validate_messages_dataset(self.spec.val_dataset, "val")
+
+    def _effective_lora_rank(self) -> int:
+        """The rank the training loop will actually see: an overrides
+        ``model.lora_rank`` (e.g. from ``rllm sft --config``) beats the spec
+        field, exactly as ``build_config`` merges it."""
+        if self.spec.overrides:
+            user = OmegaConf.to_container(OmegaConf.create(self.spec.overrides), resolve=False)
+            model = user.get("model") if isinstance(user, dict) and isinstance(user.get("model"), dict) else {}
+            if model.get("lora_rank") is not None:
+                return int(model["lora_rank"])
+        return int(self.spec.lora_rank)
 
     def _config_template(self) -> Path:
         """Path to the backend's native config template (overridden per backend)."""

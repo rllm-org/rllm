@@ -58,7 +58,7 @@ from rllm.cli._ui import console, fail
     "config_file",
     default=None,
     type=click.Path(exists=True),
-    help="YAML file deep-merged into the backend's native config (backend knobs without a flag, e.g. fireworks model.tokenizer_model + fireworks_config.policy_trainer_shape_id). CLI flags win.",
+    help="YAML escape hatch merged ON TOP of the backend config: file keys beat equivalent CLI flags (--renderer/--gpus still win). For backend knobs without a flag.",
 )
 def sft_cmd(
     dataset: str | None,
@@ -162,10 +162,13 @@ def sft_cmd(
                 resolved_logger.append(name)
 
     # Backend-specific spec overrides, lowest to highest precedence:
-    #   - --config YAML (backend-native knobs with no dedicated flag);
-    #   - verl runs under torchrun; route --gpus to its native trainer.n_gpus_per_node;
+    #   - --config YAML (the escape hatch: beats flag-derived values, see its help);
+    #   - verl runs under torchrun; route --gpus to its native trainer.n_gpus_per_node
+    #     (when --config is given, only an explicitly-passed --gpus beats the file —
+    #     the Click default of 1 must not clobber a file-set n_gpus_per_node);
     #   - tinker/fireworks render via tinker_cookbook; route --renderer to
     #     data.renderer_name (null/omitted => backend auto-detects from the model).
+    from click.core import ParameterSource
     from omegaconf import OmegaConf
 
     override_layers: list[dict] = []
@@ -174,9 +177,11 @@ def sft_cmd(
         if not isinstance(loaded, dict):
             fail(f"--config {config_file} must be a YAML mapping.")
         override_layers.append(loaded)
-    if backend == "verl":
+    ctx = click.get_current_context(silent=True)
+    gpus_explicit = ctx is not None and ctx.get_parameter_source("gpus") == ParameterSource.COMMANDLINE
+    if backend == "verl" and (gpus_explicit or not config_file):
         override_layers.append({"trainer": {"n_gpus_per_node": gpus}})
-    elif renderer:
+    elif backend != "verl" and renderer:
         override_layers.append({"data": {"renderer_name": renderer}})
     overrides = None
     if override_layers:

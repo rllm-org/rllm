@@ -357,6 +357,41 @@ def test_fireworks_model_swap_requires_tokenizer_and_shape():
         FireworksSFTBackend(_spec(model="accounts/fireworks/models/qwen3p6-35b-a3b")).build_config()
 
 
+def test_fireworks_model_swap_via_overrides_also_guarded():
+    """The same trap through overrides model.name (e.g. --config) must be caught."""
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    with pytest.raises(SFTConfigError, match="tokenizer_model"):
+        FireworksSFTBackend(_spec(overrides={"model": {"name": "accounts/fireworks/models/qwen3p6-35b-a3b"}})).build_config()
+
+
+def test_fireworks_model_swap_accepts_dictconfig_overrides():
+    """Programmatic callers may pass overrides as a DictConfig; a complete
+    tokenizer+shape override must not be rejected."""
+    from omegaconf import OmegaConf
+
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    cfg = FireworksSFTBackend(
+        _spec(
+            model="accounts/fireworks/models/qwen3p6-35b-a3b",
+            overrides=OmegaConf.create(
+                {
+                    "model": {"tokenizer_model": "Qwen/Qwen3.6-35B-A3B"},
+                    "fireworks_config": {"policy_trainer_shape_id": "accounts/fireworks/trainingShapes/qwen3p6-35b-a3b-256k-lora"},
+                }
+            ),
+        )
+    ).build_config()
+    assert cfg.model.tokenizer_model == "Qwen/Qwen3.6-35B-A3B"
+
+
+def test_tinker_rejects_full_finetune_via_overrides():
+    """overrides model.lora_rank=0 (e.g. from --config) reaches the same gate."""
+    with pytest.raises(SFTConfigError, match="fireworks"):
+        TinkerSFTBackend(_spec(overrides={"model": {"lora_rank": 0}})).validate_spec()
+
+
 def test_fireworks_model_swap_with_tokenizer_and_shape_builds():
     from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
 

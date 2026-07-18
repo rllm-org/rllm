@@ -211,3 +211,35 @@ def test_sft_config_file_merges_overrides(runner, tmp_rllm_home, monkeypatch, tm
     ov = captured["spec"].overrides
     assert ov["model"]["tokenizer_model"] == "Qwen/Qwen3.6-35B-A3B"
     assert ov["data"]["renderer_name"] == "qwen3"  # CLI --renderer beats the file
+
+
+def test_sft_config_file_gpus_precedence_verl(runner, tmp_rllm_home, monkeypatch, tmp_path):
+    """With --config on verl, a file-set trainer.n_gpus_per_node survives the
+    --gpus Click default (1) but loses to an explicitly passed --gpus."""
+    from omegaconf import OmegaConf
+
+    from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    captured = {}
+    # Skip the real verl/hydra config build + parquet materialization.
+    monkeypatch.setattr(
+        VerlSFTBackend,
+        "build_config",
+        lambda self: OmegaConf.create({"model": {"path": self.spec.model}, "trainer": {"default_local_dir": "/tmp/x"}}),
+    )
+    monkeypatch.setattr(VerlSFTBackend, "prepare_data", lambda self: None)
+    monkeypatch.setattr(AgentSFTTrainer, "train", lambda self: captured.setdefault("spec", self.spec))
+
+    cfg = tmp_path / "verl.yaml"
+    cfg.write_text("trainer:\n  n_gpus_per_node: 8\n")
+    name = _register_toy("gpus-toy")
+
+    result = runner.invoke(cli, ["sft", name, "--backend", "verl", "--config", str(cfg)])
+    assert result.exit_code == 0, result.output
+    assert captured["spec"].overrides["trainer"]["n_gpus_per_node"] == 8  # file survives the default
+
+    captured.clear()
+    result = runner.invoke(cli, ["sft", name, "--backend", "verl", "--config", str(cfg), "--gpus", "2"])
+    assert result.exit_code == 0, result.output
+    assert captured["spec"].overrides["trainer"]["n_gpus_per_node"] == 2  # explicit flag wins

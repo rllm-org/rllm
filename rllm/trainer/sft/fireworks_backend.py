@@ -108,9 +108,11 @@ class FireworksSFTBackend(TinkerSFTBackend):
         resources named ``<base>`` (POLICY_TRAINER = full-parameter) and
         ``<base>-lora`` (LORA_TRAINER), and the SDK derives the expected mode
         from ``lora_rank`` alone (``_expected_trainer_mode``: rank 0 →
-        POLICY_TRAINER). A rank-0 run pointed at a ``-lora`` shape would
-        provision the wrong trainer mode, so derive the full-parameter sibling
-        by stripping the suffix; explicit non-``-lora`` shapes pass through.
+        POLICY_TRAINER — client-side only for shape auto-select; with an
+        explicit shape id a mode mismatch surfaces server-side at provisioning).
+        A rank-0 run pointed at a ``-lora`` shape would provision the wrong
+        trainer mode, so derive the full-parameter sibling by stripping the
+        suffix; explicit non-``-lora`` shapes pass through.
         """
         shape = str(OmegaConf.select(cfg, "fireworks_config.policy_trainer_shape_id") or "")
         lora_rank = int(cfg.model.get("lora_rank") or 0)
@@ -128,26 +130,30 @@ class FireworksSFTBackend(TinkerSFTBackend):
             )
 
     def _require_consistent_model_swap(self, base: DictConfig, cfg: DictConfig) -> None:
-        """Fail fast when ``--model`` swaps the FW base model but the HF tokenizer
-        and training shape are left at the template's values.
+        """Fail fast when the FW base model is swapped (via ``--model`` or an
+        overrides ``model.name``) but the HF tokenizer and training shape are
+        left at the template's values.
 
         Rendering/tokenization would silently use the wrong tokenizer and
         provisioning would request a shape validated for a different model.
         Detection is by explicit intent: the user must set both knobs in
         ``spec.overrides`` (e.g. via ``rllm sft --config``).
         """
-        spec_model = str(self.spec.model)
-        if not spec_model.startswith("accounts/") or spec_model == str(base.model.name):
+        new_model = str(cfg.model.name)
+        if new_model == str(base.model.name):
             return
-        user = self.spec.overrides or {}
+        # Normalize (plain dict or DictConfig both allowed) for key introspection.
+        user = OmegaConf.to_container(OmegaConf.create(self.spec.overrides), resolve=False) if self.spec.overrides else {}
+        user_model = user.get("model") if isinstance(user.get("model"), dict) else {}
+        user_fw = user.get("fireworks_config") if isinstance(user.get("fireworks_config"), dict) else {}
         missing = []
-        if not (isinstance(user.get("model"), dict) and user["model"].get("tokenizer_model")):
+        if not user_model.get("tokenizer_model"):
             missing.append("model.tokenizer_model (the HF tokenizer the rows are rendered with)")
-        if not (isinstance(user.get("fireworks_config"), dict) and user["fireworks_config"].get("policy_trainer_shape_id")):
+        if not user_fw.get("policy_trainer_shape_id"):
             missing.append("fireworks_config.policy_trainer_shape_id (a training shape validated for the new model)")
         if missing:
             raise SFTConfigError(
-                f"--model swapped the Fireworks base model to {spec_model!r}, but the config still carries the "
+                f"The Fireworks base model was swapped to {new_model!r}, but the config still carries the "
                 f"template's values for: {'; '.join(missing)}. Set them together via overrides "
                 "(e.g. rllm sft --config overrides.yaml with a model: {tokenizer_model: ...} and "
                 "fireworks_config: {policy_trainer_shape_id: ...} section)."
