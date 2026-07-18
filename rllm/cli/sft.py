@@ -226,8 +226,11 @@ def sft_cmd(
     ]
     if tokenizer_model and tokenizer_model != resolved_model:
         rows.append(("Tokenizer", f"[dim]{tokenizer_model}[/]"))
+    # Panel honesty: a --config-set trainer.n_gpus_per_node beats the --gpus
+    # Click default at launch, so report the resolved count, not the raw flag.
+    resolved_gpus = (cfg.get("trainer", {}).get("n_gpus_per_node") or gpus) if backend == "verl" else gpus
     rows += [
-        ("Backend", f"[val]{backend}[/]" + (f"  [dim]({gpus} GPU{'s' if gpus != 1 else ''}, torchrun)[/]" if backend == "verl" else "")),
+        ("Backend", f"[val]{backend}[/]" + (f"  [dim]({resolved_gpus} GPU{'s' if resolved_gpus != 1 else ''}, torchrun)[/]" if backend == "verl" else "")),
         ("Train data", f"[val]{source_label}[/]  [dim]({len(train_dataset)} examples)[/]"),
         ("Val data", f"[dim]{len(val_dataset)} examples[/]" if val_dataset else "[dim]none[/]"),
         ("LoRA rank", f"[dim]{lora_rank}[/]"),

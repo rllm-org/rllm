@@ -243,3 +243,31 @@ def test_sft_config_file_gpus_precedence_verl(runner, tmp_rllm_home, monkeypatch
     result = runner.invoke(cli, ["sft", name, "--backend", "verl", "--config", str(cfg), "--gpus", "2"])
     assert result.exit_code == 0, result.output
     assert captured["spec"].overrides["trainer"]["n_gpus_per_node"] == 2  # explicit flag wins
+
+
+def test_sft_summary_panel_shows_resolved_gpus_verl(runner, tmp_rllm_home, monkeypatch, tmp_path):
+    """The pre-launch panel reports the resolved trainer.n_gpus_per_node (e.g.
+    file-set via --config), not the raw --gpus Click default. The torchrun
+    launch already used the resolved value; only the panel under-reported."""
+    from omegaconf import OmegaConf
+
+    from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    def fake_build_config(self):
+        # Minimal stand-in that, like the real build_config, merges spec.overrides.
+        base = OmegaConf.create({"model": {"path": self.spec.model}, "trainer": {"default_local_dir": "/tmp/x"}})
+        return OmegaConf.merge(base, OmegaConf.create(self.spec.overrides or {}))
+
+    monkeypatch.setattr(VerlSFTBackend, "build_config", fake_build_config)
+    monkeypatch.setattr(VerlSFTBackend, "prepare_data", lambda self: None)
+    monkeypatch.setattr(AgentSFTTrainer, "train", lambda self: None)
+
+    cfg = tmp_path / "verl.yaml"
+    cfg.write_text("trainer:\n  n_gpus_per_node: 8\n")
+    name = _register_toy("gpus-panel-toy")
+
+    result = runner.invoke(cli, ["sft", name, "--backend", "verl", "--config", str(cfg)])
+    assert result.exit_code == 0, result.output
+    assert "8 GPUs" in result.output
+    assert "1 GPU," not in result.output
