@@ -194,8 +194,17 @@ def test_fireworks_build_config_uses_fireworks_template():
 def test_fireworks_model_override_requires_fw_path():
     from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
 
-    # a FW path replaces the base model; a bare HF name does not
-    cfg = FireworksSFTBackend(_spec(model="accounts/fireworks/models/custom")).build_config()
+    # a FW path replaces the base model (tokenizer/shape must move with it);
+    # a bare HF name does not.
+    cfg = FireworksSFTBackend(
+        _spec(
+            model="accounts/fireworks/models/custom",
+            overrides={
+                "model": {"tokenizer_model": "Qwen/Qwen3.5-9B"},
+                "fireworks_config": {"policy_trainer_shape_id": "accounts/fireworks/trainingShapes/custom-256k-lora"},
+            },
+        )
+    ).build_config()
     assert cfg.model.name == "accounts/fireworks/models/custom"
 
 
@@ -272,3 +281,133 @@ def test_verl_rejects_structured_rows():
     spec = _spec(train_dataset=_structured_ds())
     with pytest.raises(SFTConfigError, match="tinker"):
         VerlSFTBackend(spec).validate_spec()
+
+
+# -- full-parameter (lora_rank=0) support ------------------------------------
+
+
+def test_spec_rejects_negative_lora_rank():
+    with pytest.raises(ValueError, match="lora_rank"):
+        _spec(lora_rank=-1)
+
+
+def test_spec_allows_full_finetune_rank():
+    assert _spec(lora_rank=0).lora_rank == 0
+
+
+def test_tinker_validate_rejects_full_finetune():
+    """Tinker's SDK is LoRA-only (``create_lora_training_client``); rank 0 must
+    fail fast with a pointer at the backends that do full-parameter."""
+    with pytest.raises(SFTConfigError, match="fireworks"):
+        TinkerSFTBackend(_spec(lora_rank=0)).validate_spec()
+
+
+def test_fireworks_validate_allows_full_finetune():
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    FireworksSFTBackend(_spec(lora_rank=0)).validate_spec()  # no raise
+
+
+def test_fireworks_full_param_derives_policy_trainer_shape():
+    """lora_rank=0 selects the POLICY_TRAINER (non ``-lora``) sibling shape and
+    threads rank 0 into the provision document."""
+    from omegaconf import OmegaConf
+
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    cfg = FireworksSFTBackend(_spec(lora_rank=0)).build_config()
+    assert cfg.model.lora_rank == 0
+    assert cfg.fireworks_config.policy_trainer_shape_id == "accounts/fireworks/trainingShapes/qwen3p5-9b-256k"
+    doc = OmegaConf.to_container(cfg.fireworks_infra, resolve=True)
+    assert doc["trainers"]["policy"]["training_shape_id"] == "accounts/fireworks/trainingShapes/qwen3p5-9b-256k"
+    assert doc["common"]["lora_rank"] == 0
+
+
+def test_fireworks_full_param_keeps_explicit_shape():
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    shape = "accounts/fireworks/trainingShapes/qwen3p6-35b-a3b-256k"
+    cfg = FireworksSFTBackend(
+        _spec(
+            model="accounts/fireworks/models/qwen3p6-35b-a3b",
+            lora_rank=0,
+            overrides={
+                "model": {"tokenizer_model": "Qwen/Qwen3.6-35B-A3B"},
+                "fireworks_config": {"policy_trainer_shape_id": shape},
+            },
+        )
+    ).build_config()
+    assert cfg.fireworks_config.policy_trainer_shape_id == shape
+
+
+def test_fireworks_lora_rank_keeps_lora_shape():
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    cfg = FireworksSFTBackend(_spec(lora_rank=8)).build_config()
+    assert cfg.fireworks_config.policy_trainer_shape_id == "accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora"
+
+
+def test_fireworks_model_swap_requires_tokenizer_and_shape():
+    """Swapping to a different FW base model without also swapping the HF
+    tokenizer + training shape would silently render with the wrong tokenizer
+    and provision the wrong shape — must fail fast."""
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    with pytest.raises(SFTConfigError, match="tokenizer_model"):
+        FireworksSFTBackend(_spec(model="accounts/fireworks/models/qwen3p6-35b-a3b")).build_config()
+
+
+def test_fireworks_model_swap_with_tokenizer_and_shape_builds():
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    cfg = FireworksSFTBackend(
+        _spec(
+            model="accounts/fireworks/models/qwen3p6-35b-a3b",
+            lora_rank=0,
+            overrides={
+                "model": {"tokenizer_model": "Qwen/Qwen3.6-35B-A3B"},
+                "fireworks_config": {"policy_trainer_shape_id": "accounts/fireworks/trainingShapes/qwen3p6-35b-a3b-256k"},
+            },
+        )
+    ).build_config()
+    assert cfg.model.name == "accounts/fireworks/models/qwen3p6-35b-a3b"
+    assert cfg.model.tokenizer_model == "Qwen/Qwen3.6-35B-A3B"
+
+
+def test_fireworks_provision_doc_parses_sft_full_param():
+    """The full-parameter (lora_rank=0) provision document must parse offline
+    into a valid SFT provision config with rank 0 + the POLICY_TRAINER shape."""
+    pytest.importorskip("training.provision")
+    import tempfile
+    from pathlib import Path
+
+    import yaml
+    from omegaconf import OmegaConf
+    from training.provision import load_yaml_provision
+
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    cfg = FireworksSFTBackend(
+        _spec(
+            model="accounts/fireworks/models/qwen3p6-35b-a3b",
+            lora_rank=0,
+            overrides={
+                "model": {"tokenizer_model": "Qwen/Qwen3.6-35B-A3B"},
+                "fireworks_config": {"policy_trainer_shape_id": "accounts/fireworks/trainingShapes/qwen3p6-35b-a3b-256k"},
+            },
+        )
+    ).build_config()
+    doc = OmegaConf.to_container(cfg.fireworks_infra, resolve=True)
+    doc["common"]["learning_rate"] = float(cfg.optim.lr)
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+        yaml.safe_dump(doc, fh)
+        p = Path(fh.name)
+    try:
+        mode, pc = load_yaml_provision(mode="sft", recipe=None, path=p)
+    finally:
+        p.unlink(missing_ok=True)
+    assert mode == "sft"
+    assert pc.base_model == "accounts/fireworks/models/qwen3p6-35b-a3b"
+    assert pc.tokenizer_model == "Qwen/Qwen3.6-35B-A3B"
+    assert pc.lora_rank == 0
+    assert pc.trainer.training_shape_id == "accounts/fireworks/trainingShapes/qwen3p6-35b-a3b-256k"

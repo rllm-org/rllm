@@ -53,6 +53,13 @@ from rllm.cli._ui import console, fail
 )
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live rLLM UI logging. Default: auto-enabled when logged in (see 'rllm login'). Not supported on the verl backend.")
 @click.option("--output", "output_dir", default=None, help="Checkpoint directory.")
+@click.option(
+    "--config",
+    "config_file",
+    default=None,
+    type=click.Path(exists=True),
+    help="YAML file deep-merged into the backend's native config (backend knobs without a flag, e.g. fireworks model.tokenizer_model + fireworks_config.policy_trainer_shape_id). CLI flags win.",
+)
 def sft_cmd(
     dataset: str | None,
     train_file: str | None,
@@ -78,6 +85,7 @@ def sft_cmd(
     loggers: tuple[str, ...],
     enable_ui: bool | None,
     output_dir: str | None,
+    config_file: str | None,
 ):
     """Fine-tune a model with supervised learning (SFT).
 
@@ -153,16 +161,26 @@ def sft_cmd(
                 seen.add(name)
                 resolved_logger.append(name)
 
-    # Backend-specific spec overrides:
-    #   - verl runs under torchrun; route --gpus to its native trainer.n_gpus_per_node.
+    # Backend-specific spec overrides, lowest to highest precedence:
+    #   - --config YAML (backend-native knobs with no dedicated flag);
+    #   - verl runs under torchrun; route --gpus to its native trainer.n_gpus_per_node;
     #   - tinker/fireworks render via tinker_cookbook; route --renderer to
     #     data.renderer_name (null/omitted => backend auto-detects from the model).
+    from omegaconf import OmegaConf
+
+    override_layers: list[dict] = []
+    if config_file:
+        loaded = OmegaConf.to_container(OmegaConf.load(config_file), resolve=False)
+        if not isinstance(loaded, dict):
+            fail(f"--config {config_file} must be a YAML mapping.")
+        override_layers.append(loaded)
     if backend == "verl":
-        overrides = {"trainer": {"n_gpus_per_node": gpus}}
+        override_layers.append({"trainer": {"n_gpus_per_node": gpus}})
     elif renderer:
-        overrides = {"data": {"renderer_name": renderer}}
-    else:
-        overrides = None
+        override_layers.append({"data": {"renderer_name": renderer}})
+    overrides = None
+    if override_layers:
+        overrides = OmegaConf.to_container(OmegaConf.merge(*[OmegaConf.create(layer) for layer in override_layers]), resolve=False)
 
     spec = SFTSpec(
         model=model,

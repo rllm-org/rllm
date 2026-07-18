@@ -43,6 +43,10 @@ class FireworksSFTBackend(TinkerSFTBackend):
 
     name = "fireworks"
     requires_distributed = False
+    # Fireworks trains full-parameter when lora_rank=0: the SDK's
+    # _expected_trainer_mode maps rank 0 to POLICY_TRAINER (full-tune) shapes,
+    # and promotable saves then yield HF_BASE_MODEL account models.
+    supports_full_finetune = True
 
     def _config_template(self) -> Path:
         return _CONFIG_FILE
@@ -54,6 +58,9 @@ class FireworksSFTBackend(TinkerSFTBackend):
         training shape (configured in the template). So ``--model`` only replaces
         the FW base model when it is itself a FW path (``accounts/...``);
         otherwise the template's ``model.name``/``tokenizer_model`` are kept.
+        Swapping to a *different* FW base model requires ``model.tokenizer_model``
+        + ``fireworks_config.policy_trainer_shape_id`` overrides to move with it
+        (enforced below — the template's values belong to the template's model).
         """
         spec = self.spec
         base = OmegaConf.load(str(self._config_template()))
@@ -89,8 +96,62 @@ class FireworksSFTBackend(TinkerSFTBackend):
             cfg = OmegaConf.merge(cfg, OmegaConf.create({"trainer": {"default_local_dir": spec.output_dir}}))
         if spec.overrides:
             cfg = OmegaConf.merge(cfg, OmegaConf.create(spec.overrides))
+        self._align_shape_with_lora_rank(cfg)
+        self._require_consistent_model_swap(base, cfg)
         self._config = cfg
         return cfg
+
+    def _align_shape_with_lora_rank(self, cfg: DictConfig) -> None:
+        """Keep the training shape's trainer mode consistent with ``lora_rank``.
+
+        Fireworks publishes each model's shapes per trainer mode as sibling
+        resources named ``<base>`` (POLICY_TRAINER = full-parameter) and
+        ``<base>-lora`` (LORA_TRAINER), and the SDK derives the expected mode
+        from ``lora_rank`` alone (``_expected_trainer_mode``: rank 0 →
+        POLICY_TRAINER). A rank-0 run pointed at a ``-lora`` shape would
+        provision the wrong trainer mode, so derive the full-parameter sibling
+        by stripping the suffix; explicit non-``-lora`` shapes pass through.
+        """
+        shape = str(OmegaConf.select(cfg, "fireworks_config.policy_trainer_shape_id") or "")
+        lora_rank = int(cfg.model.get("lora_rank") or 0)
+        if lora_rank == 0 and shape.endswith("-lora"):
+            full_shape = shape.removesuffix("-lora")
+            logger.info("Full-parameter mode (lora_rank=0): training shape %s -> %s (POLICY_TRAINER)", shape, full_shape)
+            cfg.fireworks_config.policy_trainer_shape_id = full_shape
+        elif lora_rank > 0 and shape and not shape.endswith("-lora"):
+            logger.warning(
+                "lora_rank=%d (LoRA mode) with training shape %r, which does not follow the '-lora' naming "
+                "convention for LORA_TRAINER shapes. If provisioning fails with a trainer-mode mismatch, point "
+                "fireworks_config.policy_trainer_shape_id at the model's LoRA-validated shape.",
+                lora_rank,
+                shape,
+            )
+
+    def _require_consistent_model_swap(self, base: DictConfig, cfg: DictConfig) -> None:
+        """Fail fast when ``--model`` swaps the FW base model but the HF tokenizer
+        and training shape are left at the template's values.
+
+        Rendering/tokenization would silently use the wrong tokenizer and
+        provisioning would request a shape validated for a different model.
+        Detection is by explicit intent: the user must set both knobs in
+        ``spec.overrides`` (e.g. via ``rllm sft --config``).
+        """
+        spec_model = str(self.spec.model)
+        if not spec_model.startswith("accounts/") or spec_model == str(base.model.name):
+            return
+        user = self.spec.overrides or {}
+        missing = []
+        if not (isinstance(user.get("model"), dict) and user["model"].get("tokenizer_model")):
+            missing.append("model.tokenizer_model (the HF tokenizer the rows are rendered with)")
+        if not (isinstance(user.get("fireworks_config"), dict) and user["fireworks_config"].get("policy_trainer_shape_id")):
+            missing.append("fireworks_config.policy_trainer_shape_id (a training shape validated for the new model)")
+        if missing:
+            raise SFTConfigError(
+                f"--model swapped the Fireworks base model to {spec_model!r}, but the config still carries the "
+                f"template's values for: {'; '.join(missing)}. Set them together via overrides "
+                "(e.g. rllm sft --config overrides.yaml with a model: {tokenizer_model: ...} and "
+                "fireworks_config: {policy_trainer_shape_id: ...} section)."
+            )
 
     def _provision(self, config, api_key: str, base_url: str):
         """Provision a dedicated SFT trainer via the shape path (like RL)."""
@@ -238,24 +299,28 @@ class FireworksSFTBackend(TinkerSFTBackend):
 
                 if total_steps > start_step:
                     logger.info(f"Saving final checkpoint at step {total_steps}")
-                    # promotable=True writes a sampler (INFERENCE_LORA) row — the only
-                    # artifact ``promote_latest`` accepts. Without it the trained LoRA
-                    # is a resumable-only DCP blob that is garbage-collected after the
-                    # job's ~30-day retention window; promotion turns it into a
-                    # permanent, servable account model BEFORE ``finally: infra.close()``
+                    # promotable=True writes a sampler row (INFERENCE_LORA for LoRA
+                    # runs, INFERENCE_BASE full snapshot for lora_rank=0 runs) — the
+                    # only artifact ``promote_latest`` accepts. Without it the trained
+                    # weights are a resumable-only DCP blob that is garbage-collected
+                    # after the job's ~30-day retention window; promotion turns them
+                    # into a permanent, servable account model (HF_PEFT_ADDON for LoRA,
+                    # HF_BASE_MODEL for full-parameter) BEFORE ``finally: infra.close()``
                     # deletes the trainer job. Mirrors the RL path and the SDK sft recipe.
                     ckpt.save(f"step-{total_steps}", resumable=True, promotable=True)
+                    artifact = "LoRA adapter" if lora_rank else "full-weight model"
                     experiment = config.trainer.get("experiment_name") or "default"
                     output_model_id = re.sub(r"[^a-z0-9-]+", "-", f"{config.trainer.get('project_name', 'rllm-sft')}-{experiment}".lower()).strip("-")[:63]
                     try:
                         model = ckpt.promote_latest(output_model_id, config.model.name)
-                        logger.info("Promoted final LoRA -> %s", (model or {}).get("name", output_model_id))
+                        logger.info("Promoted final %s -> %s", artifact, (model or {}).get("name", output_model_id))
                     except Exception:
                         logger.exception(
-                            "Final LoRA promotion failed. The promotable sampler checkpoint for job %s "
+                            "Final %s promotion failed. The promotable sampler checkpoint for job %s "
                             "survives job deletion for ~30 days; promote it manually via "
                             "TrainerJobManager.promote_checkpoint(name=<row from list_checkpoints>, "
                             "output_model_id=%r, base_model=%r).",
+                            artifact,
                             getattr(infra, "policy_job_id", "<job>"),
                             output_model_id,
                             config.model.name,

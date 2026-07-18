@@ -191,3 +191,23 @@ def test_sft_ui_flag_appends_ui(runner, tmp_rllm_home, monkeypatch):
     result = runner.invoke(cli, ["sft", name, "--backend", "tinker", "--logger", "wandb", "--ui"])
     assert result.exit_code == 0, result.output
     assert captured["spec"].logger == ["console", "wandb", "ui"]
+
+
+def test_sft_config_file_merges_overrides(runner, tmp_rllm_home, monkeypatch, tmp_path):
+    """`--config file.yaml` deep-merges into SFTSpec.overrides; explicit CLI flags win.
+
+    RED today: there is no `--config` option, so Click errors with exit_code 2.
+    """
+    from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
+
+    captured = {}
+    monkeypatch.setattr(AgentSFTTrainer, "train", lambda self: captured.setdefault("spec", self.spec))
+
+    cfg = tmp_path / "fw.yaml"
+    cfg.write_text("model:\n  tokenizer_model: Qwen/Qwen3.6-35B-A3B\ndata:\n  renderer_name: role_colon\n")
+    name = _register_toy("config-toy")
+    result = runner.invoke(cli, ["sft", name, "--backend", "tinker", "--config", str(cfg), "--renderer", "qwen3"])
+    assert result.exit_code == 0, result.output
+    ov = captured["spec"].overrides
+    assert ov["model"]["tokenizer_model"] == "Qwen/Qwen3.6-35B-A3B"
+    assert ov["data"]["renderer_name"] == "qwen3"  # CLI --renderer beats the file

@@ -181,6 +181,11 @@ class TinkerSFTBackend(SFTBackend):
 
     name = "tinker"
     requires_distributed = False
+    # Tinker's SDK only exposes LoRA training clients (create_lora_training_client
+    # and state-resume paths that assert is_lora), so rank-0/full-parameter runs
+    # are impossible here. FireworksSFTBackend flips this: its POLICY_TRAINER
+    # shapes train full-parameter.
+    supports_full_finetune = False
 
     def __init__(self, spec):
         super().__init__(spec)
@@ -189,6 +194,12 @@ class TinkerSFTBackend(SFTBackend):
     # -- contract -----------------------------------------------------------
 
     def validate_spec(self) -> None:
+        if self.spec.lora_rank == 0 and not self.supports_full_finetune:
+            raise SFTConfigError(
+                f"--lora-rank 0 (full-parameter fine-tuning) is not supported by the {self.name!r} SFT backend: "
+                "the tinker SDK only exposes LoRA training clients. Use --lora-rank >= 1 here, or switch to "
+                "--backend fireworks (full-weight POLICY_TRAINER shapes) or --backend verl."
+            )
         validate_messages_dataset(self.spec.train_dataset, "train")
         if self.spec.val_dataset is not None:
             validate_messages_dataset(self.spec.val_dataset, "val")

@@ -43,6 +43,29 @@ def _row_context(conversation, limit: int = 400) -> str:
     return text if len(text) <= limit else text[:limit] + "..."
 
 
+# Process-wide truncation-warning counter: warn loudly on the first few
+# over-length rows, then thin out so a fully over-length dataset doesn't flood
+# the logs (one reminder every 1000 rows).
+_truncation_warn_count = 0
+
+
+def _warn_truncation(row_tokens: int, max_length: int) -> None:
+    global _truncation_warn_count
+    _truncation_warn_count += 1
+    if _truncation_warn_count <= 5 or _truncation_warn_count % 1000 == 0:
+        logger.warning(
+            "SFT row renders to %d tokens > data.max_length=%d: the datum is TRUNCATED and its tail — including "
+            "the final trainable turn(s) — is dropped from training. If that is not intended, raise --max-length "
+            "to at least %d (SFTSpec.max_length defaults to 2048, far below typical multi-turn trajectories). "
+            "[over-length row #%d%s]",
+            row_tokens,
+            max_length,
+            row_tokens,
+            _truncation_warn_count,
+            "; further warnings thinned to every 1000th" if _truncation_warn_count == 5 else "",
+        )
+
+
 def conversation_to_datum(
     conversation: list[Message],
     renderer: Renderer,
@@ -68,6 +91,8 @@ def conversation_to_datum(
     except SFTSchemaError as e:
         raise SFTConfigError(f"SFT row failed schema normalization: {e}\n  row={_row_context(conversation)}") from e
     model_input, weights = renderer.build_supervised_example(tinker_messages, train_on_what=TrainOnWhat.CUSTOMIZED)
+    if max_length is not None and model_input.length > max_length:
+        _warn_truncation(model_input.length, max_length)
     return datum_from_model_input_weights(model_input, weights, max_length)
 
 

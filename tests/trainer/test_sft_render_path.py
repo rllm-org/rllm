@@ -241,3 +241,41 @@ def test_f3_roundtrip_stamps_trainable_none(qwen_tokenizer, tmp_path):
     trained = _trained_text(datums[1], qwen_tokenizer)
     assert "hello" in trained
     assert "hi" not in trained
+
+
+# -- max_length truncation must be loud (vetting handoff item b) --------------
+
+
+def test_truncation_past_max_length_warns_loudly(qwen_tokenizer, caplog):
+    """A row that renders past ``data.max_length`` must emit a loud warning.
+
+    ``SFTSpec.max_length`` defaults to 2048, which silently truncated every
+    long trajectory row at datum build (the tail — including the final trainable
+    turn — dropped from training with zero signal to the user).
+
+    RED today: ``datum_from_model_input_weights`` truncates silently.
+    """
+    import logging
+
+    import rllm.trainer.sft.tinker_dataset as td
+
+    renderer = get_renderer("qwen3", qwen_tokenizer)
+    convo = [
+        {"role": "user", "content": "count: " + " ".join(str(i) for i in range(300)), "trainable": False},
+        {"role": "assistant", "content": "done", "trainable": True},
+    ]
+
+    td._truncation_warn_count = 0
+    with caplog.at_level(logging.WARNING, logger="rllm.trainer.sft.tinker_dataset"):
+        datum = conversation_to_datum(convo, renderer, max_length=64)
+    assert datum.model_input.length <= 64
+    warned = [r for r in caplog.records if "max_length" in r.getMessage()]
+    assert warned, "expected a loud truncation warning"
+    assert "64" in warned[0].getMessage()
+
+    # A row that fits must not warn.
+    caplog.clear()
+    td._truncation_warn_count = 0
+    with caplog.at_level(logging.WARNING, logger="rllm.trainer.sft.tinker_dataset"):
+        conversation_to_datum(convo, renderer, max_length=100_000)
+    assert not [r for r in caplog.records if "max_length" in r.getMessage()]
