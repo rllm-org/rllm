@@ -161,13 +161,12 @@ def sft_cmd(
                 seen.add(name)
                 resolved_logger.append(name)
 
-    # Backend-specific spec overrides, lowest to highest precedence:
-    #   - --config YAML (the escape hatch: beats flag-derived values, see its help);
-    #   - verl runs under torchrun; route --gpus to its native trainer.n_gpus_per_node
-    #     (when --config is given, only an explicitly-passed --gpus beats the file —
-    #     the Click default of 1 must not clobber a file-set n_gpus_per_node);
-    #   - tinker/fireworks render via tinker_cookbook; route --renderer to
-    #     data.renderer_name (null/omitted => backend auto-detects from the model).
+    # Backend-specific spec overrides, lowest → highest precedence:
+    #   - --config YAML: the escape hatch for backend-native knobs (see its help);
+    #   - verl: route --gpus to trainer.n_gpus_per_node, but only an explicitly
+    #     passed --gpus, so the flag's default doesn't override a --config value;
+    #   - tinker/fireworks: route --renderer to data.renderer_name (omitted =>
+    #     backend auto-detects from the model).
     from click.core import ParameterSource
     from omegaconf import OmegaConf
 
@@ -226,8 +225,8 @@ def sft_cmd(
     ]
     if tokenizer_model and tokenizer_model != resolved_model:
         rows.append(("Tokenizer", f"[dim]{tokenizer_model}[/]"))
-    # Panel honesty: a --config-set trainer.n_gpus_per_node beats the --gpus
-    # Click default at launch, so report the resolved count, not the raw flag.
+    # verl's effective GPU count comes from the merged trainer.n_gpus_per_node
+    # (a --config value can override the --gpus flag).
     resolved_gpus = (cfg.get("trainer", {}).get("n_gpus_per_node") or gpus) if backend == "verl" else gpus
     rows += [
         ("Backend", f"[val]{backend}[/]" + (f"  [dim]({resolved_gpus} GPU{'s' if resolved_gpus != 1 else ''}, torchrun)[/]" if backend == "verl" else "")),

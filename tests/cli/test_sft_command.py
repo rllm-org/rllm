@@ -37,6 +37,29 @@ def _register_toy(name="toy-sft"):
     return name
 
 
+@pytest.fixture
+def sft_no_train(monkeypatch):
+    """Capture the dispatched SFTSpec and stub the verl backend's config build +
+    data prep, so ``--config`` resolution is assertable without a real
+    verl/hydra/torchrun stack (verl's own overrides->config merge is covered by
+    tests/trainer test_verl_build_config_maps_spec). Returns a dict populated with
+    ``'spec'`` when the command reaches dispatch."""
+    from omegaconf import OmegaConf
+
+    from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    captured: dict = {}
+    monkeypatch.setattr(AgentSFTTrainer, "train", lambda self: captured.setdefault("spec", self.spec))
+    monkeypatch.setattr(
+        VerlSFTBackend,
+        "build_config",
+        lambda self: OmegaConf.create({"model": {"path": self.spec.model}, "trainer": {"default_local_dir": "/tmp/x"}}),
+    )
+    monkeypatch.setattr(VerlSFTBackend, "prepare_data", lambda self: None)
+    return captured
+
+
 def test_sft_registered_in_cli():
     """`sft` shows up in the top-level command list and has help."""
     result = CliRunner().invoke(cli, ["sft", "--help"])
@@ -193,81 +216,65 @@ def test_sft_ui_flag_appends_ui(runner, tmp_rllm_home, monkeypatch):
     assert captured["spec"].logger == ["console", "wandb", "ui"]
 
 
-def test_sft_config_file_merges_overrides(runner, tmp_rllm_home, monkeypatch, tmp_path):
-    """`--config file.yaml` deep-merges into SFTSpec.overrides; explicit CLI flags win.
-
-    RED today: there is no `--config` option, so Click errors with exit_code 2.
-    """
-    from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
-
-    captured = {}
-    monkeypatch.setattr(AgentSFTTrainer, "train", lambda self: captured.setdefault("spec", self.spec))
-
-    cfg = tmp_path / "fw.yaml"
-    cfg.write_text("model:\n  tokenizer_model: Qwen/Qwen3.6-35B-A3B\ndata:\n  renderer_name: role_colon\n")
-    name = _register_toy("config-toy")
-    result = runner.invoke(cli, ["sft", name, "--backend", "tinker", "--config", str(cfg), "--renderer", "qwen3"])
+@pytest.mark.parametrize(
+    "backend, config_text, extra_flags, expected",
+    [
+        pytest.param(
+            "tinker",
+            "model:\n  tokenizer_model: Qwen/Qwen3.6-35B-A3B\ndata:\n  renderer_name: role_colon\n",
+            ["--renderer", "qwen3"],
+            {("model", "tokenizer_model"): "Qwen/Qwen3.6-35B-A3B", ("data", "renderer_name"): "qwen3"},
+            id="tinker-file-plus-renderer-cli-wins",
+        ),
+        pytest.param(
+            "verl",
+            "trainer:\n  n_gpus_per_node: 8\n",
+            [],
+            {("trainer", "n_gpus_per_node"): 8},
+            id="verl-file-gpus-survives-gpus-default",
+        ),
+        pytest.param(
+            "verl",
+            "trainer:\n  n_gpus_per_node: 8\n",
+            ["--gpus", "2"],
+            {("trainer", "n_gpus_per_node"): 2},
+            id="verl-explicit-gpus-flag-wins",
+        ),
+    ],
+)
+def test_sft_config_file_precedence(runner, tmp_rllm_home, sft_no_train, tmp_path, backend, config_text, extra_flags, expected):
+    """`--config file.yaml` merges into SFTSpec.overrides; an equivalent explicit
+    CLI flag beats the file (--renderer for tinker/fireworks, an explicitly passed
+    --gpus for verl), while the --gpus Click default does not clobber a file value."""
+    cfg = tmp_path / "override.yaml"
+    cfg.write_text(config_text)
+    name = _register_toy(f"cfg-prec-{backend}-{len(extra_flags)}")
+    result = runner.invoke(cli, ["sft", name, "--backend", backend, "--config", str(cfg), *extra_flags])
     assert result.exit_code == 0, result.output
-    ov = captured["spec"].overrides
-    assert ov["model"]["tokenizer_model"] == "Qwen/Qwen3.6-35B-A3B"
-    assert ov["data"]["renderer_name"] == "qwen3"  # CLI --renderer beats the file
+    overrides = sft_no_train["spec"].overrides
+    for path, want in expected.items():
+        node = overrides
+        for key in path:
+            node = node[key]
+        assert node == want
 
 
-def test_sft_config_file_gpus_precedence_verl(runner, tmp_rllm_home, monkeypatch, tmp_path):
-    """With --config on verl, a file-set trainer.n_gpus_per_node survives the
-    --gpus Click default (1) but loses to an explicitly passed --gpus."""
+def test_sft_summary_panel_shows_resolved_gpus_verl(runner, tmp_rllm_home, monkeypatch, sft_no_train, tmp_path):
+    """The pre-launch panel reports cfg.trainer.n_gpus_per_node (what build_config
+    resolved) rather than the raw --gpus flag. build_config here returns a fixed
+    8-GPU config (the real overrides->config merge is covered by
+    test_verl_build_config_maps_spec) and --gpus is 1, so the panel must show 8."""
     from omegaconf import OmegaConf
 
-    from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
     from rllm.trainer.sft.verl_backend import VerlSFTBackend
 
-    captured = {}
-    # Skip the real verl/hydra config build + parquet materialization.
     monkeypatch.setattr(
         VerlSFTBackend,
         "build_config",
-        lambda self: OmegaConf.create({"model": {"path": self.spec.model}, "trainer": {"default_local_dir": "/tmp/x"}}),
+        lambda self: OmegaConf.create({"model": {"path": self.spec.model}, "trainer": {"default_local_dir": "/tmp/x", "n_gpus_per_node": 8}}),
     )
-    monkeypatch.setattr(VerlSFTBackend, "prepare_data", lambda self: None)
-    monkeypatch.setattr(AgentSFTTrainer, "train", lambda self: captured.setdefault("spec", self.spec))
-
-    cfg = tmp_path / "verl.yaml"
-    cfg.write_text("trainer:\n  n_gpus_per_node: 8\n")
-    name = _register_toy("gpus-toy")
-
-    result = runner.invoke(cli, ["sft", name, "--backend", "verl", "--config", str(cfg)])
-    assert result.exit_code == 0, result.output
-    assert captured["spec"].overrides["trainer"]["n_gpus_per_node"] == 8  # file survives the default
-
-    captured.clear()
-    result = runner.invoke(cli, ["sft", name, "--backend", "verl", "--config", str(cfg), "--gpus", "2"])
-    assert result.exit_code == 0, result.output
-    assert captured["spec"].overrides["trainer"]["n_gpus_per_node"] == 2  # explicit flag wins
-
-
-def test_sft_summary_panel_shows_resolved_gpus_verl(runner, tmp_rllm_home, monkeypatch, tmp_path):
-    """The pre-launch panel reports the resolved trainer.n_gpus_per_node (e.g.
-    file-set via --config), not the raw --gpus Click default. The torchrun
-    launch already used the resolved value; only the panel under-reported."""
-    from omegaconf import OmegaConf
-
-    from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
-    from rllm.trainer.sft.verl_backend import VerlSFTBackend
-
-    def fake_build_config(self):
-        # Minimal stand-in that, like the real build_config, merges spec.overrides.
-        base = OmegaConf.create({"model": {"path": self.spec.model}, "trainer": {"default_local_dir": "/tmp/x"}})
-        return OmegaConf.merge(base, OmegaConf.create(self.spec.overrides or {}))
-
-    monkeypatch.setattr(VerlSFTBackend, "build_config", fake_build_config)
-    monkeypatch.setattr(VerlSFTBackend, "prepare_data", lambda self: None)
-    monkeypatch.setattr(AgentSFTTrainer, "train", lambda self: None)
-
-    cfg = tmp_path / "verl.yaml"
-    cfg.write_text("trainer:\n  n_gpus_per_node: 8\n")
     name = _register_toy("gpus-panel-toy")
-
-    result = runner.invoke(cli, ["sft", name, "--backend", "verl", "--config", str(cfg)])
+    result = runner.invoke(cli, ["sft", name, "--backend", "verl", "--gpus", "1"])
     assert result.exit_code == 0, result.output
-    assert "8 GPUs" in result.output
+    assert "8 GPUs" in result.output  # panel reads the resolved config, not --gpus
     assert "1 GPU," not in result.output

@@ -43,9 +43,7 @@ class FireworksSFTBackend(TinkerSFTBackend):
 
     name = "fireworks"
     requires_distributed = False
-    # Fireworks trains full-parameter when lora_rank=0: the SDK's
-    # _expected_trainer_mode maps rank 0 to POLICY_TRAINER (full-tune) shapes,
-    # and promotable saves then yield HF_BASE_MODEL account models.
+    # rank 0 → POLICY_TRAINER full-parameter shapes (tinker is LoRA-only).
     supports_full_finetune = True
 
     def _config_template(self) -> Path:
@@ -106,13 +104,10 @@ class FireworksSFTBackend(TinkerSFTBackend):
 
         Fireworks publishes each model's shapes per trainer mode as sibling
         resources named ``<base>`` (POLICY_TRAINER = full-parameter) and
-        ``<base>-lora`` (LORA_TRAINER), and the SDK derives the expected mode
-        from ``lora_rank`` alone (``_expected_trainer_mode``: rank 0 →
-        POLICY_TRAINER — client-side only for shape auto-select; with an
-        explicit shape id a mode mismatch surfaces server-side at provisioning).
-        A rank-0 run pointed at a ``-lora`` shape would provision the wrong
-        trainer mode, so derive the full-parameter sibling by stripping the
-        suffix; explicit non-``-lora`` shapes pass through.
+        ``<base>-lora`` (LORA_TRAINER); ``lora_rank`` alone selects the mode
+        (rank 0 → POLICY_TRAINER). A rank-0 run pointed at a ``-lora`` shape
+        would provision the wrong trainer mode, so derive the full-parameter
+        sibling by stripping the suffix; explicit non-``-lora`` shapes pass through.
         """
         shape = str(OmegaConf.select(cfg, "fireworks_config.policy_trainer_shape_id") or "")
         lora_rank = int(cfg.model.get("lora_rank") or 0)
@@ -142,7 +137,6 @@ class FireworksSFTBackend(TinkerSFTBackend):
         new_model = str(cfg.model.name)
         if new_model == str(base.model.name):
             return
-        # Normalize (plain dict or DictConfig both allowed) for key introspection.
         user = OmegaConf.to_container(OmegaConf.create(self.spec.overrides), resolve=False) if self.spec.overrides else {}
         user_model = user.get("model") if isinstance(user.get("model"), dict) else {}
         user_fw = user.get("fireworks_config") if isinstance(user.get("fireworks_config"), dict) else {}
@@ -305,14 +299,11 @@ class FireworksSFTBackend(TinkerSFTBackend):
 
                 if total_steps > start_step:
                     logger.info(f"Saving final checkpoint at step {total_steps}")
-                    # promotable=True writes a sampler row (INFERENCE_LORA for LoRA
-                    # runs, INFERENCE_BASE full snapshot for lora_rank=0 runs) — the
-                    # only artifact ``promote_latest`` accepts. Without it the trained
-                    # weights are a resumable-only DCP blob that is garbage-collected
-                    # after the job's ~30-day retention window; promotion turns them
-                    # into a permanent, servable account model (HF_PEFT_ADDON for LoRA,
-                    # HF_BASE_MODEL for full-parameter) BEFORE ``finally: infra.close()``
-                    # deletes the trainer job. Mirrors the RL path and the SDK sft recipe.
+                    # promotable=True writes the servable sampler row that
+                    # ``promote_latest`` needs. Without it the weights are a
+                    # resumable-only DCP blob, GC'd after the job's ~30-day retention
+                    # window — so promote BEFORE ``finally: infra.close()`` deletes the
+                    # trainer job. Mirrors the RL path and the SDK sft recipe.
                     ckpt.save(f"step-{total_steps}", resumable=True, promotable=True)
                     artifact = "LoRA adapter" if lora_rank else "full-weight model"
                     experiment = config.trainer.get("experiment_name") or "default"

@@ -24,10 +24,8 @@ model:
 
 fireworks_config:
   # Trainer-mode shapes come in `-lora` (LORA_TRAINER) / suffix-less
-  # (POLICY_TRAINER = full-parameter) sibling pairs; the SDK derives the
-  # expected mode from lora_rank alone. The backend keeps them consistent:
-  # with lora_rank=0 a `-lora` shape is rewritten to its full-parameter
-  # sibling at build_config time. Matches swe-rl's RL recipe.
+  # (POLICY_TRAINER = full-parameter) sibling pairs, selected by lora_rank.
+  # Matches swe-rl's RL recipe.
   policy_trainer_shape_id: accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora
   policy_trainer_replica_count: 1
 
