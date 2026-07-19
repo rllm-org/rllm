@@ -177,3 +177,22 @@ def test_legacy_modal_var_is_deprecated_alias(monkeypatch):
     assert sandbox_timeout_override_s() == 3600
     monkeypatch.setenv("RLLM_SANDBOX_TIMEOUT_S", "5000")  # canonical wins
     assert sandbox_timeout_override_s() == 5000
+
+
+def test_create_base_sandbox_explicit_timeout_overrides_resource_default(monkeypatch):
+    """An explicit caller ``timeout`` (e.g. the Modal snapshot builder's
+    build_timeout) must override the sized lifetime from
+    ``_sandbox_resource_kwargs`` instead of raising a duplicate-kwarg TypeError."""
+    import rllm.sandbox.sandboxed_flow as sandboxed_flow
+    from rllm.eval._resolution import _create_base_sandbox
+
+    captured: dict = {}
+
+    def fake_create_sandbox(backend, name, image, **kwargs):
+        captured.update(kwargs, backend=backend, name=name, image=image)
+        return object()
+
+    monkeypatch.setattr(sandboxed_flow, "create_sandbox", fake_create_sandbox)
+    task = _budget_task()
+    _create_base_sandbox(task, "modal", image="img", name="n", timeout=12345)
+    assert captured["timeout"] == 12345
