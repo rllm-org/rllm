@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,8 @@ from statistics import mean
 from rllm import paths
 from rllm.eval.filter_dsl import FilterError, compile_filter
 from rllm.eval.results import EvalResult, _pass_at_k
+
+logger = logging.getLogger(__name__)
 
 # Per-task trajectory selection strategies.
 SELECT_STRATEGIES = ("correct", "best", "best-n", "shortest", "all")
@@ -76,8 +79,14 @@ class CurationStats:
     tasks_kept: int = 0
     attempts_total: int = 0
     rows_emitted: int = 0
-    rows_skipped_no_messages: int = 0
+    rows_skipped_no_messages: int = 0  # attempts whose automerge walk yielded zero segments
     rows_deduped: int = 0
+    rows_invalid: int = 0  # rows dropped because they failed SFT schema validation
+    # Automerge-walk telemetry (from-eval): how steps merged/split into rows.
+    segments_merged: int = 0  # steps merged into an already-open segment
+    segments_split: int = 0  # times a new segment was started while one was already open (same attempt)
+    steps_skipped_no_assistant: int = 0  # steps with no assistant turn to train
+    targets_skipped_empty: int = 0  # steps whose last assistant turn had no content and no tool_calls
 
 
 # ---------------------------------------------------------------------------
@@ -242,77 +251,190 @@ def _build_groups(runs: list[_RunData], metric: str) -> list[AttemptGroup]:
 
 
 # ---------------------------------------------------------------------------
-# Message extraction
+# Message extraction — automerge walk (always on; the data decides).
+#
+# Each attempt becomes one or more self-describing rows: every message carries a
+# ``trainable`` flag, and an automerge walk (message-level analogue of
+# ``rllm.trainer.verl.transform._process_trajectory``) merges steps that form a
+# clean prefix chain into one row (all their turns trained) and splits where they
+# don't. This is deterministic — no flag decides it:
+#   - A NON-thinking trajectory (each turn's history-form == its target-form) is
+#     one prefix chain and merges into a single row training every turn.
+#   - A THINKING trajectory follows what the data shows: when the harness strips a
+#     turn's reasoning from history (non-interleaved runs), the reasoning-aware
+#     prefix breaks and each turn becomes its own row; when history RETAINS
+#     reasoning (interleaved-thinking runs), steps keep merging and context keeps
+#     its ThinkingParts. Either way rows match what the model saw at inference.
+# Every turn is a trained target; only a step with no assistant turn is skipped.
+# Reasoning is preserved MODEL-AGNOSTICALLY as a structured ``ThinkingPart`` (not
+# a hardcoded ``<think>`` string) so the model's renderer picks the reasoning
+# format at training time (deepseek ``<think>``, qwen, harmony, ...). The SFT
+# loader renders these rows with tinker's ``CUSTOMIZED`` mode, driven by the
+# per-message ``trainable`` flag.
 # ---------------------------------------------------------------------------
 
 
-def _clean_message(m: dict) -> dict | None:
-    """Normalize one chat-completion message; drop empties (no content/tool_calls)."""
-    if not isinstance(m, dict):
-        return None
-    role = m.get("role")
-    if not role:
-        return None
-    content = m.get("content")
-    if isinstance(content, str | list):
-        norm = content
-    elif content is None:
-        norm = ""
-    else:
-        norm = str(content)
-    out = {"role": role, "content": norm}
+def _reasoning(msg: dict) -> str:
+    return msg.get("reasoning_content") or msg.get("reasoning") or ""
+
+
+def _text_content(content) -> str:
+    """The plain-text view of a message's content (str or list of parts)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
+def _parts_thinking(content) -> str:
+    """The thinking-text view of a parts-list content."""
+    if isinstance(content, list):
+        return "".join(p.get("thinking", "") for p in content if isinstance(p, dict) and p.get("type") == "thinking")
+    return ""
+
+
+def _passthrough(out: dict, msg: dict) -> dict:
+    """Carry provider fields (tool calls etc.) through to the rebuilt message."""
     for k in ("tool_calls", "tool_call_id", "name"):
-        if m.get(k) is not None:
-            out[k] = m[k]
-    has_text = bool(norm.strip()) if isinstance(norm, str) else bool(norm)
-    if not (has_text or out.get("tool_calls")):
-        return None
+        if msg.get(k) is not None:
+            out[k] = msg[k]
     return out
 
 
-def _episode_to_messages(episode: dict, trajectory_name: str | None) -> list[dict] | None:
-    """Extract the conversation from an episode's chosen trajectory.
+def _to_parts(msg: dict) -> list[dict]:
+    """Message content as a parts list, reasoning preserved as a ``ThinkingPart``.
 
-    Uses the last step that carries ``chat_completions`` (the full conversation),
-    matching how eval scores trajectories. Returns ``None`` if no usable
-    (>=2-turn) conversation is found.
+    NOT a hardcoded ``<think>`` string: the model's *renderer* decides the
+    reasoning format at training time (deepseek ``<think>``, qwen, harmony, ...).
+    Content is always a list of parts so the dataset's content column stays a
+    uniform type for parquet.
+    """
+    parts: list[dict] = []
+    rc = _reasoning(msg).strip()
+    if rc:
+        parts.append({"type": "thinking", "thinking": rc})
+    parts.append({"type": "text", "text": msg.get("content") or ""})
+    return parts
+
+
+def _step_target(msg: dict) -> dict:
+    """An assistant turn as a trained target — model-agnostic."""
+    return _passthrough({"role": "assistant", "content": _to_parts(msg), "trainable": True}, msg)
+
+
+def _step_context(msg: dict) -> dict:
+    """A history/context message: never trained. Reasoning stays a ThinkingPart
+    when the episode data carries it (interleaved-thinking runs), so context
+    matches what the model actually saw."""
+    return _passthrough({"role": msg["role"], "content": _to_parts(msg), "trainable": False}, msg)
+
+
+def _step_has_content(msg: dict) -> bool:
+    return bool(_text_content(msg.get("content")).strip())
+
+
+def _keep(msg: dict) -> bool:
+    """A message worth keeping in a conversation: it carries text or tool calls.
+
+    The one keep-predicate applied SYMMETRICALLY on both sides of the prefix
+    walk — a message dropped from the running segment must also be dropped from
+    the step view it is compared against, or the positional window desyncs."""
+    return _step_has_content(msg) or bool(msg.get("tool_calls"))
+
+
+def _prefix_matches(seg_messages: list[dict], step_cc: list[dict]) -> bool:
+    """Whether the running segment's turns appear identically — text, reasoning,
+    and tool calls — at the start of the new step's conversation. A context reset
+    (summarization) breaks this, and so does a turn whose thinking the harness
+    stripped from history (non-interleaved runs)."""
+    seg_view = [(m["role"], _text_content(m["content"]), _parts_thinking(m["content"]), str(m.get("tool_calls"))) for m in seg_messages]
+    step_view = [(m.get("role"), _text_content(m.get("content") or ""), _reasoning(m).strip(), str(m.get("tool_calls"))) for m in step_cc[: len(seg_view)]]
+    return len(step_cc) >= len(seg_view) and step_view == seg_view
+
+
+def _episode_to_step_message_lists(episode: dict, trajectory_name: str | None, stats: CurationStats | None = None) -> list[list[dict]]:
+    """Extract per-turn (automerged) training conversations from an episode.
+
+    Returns one message-list per segment; every message carries ``trainable``.
+    A segment merges the next step iff its turns — text, reasoning, and tool
+    calls — appear identically as the new step's history. Purely data-driven:
+    a context reset splits, and a turn whose thinking was stripped from history
+    (non-interleaved harness) splits, while interleaved-thinking histories keep
+    merging with their ThinkingParts intact. No flag or format string decides it.
+
+    The prefix walk filters both sides with the same ``_keep`` predicate: the
+    running segment and the step's history view are compared over their KEPT
+    messages, never a mix of filtered-vs-raw positions (which would desync the
+    window on an empty history message). ``stats`` (optional) accumulates
+    merge/split/skip telemetry across attempts.
     """
     trajs = episode.get("trajectories") or []
-    if not trajs:
-        return None
     traj = None
     if trajectory_name:
-        for t in trajs:
-            if t.get("name") == trajectory_name:
-                traj = t
-                break
-        if traj is None:
-            return None
-    else:
+        traj = next((t for t in trajs if t.get("name") == trajectory_name), None)
+    elif trajs:
         traj = trajs[0]
-    steps = traj.get("steps") or []
-    for step in reversed(steps):
-        cc = step.get("chat_completions")
-        if cc:
-            clean = [c for c in (_clean_message(m) for m in cc) if c is not None]
-            if len(clean) >= 2:
-                return clean
-    return None
+    if traj is None:
+        return []
+
+    segments: list[list[dict]] = []
+    seg: list[dict] | None = None
+    targets = 0  # steps that became a trained target in THIS attempt
+    merges = 0  # merges in THIS attempt
+    for step in traj.get("steps") or []:
+        cc = step.get("chat_completions") or []
+        last = next((i for i in range(len(cc) - 1, -1, -1) if cc[i].get("role") == "assistant"), -1)
+        if last < 0:
+            if stats is not None:
+                stats.steps_skipped_no_assistant += 1
+            continue  # no assistant turn to train
+        if not _keep(cc[last]):
+            # An empty final assistant (no text, no tool_calls) carries no
+            # trainable signal; never emit a segment with an empty target.
+            if stats is not None:
+                stats.targets_skipped_empty += 1
+            continue
+        # KEPT view of the history before the target; the target is always the
+        # last assistant message regardless of _keep.
+        kept = [m for m in cc[:last] if _keep(m)]
+        target = _step_target(cc[last])
+        if seg is not None and _prefix_matches(seg, kept):
+            tail = [_step_context(m) for m in kept[len(seg) :]]
+            seg = seg + tail + [target]
+            merges += 1
+            if stats is not None:
+                stats.segments_merged += 1
+        else:
+            if seg is not None:
+                segments.append(seg)
+                if stats is not None:
+                    stats.segments_split += 1
+            seg = [_step_context(m) for m in kept] + [target]
+        targets += 1
+    if seg is not None:
+        segments.append(seg)
+    if targets >= 3 and merges == 0:
+        logger.warning(
+            "from-eval automerge: attempt produced %d trained steps but 0 merges (degenerate splitting — likely a per-step-varying history element).",
+            targets,
+        )
+    return segments
 
 
-def _load_messages(ref: _AttemptRef, trajectory_name: str | None) -> list[dict] | None:
+def _load_step_message_lists(ref: _AttemptRef, trajectory_name: str | None, stats: CurationStats | None = None) -> list[list[dict]]:
     if ref.episode_path is None or not ref.episode_path.is_file():
-        return None
+        return []
     try:
         with open(ref.episode_path, encoding="utf-8") as f:
             episode = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return None
-    return _episode_to_messages(episode, trajectory_name)
+        return []
+    return _episode_to_step_message_lists(episode, trajectory_name, stats)
 
 
 def _content_len(messages: list[dict]) -> int:
-    return sum(len(m["content"]) if isinstance(m.get("content"), str) else len(str(m.get("content"))) for m in messages)
+    return sum(len(_text_content(m.get("content"))) for m in messages)
 
 
 # ---------------------------------------------------------------------------
@@ -347,8 +469,39 @@ def _make_row(ref: _AttemptRef, group: AttemptGroup, messages: list[dict]) -> di
     }
 
 
-def _assistant_signature(messages: list[dict]) -> str:
-    parts = [str(m.get("content", "")) for m in messages if m.get("role") == "assistant"]
+def _rows_for_attempt(ref: _AttemptRef, group: AttemptGroup, trajectory_name: str | None, stats: CurationStats | None = None) -> list[dict]:
+    """All rows one attempt (episode) contributes, via the automerge walk.
+
+    Each row is validated through the SFT schema (``rllm.data.sft_schema``)
+    before emission, so malformed provider payloads are caught here — at
+    creation time — rather than deep inside a training backend.
+    """
+    from rllm.data.sft_schema import SFTSchemaError, normalize_row
+
+    rows: list[dict] = []
+    for seg in _load_step_message_lists(ref, trajectory_name, stats):
+        raw = _make_row(ref, group, seg)
+        try:
+            rows.append(normalize_row(raw).to_record())
+        except SFTSchemaError as e:
+            logger.warning("Dropping curated row (task %s, attempt %d): %s", group.task_id, ref.attempt, e)
+            if stats is not None:
+                stats.rows_invalid += 1
+    return rows
+
+
+def _row_signature(row: dict) -> str:
+    """Dedup key for a curated row: its task_id plus every message's role, text,
+    thinking, and tool calls. Keyed on the full conversation (not just assistant
+    content) so two distinct tasks that happen to share an assistant string do
+    not collide, while identical attempts of the SAME task still dedup."""
+    parts = [str(row.get("task_id"))]
+    for m in row.get("messages") or []:
+        content = m.get("content")
+        parts.append(str(m.get("role") or ""))
+        parts.append(_text_content(content))
+        parts.append(_parts_thinking(content))
+        parts.append(str(m.get("tool_calls")))
     return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -385,36 +538,41 @@ def curate(run_dirs: list[str | Path], config: CurationConfig | None = None) -> 
         stats.tasks_kept += 1
         cands = _ranked_candidates(group, config)
 
+        # Each attempt becomes one or more self-describing rows via the automerge
+        # walk (below): steps that form a clean prefix chain merge into one row
+        # (all turns trained), others split — deterministic, decided by the data.
         if config.select == "shortest":
             loaded = []
             for ref in cands:
-                messages = _load_messages(ref, config.trajectory)
-                if messages is None:
+                attempt_rows = _rows_for_attempt(ref, group, config.trajectory, stats)
+                if not attempt_rows:
                     stats.rows_skipped_no_messages += 1
                     continue
-                loaded.append((ref, messages, _content_len(messages)))
-            loaded.sort(key=lambda t: t[2])
+                total_len = sum(_content_len(r["messages"]) for r in attempt_rows)
+                loaded.append((attempt_rows, total_len))
+            loaded.sort(key=lambda t: t[1])
             if config.max_per_task is not None:
                 loaded = loaded[: config.max_per_task]
-            rows.extend(_make_row(ref, group, messages) for ref, messages, _ in loaded)
+            for attempt_rows, _ in loaded:
+                rows.extend(attempt_rows)
         else:
             limit = 1 if config.select == "best" else config.max_per_task
             taken = 0
             for ref in cands:
                 if limit is not None and taken >= limit:
                     break
-                messages = _load_messages(ref, config.trajectory)
-                if messages is None:
+                attempt_rows = _rows_for_attempt(ref, group, config.trajectory, stats)
+                if not attempt_rows:
                     stats.rows_skipped_no_messages += 1
                     continue
-                rows.append(_make_row(ref, group, messages))
+                rows.extend(attempt_rows)
                 taken += 1
 
     if config.dedup:
         seen: set[str] = set()
         deduped: list[dict] = []
         for row in rows:
-            key = _assistant_signature(row["messages"])
+            key = _row_signature(row)
             if key in seen:
                 stats.rows_deduped += 1
                 continue
