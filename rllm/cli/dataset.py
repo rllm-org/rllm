@@ -279,6 +279,71 @@ def register(name: str, file_path: str, split: str, category: str | None, descri
     click.echo(f"Registered '{name}' split '{split}' ({len(ds)} examples).")
 
 
+@dataset.command(name="import")
+@click.argument("file_path", type=click.Path(exists=True))
+@click.option("--name", required=True, help="Name to register the imported SFT dataset under.")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["messages", "think-tags"]),
+    default="messages",
+    help="Source row format: 'messages' (plain OpenAI, default) or 'think-tags' (assistant `<think>...</think>` blocks).",
+)
+@click.option("--split", default="train", help="Split name to register the rows under (default: train).")
+@click.option("--train-on", type=click.Choice(["all", "last"]), default="all", help="[messages] Derive the loss mask over 'all' assistant turns (default) or only the 'last'.")
+@click.option("--no-explode", is_flag=True, help="[think-tags] Emit one row per conversation instead of one row per assistant turn.")
+@click.option("--description", default=None, help="Short description of the dataset.")
+@click.pass_context
+def import_data(ctx: click.Context, file_path: str, name: str, fmt: str, split: str, train_on: str, no_explode: bool, description: str | None):
+    """Import a local SFT data file, bridging it to the canonical row schema.
+
+    FILE is a JSON/JSONL/CSV/Parquet file of ``{"messages": [...]}`` rows. The
+    chosen --format bridge normalizes each row (deriving ``trainable`` masks and,
+    for think-tags, splitting the ``<think>`` chain-of-thought) before the rows
+    are registered ready for ``rllm sft``.
+
+    \b
+    Examples:
+      rllm dataset import data.jsonl --name my-sft
+      rllm dataset import data.jsonl --name my-sft --train-on last
+      rllm dataset import traces.jsonl --name distill-traces --format think-tags
+    """
+    from rllm.data import Dataset, DatasetRegistry
+    from rllm.data.sft_bridges import get_bridge
+    from rllm.data.sft_schema import SFTSchemaError
+
+    # Friendly guardrails on format-specific options.
+    train_on_set = ctx.get_parameter_source("train_on") != click.core.ParameterSource.DEFAULT
+    if fmt == "think-tags" and train_on_set:
+        console.print("  [yellow]--train-on is ignored for --format think-tags[/] [dim](trainable masks are derived from explode).[/]")
+    if fmt == "messages" and no_explode:
+        console.print("  [yellow]--no-explode is ignored for --format messages[/] [dim](explosion only applies to think-tags).[/]")
+
+    bridge_opts = {"train_on": train_on} if fmt == "messages" else {"explode": not no_explode}
+
+    ds = Dataset.load_data(file_path)
+    try:
+        rows = get_bridge(fmt)(ds.data, **bridge_opts)
+    except SFTSchemaError as e:
+        fail(str(e))
+
+    records = [r.to_record() for r in rows]
+    DatasetRegistry.register_dataset(
+        name,
+        records,
+        split=split,
+        source=f"import:{fmt}",
+        description=description or "",
+    )
+
+    detail = " [dim](exploded, one row per assistant turn)[/]" if fmt == "think-tags" and not no_explode else ""
+    console.print()
+    console.print(f"  [success]Imported[/] [val]{name}[/]/[val]{split}[/]  [dim]—[/] [val]{len(ds.data)}[/] [dim]source rows →[/] [val]{len(records)}[/] [dim]SFT rows[/]{detail}")
+    console.print(f"  [dim]Inspect: [bold]rllm dataset inspect {name} --split {split}[/][/]")
+    console.print(f"  [dim]Train:   [bold]rllm sft {name} --model <model> --backend tinker[/][/]")
+    console.print()
+
+
 def _split_train_val(rows: list[dict], val_fraction: float, seed: int) -> tuple[list[dict], list[dict]]:
     """Hold out a fraction of *tasks* (not rows) for validation, to avoid leaking
     sibling trajectories of the same task across the split."""

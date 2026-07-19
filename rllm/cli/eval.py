@@ -693,34 +693,52 @@ def eval_cmd(
             fail("--model is required when --base-url is provided.")
     else:
         # Proxy mode: auto-start LiteLLM proxy from config
+        import os as _os
+
         from rllm.eval.config import load_config
 
         config = load_config()
-        if not config.is_configured():
-            fail("No configuration found. Run `rllm setup` first to configure your provider and API key.")
 
-        # --model overrides configured model
-        if model is None:
-            model = config.model
+        # A ``tinker://`` sampler-checkpoint path (produced by ``rllm sft`` on the
+        # tinker backend) is served by the Tinker OAI endpoint, which the built-in
+        # "tinker" provider is pinned to. Route it there automatically no matter
+        # which provider the local config selects — or whether a config exists at
+        # all — since the checkpoint path alone determines where it can run.
+        resolved_model = model if model is not None else config.model
+        is_tinker_checkpoint = bool(resolved_model) and resolved_model.startswith("tinker://")
 
-        if config.provider == "custom":
+        if is_tinker_checkpoint:
+            api_key = _os.environ.get("TINKER_API_KEY", "")
+            if not api_key:
+                fail("tinker:// checkpoint models require TINKER_API_KEY in the environment.\n\n  Export your Tinker key and re-run, e.g.:\n    export TINKER_API_KEY=<your-tinker-key>")
+            provider = "tinker"
+            model = resolved_model
+            console.print("  [success]tinker:// checkpoint detected[/] → routing through the Tinker OAI endpoint")
+        else:
+            if not config.is_configured():
+                fail("No configuration found. Run `rllm setup` first to configure your provider and API key.")
+            provider = config.provider
+            api_key = config.api_key
+            # --model overrides configured model
+            if model is None:
+                model = config.model
+
+        if provider == "custom":
             # Custom provider: skip LiteLLM proxy, use base_url directly
-            import os as _os
-
             base_url = config.base_url
-            if config.api_key:
-                _os.environ.setdefault("OPENAI_API_KEY", config.api_key)
+            if api_key:
+                _os.environ.setdefault("OPENAI_API_KEY", api_key)
             console.print(f"  [success]Using custom endpoint[/] at [dim]{base_url}[/]")
         else:
             from rllm.eval.proxy import EvalProxyManager
 
             proxy_manager = EvalProxyManager(
-                provider=config.provider,
+                provider=provider,
                 model_name=model,
-                api_key=config.api_key,
+                api_key=api_key,
                 proxy_port=proxy_port,
             )
-            with Status(f"[dim]Starting LiteLLM proxy for [bold]{config.provider}/{model}[/bold]...[/]", console=console):
+            with Status(f"[dim]Starting LiteLLM proxy for [bold]{provider}/{model}[/bold]...[/]", console=console):
                 try:
                     proxy_manager.start_proxy_subprocess(proxy_manager.build_proxy_config())
                 except (RuntimeError, TimeoutError) as e:

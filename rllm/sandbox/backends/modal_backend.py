@@ -51,6 +51,24 @@ def _default_sandbox_timeout() -> int:
     return run_timeout + install_timeout + _SANDBOX_LIFETIME_HEADROOM_S
 
 
+def _supports_create_tags(sandbox_cls) -> bool:
+    """Whether this modal SDK's ``Sandbox.create`` accepts a ``tags`` kwarg (>= 1.5)."""
+    import inspect
+
+    try:
+        return "tags" in inspect.signature(sandbox_cls.create).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _attach_run_tags(sandbox, tags: dict[str, str], name: str) -> None:
+    """Best-effort ``set_tags`` for SDKs without the create-time kwarg."""
+    try:
+        sandbox.set_tags(tags)
+    except Exception:
+        logger.debug("could not tag sandbox %s", name, exc_info=True)
+
+
 # Modal caps an exec's total argv at 64 KiB (ARG_MAX); payloads above this go
 # through a chunked temp-file path instead of being inlined in the command.
 _B64_ARGV_LIMIT = 50_000
@@ -217,8 +235,15 @@ class ModalSandbox:
             # name = per-task label (visible in `modal sandbox list`); tags carry
             # the run id so you can filter/terminate a run's sandboxes:
             #   modal.Sandbox.list(tags={"rllm_run_id": "<id>"})  -> .terminate()
+            # Older modal SDKs (< 1.5) have no ``tags`` create kwarg — attach
+            # them post-create via set_tags() instead.
             create_kwargs["name"] = self.name[:64]
-            create_kwargs["tags"] = {"rllm_run_id": rllm_run_id()}
+            run_tags = {"rllm_run_id": rllm_run_id()}
+            post_create_tags: dict[str, str] | None = None
+            if _supports_create_tags(modal.Sandbox):
+                create_kwargs["tags"] = run_tags
+            else:
+                post_create_tags = run_tags
             for key in ("secrets", "volumes", "workdir", "gpu", "cpu", "memory"):
                 if key in kwargs:
                     create_kwargs[key] = kwargs.pop(key)
@@ -237,6 +262,8 @@ class ModalSandbox:
                 raise SnapshotNotFound(f"modal snapshot {image} no longer exists") from e
             raise
         self._sandbox_id = self._sandbox.object_id
+        if post_create_tags is not None:
+            _attach_run_tags(self._sandbox, post_create_tags, self.name)
 
         with _LIVE_LOCK:
             _LIVE_SANDBOXES.add(self)

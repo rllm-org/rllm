@@ -17,14 +17,15 @@ fireworks_base_url: "https://api.fireworks.ai"
 model:
   name: accounts/fireworks/models/qwen3p5-9b      # Fireworks base-model path
   tokenizer_model: Qwen/Qwen3.5-9B                # HF tokenizer (for rendering/tokenization)
-  lora_rank: 32
+  lora_rank: 32                                   # 0 = full-parameter fine-tuning (POLICY_TRAINER shape)
   train_unembed: true
   train_attn: true
   train_mlp: true
 
 fireworks_config:
-  # LoRA-validated shape (we train LoRA → LORA_TRAINER mode). The non-`-lora`
-  # shape resolves but is not validated for LoRA. Matches swe-rl's RL recipe.
+  # Trainer-mode shapes come in `-lora` (LORA_TRAINER) / suffix-less
+  # (POLICY_TRAINER = full-parameter) sibling pairs, selected by lora_rank.
+  # Matches swe-rl's RL recipe.
   policy_trainer_shape_id: accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora
   policy_trainer_replica_count: 1
 
@@ -36,7 +37,7 @@ data:
   train_max_samples: -1
   val_max_samples: -1
   max_length: 2048
-  renderer_name: "role_colon"
+  renderer_name: null   # null = auto-detect from the model; set explicitly to override, e.g. qwen3 / qwen3_5 / deepseekv3 / role_colon
   rllm:
     tokenize_and_mask_method: cumulative
 
