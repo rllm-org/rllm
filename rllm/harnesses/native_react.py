@@ -390,6 +390,7 @@ class NativeReactHarness(SandboxedAgentFlow):
     name = "native_react"
     sandbox_backend = "docker"
     max_turns: int | None = 100
+    max_tokens: int = 32_768
     command_timeout: float = 300.0
     max_output_length: int = 15_000
     max_parse_retries: int = 5
@@ -510,6 +511,7 @@ class NativeReactHarness(SandboxedAgentFlow):
                     model=config.model,
                     messages=messages,
                     tools=NATIVE_TOOL_SCHEMAS,
+                    max_tokens=self.max_tokens,
                     timeout=remaining,
                 )
                 assistant = preserve_assistant_message(response.choices[0].message)

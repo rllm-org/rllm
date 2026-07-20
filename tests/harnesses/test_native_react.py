@@ -188,6 +188,11 @@ def test_rollout_timeout_env_is_a_hard_cap(monkeypatch):
     assert harness._effective_timeout(Task(id="unset", instruction="x", metadata={})) == 30
 
 
+def test_max_tokens_defaults_to_32768_and_is_configurable():
+    assert NativeReactHarness().max_tokens == 32_768
+    assert NativeReactHarness(max_tokens=4096).max_tokens == 4096
+
+
 def test_timeout_exception_detection_covers_backend_and_sandbox_timeouts():
     class BackendTimeoutError(RuntimeError):
         status_code = 504
@@ -298,6 +303,8 @@ def test_harness_resends_complete_assistant_and_native_tool_result(monkeypatch):
     assert len(requests) == 2
     assert requests[0]["tools"] == NATIVE_TOOL_SCHEMAS
     assert requests[1]["tools"] == NATIVE_TOOL_SCHEMAS
+    assert requests[0]["max_tokens"] == 32_768
+    assert requests[1]["max_tokens"] == 32_768
     assert requests[1]["messages"][-2] == first_message
     assert requests[1]["messages"][-1] == {
         "role": "tool",
