@@ -25,6 +25,9 @@ export HF_HUB_DISABLE_XET=1
 # python/entry-points directly.
 VENV_PY=/tmp/uv-venv/bin/python
 VENV_VLLM=/tmp/uv-venv/bin/vllm
+# Ensure /tmp/uv-venv/bin is on PATH so vLLM subprocesses can find bundled
+# tools (ninja for torch.compile, uvicorn, etc.) that live inside the venv.
+export PATH="/tmp/uv-venv/bin:${PATH}"
 # vLLM 0.22.1 links against CUDA 13; venv default is CUDA 12 — inject 13 first.
 # Detect the venv's python site-packages dir (pod is py3.12; older tars used py3.13).
 _VENV_SITE=$(ls -d /tmp/uv-venv/lib/python*/site-packages 2>/dev/null | head -1)
