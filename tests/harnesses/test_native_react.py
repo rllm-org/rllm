@@ -315,6 +315,106 @@ def test_harness_resends_complete_assistant_and_native_tool_result(monkeypatch):
     assert episode.metadata["native_react"] == {"turns": 2, "parse_errors": 0}
 
 
+def test_command_timeout_resets_shell_and_continues_rollout(monkeypatch):
+    import openai
+
+    requests = []
+    assistant_messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_timeout",
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": '{"command":"export TRANSIENT_STATE=lost; printf partial-output; sleep 5"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_after_timeout",
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": '{"command":"pwd; printf state=%s ${TRANSIENT_STATE-unset}"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_submit",
+                    "type": "function",
+                    "function": {"name": "submit", "arguments": "{}"},
+                }
+            ],
+        },
+    ]
+
+    class SDKMessage:
+        def __init__(self, data):
+            self.data = data
+
+        def model_dump(self, **kwargs):
+            assert kwargs == {"exclude_unset": True}
+            return copy.deepcopy(self.data)
+
+    class Completions:
+        def create(self, **kwargs):
+            requests.append(copy.deepcopy(kwargs))
+            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage(assistant_messages[len(requests) - 1]))])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=Completions())
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    sandbox = LocalSandbox("native-react-command-timeout")
+    try:
+        episode = NativeReactHarness(command_timeout=1, max_turns=4).run(
+            Task(
+                id="command-timeout-task",
+                instruction="inspect",
+                metadata={"workdir": "/tmp", "agent_timeout": 20},
+            ),
+            AgentConfig(
+                base_url="http://gateway/v1",
+                model="qwen",
+                session_uid="command-timeout-session",
+            ),
+            env=sandbox,
+        )
+    finally:
+        sandbox.close()
+
+    assert len(requests) == 3
+    assert requests[1]["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "call_timeout",
+        "content": "partial-output",
+    }
+    assert requests[2]["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "call_after_timeout",
+        "content": "/tmp\nstate=unset",
+    }
+    assert episode.termination_reason is None
+    assert episode.metadata["native_react"] == {"turns": 3, "parse_errors": 0}
+
+
 def test_api_timeout_returns_typed_timeout_episode(monkeypatch):
     import openai
 
