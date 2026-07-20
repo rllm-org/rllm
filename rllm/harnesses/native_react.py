@@ -557,13 +557,42 @@ class NativeReactHarness(SandboxedAgentFlow):
                     command_timeout = min(self.command_timeout, remaining)
                     result = shell.run(command, timeout=command_timeout)
                     if result.timed_out:
-                        return self._timeout_episode(
-                            task,
-                            config,
-                            message=f"Shell command timed out after {command_timeout:g}s",
-                            turns=turns,
-                            parse_errors=parse_errors,
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            return self._timeout_episode(
+                                task,
+                                config,
+                                message=f"Agent execution timed out after {agent_timeout:g}s",
+                                turns=turns,
+                                parse_errors=parse_errors,
+                            )
+
+                        # A command timeout kills the persistent shell to stop the
+                        # entire foreground process group. Recreate a clean shell in
+                        # the task workdir; filesystem changes survive, while cwd,
+                        # exported variables, and shell functions reset.
+                        shell.start()
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            return self._timeout_episode(
+                                task,
+                                config,
+                                message=f"Agent execution timed out after {agent_timeout:g}s",
+                                turns=turns,
+                                parse_errors=parse_errors,
+                            )
+                        reset = shell.run(
+                            f"cd {shlex.quote(workdir)}",
+                            timeout=min(30.0, remaining),
                         )
+                        if reset.timed_out:
+                            return self._timeout_episode(
+                                task,
+                                config,
+                                message=f"Agent execution timed out after {agent_timeout:g}s",
+                                turns=turns,
+                                parse_errors=parse_errors,
+                            )
                     messages.append(
                         tool_result(
                             tool_call.id,
