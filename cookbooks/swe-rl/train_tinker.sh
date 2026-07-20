@@ -30,8 +30,11 @@ export SWE_SANDBOX_BACKEND="${SWE_SANDBOX_BACKEND:-modal}"
 export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
 
+# Agent harness by registry name -> edit rllm.agent.name below to switch
+# (terminus2 | mini-swe-agent | react | oracle | ...); SWE_HARNESS env also works.
 python -u train.py \
     rllm/backend=tinker \
+    rllm.agent.name="${SWE_HARNESS:-terminus2}" \
     model.name=Qwen/Qwen3.5-4B \
     model.lora_rank=32 \
     training.group_size=8 \

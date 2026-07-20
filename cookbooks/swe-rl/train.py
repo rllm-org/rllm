@@ -2,10 +2,13 @@
 
 This cookbook deliberately ships no custom AgentFlow or evaluator:
 
-* The **agent** is the in-tree ``terminus2`` harness
-  (:class:`rllm.harnesses.terminus2.Terminus2Harness`) — a
-  :class:`~rllm.sandbox.sandboxed_flow.SandboxedAgentFlow` that runs the
-  terminus2 CLI agent inside each task's sandbox. The rLLM gateway
+* The **agent** is a sandboxed CLI harness selected by name via the
+  ``rllm.agent.name`` config value — set it as a plain string in the
+  Hydra-override block of the ``train_*.sh`` scripts (default ``terminus2``;
+  any agent registered in ``rllm/registry/agents.json`` — ``mini-swe-agent``,
+  ``react``, ``oracle``, ...; the ``SWE_HARNESS`` env var still works as a
+  fallback). Each is a :class:`~rllm.sandbox.sandboxed_flow.SandboxedAgentFlow`
+  that runs its CLI agent inside each task's sandbox. The rLLM gateway
   intercepts every LLM call, so the trainer sees full trajectories without
   the harness knowing it's being trained.
 * The **evaluator** is each task's own verifier (sandbox-shell), resolved
@@ -30,6 +33,8 @@ command line (see ``train_tinker.sh`` / ``train_verl.sh`` for working defaults).
 Usage (from rllm repo root)::
 
     SWE_SANDBOX_BACKEND=modal python cookbooks/swe-rl/train.py rllm/backend=tinker
+    # switch the agent harness (config value; overridable on the CLI):
+    python cookbooks/swe-rl/train.py rllm/backend=tinker rllm.agent.name=mini-swe-agent
 """
 
 from __future__ import annotations
@@ -40,11 +45,28 @@ import hydra
 from omegaconf import DictConfig
 
 from rllm.data.dataset import DatasetRegistry
-from rllm.harnesses.terminus2 import Terminus2Harness
+from rllm.eval.agent_loader import load_agent
 from rllm.trainer import AgentTrainer
 
 TRAIN_DATASET = "r2egym"
 VAL_DATASET = "swebench-verified"
+
+
+# Agent harness, selectable by registry name. Set it right in the Hydra-override
+# block of the train_*.sh scripts:  rllm.agent.name=<name>  (e.g. terminus2,
+# mini-swe-agent, react, oracle, ... — anything in ``rllm/registry/agents.json``).
+# Resolution precedence: rllm.agent.name (config/CLI) > SWE_HARNESS env var >
+# default ``terminus2``. ``load_agent`` builds it bare; the cookbook applies the
+# sandbox backend to every harness and the terminus-specific knobs only to
+# ``terminus2``.
+def _resolve_harness(config: DictConfig) -> str:
+    # ``math_agent`` is the framework's generic base default (base.yaml); it is
+    # never a real SWE harness, so treat it as "unset" and fall through.
+    name = config.rllm.agent.get("name")
+    if not name or name == "math_agent":
+        name = os.environ.get("SWE_HARNESS", "terminus2")
+    return name
+
 
 # Sandbox backend for the SandboxedAgentFlow path: docker | local | modal | daytona.
 SANDBOX_BACKEND = os.environ.get("SWE_SANDBOX_BACKEND", "modal")
@@ -75,11 +97,18 @@ def main(config: DictConfig) -> None:
     if SWE_VAL_MAX > 0 and SWE_VAL_MAX < len(val_dataset):
         val_dataset = val_dataset.select(range(SWE_VAL_MAX))
 
-    # terminus2 as a SandboxedAgentFlow. Passing ``agent_flow`` (with no
-    # explicit evaluator/hooks) makes AgentTrainer auto-wire SandboxTaskHooks
-    # for the sandbox lifecycle + per-task verifier, and route rollouts through
+    # Build the selected harness by registry name (rllm.agent.name) as a
+    # SandboxedAgentFlow. Passing ``agent_flow`` (with no explicit
+    # evaluator/hooks) makes AgentTrainer auto-wire SandboxTaskHooks for the
+    # sandbox lifecycle + per-task verifier, and route rollouts through
     # AgentFlowEngine — rLLM's own runtime, not the remote Harbor runtime.
-    agent_flow = Terminus2Harness(sandbox_backend=SANDBOX_BACKEND, max_turns=TERMINUS_MAX_TURNS)
+    harness = _resolve_harness(config)
+    agent_flow = load_agent(harness)
+    if hasattr(agent_flow, "sandbox_backend"):
+        agent_flow.sandbox_backend = SANDBOX_BACKEND
+    if harness == "terminus2":
+        # Terminus-2-only knob (read by Terminus2Harness.build_env at run time).
+        agent_flow.max_turns = TERMINUS_MAX_TURNS
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),
