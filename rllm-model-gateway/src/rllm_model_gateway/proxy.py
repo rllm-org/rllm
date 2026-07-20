@@ -67,6 +67,75 @@ def _strip_logprobs(response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _to_openai_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Renderer ``parse_response`` tool_calls -> OpenAI chat ``tool_calls`` shape.
+
+    The renderer emits ``{"function": {"name", "arguments": <dict|str>}}``; the OpenAI
+    wire shape a client (e.g. opencode's OpenAI-compatible provider) expects is
+    ``{"id", "type": "function", "index", "function": {"name", "arguments": <json str>}}``.
+    """
+    out: list[dict[str, Any]] = []
+    for i, tc in enumerate(tool_calls):
+        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+        args = fn.get("arguments", {})
+        if not isinstance(args, str):
+            args = json.dumps(args)
+        out.append(
+            {
+                "id": tc.get("id") or f"call_{i}",
+                "type": "function",
+                "index": i,
+                "function": {"name": fn.get("name", ""), "arguments": args},
+            }
+        )
+    return out
+
+
+def _assistant_message_from_completion(
+    text: str,
+    completion_token_ids: list[int] | None,
+    request_body: dict[str, Any],
+    renderer: Any,
+) -> dict[str, Any]:
+    """Build the assistant ``message`` for a cumulative-mode chat response.
+
+    Default (and for every client today): the raw completion ``text`` as ``content`` —
+    byte-identical to the prior behavior. Text-protocol harnesses (Terminus-2 etc.) send
+    no OpenAI ``tools`` field and parse the raw output themselves, so they are unaffected.
+
+    When the client DID send ``tools`` (OpenAI function-calling clients such as opencode),
+    parse the completion tokens via the renderer into structured
+    ``content`` / ``reasoning_content`` / ``tool_calls``. The ``/v1/completions`` bridge
+    used in ``cumulative_token_mode`` skips the serving stack's own chat tool-call parser,
+    so without this such clients receive only raw ``<think>…</think><tool_call>…`` text,
+    never see structured ``tool_calls``, and take no action (0 reward in training). This
+    only shapes the CLIENT-facing message; training token capture uses the raw
+    ``completion_token_ids`` and is unchanged. Falls back to raw ``text`` if the renderer
+    can't parse or finds nothing structured.
+    """
+    message: dict[str, Any] = {"role": "assistant", "content": text}
+    if not request_body.get("tools"):
+        return message
+    parse = getattr(renderer, "parse_response", None)
+    if not callable(parse) or not completion_token_ids:
+        return message
+    try:
+        parsed = parse(list(completion_token_ids))
+    except Exception:
+        logger.warning("cumulative-turn tool-call parse failed; returning raw content", exc_info=True)
+        return message
+    tool_calls = _to_openai_tool_calls(parsed.tool_calls) if getattr(parsed, "tool_calls", None) else None
+    reasoning = getattr(parsed, "reasoning_content", None)
+    if not tool_calls and not reasoning:
+        return message  # nothing structured recovered -> keep raw text (defensive)
+    message["content"] = parsed.content or ""
+    if reasoning:
+        message["reasoning_content"] = reasoning
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    return message
+
+
 def _build_trace_data(
     session_id: str,
     request_body: dict[str, Any],
@@ -641,7 +710,7 @@ class ReverseProxy:
         choices = response_body.get("choices") or []
         if choices:
             first_choice = choices[0]
-            first_choice["message"] = {"role": "assistant", "content": first_choice.pop("text", "")}
+            first_choice["message"] = _assistant_message_from_completion(first_choice.pop("text", ""), completion_token_ids, request_body, acc.renderer)
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:
@@ -721,19 +790,30 @@ class ReverseProxy:
 
         t0 = time.perf_counter()
         chunks: list[dict[str, Any]] = []
+        # OpenAI function-calling clients (e.g. opencode) need structured tool_calls, which
+        # require the full completion to parse. Buffer the stream and fake-stream a single
+        # reconstructed message at the end; text-protocol clients (no tools) stream through
+        # unchanged. See _assistant_message_from_completion.
+        tools_mode = bool(request_body.get("tools"))
+
+        def _build_trace():
+            latency_ms = (time.perf_counter() - t0) * 1000
+            return build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
 
         async def event_generator():
+            built_trace = None
             try:
                 first_chunk_sent = False
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):
-                        if line:
+                        if line and not tools_mode:
                             yield line + "\n"
                         continue
 
                     data_str = line[6:].strip()
                     if data_str == "[DONE]":
-                        yield "data: [DONE]\n\n"
+                        if not tools_mode:
+                            yield "data: [DONE]\n\n"
                         continue
 
                     try:
@@ -742,6 +822,9 @@ class ReverseProxy:
                         continue
 
                     chunks.append(chunk)
+
+                    if tools_mode:
+                        continue  # buffer; structured message emitted after the stream
 
                     # Translate completions chunk → chat chunk
                     choices = chunk.get("choices", [])
@@ -778,16 +861,46 @@ class ReverseProxy:
                     sanitized = strip_vllm_fields(chat_chunk) if self.strip_vllm else chat_chunk
                     yield f"data: {json.dumps(sanitized)}\n\n"
 
+                # Tools client: reconstruct one structured chat message from the full
+                # completion and fake-stream it (role → content+tool_calls → finish → DONE).
+                if tools_mode and chunks:
+                    built_trace = _build_trace()
+                    message = _assistant_message_from_completion(
+                        "".join((c.get("choices") or [{}])[0].get("text", "") for c in chunks),
+                        built_trace.completion_token_ids,
+                        request_body,
+                        acc.renderer,
+                    )
+                    cid = chunks[0].get("id", "")
+                    created = chunks[0].get("created", 0)
+                    model = chunks[0].get("model", "")
+                    usage = next((c["usage"] for c in reversed(chunks) if c.get("usage")), {})
+                    finish_reason = next((fr for c in reversed(chunks) for ch in (c.get("choices") or []) if (fr := ch.get("finish_reason"))), "stop")
+                    base = {"id": cid, "object": "chat.completion.chunk", "created": created, "model": model}
+                    delta = {"content": message["content"]}
+                    for k in ("reasoning_content", "tool_calls"):
+                        if k in message:
+                            delta[k] = message[k]
+                    role_chunk = {**base, "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]}
+                    msg_chunk = {**base, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]}
+                    fin_chunk = {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}], "usage": usage}
+                    if self.strip_vllm:
+                        msg_chunk = strip_vllm_fields(msg_chunk)
+                    yield f"data: {json.dumps(role_chunk)}\n\n"
+                    yield f"data: {json.dumps(msg_chunk)}\n\n"
+                    yield f"data: {json.dumps(fin_chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
+
             finally:
                 await upstream.__aexit__(None, None, None)
                 if retry_client is not None:
                     await retry_client.aclose()
                 self.router.release(worker.url)
 
-                # Ingest accumulated token data
+                # Ingest accumulated token data (reuse the trace already built for the
+                # tools-mode emission, so chunks are parsed once).
                 if chunks:
-                    latency_ms = (time.perf_counter() - t0) * 1000
-                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
+                    trace = built_trace or _build_trace()
                     prompt_ids = trace.prompt_token_ids or token_ids
                     completion_ids = trace.completion_token_ids
 
@@ -841,11 +954,19 @@ class ReverseProxy:
         finish_reason = (choices[0].get("finish_reason") if choices else None) or "stop"
         completion_logprobs = choices[0].get("logprobs") if choices else None
 
+        # When the client requested OpenAI tools, reconstruct structured
+        # content/reasoning_content/tool_calls; otherwise `message` is just the raw
+        # content and `extra_delta` is empty (behavior unchanged). See
+        # _assistant_message_from_completion.
+        message = _assistant_message_from_completion(content, completion_token_ids, request_body, acc.renderer)
+        content = message["content"]
+        extra_delta = {k: message[k] for k in ("reasoning_content", "tool_calls") if k in message}
+
         if session_id and response_body:
             chat_body = dict(response_body)
             chat_body["object"] = "chat.completion"
             if chat_body.get("choices"):
-                chat_body["choices"][0]["message"] = {"role": "assistant", "content": content}
+                chat_body["choices"][0]["message"] = message
             trace = build_trace_record(session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
             await self._persist(trace)
 
@@ -880,7 +1001,7 @@ class ReverseProxy:
                             "object": "chat.completion.chunk",
                             "created": created,
                             "model": model,
-                            "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None, "token_ids": completion_token_ids, "logprobs": completion_logprobs}],
+                            "choices": [{"index": 0, "delta": {"content": content, **extra_delta}, "finish_reason": None, "token_ids": completion_token_ids, "logprobs": completion_logprobs}],
                             "prompt_token_ids": prompt_token_ids,
                         }
                     )
