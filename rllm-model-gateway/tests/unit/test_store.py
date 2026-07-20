@@ -1,5 +1,6 @@
 """Tests for MemoryTraceStore and SqliteTraceStore."""
 
+import copy
 import os
 import tempfile
 
@@ -115,6 +116,54 @@ class TestFlush:
     @pytest.mark.asyncio
     async def test_flush_no_error(self, store):
         await store.flush()  # should not raise
+
+
+class TestMemoryStoreSpecific:
+    @pytest.mark.asyncio
+    async def test_cumulative_messages_share_equal_prefix_objects(self):
+        store = MemoryTraceStore()
+        first_messages = [
+            {"role": "system", "content": "You are a terminal agent."},
+            {"role": "user", "content": "Inspect the repository."},
+        ]
+        second_messages = copy.deepcopy(first_messages)
+        second_messages.extend(
+            [
+                {"role": "assistant", "content": "I will inspect it."},
+                {"role": "tool", "content": "README.md"},
+            ]
+        )
+
+        await store.store_trace("t1", "s1", {"messages": first_messages})
+        await store.store_trace("t2", "s1", {"messages": second_messages})
+
+        traces = await store.get_session_traces("s1")
+        assert traces[1]["messages"] == second_messages
+        assert traces[1]["messages"][0] is traces[0]["messages"][0]
+        assert traces[1]["messages"][1] is traces[0]["messages"][1]
+
+    @pytest.mark.asyncio
+    async def test_cumulative_messages_stop_sharing_at_divergence(self):
+        store = MemoryTraceStore()
+        first_messages = [
+            {"role": "system", "content": "shared"},
+            {"role": "user", "content": "original"},
+            {"role": "tool", "content": "equal after divergence"},
+        ]
+        second_messages = [
+            copy.deepcopy(first_messages[0]),
+            {"role": "user", "content": "edited"},
+            copy.deepcopy(first_messages[2]),
+        ]
+
+        await store.store_trace("t1", "s1", {"messages": first_messages})
+        await store.store_trace("t2", "s1", {"messages": second_messages})
+
+        traces = await store.get_session_traces("s1")
+        assert traces[1]["messages"] == second_messages
+        assert traces[1]["messages"][0] is traces[0]["messages"][0]
+        assert traces[1]["messages"][1] is not traces[0]["messages"][1]
+        assert traces[1]["messages"][2] is not traces[0]["messages"][2]
 
 
 class TestSqliteStoreSpecific:

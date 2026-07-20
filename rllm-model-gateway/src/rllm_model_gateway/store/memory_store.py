@@ -18,10 +18,25 @@ class MemoryTraceStore:
 
     async def store_trace(self, trace_id: str, session_id: str, data: dict[str, Any]) -> None:
         now = time.time()
+        idx = self._session_index[session_id]
+
+        # Cumulative chat requests repeat the full message history on every
+        # turn. Reuse the preceding trace's equal prefix objects so repeated
+        # request-message data is retained once while every trace still exposes
+        # the same complete list and JSON value. Stop at the first edit/compaction.
+        if idx:
+            previous = self._traces.get(idx[-1], {})
+            previous_messages = previous.get("messages")
+            messages = data.get("messages")
+            if isinstance(previous_messages, list) and isinstance(messages, list):
+                for i, (previous_message, message) in enumerate(zip(previous_messages, messages, strict=False)):
+                    if previous_message != message:
+                        break
+                    messages[i] = previous_message
+
         self._traces[trace_id] = data
         if trace_id not in self._timestamps:
             self._timestamps[trace_id] = now
-        idx = self._session_index[session_id]
         if trace_id not in idx:
             idx.append(trace_id)
 
