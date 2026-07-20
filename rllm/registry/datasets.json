@@ -736,15 +736,15 @@
       "instruction_field": "question"
     },
     "swebench_verified": {
-      "description": "SWE-bench Verified: 500 human-validated real-world GitHub issues across 12 Python repos (Harbor format; pre-built swebench/sweb.eval images; in-sandbox F2P/P2P grading)",
-      "source": "princeton-nlp/SWE-bench_Verified",
-      "builder": "rllm.data.swebench_verified_builder:build_benchmark",
+      "description": "SWE-bench Verified: 500 human-validated real-world GitHub issues across 12 Python repos (Harbor-sourced; per-task in-sandbox tests/test.sh verifier)",
+      "source": "harbor:swebench-verified",
       "category": "code",
       "splits": [
-        "test"
+        "default"
       ],
-      "eval_split": "test",
-      "default_agent": "mini-swe-agent"
+      "eval_split": "default",
+      "default_agent": "mini-swe-agent",
+      "reward_fn": "harbor_reward_fn"
     },
     "swebench_pro": {
       "description": "SWE-bench Pro (Public): 731 enterprise-grade SWE tasks across 41 repos, evaluated against pre-built jefzda/sweap-images Docker images (Harbor format; F2P/P2P verifier)",
