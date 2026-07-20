@@ -1,14 +1,13 @@
 """Train a terminal agent on a local set of terminal-agent tasks, eval on
 Terminal-Bench.
 
-This cookbook deliberately ships no custom AgentFlow or evaluator:
+This cookbook deliberately ships no custom evaluator:
 
-* The **agent** is the in-tree ``terminus2`` harness
-  (:class:`rllm.harnesses.terminus2.Terminus2Harness`) — a
-  :class:`~rllm.sandbox.sandboxed_flow.SandboxedAgentFlow` that runs Harbor's
-  Terminus-2 tmux/terminal agent inside each task's sandbox. The rLLM gateway
-  intercepts every LLM call, so the trainer sees full trajectories without the
-  harness knowing it's being trained.
+* The **agent** is selected with ``TERMINAL_AGENT``. ``terminus2`` runs Harbor's
+  Terminus-2 agent inside the sandbox; ``native_react`` runs a minimal host-side
+  native-tool loop with the VMVM TB-v2 prompt and observation protocol. Both use
+  :class:`~rllm.sandbox.sandboxed_flow.SandboxedAgentFlow`, and the rLLM gateway
+  captures every model call for training.
 * The **evaluator** is each task's own verifier (sandbox-shell), resolved
   per-task by :class:`rllm.hooks.SandboxTaskHooks`. Both the local training
   tasks and the Terminal-Bench eval tasks ship a ``tests/test.sh`` that writes
@@ -40,10 +39,13 @@ import hydra
 from omegaconf import DictConfig
 
 from rllm.data.dataset import DatasetRegistry
+from rllm.harnesses.native_react import NativeReactHarness
 from rllm.harnesses.terminus2 import Terminus2Harness
 from rllm.trainer import AgentTrainer
 
-TRAIN_DATASET = "tb-opus-pass"
+# Train dataset name (DatasetRegistry). Override this for a different local
+# task set, for example ``TB_TRAIN_DATASET=tb-v2-debug``.
+TRAIN_DATASET = os.environ.get("TB_TRAIN_DATASET", "tb-opus-pass")
 
 # Terminal-Bench eval version (Harbor registry). Must match prepare_data.py;
 # both read TB_EVAL_VERSION so the pulled and loaded dataset names agree.
@@ -52,6 +54,9 @@ VAL_DATASET = f"terminal-bench@{EVAL_VERSION}"
 
 # Sandbox backend for the SandboxedAgentFlow path: docker | local | modal | daytona.
 SANDBOX_BACKEND = os.environ.get("TERMINAL_SANDBOX_BACKEND", "modal")
+
+# Agent harness: terminus2 (backward-compatible default) or native_react.
+TERMINAL_AGENT = os.environ.get("TERMINAL_AGENT", "terminus2").strip().lower()
 
 # Optional cap on the validation set size. Terminal-Bench 2.0 is 89 tasks;
 # validation runs ALL of them every time it fires, which is slow. Set
@@ -71,6 +76,28 @@ TERMINUS_MAX_TURNS = int(_terminus_max_turns) if _terminus_max_turns and int(_te
 # TERMINUS_ENABLE_SUMMARIZE=0 to disable it. Unset = Harbor's default (on).
 TERMINUS_ENABLE_SUMMARIZE = os.environ.get("TERMINUS_ENABLE_SUMMARIZE", "1").strip().lower() not in ("0", "false", "no", "off")
 
+_native_react_max_turns = os.environ.get("NATIVE_REACT_MAX_TURNS")
+NATIVE_REACT_MAX_TURNS = int(_native_react_max_turns) if _native_react_max_turns and int(_native_react_max_turns) > 0 else None
+NATIVE_REACT_COMMAND_TIMEOUT = float(os.environ.get("NATIVE_REACT_COMMAND_TIMEOUT", "300"))
+
+
+def build_agent_flow():
+    if TERMINAL_AGENT == "native_react":
+        kwargs = {
+            "sandbox_backend": SANDBOX_BACKEND,
+            "command_timeout": NATIVE_REACT_COMMAND_TIMEOUT,
+        }
+        if NATIVE_REACT_MAX_TURNS is not None:
+            kwargs["max_turns"] = NATIVE_REACT_MAX_TURNS
+        return NativeReactHarness(**kwargs)
+    if TERMINAL_AGENT == "terminus2":
+        return Terminus2Harness(
+            sandbox_backend=SANDBOX_BACKEND,
+            max_turns=TERMINUS_MAX_TURNS,
+            enable_summarize=TERMINUS_ENABLE_SUMMARIZE,
+        )
+    raise ValueError(f"Unknown TERMINAL_AGENT={TERMINAL_AGENT!r}; expected 'native_react' or 'terminus2'")
+
 
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig) -> None:
@@ -85,14 +112,11 @@ def main(config: DictConfig) -> None:
     if TB_VAL_MAX > 0 and TB_VAL_MAX < len(val_dataset):
         val_dataset = val_dataset.select(range(TB_VAL_MAX))
 
-    # terminus2 as a SandboxedAgentFlow. Passing ``agent_flow`` (with no
+    # Passing a SandboxedAgentFlow as ``agent_flow`` (with no
     # explicit evaluator/hooks) makes AgentTrainer auto-wire SandboxTaskHooks
     # for the sandbox lifecycle + per-task verifier, and route rollouts through
     # AgentFlowEngine — rLLM's own runtime, not the remote Harbor runtime.
-    # enable_summarize controls Terminus-2 context compaction; the train_*.sh
-    # scripts set TERMINUS_ENABLE_SUMMARIZE=0 to turn it off so summarization
-    # subagents don't fragment the captured trajectory during training.
-    agent_flow = Terminus2Harness(sandbox_backend=SANDBOX_BACKEND, max_turns=TERMINUS_MAX_TURNS, enable_summarize=TERMINUS_ENABLE_SUMMARIZE)
+    agent_flow = build_agent_flow()
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),

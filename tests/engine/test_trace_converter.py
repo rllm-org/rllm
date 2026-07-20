@@ -170,6 +170,18 @@ class TestTraceRecordToStep:
         assert step.thought == "Let me think..."
         assert step.model_output.reasoning == "Let me think..."
 
+    def test_step_with_reasoning_content(self):
+        trace = self._make_trace(
+            response_message={
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "Preserve this native reasoning field.",
+            },
+        )
+        step = trace_record_to_step(trace)
+        assert step.thought == "Preserve this native reasoning field."
+        assert step.model_output.reasoning == "Preserve this native reasoning field."
+
     def test_chat_completions_includes_response(self):
         trace = self._make_trace()
         step = trace_record_to_step(trace)

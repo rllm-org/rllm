@@ -67,6 +67,69 @@ def _strip_logprobs(response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _openai_tool_calls(tool_calls: list[Any]) -> list[dict[str, Any]]:
+    """Convert renderer tool calls to the OpenAI chat response shape."""
+    result: list[dict[str, Any]] = []
+    for index, tool_call in enumerate(tool_calls):
+        if isinstance(tool_call, dict):
+            function = tool_call.get("function") or tool_call
+            name = function.get("name", "")
+            arguments = function.get("arguments", {})
+            call_id = tool_call.get("id") or f"call_{index}"
+        else:
+            function = getattr(tool_call, "function", None)
+            name = getattr(function, "name", None) or getattr(tool_call, "name", "")
+            arguments = getattr(function, "arguments", None)
+            if arguments is None:
+                arguments = getattr(tool_call, "arguments", {})
+            call_id = getattr(tool_call, "id", None) or f"call_{index}"
+        if isinstance(arguments, dict):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        elif not isinstance(arguments, str):
+            arguments = str(arguments)
+        result.append(
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            }
+        )
+    return result
+
+
+def _completion_choice_to_chat_message(
+    choice: dict[str, Any],
+    renderer: Any,
+    completion_token_ids: list[int],
+) -> dict[str, Any]:
+    """Translate a cumulative completion without losing parsed assistant fields."""
+    text = choice.pop("text", "")
+    carried = choice.pop("response_message", None)
+    message = dict(carried) if isinstance(carried, dict) else {}
+    message.setdefault("role", "assistant")
+    message.setdefault("content", text)
+
+    if renderer is not None and completion_token_ids:
+        try:
+            parsed = renderer.parse_response(completion_token_ids)
+        except Exception:
+            logger.warning("Cumulative response parsing failed; returning carried completion fields", exc_info=True)
+        else:
+            content = getattr(parsed, "content", None)
+            if content is not None:
+                message["content"] = content
+            reasoning = getattr(parsed, "reasoning_content", None)
+            if reasoning is not None:
+                message["reasoning_content"] = reasoning
+            tool_calls = getattr(parsed, "tool_calls", None)
+            if tool_calls:
+                message["tool_calls"] = _openai_tool_calls(list(tool_calls))
+
+    if message.get("tool_calls") and choice.get("finish_reason") == "stop":
+        choice["finish_reason"] = "tool_calls"
+    return message
+
+
 def _build_trace_data(
     session_id: str,
     request_body: dict[str, Any],
@@ -641,7 +704,11 @@ class ReverseProxy:
         choices = response_body.get("choices") or []
         if choices:
             first_choice = choices[0]
-            first_choice["message"] = {"role": "assistant", "content": first_choice.pop("text", "")}
+            first_choice["message"] = _completion_choice_to_chat_message(
+                first_choice,
+                acc.renderer,
+                completion_token_ids,
+            )
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:

@@ -42,6 +42,18 @@ def _to_openai_tool_calls(tool_calls: list) -> list[dict[str, Any]]:
     return result
 
 
+def _model_output_message(model_output: Any, response_text: str) -> dict[str, Any]:
+    """Build the assistant message without dropping structured model output."""
+    message: dict[str, Any] = {"role": "assistant", "content": response_text}
+    reasoning = getattr(model_output, "reasoning", None)
+    tool_calls = getattr(model_output, "tool_calls", None)
+    if reasoning:
+        message["reasoning_content"] = reasoning
+    if tool_calls:
+        message["tool_calls"] = _to_openai_tool_calls(tool_calls)
+    return message
+
+
 def _termination_http_error(reason: TerminationReason) -> Exception:
     """Map a ``TerminationEvent`` to a non-retryable OpenAI-style 400.
 
@@ -98,6 +110,10 @@ async def _token_prompt_completion(
     # them every cumulative turn.
     routing_matrices = getattr(token_output, "routing_matrices", None)
 
+    response_message = _model_output_message(model_output, text)
+    if response_message.get("tool_calls") and finish_reason == "stop":
+        finish_reason = "tool_calls"
+
     return {
         "id": f"cmpl-{uuid.uuid4().hex[:12]}",
         "object": "text_completion",
@@ -107,6 +123,11 @@ async def _token_prompt_completion(
             {
                 "index": 0,
                 "text": text,
+                # The cumulative gateway translates this completions-style
+                # response back to chat. Carry the complete parsed assistant
+                # message alongside the raw text so reasoning/tool calls are
+                # not lost on turn 2+.
+                "response_message": response_message,
                 "token_ids": completion_ids,
                 "finish_reason": finish_reason,
                 "routing_matrices": routing_matrices,
@@ -183,11 +204,8 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
         logprobs = model_output.logprobs or []
         finish_reason = model_output.finish_reason or "stop"
 
-        response_message: dict[str, Any] = {"role": "assistant", "content": response_text}
-        if model_output.reasoning:
-            response_message["reasoning"] = model_output.reasoning
+        response_message = _model_output_message(model_output, response_text)
         if model_output.tool_calls:
-            response_message["tool_calls"] = _to_openai_tool_calls(model_output.tool_calls)
             if finish_reason == "stop":
                 finish_reason = "tool_calls"
 

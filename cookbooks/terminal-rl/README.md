@@ -4,12 +4,15 @@ End-to-end agentic-RL recipe for terminal agents: train on **a local set of
 Harbor-format terminal-agent tasks** that you provide (a `.tar.zst` of task
 directories) and validate on
 [Terminal-Bench](https://www.tbench.ai) pulled from the Harbor registry. The
-agent harness is Harbor's [Terminus-2](https://www.harborframework.com/docs/agents/terminus-2)
-(a tmux-driven mono-tool terminal agent); the base model is `Qwen/Qwen3.5-4B`.
+agent harness is selectable: Harbor's
+[Terminus-2](https://www.harborframework.com/docs/agents/terminus-2), or the
+in-tree `native_react` loop that matches PRIME's VMVM TB-v2 native-tool prompt
+and observation protocol. The base model is `Qwen/Qwen3.5-4B`.
 
-This cookbook ships **no custom AgentFlow and no custom evaluator** — it's a thin
-wrapper around primitives that already live in `rllm/`. The flow is Terminus-2
-running *inside* each task's sandbox, and the evaluator is each task's own
+This cookbook ships **no custom evaluator** — it is a thin wrapper around
+primitives that live in `rllm/`. `terminus2` runs *inside* each task sandbox;
+`native_react` runs its model loop on the trainer host and executes commands in
+one persistent bash process in the sandbox. The evaluator is each task's own
 `tests/test.sh`. Both the training tasks and the Terminal-Bench eval tasks ship
 that verifier with the dataset. This is the same machinery as the
 [Terminal-Bench eval cookbook](../../docs/cookbooks/terminal_bench.mdx), packaged
@@ -22,12 +25,12 @@ AgentTrainer.train()
   │
   ├── for each task: launch a sandbox (Modal / Daytona / Docker)
   │       │
-  │       └── terminus2 driver runs IN the sandbox
-  │             │   (multi-turn tmux loop; each LLM call → gateway)
-  │             │
-  │             └── rLLM gateway routes to the trainer-hosted policy,
-  │                  capturing the full trajectory (prompt + response
-  │                  tokens + sampling params per turn).
+  │       ├── terminus2: driver + tmux loop run IN the sandbox
+  │       └── native_react: host loop drives persistent sandbox bash
+  │                    │
+  │                    └── each LLM call goes through the rLLM gateway,
+  │                         which routes to the trainer-hosted policy and
+  │                         captures prompt/response tokens per turn.
   │
   └── verifier: tests/test.sh inside the sandbox
         │   writes 1.0 / 0.0 to /logs/verifier/reward.txt
@@ -38,6 +41,32 @@ AgentTrainer.train()
 The trainer never parses tool calls or model outputs directly. The agent harness
 owns the action loop; the gateway owns the trajectory; the in-sandbox verifier
 owns the reward.
+
+### Native ReAct / VMVM TB-v2 parity
+
+Select it with `TERMINAL_AGENT=native_react` (the Qwen3.5 DPPO debug launcher
+does this by default). It has no compaction and preserves each complete
+assistant message—including `reasoning_content`, native `tool_calls`, and
+provider extension fields—before appending the exact VMVM observation:
+
+```text
+<tool_response>
+Current terminal state:
+...
+</tool_response>
+```
+
+The gateway's cumulative-token mode is required for interleaved thinking. On
+the tested Fireworks Qwen3.5 deployment, the public chat endpoint returns
+`reasoning_content` but does not render that field when it is resent; cumulative
+mode instead retains the sampled token IDs and bridges only the new VMVM
+observation. Verify both the public message contract and the real two-turn
+token-in path against a deployment with:
+
+```bash
+uv run python cookbooks/terminal-rl/verify_native_react.py \
+  --model accounts/rllm-project/deployments/<deployment>
+```
 
 ## Installation
 
@@ -188,8 +217,8 @@ full benchmark run (snapshots, pass@k, sandbox lifetimes).
 ## Sandbox backend
 
 Training uses rLLM's own `SandboxedAgentFlow` path (`AgentFlowEngine`) — not the
-remote Harbor runtime. Terminus-2 runs inside one sandbox per task, created by
-`SandboxTaskHooks`. Pick a backend via the `TERMINAL_SANDBOX_BACKEND` env var:
+remote Harbor runtime. `SandboxTaskHooks` creates one sandbox per task. Pick a
+backend via the `TERMINAL_SANDBOX_BACKEND` env var:
 
 | Backend | Setup | Notes |
 |---|---|---|
@@ -225,6 +254,7 @@ then error out and get dropped instead of scored.
 | `train_fireworks.sh` | Fireworks backend — Qwen3.5-9B LoRA, GRPO + async, managed trainer/deployment |
 | `train_fireworks_sync.sh` | Fireworks backend — synchronous (on-policy) variant |
 | `train_verl.sh` | Verl backend — same recipe with vLLM + FSDP |
+| `verify_native_react.py` | Live message-field and exact VMVM token-bridge verification |
 | `test.py` | Harness/loader import + script-wiring smoke tests |
 | `pyproject.toml` | Cookbook metadata (registers `prepare_data`) |
 
@@ -235,13 +265,16 @@ AgentFlow because their workloads either fit in a single LLM turn or need bespok
 tool wiring. A terminal agent doesn't — the existing in-tree primitives already
 cover it:
 
-- **`rllm.harnesses.terminus2`** is the agent. It runs Harbor's Terminus-2
+- **`rllm.harnesses.terminus2`** runs Harbor's Terminus-2
   *inside* the sandbox (installs an isolated Python 3.12 venv on first run; reads
   the gateway URL from the env; drives a tmux session locally).
+- **`rllm.harnesses.native_react`** is the minimal native-tool alternative. It
+  owns a persistent bash session, uses VMVM TB-v2 prompts/observations, and lets
+  the configured renderer own model-specific reasoning/tool syntax.
 - **Per-task `tests/test.sh`** is the evaluator. The sandbox-shell verifier kind
   reads `/logs/verifier/reward.txt` and returns it as the RL reward. Every
   Terminal-Bench task (train and eval) ships that script.
 
 The only thing this cookbook adds on top is the recipe: dataset pairing,
-sampling/optimizer hyperparams, and the `terminus2` harness selection. Forking
+sampling/optimizer hyperparams, and the harness selection. Forking
 `train_tinker.sh` is the place to start customizing.
