@@ -315,7 +315,7 @@ def test_harness_resends_complete_assistant_and_native_tool_result(monkeypatch):
     assert episode.metadata["native_react"] == {"turns": 2, "parse_errors": 0}
 
 
-def test_command_timeout_resets_shell_and_continues_rollout(monkeypatch):
+def test_command_timeout_resets_shell_and_continues_rollout(monkeypatch, tmp_path):
     import openai
 
     requests = []
@@ -329,7 +329,7 @@ def test_command_timeout_resets_shell_and_continues_rollout(monkeypatch):
                     "type": "function",
                     "function": {
                         "name": "bash",
-                        "arguments": '{"command":"export TRANSIENT_STATE=lost; printf partial-output; sleep 5"}',
+                        "arguments": json.dumps({"command": ("touch survives; export TRANSIENT_STATE=lost; sleep 30 & echo $! > child.pid; printf partial-output; cd /; wait")}),
                     },
                 }
             ],
@@ -343,7 +343,18 @@ def test_command_timeout_resets_shell_and_continues_rollout(monkeypatch):
                     "type": "function",
                     "function": {
                         "name": "bash",
-                        "arguments": '{"command":"pwd; printf state=%s ${TRANSIENT_STATE-unset}"}',
+                        "arguments": json.dumps(
+                            {
+                                "command": (
+                                    "printf 'pwd=%s\\n' \"$PWD\"; "
+                                    "printf 'state=%s\\n' \"${TRANSIENT_STATE-unset}\"; "
+                                    "test -f survives && echo file=kept || echo file=missing; "
+                                    "pid=$(cat child.pid); "
+                                    "state=$(ps -o stat= -p \"$pid\" 2>/dev/null | tr -d ' '); "
+                                    "case \"$state\" in ''|Z*) echo child=dead ;; *) echo child=alive:$state ;; esac"
+                                )
+                            }
+                        ),
                     },
                 }
             ],
@@ -388,7 +399,7 @@ def test_command_timeout_resets_shell_and_continues_rollout(monkeypatch):
             Task(
                 id="command-timeout-task",
                 instruction="inspect",
-                metadata={"workdir": "/tmp", "agent_timeout": 20},
+                metadata={"workdir": str(tmp_path), "agent_timeout": 20},
             ),
             AgentConfig(
                 base_url="http://gateway/v1",
@@ -409,10 +420,87 @@ def test_command_timeout_resets_shell_and_continues_rollout(monkeypatch):
     assert requests[2]["messages"][-1] == {
         "role": "tool",
         "tool_call_id": "call_after_timeout",
-        "content": "/tmp\nstate=unset",
+        "content": f"pwd={tmp_path}\nstate=unset\nfile=kept\nchild=dead\n",
     }
     assert episode.termination_reason is None
     assert episode.metadata["native_react"] == {"turns": 3, "parse_errors": 0}
+
+
+def test_command_timeout_at_rollout_deadline_returns_typed_timeout(monkeypatch):
+    import openai
+
+    import rllm.harnesses.native_react as native_react
+
+    requests = []
+
+    class SDKMessage:
+        def model_dump(self, **kwargs):
+            assert kwargs == {"exclude_unset": True}
+            return {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_timeout",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command":"sleep 30"}'},
+                    }
+                ],
+            }
+
+    class Completions:
+        def create(self, **kwargs):
+            requests.append(copy.deepcopy(kwargs))
+            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage())])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=Completions())
+
+        def close(self):
+            pass
+
+    class FakeShell:
+        def __init__(self, *args, **kwargs):
+            self.run_count = 0
+
+        def start(self):
+            pass
+
+        def run(self, command, timeout):
+            self.run_count += 1
+            if self.run_count == 1:
+                return SimpleNamespace(output="", exit_code=0, timed_out=False)
+            return SimpleNamespace(output="partial-output", exit_code=-1, timed_out=True)
+
+        def close(self):
+            pass
+
+    monotonic_values = iter([0.0, 1.0, 2.0, 11.0])
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(native_react, "PersistentBashSession", FakeShell)
+    monkeypatch.setattr(native_react.time, "monotonic", lambda: next(monotonic_values))
+
+    episode = NativeReactHarness(command_timeout=30, max_turns=4, run_timeout=10).run(
+        Task(
+            id="rollout-timeout-task",
+            instruction="inspect",
+            metadata={"workdir": "/tmp"},
+        ),
+        AgentConfig(
+            base_url="http://gateway/v1",
+            model="qwen",
+            session_uid="rollout-timeout-session",
+        ),
+        env=SimpleNamespace(),
+    )
+
+    assert len(requests) == 1
+    assert episode.termination_reason is TerminationReason.TIMEOUT
+    assert episode.metadata["error"] == {
+        "error_type": "AgentTimeoutError",
+        "message": "Agent execution timed out after 10s",
+    }
 
 
 def test_api_timeout_returns_typed_timeout_episode(monkeypatch):
