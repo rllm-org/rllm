@@ -8,13 +8,14 @@ so that downstream importance sampling and bypass mode work.
 
 from unittest.mock import MagicMock
 
+import numpy as np
 import torch
 
 from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine.rollout import ModelOutput
 from rllm.trainer.algorithms.config import CompactFilteringConfig, TransformConfig
 from rllm.trainer.algorithms.transform import transform_episodes_to_trajectory_groups
-from rllm.trainer.verl.transform import transform_episodes_to_dataproto
+from rllm.trainer.verl.transform import _build_token_advantages, transform_episodes_to_dataproto
 from rllm.workflows.workflow import TerminationReason
 
 
@@ -208,3 +209,88 @@ class TestRolloutLogProbsPropagation:
         # All standard fields should still be present
         for key in ["input_ids", "attention_mask", "position_ids", "prompts", "responses", "response_mask", "traj_rewards", "step_rewards"]:
             assert key in batch.batch, f"Standard field '{key}' should be present"
+        assert "advantages" not in batch.batch
+
+
+def test_verl_preserves_token_advantages_through_prefix_merge():
+    model_output_1 = ModelOutput(prompt_ids=[1, 2], completion_ids=[3, 4], logprobs=[-0.1, -0.2])
+    model_output_2 = ModelOutput(prompt_ids=[1, 2, 3, 4, 5], completion_ids=[6, 7], logprobs=[-0.3, -0.4])
+    step1 = Step(model_output=model_output_1, advantage=[0.1, 0.2])
+    step2 = Step(model_output=model_output_2, advantage=[0.3, 0.4])
+    trajectory = Trajectory(steps=[step1, step2], reward=1.0)
+    episode = Episode(id="task:0", trajectories=[trajectory])
+
+    batch = transform_episodes_to_dataproto([episode], _make_mock_rollout_engine(), max_prompt_length=8, max_response_length=8)
+
+    # Merged response is [3, 4, 5, 6, 7]: action, observation, action.
+    assert torch.allclose(batch.batch["advantages"][0], torch.tensor([0.1, 0.2, 0.0, 0.3, 0.4, 0.0, 0.0, 0.0]))
+
+
+def test_build_token_advantages_pads_truncates_and_masks_rows():
+    response_mask = torch.tensor(
+        [
+            [1, 0, 1, 0],
+            [1, 1, 0, 1],
+            [0, 0, 0, 0],
+        ],
+        dtype=torch.bool,
+    )
+    advantages = [[0.1, 0.2], [1.0, 2.0, 3.0, 4.0, 5.0], []]
+
+    result = _build_token_advantages(response_mask, advantages)
+
+    assert result.dtype == torch.float32
+    assert torch.allclose(
+        result,
+        torch.tensor(
+            [
+                [0.1, 0.0, 0.0, 0.0],
+                [1.0, 2.0, 0.0, 4.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ]
+        ),
+    )
+
+    empty_result = _build_token_advantages(torch.empty((0, 4), dtype=torch.bool), [])
+    assert empty_result.shape == (0, 4)
+
+
+def test_verl_expands_legacy_scalar_advantage_input():
+    episode = _make_episode(prompt_ids=[1, 2], completion_ids=[3, 4], logprobs=[-0.1, -0.2])
+    episode.trajectories[0].steps[0].advantage = 0.5
+
+    batch = transform_episodes_to_dataproto([episode], _make_mock_rollout_engine(), max_prompt_length=4, max_response_length=4)
+
+    assert torch.allclose(batch.batch["advantages"][0], torch.tensor([0.5, 0.5, 0.0, 0.0]))
+
+
+def test_verl_token_advantages_move_with_split_rows_and_reordering():
+    step1 = Step(model_output=ModelOutput(prompt_ids=[1], completion_ids=[2], logprobs=[-0.1]), advantage=[0.1])
+    # This prompt is not a prefix extension, so it becomes a second row.
+    step2 = Step(model_output=ModelOutput(prompt_ids=[9], completion_ids=[10, 11], logprobs=[-0.2, -0.3]), advantage=[0.2, 0.3])
+    trajectory = Trajectory(steps=[step1, step2], reward=1.0)
+    episode = Episode(id="task:0", trajectories=[trajectory])
+
+    batch = transform_episodes_to_dataproto([episode], _make_mock_rollout_engine(), max_prompt_length=4, max_response_length=4)
+    batch = batch.select_idxs(np.array([1, 0]))  # mimic backend balancing
+
+    assert torch.allclose(batch.batch["advantages"][0], torch.tensor([0.2, 0.3, 0.0, 0.0]))
+    assert torch.allclose(batch.batch["advantages"][1], torch.tensor([0.1, 0.0, 0.0, 0.0]))
+
+
+def test_verl_token_advantages_robust_to_pad_equal_action_token():
+    # pad_token_id may equal a real emitted token (common when pad == eos).
+    # Targets are built alongside each raw response row, before padding, so the
+    # shorter [5] action cannot collide with the [5, pad] action.
+    pad = 2
+    step1 = Step(model_output=ModelOutput(prompt_ids=[1], completion_ids=[5], logprobs=[-0.1]), advantage=[0.1])
+    step2 = Step(model_output=ModelOutput(prompt_ids=[9], completion_ids=[5, pad], logprobs=[-0.2, -0.3]), advantage=[0.2, 0.3])
+    trajectory = Trajectory(steps=[step1, step2], reward=1.0)
+    episode = Episode(id="task:0", trajectories=[trajectory])
+
+    engine = _make_mock_rollout_engine(pad_token_id=pad)
+    batch = transform_episodes_to_dataproto([episode], engine, max_prompt_length=4, max_response_length=4)
+
+    rows = [r for r in batch.batch["advantages"]]
+    assert any(torch.allclose(r, torch.tensor([0.1, 0.0, 0.0, 0.0])) for r in rows), rows
+    assert any(torch.allclose(r, torch.tensor([0.2, 0.3, 0.0, 0.0])) for r in rows), rows

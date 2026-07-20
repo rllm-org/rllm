@@ -75,14 +75,33 @@ def _build_step_and_trajectory_rewards(step_rewards: list[float], trajectory_rew
     return step_rewards_batch, trajectory_rewards_batch
 
 
-def _build_per_step_advantages(response_mask: torch.Tensor, advantages: list[float] | list[list[float]]) -> torch.Tensor:
-    """Builds the per-step advantages for a batch of prompts/responses."""
+def _step_advantage_values(step, action_len: int) -> list[float] | None:
+    """Return one advantage per action token, or ``None`` before computation.
+
+    Scalar support is retained only for compatibility with callers that build
+    a ``Step`` manually; the native collector materializes lists before this
+    transform runs.
+    """
+    adv = step.advantage
+    if adv is None:
+        return None
+    if isinstance(adv, list):
+        if len(adv) != action_len:
+            raise ValueError(f"step.advantage length {len(adv)} does not match action length {action_len} for step {step.id}")
+        return [float(v) for v in adv]
+    return [float(adv)] * action_len
+
+
+def _build_token_advantages(response_mask: torch.Tensor, advantages: list[list[float]]) -> torch.Tensor:
+    """Pad response-aligned advantage rows and mask non-trainable tokens."""
     assert response_mask.shape[0] == len(advantages), "response_mask and advantages must have the same length"
-    if isinstance(advantages[0], list):
-        # verticle stack the advantages (which implicitly ensures that all advantages have the same length)
-        advantages_tensor = torch.tensor(advantages, dtype=torch.float32)
-    else:
-        advantages_tensor = torch.tensor(advantages, dtype=torch.float32).unsqueeze(-1)
+    width = response_mask.shape[1]
+    padded = np.zeros(response_mask.shape, dtype=np.float32)
+    for row, advantage in enumerate(advantages):
+        length = min(len(advantage), width)
+        if length:
+            padded[row, :length] = advantage[:length]
+    advantages_tensor = torch.from_numpy(padded).to(device=response_mask.device)
     return advantages_tensor * response_mask
 
 
@@ -200,6 +219,20 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         "traj_rewards": traj_rewards_batch,
         "step_rewards": step_rewards_batch,
     }
+
+    advantage_presence = [advantage is not None for advantage in accumulated.advantages]
+    if any(advantage_presence):
+        if not all(advantage_presence):
+            raise ValueError("Step advantages must be populated for every trajectory before Verl transformation")
+        advantage_rows = [advantage for advantage in accumulated.advantages if advantage is not None]
+        for response, advantage in zip(accumulated.responses, advantage_rows, strict=True):
+            if len(advantage) != len(response):
+                raise ValueError(f"Advantage row length {len(advantage)} does not match response length {len(response)}")
+        advantage_tensor = _build_token_advantages(traj_mask, advantage_rows)
+        tensors["advantages"] = advantage_tensor
+        tensors["returns"] = advantage_tensor
+        tensors["token_level_scores"] = traj_rewards_batch
+        tensors["token_level_rewards"] = traj_rewards_batch
 
     # Include rollout log probs if available (enables importance sampling & bypass mode)
     if accumulated.rollout_logprobs and len(accumulated.rollout_logprobs) == len(accumulated.responses):
@@ -328,6 +361,9 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             "logprobs": list(action_lp),
             "full_seq": list(prompt) + list(action),
             "multi_modal": step.model_output.multi_modal_inputs or {},
+            # Advantage row parallel to ``response``/``mask``: zeros on
+            # observation tokens and one precomputed value per action token.
+            "advantages": _step_advantage_values(step, len(action)),
             # Hold the latest step that produced routing in this segment. Each step's
             # routing covers (step.prompt + step.action), and the segment is cumulative
             # by construction, so the last step's routing covers seg["full_seq"]. We
@@ -341,12 +377,6 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
         mask_t = torch.tensor(seg["mask"], dtype=torch.long)
         last_routing_step = seg["last_routing_step"]
         routing_t = _decode_routing_matrices(last_routing_step.routing_matrices) if last_routing_step is not None else None
-        # step_id is keyed by trajectory.uid (no per-segment suffix). All
-        # segments of one trajectory share the same scalar advantage from
-        # collect_reward_and_advantage_from_trajectory_groups (broadcast
-        # mode), so collisions across segments are harmless: the dict in
-        # update_dataproto_with_advantages would write the same value
-        # for either key.
         step_data = ProcessedStepData(
             prompt=prompt_t,
             response=response_t,
@@ -354,7 +384,7 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             step_reward=traj_reward,
             step_id=trajectory.uid,
             multi_modal_inputs=seg["multi_modal"],
-            advantage=None,
+            advantage=seg["advantages"],
             logprobs=seg["logprobs"] if seg["logprobs"] else None,
             routing_matrices=routing_t,
         )
@@ -387,6 +417,12 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             seg["logprobs"].extend(action_lp)
             seg["full_seq"].extend(delta_obs)
             seg["full_seq"].extend(action)
+            step_advantages = _step_advantage_values(step, len(action))
+            if (seg["advantages"] is None) != (step_advantages is None):
+                raise ValueError("Step advantages must be populated for every step before Verl transformation")
+            if seg["advantages"] is not None:
+                seg["advantages"].extend([0.0] * len(delta_obs))
+                seg["advantages"].extend(step_advantages)
 
             if step.routing_matrices is not None:
                 seg["last_routing_step"] = step
@@ -570,54 +606,3 @@ def transform_trajectory_groups_to_dataproto(
     assert tokenizer is not None and hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
     pad_token_id = tokenizer.pad_token_id
     return _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, processor)
-
-
-def update_dataproto_with_advantages(batch: DataProto, container: list[Episode] | list[TrajectoryGroup], mode: str = "broadcast") -> DataProto:
-    """
-    Updates a DataProto with advantages. Useful when we use rLLM-native advantage computation,
-    after which we need to update the DataProto with the advantages.
-    """
-    # Build a step_id → advantage mapping from episodes/trajectory groups.
-    # step_id format must match _process_trajectory's emit: just trajectory.uid.
-    # _process_trajectory now emits one row per *trajectory* (prefix-merged
-    # multi-step) rather than one row per step, so a single advantage per
-    # trajectory is sufficient. In broadcast mode all steps in a trajectory
-    # share the same scalar advantage from
-    # collect_reward_and_advantage_from_trajectory_groups, so reading from
-    # the first valid step is safe.
-    adv_by_traj_uid: dict[str, float] = {}
-    for item in container:
-        for trajectory in item.trajectories:
-            if not trajectory.steps:
-                continue
-            adv = next(
-                (s.advantage for s in trajectory.steps if s.advantage is not None),
-                0.0,
-            )
-            adv_by_traj_uid[trajectory.uid] = adv if isinstance(adv, float) else float(adv)
-
-    # Match advantages to batch entries by step_id (robust to batch reordering and padding)
-    n_total = len(batch.non_tensor_batch["trajectory_ids"])
-    step_ids = batch.non_tensor_batch["step_ids"]
-    is_pad = batch.non_tensor_batch.get("is_pad_step", np.zeros(n_total, dtype=bool))
-
-    # step_ids in the batch are trajectory.uid values (set by _process_trajectory).
-    # The scalar advantage is broadcast across response tokens by
-    # _build_per_step_advantages, multiplied by response_mask which is 0
-    # on observation tokens between actions — so observation tokens
-    # automatically receive zero advantage in the loss.
-    advantages = [0.0 if is_pad[i] else adv_by_traj_uid.get(str(step_ids[i]), 0.0) for i in range(n_total)]
-
-    advantage_tensor = _build_per_step_advantages(batch.batch["response_mask"], advantages)
-    batch.batch["advantages"] = advantage_tensor
-    batch.batch["returns"] = advantage_tensor
-
-    # TODO(listar2000): we should support `token_level_scores` from the `Step` attribute level.
-    # we also need to implement the `kl_penalty` logic used in `verl`.
-    if mode == "broadcast":
-        batch.batch["token_level_scores"] = batch.batch["traj_rewards"]
-        batch.batch["token_level_rewards"] = batch.batch["traj_rewards"]
-    else:
-        raise ValueError(f"Stepwise advantage mode {mode} not supported in experimental unified trainer.")
-
-    return batch

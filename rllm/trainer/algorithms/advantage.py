@@ -142,6 +142,66 @@ def calculate_rloo_advantages(rewards: list[np.ndarray], algorithm_config: Algor
     return advantages_by_group, returns_by_group
 
 
+@register_adv_estimator(rLLMAdvantageEstimator.MINUS_LENGTH_WEIGHTED_MEAN)
+def calculate_minus_length_weighted_mean_advantages(
+    rewards: list[np.ndarray],
+    algorithm_config: AlgorithmConfig,
+    traj_groups: list[TrajectoryGroup] | None = None,
+    **kwargs,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Subtract one response-token-weighted baseline across the role pool.
+
+    By default, each trajectory's scalar reward is repeated over its response
+    tokens when computing the baseline and when materializing ``Step.advantage``.
+
+    If every non-empty step supplies ``metadata["per_token_rewards"]``, those
+    values define the baseline and token targets instead. Partial token rewards
+    are rejected so a malformed pool cannot silently mix the two modes.
+    """
+    if traj_groups is None:
+        raise ValueError("minus_length_weighted_mean requires traj_groups for response lengths")
+
+    aligned = list(zip(traj_groups, rewards, strict=True))
+    non_empty_steps = [step for group, _ in aligned for traj in group.trajectories for step in traj.steps if step.response_ids]
+    token_mode = any((step.metadata or {}).get("per_token_rewards") is not None for step in non_empty_steps)
+
+    if token_mode:
+        for step in non_empty_steps:
+            token_rewards = (step.metadata or {}).get("per_token_rewards")
+            if token_rewards is None:
+                raise ValueError("per_token_rewards must be present on every non-empty step in token mode")
+            if len(token_rewards) != len(step.response_ids):
+                raise ValueError(f"per_token_rewards length {len(token_rewards)} does not match response_ids length {len(step.response_ids)}")
+
+    total_reward = 0.0
+    total_tokens = 0
+    for group, group_rewards in aligned:
+        for traj, reward in zip(group.trajectories, group_rewards, strict=True):
+            for step in traj.steps:
+                length = len(step.response_ids)
+                if token_mode and length:
+                    total_reward += sum(float(value) for value in step.metadata["per_token_rewards"])
+                else:
+                    total_reward += float(reward) * length
+                total_tokens += length
+    baseline = total_reward / total_tokens if total_tokens else 0.0
+
+    advantages_by_group: list[np.ndarray] = []
+    for group, group_rewards in aligned:
+        for traj, reward in zip(group.trajectories, group_rewards, strict=True):
+            sample_advantage = float(reward) - baseline
+            for step in traj.steps:
+                if token_mode and step.response_ids:
+                    step.advantage = [float(value) - baseline for value in step.metadata["per_token_rewards"]]
+                elif token_mode:
+                    step.advantage = []
+                else:
+                    step.advantage = [sample_advantage] * len(step.response_ids)
+        advantages_by_group.append(np.asarray(group_rewards, dtype=np.float64) - baseline)
+
+    return advantages_by_group, advantages_by_group
+
+
 @register_adv_estimator(rLLMAdvantageEstimator.ECHO)
 def calculate_echo_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """ECHO (arXiv:2605.24517): advantages are identical to GRPO.
@@ -157,9 +217,8 @@ def calculate_echo_advantages(rewards: list[np.ndarray], algorithm_config: Algor
 def _collect_precomputed_advantages(group: TrajectoryGroup, group_role: str) -> list[float]:
     """Collect pre-computed per-token advantages from all steps.
 
-    Called when use_precomputed_advantage is True. Steps with None or length-mismatched
-    advantages are defaulted to zero lists. Raises if step.advantage is a scalar float
-    (pre-computed advantages must be per-token lists).
+    A scalar is accepted as legacy input and immediately expanded to one value
+    per response token. Length-mismatched lists are replaced with zeros.
     """
     flattened_advantages = []
     steps_missing = 0
@@ -234,8 +293,19 @@ def collect_reward_and_advantage_from_trajectory_groups(
 
     if collect_advantage:
         for group_role, traj_groups in traj_groups_by_role.items():
-            advantage_fn = get_adv_estimator(algorithm_config.estimator_map.get(group_role, algorithm_config.estimator))
+            estimator = algorithm_config.estimator_map.get(group_role, algorithm_config.estimator)
+            advantage_fn = get_adv_estimator(estimator)
             traj_rewards = traj_rewards_by_role[group_role]
+
+            # The post-estimator invariant is that every step owns one target
+            # per response token. Clear stale workflow values first so an
+            # estimator may either write explicit token targets (as MLWM does)
+            # or rely on its returned trajectory scalar being expanded below.
+            for traj_group in traj_groups:
+                for traj in traj_group.trajectories:
+                    for step in traj.steps:
+                        step.advantage = None
+
             advantages_by_group, _ = advantage_fn(  # ignore returns here
                 rewards=traj_rewards,
                 algorithm_config=algorithm_config,
@@ -247,7 +317,14 @@ def collect_reward_and_advantage_from_trajectory_groups(
                 advantages_by_role[group_role].extend(np.asarray(advantages_by_traj).tolist())  # for metrics calculation
                 for traj, advantage in zip(traj_group.trajectories, advantages_by_traj, strict=True):
                     for step in traj.steps:
-                        step.advantage = float(advantage)
+                        if step.advantage is None:
+                            step.advantage = [float(advantage)] * len(step.response_ids)
+                        elif isinstance(step.advantage, float):
+                            # Compatibility for custom estimators that still
+                            # write a scalar directly onto the step.
+                            step.advantage = [step.advantage] * len(step.response_ids)
+                        elif len(step.advantage) != len(step.response_ids):
+                            raise ValueError(f"Estimator {estimator} wrote step.advantage length {len(step.advantage)} for {len(step.response_ids)} response tokens")
 
     # reduce metrics by group
     final_metrics = {}

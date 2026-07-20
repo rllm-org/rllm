@@ -224,6 +224,8 @@ class Step(BaseModel):
     model_response: str = ""
     model_output: Any = None  # Runtime type is ModelOutput | None; uses Any to avoid circular import
     mc_return: float = 0.0
+    # Canonical training form is one value per response token. Scalars remain
+    # accepted as legacy input and are expanded before backend transformation.
     advantage: list[float] | float | None = None
     weight_version: int | None = None  # weight version at time of generation (async staleness)
 
@@ -310,7 +312,7 @@ class Step(BaseModel):
             reward=data["reward"],
             done=data["done"],
             mc_return=data["mc_return"],
-            advantage=data.get("advantage", 0.0),
+            advantage=data.get("advantage"),
             weight_version=data.get("weight_version"),
         )
 

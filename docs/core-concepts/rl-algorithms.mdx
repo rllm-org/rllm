@@ -16,7 +16,7 @@ The backend then applies a policy **loss function** (`ppo`, `importance_sampling
 
 ## How advantages are computed
 
-Advantages are computed on `TrajectoryGroup`s, partitioned by `group_role`. The estimator hook is **scalar reward per trajectory in, scalar advantage per trajectory out** — the unified trainer broadcasts each trajectory's advantage across its response tokens. This single contract is what lets the same estimator code serve every backend.
+Advantages are computed on `TrajectoryGroup`s, partitioned by `group_role`, before conversion to a backend batch. The normal estimator hook is **scalar reward per trajectory in, scalar advantage per trajectory out**; the collector immediately materializes that scalar as one target per `Step.response_ids` token. `minus_length_weighted_mean` can instead materialize distinct targets for those tokens.
 
 Select the estimator with `adv_estimator`:
 
@@ -38,9 +38,10 @@ See [Advantage estimator](/training/advantage-estimator) for the full data contr
 | **REINFORCE++ baseline** | `reinforce_plus_plus_baseline` | Per-group mean baseline, then whiten by the role-batch std. |
 | **PRPO** | `prpo` | Center and normalize across the **whole batch** (flatten all groups), not per-group. |
 | **RLOO** | `rloo` | Leave-one-out baseline per group: each trajectory is scored against the mean of the *others*. |
+| **Minus length-weighted mean** | `minus_length_weighted_mean` | Subtract a role-pool baseline weighted by response length; uses explicit token targets when every step supplies `metadata["per_token_rewards"]`. |
 | **ECHO** | `echo` | GRPO's advantage **unchanged**, plus an environment-observation auxiliary loss (see below). |
 
-All six live in one registry and run on every backend. (The verl backend can also be pointed at its native estimators, but the rLLM-native set above is the portable path.)
+All seven live in one registry and run on every backend. (The verl backend can also be pointed at its native estimators, but the rLLM-native set above is the portable path.)
 
 ## ECHO and auxiliary losses
 

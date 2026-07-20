@@ -234,7 +234,7 @@ For the full configuration reference, see [configuration](/training/configuratio
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `estimator` | `rLLMAdvantageEstimator` | `GRPO` | Advantage estimator (`GRPO`, `REINFORCE`, `REINFORCE_PLUS_PLUS_BASELINE`, `RLOO`) |
+| `estimator` | `rLLMAdvantageEstimator` | `GRPO` | Advantage estimator (`GRPO`, `REINFORCE`, `REINFORCE_PLUS_PLUS_BASELINE`, `RLOO`, `MINUS_LENGTH_WEIGHTED_MEAN`) |
 | `estimator_map` | `dict[str, rLLMAdvantageEstimator \| str]` | `{}` | Per-role estimator override map (set by `traj_group_adv_estimator_map`) |
 | `stepwise_advantage_mode` | `"broadcast"` | `"broadcast"` | How advantages map to steps |
 | `norm_adv_by_std_in_grpo` | `bool` | `True` | Normalize advantages by std in GRPO |

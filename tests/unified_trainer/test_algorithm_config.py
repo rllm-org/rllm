@@ -98,6 +98,12 @@ def test_grpo_leaves_loss_fn_unset():
     assert algo_config.loss_fn is None
 
 
+def test_minus_length_weighted_mean_estimator_resolves():
+    config = _echo_config(adv_estimator="minus_length_weighted_mean")
+    algo_config = AlgorithmConfig.from_config(config.rllm.algorithm)
+    assert algo_config.estimator == rLLMAdvantageEstimator.MINUS_LENGTH_WEIGHTED_MEAN
+
+
 def test_explicit_loss_fn_overrides_estimator_default():
     """An explicit loss_fn wins over the estimator's default (echo → dppo_tv here)."""
     algo_config = AlgorithmConfig.from_config(_echo_config(loss_fn="dppo_tv").rllm.algorithm)

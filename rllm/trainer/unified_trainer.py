@@ -548,17 +548,17 @@ class UnifiedTrainer:
         if not trainer_state.has_trajectory_groups:
             return
 
-        # stage 4: transform rllm-native data structures to backend-specific format (sync)
+        # stage 4: compute token-aligned advantages before backend transformation
+        with simple_timer("adv", trainer_state.timing_dict):
+            await self.backend.compute_advantages(trainer_state, self.algorithm_config)
+
+        # stage 5: transform rllm-native data structures to backend-specific format (sync)
         backend_batch = self.backend.transform_to_backend_batch(trainer_state)
         trainer_state.backend_batch = backend_batch
 
-        # stage 5: process backend batch (async) - compute log probs, critic values, etc.
+        # stage 6: process backend batch (async) - compute log probs, critic values, etc.
         await self.backend.process_backend_batch(trainer_state)
         assert trainer_state.has_backend_batch, "Backend batch is not transformed or processed successfully"
-
-        # TODO(kylemontgomery1): compute advantages should be backend-agnostic
-        # stage 6: compute advantages (async)
-        await self.backend.compute_advantages(trainer_state, self.algorithm_config)
 
         # stage 7: update policy (async)
         await self.backend.update_policy(trainer_state)

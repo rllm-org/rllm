@@ -45,10 +45,10 @@ Concretely, if a training step produced 4 `solver` groups with 8 trajectories ea
 The output `(advantages_by_group, returns_by_group)` must align with `rewards`:
 
 - `advantages_by_group[i].shape == rewards[i].shape`
-- one scalar advantage per trajectory; the unified trainer broadcasts it across the trajectory's response tokens later.
+- one scalar advantage per trajectory; the collector expands it to one value per response token before backend transformation.
 
 <Note>
-The estimator interface is **trajectory-level scalar in, trajectory-level scalar out**. Per-token signals (returns over time, GAE, K3 detector, etc.) cannot be expressed through this hook today. For per-token signals, see [Pre-computing advantage in workflow](/training/precompute-advantage).
+The registry return interface remains **trajectory-level scalar in, trajectory-level scalar out**. The built-in `minus_length_weighted_mean` estimator can additionally write token targets through `Step.advantage`; arbitrary per-token or critic-based estimators should still use [Pre-computing advantage in workflow](/training/precompute-advantage).
 </Note>
 
 ## Tinker loss mapping
@@ -62,6 +62,7 @@ For the Tinker backend, rLLM also maps each estimator to a default loss function
 | `REINFORCE_PLUS_PLUS_BASELINE` | `importance_sampling` |
 | `GRPO` | `ppo` |
 | `RLOO` | `importance_sampling` |
+| `MINUS_LENGTH_WEIGHTED_MEAN` | `importance_sampling` |
 | `OTHER` / unknown | `importance_sampling` (safe fallback) |
 
 Override anytime via:
@@ -80,17 +81,45 @@ rllm:
 | `REINFORCE` | `reinforce` | No baseline (`adv = reward`) |
 | `REINFORCE_PLUS_PLUS_BASELINE` | `reinforce_plus_plus_baseline` | Per-group centering, then role-batch std normalization |
 | `RLOO` | `rloo` | Leave-one-out baseline per group |
+| `MINUS_LENGTH_WEIGHTED_MEAN` | `minus_length_weighted_mean` | One response-length-weighted baseline across every group of a role; optional per-token targets |
 
 For `REINFORCE++ baseline`, normalization uses batch-level statistics across all centered rewards in the role.
 
 ## What rLLM supports today
 
-The four estimators above are intentionally a subset of Verl's full catalog. We expose what fits the rLLM hook contract — **scalar reward per trajectory, scalar advantage per trajectory** — so that the same code path serves both Tinker and Verl backends.
+The estimators above are intentionally a subset of Verl's full catalog. Most fit the portable **scalar reward per trajectory, scalar advantage per trajectory** contract. `minus_length_weighted_mean` is a narrow token-aware extension supported by all three unified backends.
 
 Verl's broader catalog includes GAE, REINFORCE++ (proper, per-token discounted reward-to-go), REMAX, OPO, GPG, GRPO-passk, GDPO, and OTB / TIR-OTB. Of these:
 
 - **Scalar-per-trajectory estimators** (OPO, GPG, GRPO-passk, GDPO) can be expressed through the current hook. The [OPO worked example](#worked-example-porting-opo-from-verl) below walks through one such port. We plan to add more on request.
 - **Per-token or critic-dependent estimators** (GAE, REINFORCE++ proper, OTB, TIR-OTB) need an interface extension and are a larger follow-up. If you need one of these today, write a per-token signal in your workflow and use [`use_precomputed_advantage`](/training/precompute-advantage) to bypass the estimator hook entirely.
+
+### Minus length-weighted mean
+
+With scalar trajectory rewards, the estimator computes one baseline across all
+groups of the same role and stores the resulting target once per response token:
+
+$$
+b = \frac{\sum_i r_i L_i}{\sum_i L_i},
+\qquad A_i = r_i - b.
+$$
+
+If every non-empty step provides a list aligned with its generated tokens:
+
+```python
+step.metadata["per_token_rewards"] = [r_1, r_2, ..., r_L]
+```
+
+the baseline and targets instead use the observed token values:
+
+$$
+b = \frac{\sum_i\sum_t r_{i,t}}{\sum_i L_i},
+\qquad A_{i,t} = r_{i,t} - b.
+$$
+
+Token mode is all-or-none within a role pool. Prompt, observation, and padding
+tokens remain masked; the target list covers only `step.response_ids`. The
+returned scalar `r_i - b` is retained for sample-level metrics.
 
 ## Setting role-level estimators
 

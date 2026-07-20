@@ -18,7 +18,9 @@ class ProcessedStepData:
     step_reward: float
     step_id: str
     multi_modal_inputs: dict = field(default_factory=dict)  # Optional multimodal inputs (e.g., image_grid_thw for Qwen-VL)
-    advantage: float | list[float] | None = None
+    # Per-token advantage row aligned with ``response``; observation tokens are
+    # zero. None is valid for inference-only transforms before computation.
+    advantage: list[float] | None = None
     logprobs: list[float] | None = None  # Per-token rollout log probs for importance sampling
     routing_matrices: torch.Tensor | None = None  # (response_len, num_layers, topk) int tensor for R3 router replay
 
@@ -57,8 +59,8 @@ class AccumulatedData:
     # Episode-level tracking
     repeat_counts: list[int] = field(default_factory=list)  # number of batch rows per episode
 
-    # Advantage data (not None if stepwise advantages are already computed)
-    advantages: list[float | list[float]] = field(default_factory=list)
+    # Advantage data, parallel to responses
+    advantages: list[list[float] | None] = field(default_factory=list)
 
     # Per-row trajectory role name (for per-role loss routing in VerlBackend)
     group_roles: list[str] = field(default_factory=list)
@@ -90,8 +92,8 @@ class AccumulatedData:
         self.traj_rewards.append(traj_reward)
         self.step_ids.append(step_data.step_id)
 
-        if step_data.advantage is not None:  # make sure to not add None to the list
-            self.advantages.append(step_data.advantage)
+        # Always append so the list remains parallel to responses.
+        self.advantages.append(step_data.advantage)
 
         self.trajectory_ids.append(trajectory_id)
         self.step_nums.append(step_num)
