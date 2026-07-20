@@ -20,7 +20,11 @@ export UV_FROZEN=1
 export HF_HOME
 export HF_HUB_DISABLE_XET=1
 # vLLM 0.22.1 links against CUDA 13; venv default is CUDA 12 — inject 13 first.
-export LD_LIBRARY_PATH="/tmp/uv-venv/lib/python3.13/site-packages/nvidia/cu13/lib:${LD_LIBRARY_PATH:-}"
+# Detect the venv's python site-packages dir (pod is py3.12; older tars used py3.13).
+_VENV_SITE=$(ls -d /tmp/uv-venv/lib/python*/site-packages 2>/dev/null | head -1)
+if [[ -n "$_VENV_SITE" && -d "$_VENV_SITE/nvidia/cu13/lib" ]]; then
+    export LD_LIBRARY_PATH="$_VENV_SITE/nvidia/cu13/lib:${LD_LIBRARY_PATH:-}"
+fi
 
 cd "$PROJECT_DIR"
 
