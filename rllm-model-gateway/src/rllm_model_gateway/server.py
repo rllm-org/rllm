@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import ctypes
 import gc
 import logging
 import os
@@ -12,8 +13,9 @@ from typing import Any
 
 import yaml
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
+from rllm_model_gateway import fastjson
 from rllm_model_gateway.middleware import SessionRoutingMiddleware
 from rllm_model_gateway.models import (
     GatewayConfig,
@@ -25,6 +27,43 @@ from rllm_model_gateway.session_router import SessionRouter
 from rllm_model_gateway.store.base import TraceStore
 
 logger = logging.getLogger(__name__)
+
+
+def _trim_process_heap() -> None:
+    try:
+        trim = ctypes.CDLL(None).malloc_trim
+    except (AttributeError, OSError):
+        return
+    trim.argtypes = [ctypes.c_size_t]
+    trim.restype = ctypes.c_int
+    trim(0)
+
+
+class _HeapTrimmer:
+    """Coalesce session deletions before process-wide heap trims."""
+
+    def __init__(self, delay_s: float, *, trim: Callable[[], None] = _trim_process_heap) -> None:
+        self.delay_s = delay_s
+        self._trim = trim
+        self._pending = False
+        self._task: asyncio.Task[None] | None = None
+
+    def request_trim(self) -> None:
+        if self.delay_s <= 0:
+            return
+        self._pending = True
+        if self._task is not None:
+            return
+        self._task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        try:
+            await asyncio.sleep(self.delay_s)
+            while self._pending:
+                self._pending = False
+                await asyncio.to_thread(self._trim)
+        finally:
+            self._task = None
 
 
 # ------------------------------------------------------------------
@@ -117,6 +156,7 @@ def create_app(
     config: GatewayConfig | None = None,
     store: TraceStore | None = None,
     local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+    heap_trim_delay_s: float = 0.0,
 ) -> FastAPI:
     """Create and return a fully configured FastAPI application."""
     if config is None:
@@ -197,6 +237,7 @@ def create_app(
         worker_label=str(config.port) if config.port else "",
     )
     sessions = SessionManager(store)
+    heap_trimmer = _HeapTrimmer(heap_trim_delay_s)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -275,7 +316,7 @@ def create_app(
         limit: int | None = Query(None),
     ):
         traces = await store.get_session_traces(session_id, since=since, limit=limit)
-        return traces
+        return Response(fastjson.dumps(traces), media_type="application/json")
 
     @app.get("/sessions/{session_id:path}")
     async def get_session(session_id: str):
@@ -291,6 +332,8 @@ def create_app(
     async def delete_session(session_id: str):
         proxy._accumulators.pop(session_id, None)
         count = await sessions.delete_session(session_id)
+        if count:
+            heap_trimmer.request_trim()
         return {"deleted": count}
 
     @app.post("/sessions/batch_delete")
@@ -301,6 +344,8 @@ def create_app(
         for sid in session_ids:
             proxy._accumulators.pop(sid, None)
             total += await sessions.delete_session(sid)
+        if total:
+            heap_trimmer.request_trim()
         return {"deleted": total}
 
     # -- Trace endpoints ---------------------------------------------------
@@ -313,7 +358,7 @@ def create_app(
                 status_code=404,
                 content={"error": f"Trace {trace_id} not found"},
             )
-        return trace
+        return Response(fastjson.dumps(trace), media_type="application/json")
 
     @app.post("/traces/query")
     async def query_traces(request: Request):
@@ -327,7 +372,7 @@ def create_app(
                 limit=body.get("limit"),
             )
             results.extend(traces)
-        return results
+        return Response(fastjson.dumps(results), media_type="application/json")
 
     # -- Admin endpoints ---------------------------------------------------
 
@@ -586,7 +631,8 @@ def main() -> None:
         app = create_front_app(getattr(args, "worker", None) or [])
     else:
         local_handler = _load_handler_factory(args.handler_factory, args.handler_config) if args.handler_factory else None
-        app = create_app(config, local_handler=local_handler)
+        # main() is not used by the in-trainer thread-mode gateway.
+        app = create_app(config, local_handler=local_handler, heap_trim_delay_s=5.0)
 
     # Standalone gateway process only (main() never runs for the in-trainer
     # thread-mode gateway, so this can't perturb the trainer's GC). Freeze the

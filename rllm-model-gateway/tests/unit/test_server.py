@@ -4,7 +4,9 @@ Uses httpx.AsyncClient as a test client against the app, with a real
 mock vLLM backend server for proxy tests.
 """
 
+import asyncio
 import json
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -12,6 +14,7 @@ import pytest_asyncio
 from rllm_model_gateway import GatewayConfig, create_app
 from rllm_model_gateway.models import WorkerConfig, WorkerInfo, _split_worker_url
 from rllm_model_gateway.proxy import ReverseProxy
+from rllm_model_gateway.server import _HeapTrimmer
 
 from tests.helpers.mock_vllm import MockVLLMServer
 
@@ -96,6 +99,16 @@ class TestSessions:
         resp = await client.delete("/sessions/to-delete")
         assert resp.status_code == 200
 
+    @pytest.mark.asyncio
+    async def test_delete_nonempty_session_requests_heap_trim(self, client: httpx.AsyncClient, app):
+        await app.state.store.store_trace("trace-1", "to-delete", {"trace_id": "trace-1"})
+
+        with patch.object(_HeapTrimmer, "request_trim") as request_trim:
+            resp = await client.delete("/sessions/to-delete")
+
+        assert resp.json() == {"deleted": 1}
+        request_trim.assert_called_once_with()
+
     # ----- Session IDs containing '/' (namespaced task ids like ``harbor/hello-world:0``) -----
 
     @pytest.mark.asyncio
@@ -127,6 +140,68 @@ class TestSessions:
         await client.post("/sessions", json={"session_id": sid})
         resp = await client.delete(f"/sessions/{sid}")
         assert resp.status_code == 200
+
+
+class TestHeapTrimmer:
+    @pytest.mark.asyncio
+    async def test_coalesces_successive_cleanup_calls_into_trailing_trim(self):
+        calls = 0
+
+        def trim():
+            nonlocal calls
+            calls += 1
+
+        trimmer = _HeapTrimmer(0.001, trim=trim)
+
+        trimmer.request_trim()
+        task = trimmer._task
+        assert task is not None
+        trimmer.request_trim()
+        assert trimmer._task is task
+        await task
+        assert calls == 1
+
+    @pytest.mark.asyncio
+    async def test_deletion_during_trim_gets_a_second_trailing_trim(self):
+        import threading
+
+        calls = 0
+        first_started = threading.Event()
+        release_first = threading.Event()
+
+        def trim():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_started.set()
+                assert release_first.wait(timeout=2.0)
+
+        trimmer = _HeapTrimmer(0.001, trim=trim)
+        trimmer.request_trim()
+        task = trimmer._task
+        assert task is not None
+        assert await asyncio.to_thread(first_started.wait, 2.0)
+
+        # This deletion must not be lost just because a trim task already exists.
+        trimmer.request_trim()
+        release_first.set()
+        await task
+
+        assert calls == 2
+
+    @pytest.mark.asyncio
+    async def test_zero_interval_disables_trim(self):
+        calls = 0
+
+        def trim():
+            nonlocal calls
+            calls += 1
+
+        trimmer = _HeapTrimmer(0.0, trim=trim)
+
+        trimmer.request_trim()
+        assert trimmer._task is None
+        assert calls == 0
 
 
 # ------------------------------------------------------------------
