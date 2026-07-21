@@ -1,6 +1,7 @@
 """Convert gateway TraceRecord to training-compatible Step, plus shared metrics."""
 
 import json
+import logging
 from typing import Any
 
 from rllm_model_gateway.models import TraceRecord
@@ -8,6 +9,8 @@ from rllm_model_gateway.models import TraceRecord
 from rllm.engine.rollout import ModelOutput
 from rllm.tools.tool_base import ToolCall
 from rllm.types import Step, Trajectory
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_openai_tool_calls(raw_tool_calls: list[dict[str, Any]]) -> list[ToolCall]:
@@ -36,6 +39,18 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
     - completion_token_ids
     - logprobs (per-token)
     """
+    # [MMCODEX-DIAG] temporary — remove after Layer 3 root cause is found
+    logger.info(
+        "[MMCODEX-DIAG] trace_record_to_step: trace_id=%s session=%s msgs=%d resp_keys=%s prompt_tok=%d completion_tok=%d logprobs=%d",
+        getattr(trace, "trace_id", "?"),
+        getattr(trace, "session_id", "?"),
+        len(trace.messages or []),
+        sorted((trace.response_message or {}).keys()),
+        len(trace.prompt_token_ids or []),
+        len(trace.completion_token_ids or []),
+        len(trace.logprobs or []),
+    )
+
     content = trace.response_message.get("content", "") or ""
     reasoning = trace.response_message.get("reasoning", "") or ""
 

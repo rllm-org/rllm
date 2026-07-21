@@ -148,6 +148,18 @@ class ReverseProxy:
 
         is_stream = request_body.get("stream", False)
 
+        # [MMCODEX-DIAG] temporary — entrypoint visibility. If session_id is None
+        # here, SessionRoutingMiddleware didn't extract a session id (URL wasn't
+        # /sessions/<sid>/...). If path is still /v1/responses, ResponsesAdapterMiddleware
+        # didn't run or didn't rewrite. Both mean upstream trace pipeline gets no session.
+        logger.info(
+            "[MMCODEX-DIAG] handle entry: path=%s session_id=%r is_stream=%s body_keys=%s",
+            request.url.path,
+            session_id,
+            is_stream,
+            sorted(request_body.keys()) if isinstance(request_body, dict) else "not-dict",
+        )
+
         # Cumulative token mode interception: if enabled and past first turn,
         # rewrite to /v1/completions with pre-tokenized prompt to avoid drift.
         if self.cumulative_token_mode and session_id and request.url.path.endswith("/chat/completions"):
@@ -228,8 +240,26 @@ class ReverseProxy:
         latency_ms = (time.perf_counter() - t0) * 1000
 
         # Persist trace
+        # [MMCODEX-DIAG] temporary — trace-skip visibility
+        if not (session_id and response_body):
+            logger.info(
+                "[MMCODEX-DIAG] non-streaming trace SKIPPED: session_id=%r has_response=%s path=%s",
+                session_id,
+                bool(response_body),
+                request.url.path,
+            )
         if session_id and response_body:
             trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version)
+            # [MMCODEX-DIAG] temporary — remove after Layer 3 root cause is found
+            logger.info(
+                "[MMCODEX-DIAG] non-streaming trace built: session=%s path=%s prompt_tok=%d completion_tok=%d content_len=%d tool_calls=%d",
+                session_id,
+                request.url.path,
+                len(trace.prompt_token_ids or []),
+                len(trace.completion_token_ids or []),
+                len((response_body.get("choices", [{}])[0].get("message", {}) or {}).get("content") or ""),
+                len((response_body.get("choices", [{}])[0].get("message", {}) or {}).get("tool_calls") or []),
+            )
             await self._persist(trace)
 
             # Ingest first turn into accumulator for cumulative token mode
@@ -620,8 +650,26 @@ class ReverseProxy:
                 # NOTE: We use create_task instead of await because this
                 # finally block may run during GeneratorExit, where await
                 # on real async I/O (e.g. aiosqlite) is not reliable.
+                # [MMCODEX-DIAG] temporary — trace-skip visibility
+                if not (session_id and chunks):
+                    logger.info(
+                        "[MMCODEX-DIAG] streaming trace SKIPPED: session_id=%r chunks=%d path=%s",
+                        session_id,
+                        len(chunks),
+                        request.url.path,
+                    )
                 if session_id and chunks:
                     trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version)
+                    # [MMCODEX-DIAG] temporary — remove after Layer 3 root cause is found
+                    logger.info(
+                        "[MMCODEX-DIAG] streaming trace built: session=%s path=%s chunks=%d prompt_tok=%d completion_tok=%d content_len=%d",
+                        session_id,
+                        request.url.path,
+                        len(chunks),
+                        len(trace.prompt_token_ids or []),
+                        len(trace.completion_token_ids or []),
+                        len(trace.response_content or "") if hasattr(trace, "response_content") else -1,
+                    )
                     task = asyncio.create_task(
                         self._safe_store(
                             trace.trace_id,
