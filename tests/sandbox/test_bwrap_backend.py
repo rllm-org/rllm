@@ -25,7 +25,9 @@ class TestBwrapSandbox:
             sandbox.close()
 
     def test_network_isolated(self):
-        sandbox = BwrapSandbox(name="test-net")
+        # Default is now network=True (Koala-pod CLI-harness workloads need the
+        # host gateway); pass network=False explicitly to exercise --unshare-net.
+        sandbox = BwrapSandbox(name="test-net", network=False)
         try:
             with pytest.raises(subprocess.CalledProcessError):
                 sandbox.exec("ping -c 1 -W 1 8.8.8.8", timeout=5)

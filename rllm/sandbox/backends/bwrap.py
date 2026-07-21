@@ -26,10 +26,19 @@ class BwrapSandbox:
     """Sandbox using bubblewrap for process isolation.
 
     Only whitelisted host paths are mounted read-only; a private tmpfs
-    provides /tmp. Network is blocked via --unshare-net.
+    provides /tmp. Network is enabled by default — bwrap is our Koala-pod
+    backend for CLI-harness workloads (codex CLI, curl-based tools,
+    bash-loop agents) that all need to reach the host gateway on
+    127.0.0.1. Callers who want strict isolation (untrusted code
+    execution, offline evals) pass ``network=False`` explicitly; the
+    ``--unshare-net`` flag is still wired up.
+
+    Historical note: default was False; a silent ``n_turns=0`` in
+    mm_codex smoke was traced to this default silently blocking codex
+    CLI's outbound HTTP to the gateway.
     """
 
-    def __init__(self, name: str, network: bool = False, **kwargs):
+    def __init__(self, name: str, network: bool = True, **kwargs):
         self.name = name
         self._network = network
         self._workdir = tempfile.mkdtemp(prefix=f"rllm-bwrap-{name}-")
