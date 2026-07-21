@@ -54,7 +54,38 @@ class TerminationReason(Enum):
     VERIFIER_TIMEOUT = "verifier_timeout"
     GRADING_ERROR = "grading_error"
     SANDBOX_ERROR = "sandbox_error"
-    MODEL_ERROR = "model_error"  # upstream/API/proxy failure — every model completion came back empty
+    MODEL_ERROR = "model_error"  # upstream/API/proxy failure or malformed completion envelope
+
+
+class ErrorRetryScope(Enum):
+    """Where an escaping failure may be retried.
+
+    Agent flows normally raise infrastructure failures to request a fresh
+    trajectory (new sandbox + new gateway session). A harness that already
+    exhausted a narrower, safe retry loop can mark the final exception
+    ``NONE`` so the engine preserves and classifies that trajectory instead of
+    silently starting it over from turn zero.
+    """
+
+    NONE = "none"
+    TRAJECTORY = "trajectory"
+
+
+def error_retry_scope(error: BaseException) -> ErrorRetryScope:
+    """Return an exception's trajectory retry contract.
+
+    Untagged exceptions retain the historical behavior: retry the complete
+    trajectory. Typed harness errors opt out with ``_rllm_retry_scope`` after
+    performing any safe, local retry themselves.
+    """
+
+    value = getattr(error, "_rllm_retry_scope", ErrorRetryScope.TRAJECTORY)
+    if isinstance(value, ErrorRetryScope):
+        return value
+    try:
+        return ErrorRetryScope(value)
+    except (TypeError, ValueError):
+        return ErrorRetryScope.TRAJECTORY
 
 
 # Reasons whose reward is NOT a trustworthy training signal: an infra or grading

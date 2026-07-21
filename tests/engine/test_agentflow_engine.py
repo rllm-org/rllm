@@ -217,8 +217,8 @@ def test_final_rollout_error_preserves_gateway_traces_and_exception_chain():
     }
 
 
-def test_recovered_retry_is_preserved_in_episode_metrics_and_metadata():
-    from rllm.harnesses.native_react import NativeModelResponseError
+def test_recovered_trajectory_retry_is_preserved_in_episode_metrics_and_metadata():
+    from rllm.harnesses.native_react import PersistentShellError
 
     engine = AgentFlowEngine(
         agent_flow=_Agent(),
@@ -234,7 +234,7 @@ def test_recovered_retry_is_preserved_in_episode_metrics_and_metadata():
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise NativeModelResponseError("gateway upstream failure", body={"error": {"code": 502}})
+            raise PersistentShellError("sandbox control plane disappeared")
         return Episode(
             id=uid,
             termination_reason=TerminationReason.ENV_DONE,
@@ -251,10 +251,10 @@ def test_recovered_retry_is_preserved_in_episode_metrics_and_metadata():
     assert episode.termination_reason is TerminationReason.ENV_DONE
     assert episode.metrics["retry/count"] == 1
     assert episode.metrics["retry/recovered"] == 1
-    assert episode.metadata["retry_errors"][0]["error_type"] == "NativeModelResponseError"
+    assert episode.metadata["retry_errors"][0]["error_type"] == "PersistentShellError"
 
 
-def test_exhausted_model_response_retries_return_model_error():
+def test_model_response_error_does_not_retry_the_entire_trajectory():
     from rllm.harnesses.native_react import NativeModelResponseError
 
     engine = AgentFlowEngine(
@@ -267,7 +267,11 @@ def test_exhausted_model_response_retries_return_model_error():
         raise_on_error=False,
     )
 
+    attempts = 0
+
     async def failing_run(task_obj, uid, is_validation=False):
+        nonlocal attempts
+        attempts += 1
         raise NativeModelResponseError("gateway upstream failure", body={"error": {"code": 502}})
 
     engine._run_single = failing_run
@@ -278,10 +282,11 @@ def test_exhausted_model_response_retries_return_model_error():
         engine.shutdown()
 
     assert episode.termination_reason is TerminationReason.MODEL_ERROR
-    assert episode.metrics["retry/count"] == 1
+    assert attempts == 1
+    assert episode.metrics["retry/count"] == 0
     assert episode.metrics["retry/recovered"] == 0
     assert episode.metadata["error"]["error_type"] == "NativeModelResponseError"
-    assert episode.metadata["retry_errors"][0]["error_type"] == "NativeModelResponseError"
+    assert "retry_errors" not in episode.metadata
 
 
 def test_needs_env_flow_must_declare_env_param():

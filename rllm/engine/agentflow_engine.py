@@ -35,7 +35,20 @@ from rllm.data.utils import task_from_row
 from rllm.engine.trace_converter import compute_step_metrics, trace_record_to_step
 from rllm.eval.types import EvalOutput
 from rllm.gateway.manager import container_reachable_url
-from rllm.types import INFRA_ERROR_REASONS, AgentConfig, Episode, Step, Task, TerminationReason, Trajectory, flow_accepts_env, run_agent_flow, termination_reason_from_error
+from rllm.types import (
+    INFRA_ERROR_REASONS,
+    AgentConfig,
+    Episode,
+    ErrorRetryScope,
+    Step,
+    Task,
+    TerminationReason,
+    Trajectory,
+    error_retry_scope,
+    flow_accepts_env,
+    run_agent_flow,
+    termination_reason_from_error,
+)
 from rllm.utils import colorful_print
 
 if TYPE_CHECKING:
@@ -570,9 +583,11 @@ class AgentFlowEngine:
     ) -> tuple[str, int, int, Episode]:
         """Run the full per-task pipeline with retry.
 
-        Each attempt runs flow + trace fetch + enrich + evaluate. On
-        retry, stale traces from the prior attempt are cleared first so
-        the new attempt's enrich doesn't see a mix of trace records.
+        Each attempt runs flow + trace fetch + enrich + evaluate. Untagged
+        exceptions retry the whole trajectory; typed failures may opt out via
+        :func:`rllm.types.error_retry_scope` after exhausting a safer local
+        retry. Before a trajectory retry, stale traces are cleared so the new
+        attempt's enrichment cannot see mixed records.
         """
         task_for_episode = task.metadata if isinstance(task, Task) else task
         task_obj = task if isinstance(task, Task) else task_from_row(task, task_id)
@@ -614,7 +629,8 @@ class AgentFlowEngine:
 
                 except Exception as e:
                     logger.error("[%s] Attempt %d/%d failed: %r (type=%s)", uid, retry_attempt, self.retry_limit, e, type(e).__name__)
-                    if retry_attempt < self.retry_limit:
+                    retry_scope = error_retry_scope(e)
+                    if retry_scope is ErrorRetryScope.TRAJECTORY and retry_attempt < self.retry_limit:
                         retry_errors.append(_exception_error_info(e))
                         continue
                     if self.raise_on_error:

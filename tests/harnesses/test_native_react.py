@@ -44,7 +44,13 @@ from rllm.types import INFRA_ERROR_REASONS, AgentConfig, Task, TerminationReason
 requires_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for the native-react terminal integration")
 
 
-def _run_with_native_response(monkeypatch, response_or_error, *, max_tokens=32_768):
+def _run_with_native_response(
+    monkeypatch,
+    response_or_error,
+    *,
+    max_tokens=32_768,
+    model_max_retries=0,
+):
     import openai
 
     import rllm.harnesses.native_react as native_react
@@ -74,7 +80,12 @@ def _run_with_native_response(monkeypatch, response_or_error, *, max_tokens=32_7
 
     monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
     monkeypatch.setattr(native_react, "PersistentBashSession", FakeShell)
-    return NativeReactHarness(max_turns=1, max_tokens=max_tokens).run(
+    return NativeReactHarness(
+        max_turns=1,
+        max_tokens=max_tokens,
+        model_max_retries=model_max_retries,
+        model_retry_backoff_s=0,
+    ).run(
         Task(id="model-response-task", instruction="inspect", metadata={"workdir": "/tmp", "agent_timeout": 30}),
         AgentConfig(base_url="http://gateway/v1", model="qwen", session_uid="model-response-session"),
         env=SimpleNamespace(),
@@ -1302,7 +1313,7 @@ def test_harness_resends_complete_assistant_and_native_tool_result(monkeypatch):
                         }
                     ],
                 }
-            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage(message))])
+            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage(message), finish_reason="tool_calls")])
 
     class FakeOpenAI:
         def __init__(self, **kwargs):
@@ -1410,7 +1421,7 @@ def test_harness_leaves_background_service_alive_for_verifier(monkeypatch, tmp_p
         def create(self, **kwargs):
             response = responses[self.index]
             self.index += 1
-            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage(response))])
+            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage(response), finish_reason="tool_calls")])
 
     class FakeOpenAI:
         def __init__(self, **kwargs):
@@ -1488,7 +1499,9 @@ def test_parse_retry_uses_standard_protocol_feedback_not_fake_tool_markup(monkey
     class Completions:
         def create(self, **kwargs):
             requests.append(copy.deepcopy(kwargs))
-            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage(responses[len(requests) - 1]))])
+            message = responses[len(requests) - 1]
+            finish_reason = "tool_calls" if message.get("tool_calls") else "stop"
+            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage(message), finish_reason=finish_reason)])
 
     class FakeOpenAI:
         def __init__(self, **kwargs):
@@ -1560,7 +1573,9 @@ def test_parse_retry_limit_counts_consecutive_failures_not_lifetime_total(monkey
     class Completions:
         def create(self, **kwargs):
             requests.append(copy.deepcopy(kwargs))
-            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage(responses[len(requests) - 1]))])
+            message = responses[len(requests) - 1]
+            finish_reason = "tool_calls" if message.get("tool_calls") else "stop"
+            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage(message), finish_reason=finish_reason)])
 
     class FakeOpenAI:
         def __init__(self, **kwargs):
@@ -1602,7 +1617,7 @@ def test_parse_retry_exhaustion_is_a_reward_bearing_tool_protocol_error(monkeypa
     class Completions:
         def create(self, **kwargs):
             requests.append(copy.deepcopy(kwargs))
-            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage(responses[len(requests) - 1]))])
+            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage(responses[len(requests) - 1]), finish_reason="stop")])
 
     class FakeOpenAI:
         def __init__(self, **kwargs):
@@ -1699,7 +1714,7 @@ def test_command_timeout_resets_shell_and_continues_rollout(monkeypatch, tmp_pat
     class Completions:
         def create(self, **kwargs):
             requests.append(copy.deepcopy(kwargs))
-            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage(assistant_messages[len(requests) - 1]))])
+            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage(assistant_messages[len(requests) - 1]), finish_reason="tool_calls")])
 
     class FakeOpenAI:
         def __init__(self, **kwargs):
@@ -1807,7 +1822,7 @@ def test_command_timeout_at_rollout_deadline_returns_typed_timeout(monkeypatch):
     class Completions:
         def create(self, **kwargs):
             requests.append(copy.deepcopy(kwargs))
-            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage())])
+            return SimpleNamespace(choices=[SimpleNamespace(message=SDKMessage(), finish_reason="tool_calls")])
 
     class FakeOpenAI:
         def __init__(self, **kwargs):
@@ -1832,7 +1847,7 @@ def test_command_timeout_at_rollout_deadline_returns_typed_timeout(monkeypatch):
         def close(self):
             pass
 
-    monotonic_values = iter([0.0, 1.0, 2.0, 11.0])
+    monotonic_values = iter([0.0, 1.0, 2.0, 3.0, 4.0, 11.0])
     monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
     monkeypatch.setattr(native_react, "PersistentBashSession", FakeShell)
     monkeypatch.setattr(native_react.time, "monotonic", lambda: next(monotonic_values))
@@ -1859,48 +1874,14 @@ def test_command_timeout_at_rollout_deadline_returns_typed_timeout(monkeypatch):
     }
 
 
-@requires_tmux
-def test_api_timeout_returns_typed_timeout_episode(monkeypatch):
-    import openai
+def test_api_timeout_is_model_infrastructure_error_not_agent_timeout(monkeypatch):
+    error = APITimeoutError(httpx.Request("POST", "http://gateway/v1/chat/completions"))
 
-    class Completions:
-        def create(self, **kwargs):
-            raise APITimeoutError(httpx.Request("POST", "http://gateway/v1/chat/completions"))
+    with pytest.raises(NativeModelResponseError) as exc_info:
+        _run_with_native_response(monkeypatch, error)
 
-    class FakeOpenAI:
-        def __init__(self, **kwargs):
-            assert kwargs == {
-                "base_url": "http://gateway/v1",
-                "api_key": "EMPTY",
-                "max_retries": 0,
-            }
-            self.chat = SimpleNamespace(completions=Completions())
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
-    sandbox = LocalSandbox("native-react-api-timeout")
-    try:
-        episode = NativeReactHarness(max_turns=1).run(
-            Task(
-                id="timeout-task",
-                instruction="inspect",
-                metadata={"workdir": "/tmp", "agent_timeout": 30},
-            ),
-            AgentConfig(
-                base_url="http://gateway/v1",
-                model="qwen",
-                session_uid="timeout-session",
-            ),
-            env=sandbox,
-        )
-    finally:
-        sandbox.close()
-
-    assert episode.termination_reason is TerminationReason.TIMEOUT
-    assert episode.metadata["error"]["error_type"] == "AgentTimeoutError"
-    assert "APITimeoutError" in episode.metadata["error"]["message"]
+    assert exc_info.value._rllm_termination_reason is TerminationReason.MODEL_ERROR
+    assert exc_info.value.__cause__ is error
 
 
 def test_context_length_error_returns_typed_prompt_limit_episode(monkeypatch):
@@ -1970,7 +1951,7 @@ def test_heartbeat_context_error_returns_typed_prompt_limit_episode(monkeypatch)
     assert "contained no choices" in episode.metadata["error"]["message"]
 
 
-def test_heartbeat_timeout_returns_typed_timeout_episode(monkeypatch):
+def test_heartbeat_timeout_is_model_infrastructure_error_not_agent_timeout(monkeypatch):
     payload = {
         "error": {
             "message": "gateway heartbeat budget exhausted waiting for upstream",
@@ -1979,11 +1960,11 @@ def test_heartbeat_timeout_returns_typed_timeout_episode(monkeypatch):
         }
     }
 
-    episode = _run_with_native_response(monkeypatch, ChatCompletion.model_construct(**payload))
+    with pytest.raises(NativeModelResponseError) as exc_info:
+        _run_with_native_response(monkeypatch, ChatCompletion.model_construct(**payload))
 
-    assert episode.termination_reason is TerminationReason.TIMEOUT
-    assert episode.metadata["error"]["error_type"] == "AgentTimeoutError"
-    assert "NativeModelResponseError" in episode.metadata["error"]["message"]
+    assert exc_info.value.body == payload
+    assert exc_info.value._rllm_termination_reason is TerminationReason.MODEL_ERROR
 
 
 def test_heartbeat_gateway_error_is_tagged_for_model_error_retry(monkeypatch):
@@ -2022,10 +2003,219 @@ def test_finish_reason_length_returns_typed_response_limit_episode(monkeypatch):
     }
 
 
-def test_openai_transport_error_is_tagged_for_model_error_retry(monkeypatch):
+def test_openai_transport_error_is_wrapped_as_model_infrastructure_error(monkeypatch):
     error = APIConnectionError(request=httpx.Request("POST", "http://gateway/v1/chat/completions"))
 
-    with pytest.raises(APIConnectionError) as exc_info:
+    with pytest.raises(NativeModelResponseError) as exc_info:
         _run_with_native_response(monkeypatch, error)
 
     assert exc_info.value._rllm_termination_reason is TerminationReason.MODEL_ERROR
+    assert exc_info.value.__cause__ is error
+
+
+def test_transient_model_error_retries_the_current_turn_without_mutating_history(monkeypatch):
+    import openai
+
+    import rllm.harnesses.native_react as native_react
+
+    requests = []
+    responses = [
+        APIConnectionError(request=httpx.Request("POST", "http://gateway/v1/chat/completions")),
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message={
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_submit",
+                                "type": "function",
+                                "function": {"name": "submit", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    finish_reason="tool_calls",
+                )
+            ]
+        ),
+    ]
+
+    class Completions:
+        def create(self, **kwargs):
+            requests.append(copy.deepcopy(kwargs))
+            result = responses[len(requests) - 1]
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=Completions())
+
+        def close(self):
+            pass
+
+    class FakeShell:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self, *, workdir=None):
+            pass
+
+        def run(self, command, timeout):
+            return SimpleNamespace(output="", exit_code=0, timed_out=False)
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(native_react, "PersistentBashSession", FakeShell)
+
+    episode = NativeReactHarness(
+        max_turns=1,
+        model_max_retries=1,
+        model_retry_backoff_s=0,
+    ).run(
+        Task(id="retry-task", instruction="inspect", metadata={"workdir": "/tmp", "agent_timeout": 30}),
+        AgentConfig(base_url="http://gateway/v1", model="qwen", session_uid="retry-session"),
+        env=SimpleNamespace(),
+    )
+
+    assert len(requests) == 2
+    assert requests[0]["messages"] == requests[1]["messages"]
+    assert episode.termination_reason is None
+    assert episode.metadata["native_react"] == {"turns": 1, "parse_errors": 0}
+
+
+@pytest.mark.parametrize("finish_reason", [None, "future_provider_reason"])
+def test_missing_or_unknown_finish_reason_is_model_infrastructure_error(monkeypatch, finish_reason):
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message={
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_submit",
+                            "type": "function",
+                            "function": {"name": "submit", "arguments": "{}"},
+                        }
+                    ],
+                },
+                finish_reason=finish_reason,
+            )
+        ]
+    )
+
+    with pytest.raises(NativeModelResponseError, match="finish_reason"):
+        _run_with_native_response(monkeypatch, response)
+
+
+def test_content_filter_is_a_noninfra_model_outcome(monkeypatch):
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message={"role": "assistant", "content": None},
+                finish_reason="content_filter",
+            )
+        ]
+    )
+
+    episode = _run_with_native_response(monkeypatch, response)
+
+    assert episode.termination_reason is TerminationReason.TOOL_PROTOCOL_ERROR
+    assert episode.termination_reason not in INFRA_ERROR_REASONS
+    assert episode.metadata["error"]["error_type"] == "ContentFilterError"
+
+
+def test_legacy_function_call_is_normalized_and_executed(monkeypatch):
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message={
+                    "role": "assistant",
+                    "content": None,
+                    "function_call": {"name": "submit", "arguments": "{}"},
+                },
+                finish_reason="function_call",
+            )
+        ]
+    )
+
+    episode = _run_with_native_response(monkeypatch, response)
+
+    assert episode.termination_reason is None
+    assert episode.metadata["native_react"] == {"turns": 1, "parse_errors": 0}
+
+
+def test_initial_terminal_capture_timeout_is_setup_failure(monkeypatch):
+    import openai
+
+    import rllm.harnesses.native_react as native_react
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=SimpleNamespace())
+
+        def close(self):
+            pass
+
+    class FakeShell:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self, *, workdir=None):
+            pass
+
+        def run(self, command, timeout):
+            return SimpleNamespace(output="", exit_code=-1, timed_out=True)
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(native_react, "PersistentBashSession", FakeShell)
+
+    with pytest.raises(RuntimeError, match="initial terminal state") as exc_info:
+        NativeReactHarness(run_timeout=30).run(
+            Task(id="setup-timeout", instruction="inspect", metadata={"workdir": "/tmp"}),
+            AgentConfig(base_url="http://gateway/v1", model="qwen", session_uid="setup-timeout"),
+            env=SimpleNamespace(),
+        )
+
+    assert exc_info.value._rllm_termination_reason is TerminationReason.AGENT_SETUP_TIMEOUT
+
+
+def test_client_close_failure_does_not_shadow_model_error(monkeypatch):
+    import openai
+
+    import rllm.harnesses.native_react as native_react
+
+    response = ChatCompletion.model_construct(error={"type": "gateway_upstream_error", "code": 502})
+
+    class Completions:
+        def create(self, **kwargs):
+            return response
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=Completions())
+
+        def close(self):
+            raise RuntimeError("client close exploded")
+
+    class FakeShell:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self, *, workdir=None):
+            pass
+
+        def run(self, command, timeout):
+            return SimpleNamespace(output="", exit_code=0, timed_out=False)
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(native_react, "PersistentBashSession", FakeShell)
+
+    with pytest.raises(NativeModelResponseError):
+        NativeReactHarness(max_turns=1, model_max_retries=0).run(
+            Task(id="close-error", instruction="inspect", metadata={"workdir": "/tmp", "agent_timeout": 30}),
+            AgentConfig(base_url="http://gateway/v1", model="qwen", session_uid="close-error"),
+            env=SimpleNamespace(),
+        )

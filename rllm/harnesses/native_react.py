@@ -23,7 +23,7 @@ from typing import Any
 from rllm.env import env_float
 from rllm.sandbox.protocol import Sandbox, SandboxCommandTimeout
 from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-from rllm.types import AgentConfig, Episode, Task, TerminationReason, Trajectory
+from rllm.types import AgentConfig, Episode, ErrorRetryScope, Task, TerminationReason, Trajectory
 
 logger = logging.getLogger(__name__)
 
@@ -146,15 +146,55 @@ _TIMEOUT_ERROR_NAMES = frozenset(
     }
 )
 
+_RETRYABLE_MODEL_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 524, 598, 599})
+_RETRYABLE_MODEL_ERROR_NAMES = frozenset(
+    {
+        "APIConnectionError",
+        "APITimeoutError",
+        "APIResponseValidationError",
+        "ConnectError",
+        "ConnectTimeout",
+        "InternalServerError",
+        "PoolTimeout",
+        "RateLimitError",
+        "ReadError",
+        "ReadTimeout",
+        "RemoteProtocolError",
+        "TimeoutError",
+        "WriteError",
+        "WriteTimeout",
+    }
+)
+_RETRYABLE_MODEL_ERROR_MARKERS = (
+    "connection reset",
+    "gateway_upstream_error",
+    "gateway_upstream_timeout",
+    "incomplete chunked read",
+    "rate limit",
+    "temporarily unavailable",
+)
+_FINAL_FINISH_REASONS = frozenset({"stop", "length", "tool_calls", "content_filter", "function_call"})
+
 
 class NativeModelResponseError(RuntimeError):
-    """Malformed/error gateway response that should use model-error retries."""
+    """Model-service failure after the harness's per-turn retries finish."""
 
     _rllm_termination_reason = TerminationReason.MODEL_ERROR
+    _rllm_retry_scope = ErrorRetryScope.NONE
 
     def __init__(self, message: str, *, body: Any = None) -> None:
         super().__init__(message)
         self.body = body
+
+
+class NativeAgentSetupTimeoutError(RuntimeError):
+    """The persistent terminal started but initial state capture did not."""
+
+    _rllm_termination_reason = TerminationReason.AGENT_SETUP_TIMEOUT
+
+
+class _RolloutDeadlineExpired(RuntimeError):
+    """Internal signal used only for an explicit monotonic deadline check."""
 
 
 def _response_payload(response: Any) -> Any:
@@ -221,6 +261,89 @@ def _is_context_length_exception(error: BaseException) -> bool:
             return True
         current = current.__cause__ or current.__context__
     return False
+
+
+def _payload_has_retryable_model_status(value: Any) -> bool:
+    """Find retryable HTTP-style status codes in nested SDK/gateway bodies."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"code", "status", "status_code"}:
+                try:
+                    if int(item) in _RETRYABLE_MODEL_STATUS_CODES:
+                        return True
+                except (TypeError, ValueError):
+                    pass
+            if _payload_has_retryable_model_status(item):
+                return True
+    elif isinstance(value, list):
+        return any(_payload_has_retryable_model_status(item) for item in value)
+    return False
+
+
+def _is_retryable_model_exception(error: BaseException) -> bool:
+    """Classify failures at the model-call boundary for same-turn retry."""
+    if _is_context_length_exception(error):
+        return False
+
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, NativeModelResponseError):
+            # A final non-streaming response with a malformed/missing envelope is
+            # an upstream protocol failure. Resampling the unchanged turn is safe.
+            return True
+        if type(current).__name__ in _RETRYABLE_MODEL_ERROR_NAMES:
+            return True
+        if getattr(current, "status_code", None) in _RETRYABLE_MODEL_STATUS_CODES:
+            return True
+        body = getattr(current, "body", None)
+        if _payload_has_retryable_model_status(body):
+            return True
+        parts = [str(current)]
+        if body is not None:
+            parts.append(json.dumps(body, default=str))
+        message = " ".join(parts).lower()
+        if any(marker in message for marker in _RETRYABLE_MODEL_ERROR_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _as_native_model_error(error: BaseException) -> NativeModelResponseError:
+    """Wrap an SDK/transport failure in the harness-engine error contract."""
+    if isinstance(error, NativeModelResponseError):
+        return error
+    body = getattr(error, "body", None)
+    return NativeModelResponseError(
+        f"model completion failed ({type(error).__name__}: {error})",
+        body=body,
+    )
+
+
+def _normalize_legacy_function_call(message: dict[str, Any], *, turn: int) -> dict[str, Any]:
+    """Translate the deprecated ``function_call`` shape to modern tool calls."""
+    if message.get("tool_calls"):
+        return message
+    function_call = message.get("function_call")
+    if hasattr(function_call, "model_dump"):
+        function_call = function_call.model_dump(exclude_none=True)
+    if not isinstance(function_call, dict) or not isinstance(function_call.get("name"), str) or not function_call["name"]:
+        return message
+
+    normalized = dict(message)
+    normalized.pop("function_call", None)
+    normalized["tool_calls"] = [
+        {
+            "id": f"call_legacy_{turn}",
+            "type": "function",
+            "function": {
+                "name": function_call["name"],
+                "arguments": function_call.get("arguments", "{}"),
+            },
+        }
+    ]
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -401,6 +524,12 @@ class PersistentShellError(RuntimeError):
 
 class PersistentShellProtocolError(PersistentShellError):
     """The tmux session returned corrupt or incomplete control data."""
+
+
+class PersistentShellSetupTimeoutError(PersistentShellError):
+    """The tmux control plane responded but its Bash never became ready."""
+
+    _rllm_termination_reason = TerminationReason.AGENT_SETUP_TIMEOUT
 
 
 class _PersistentShellExited(PersistentShellError):
@@ -685,7 +814,7 @@ class PersistentBashSession:
                 operation="initialization",
             )
             if self._wait_for(ready_channel, 10) != 0:
-                raise PersistentShellError("native_react tmux shell initialization timed out")
+                raise PersistentShellSetupTimeoutError("native_react tmux shell initialization timed out")
             self._started = True
         except Exception:
             self.close()
@@ -1098,6 +1227,8 @@ class NativeReactHarness(SandboxedAgentFlow):
     command_timeout: float = 300.0
     max_output_length: int = 15_000
     max_parse_retries: int = 5
+    model_max_retries: int = 2
+    model_retry_backoff_s: float = 1.0
     run_timeout: float = 3600.0
     run_timeout_is_cap: bool = False
 
@@ -1176,6 +1307,85 @@ class NativeReactHarness(SandboxedAgentFlow):
             error={"error_type": "AgentTimeoutError", "message": message},
         )
 
+    def _model_completion(
+        self,
+        client: Any,
+        *,
+        config: AgentConfig,
+        messages: list[dict[str, Any]],
+        deadline: float,
+    ) -> tuple[dict[str, Any], str]:
+        """Fetch and validate one final response, retrying only this model turn."""
+        max_retries = max(0, int(self.model_max_retries))
+        backoff_s = max(0.0, float(self.model_retry_backoff_s))
+        last_error: NativeModelResponseError | None = None
+        last_cause: BaseException | None = None
+
+        for attempt in range(max_retries + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if last_error is not None:
+                    if last_cause is not None and last_cause is not last_error:
+                        raise last_error from last_cause
+                    raise last_error
+                raise _RolloutDeadlineExpired
+
+            try:
+                response = client.chat.completions.create(
+                    model=config.model,
+                    messages=messages,
+                    tools=NATIVE_TOOL_SCHEMAS,
+                    tool_choice="required",
+                    max_tokens=self.max_tokens,
+                    timeout=remaining,
+                )
+                choices = response.get("choices") if isinstance(response, dict) else getattr(response, "choices", None)
+                if not choices:
+                    raise _invalid_model_response(response, "model response contained no choices")
+                choice = choices[0]
+                response_message = choice.get("message") if isinstance(choice, dict) else getattr(choice, "message", None)
+                if response_message is None:
+                    raise _invalid_model_response(response, "model response choice contained no assistant message")
+                try:
+                    assistant = preserve_assistant_message(response_message)
+                except Exception as error:
+                    raise _invalid_model_response(response, "model response contained an invalid assistant message") from error
+
+                finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else getattr(choice, "finish_reason", None)
+                if finish_reason not in _FINAL_FINISH_REASONS:
+                    raise _invalid_model_response(response, f"model response contained invalid finish_reason {finish_reason!r}")
+                return assistant, finish_reason
+            except Exception as error:
+                if _is_context_length_exception(error):
+                    raise
+
+                model_error = _as_native_model_error(error)
+                last_error = model_error
+                last_cause = error
+                retryable = _is_retryable_model_exception(error)
+                if not retryable or attempt >= max_retries:
+                    if model_error is error:
+                        raise
+                    raise model_error from error
+
+                delay = backoff_s * (2**attempt)
+                if time.monotonic() + delay >= deadline:
+                    if model_error is error:
+                        raise
+                    raise model_error from error
+                logger.warning(
+                    "native_react model turn failed (%s: %s); retrying same turn %d/%d in %.1fs",
+                    type(error).__name__,
+                    error,
+                    attempt + 1,
+                    max_retries,
+                    delay,
+                )
+                if delay:
+                    time.sleep(delay)
+
+        raise RuntimeError("unreachable")
+
     def run(self, task: Task, config: AgentConfig, *, env: Sandbox) -> Episode:
         from openai import OpenAI, OpenAIError
 
@@ -1198,11 +1408,7 @@ class NativeReactHarness(SandboxedAgentFlow):
                 timeout=min(30.0, max(1.0, deadline - time.monotonic())),
             )
             if initial.timed_out:
-                return self._timeout_episode(
-                    task,
-                    config,
-                    message=f"Agent execution timed out after {agent_timeout:g}s",
-                )
+                raise NativeAgentSetupTimeoutError("native_react initial terminal state capture timed out")
             messages = initial_messages(str(task.instruction), initial.output)
 
             while max_turns is None or turns < max_turns:
@@ -1216,29 +1422,16 @@ class NativeReactHarness(SandboxedAgentFlow):
                         parse_errors=parse_errors,
                     )
 
-                response = client.chat.completions.create(
-                    model=config.model,
+                assistant, finish_reason = self._model_completion(
+                    client,
+                    config=config,
                     messages=messages,
-                    tools=NATIVE_TOOL_SCHEMAS,
-                    tool_choice="required",
-                    max_tokens=self.max_tokens,
-                    timeout=remaining,
+                    deadline=deadline,
                 )
-                choices = response.get("choices") if isinstance(response, dict) else getattr(response, "choices", None)
-                if not choices:
-                    raise _invalid_model_response(response, "model response contained no choices")
-                choice = choices[0]
-                response_message = choice.get("message") if isinstance(choice, dict) else getattr(choice, "message", None)
-                if response_message is None:
-                    raise _invalid_model_response(response, "model response choice contained no assistant message")
-                try:
-                    assistant = preserve_assistant_message(response_message)
-                except Exception as error:
-                    raise _invalid_model_response(response, "model response contained an invalid assistant message") from error
+                assistant = _normalize_legacy_function_call(assistant, turn=turns + 1)
                 messages.append(assistant)
                 turns += 1
 
-                finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else getattr(choice, "finish_reason", None)
                 if finish_reason == "length":
                     return self._outcome_episode(
                         task,
@@ -1249,6 +1442,18 @@ class NativeReactHarness(SandboxedAgentFlow):
                         error={
                             "error_type": "OutputLengthExceededError",
                             "message": f"model response reached the per-turn output limit of {self.max_tokens} tokens",
+                        },
+                    )
+                if finish_reason == "content_filter":
+                    return self._outcome_episode(
+                        task,
+                        config,
+                        termination_reason=TerminationReason.TOOL_PROTOCOL_ERROR,
+                        turns=turns,
+                        parse_errors=parse_errors,
+                        error={
+                            "error_type": "ContentFilterError",
+                            "message": "model response was stopped by the provider content filter",
                         },
                     )
 
@@ -1327,21 +1532,20 @@ class NativeReactHarness(SandboxedAgentFlow):
                 turns=turns,
                 parse_errors=parse_errors,
             )
+        except _RolloutDeadlineExpired:
+            return self._timeout_episode(
+                task,
+                config,
+                message=f"Agent execution timed out after {agent_timeout:g}s",
+                turns=turns,
+                parse_errors=parse_errors,
+            )
         except PersistentShellError:
             # A sandbox/control-plane timeout is an infrastructure failure. The
             # command deadline is converted into ShellResult.timed_out inside
             # PersistentBashSession.run and must never reach this boundary.
             raise
         except Exception as error:
-            if _is_timeout_exception(error):
-                return self._timeout_episode(
-                    task,
-                    config,
-                    message=f"Agent execution timed out after {agent_timeout:g}s",
-                    turns=turns,
-                    parse_errors=parse_errors,
-                    cause=error,
-                )
             if _is_context_length_exception(error):
                 return self._outcome_episode(
                     task,
@@ -1351,14 +1555,12 @@ class NativeReactHarness(SandboxedAgentFlow):
                     parse_errors=parse_errors,
                     error={"error_type": "ContextLengthExceededError", "message": str(error)},
                 )
+            if isinstance(error, NativeModelResponseError):
+                raise
             if isinstance(error, OpenAIError):
-                # Preserve retries for transient upstream failures, but make an
-                # exhausted retry budget resolve to MODEL_ERROR rather than the
-                # engine's generic ERROR bucket.
-                try:
-                    error._rllm_termination_reason = TerminationReason.MODEL_ERROR
-                except Exception:
-                    raise NativeModelResponseError(str(error), body=getattr(error, "body", None)) from error
+                # Safety net for future SDK calls added outside
+                # ``_model_completion``: preserve the same typed contract.
+                raise _as_native_model_error(error) from error
             raise
         finally:
             # The verifier runs in this same task sandbox after the harness
@@ -1366,19 +1568,24 @@ class NativeReactHarness(SandboxedAgentFlow):
             # services intact until the task context tears the sandbox down
             # after evaluation. Hard shell cleanup remains scoped to timeout
             # recovery and explicit PersistentBashSession.close() callers.
-            client.close()
+            try:
+                client.close()
+            except Exception:
+                logger.warning("native_react model client cleanup failed", exc_info=True)
 
 
 __all__ = [
     "NATIVE_SYSTEM_PROMPT",
     "NATIVE_TOOL_SCHEMAS",
     "NATIVE_USER_PROMPT",
+    "NativeAgentSetupTimeoutError",
     "NativeToolCall",
     "NativeReactHarness",
     "NativeModelResponseError",
     "PersistentBashSession",
     "PersistentShellError",
     "PersistentShellProtocolError",
+    "PersistentShellSetupTimeoutError",
     "ShellResult",
     "ToolNotice",
     "ToolObservation",
