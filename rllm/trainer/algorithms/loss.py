@@ -295,9 +295,7 @@ def native_loss_names(backend: str) -> set[str]:
       (vanilla, dppo_tv, dppo_kl, gspo, sapo, gpg, clip_cov, kl_cov, geo_mean, cispo, …)
     * ``tinker``   → ``tinker.types.LossFnType``
       (cross_entropy, importance_sampling, ppo, cispo, dro)
-    * ``fireworks``→ ``tinker.types.LossFnType`` plus the Fireworks-only kernels the
-      training SDK patches onto ``ForwardBackwardInput.loss_fn`` (dapo, gspo — see
-      ``fireworks.training.sdk.patches._builtin_loss_fn_patch``).
+    * ``fireworks``→ ``tinker.types.LossFnType`` + the SDK-patched ``dapo``/``gspo``
       (cross_entropy, importance_sampling, ppo, cispo, dro, dapo, gspo)
 
     Returns an empty set if the backend isn't importable in this process (→ everything falls
@@ -314,8 +312,7 @@ def native_loss_names(backend: str) -> set[str]:
 
             return set(get_args(LossFnType))
         if backend == "fireworks":
-            # fireworks-ai >=1.2.1 removed training.utils.rl.builtin_losses; the builtin RL
-            # kernels are tinker's base LossFnType plus the Fireworks-patched additions.
+            # fireworks-ai >=1.2.1 dropped builtin_losses; use LossFnType + patched dapo/gspo.
             from typing import get_args
 
             from tinker.types import LossFnType

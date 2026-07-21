@@ -149,9 +149,8 @@ class FireworksBackend(TinkerBackend):
         cookbook's ``training.provision.init_fireworks_infra``."""
         cfg = self.full_config
         algorithm_config = kwargs.get("algorithm_config") or AlgorithmConfig.from_config(cfg.rllm.algorithm)
-        # fireworks-ai >=1.2.1 removed training.utils.rl.losses.validate_loss_path (the old
-        # pre-provision fail-fast for builtin losses); the builtin loss config is now resolved
-        # and validated in FireworksPolicyTrainer.resolve_builtin_loss at setup instead.
+        # (fireworks-ai >=1.2.1 dropped validate_loss_path; builtin loss is resolved in
+        # FireworksPolicyTrainer.resolve_builtin_loss instead.)
 
         provision_cfg = self._build_provision_config(algorithm_config)
 

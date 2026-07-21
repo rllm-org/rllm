@@ -44,20 +44,9 @@ DEFAULT_DCP_TIMEOUT = 2700
 
 
 def builtin_loss_args(algorithm_config: AlgorithmConfig) -> tuple[str, object | None]:
-    """Map an rllm ``AlgorithmConfig`` to a Fireworks builtin ``(loss_fn, loss_fn_config)``.
-
-    fireworks-ai >=1.2.1 replaced the ``LossConfig`` / ``get_builtin_loss_config`` /
-    ``validate_loss_path`` machinery: datums are built by ``build_grpo_datums`` (which folds the
-    advantage + TIS weight into the ``advantages`` field), and the policy loss is a **name**
-    passed to ``forward_backward(data, loss_fn=..., loss_fn_config=...)``. Valid names are
-    tinker's base kernels + the Fireworks-patched ``dapo``/``gspo``:
-    ``importance_sampling, ppo, cispo, dro, dapo, gspo``.
-
-    There is no ``grpo`` kernel name anymore — GRPO == ``build_grpo_datums`` (group-normalized,
-    advantage-weighted datums) + the ``importance_sampling`` loss — so ``loss_fn`` unset (or the
-    legacy ``"grpo"``) maps to ``importance_sampling``. ``dapo``/``gspo``/``cispo`` carry their
-    own clip config; the others take ``None``.
-    """
+    """rllm ``AlgorithmConfig`` -> Fireworks builtin ``(loss_fn, loss_fn_config)`` (fireworks-ai
+    >=1.2.1). No ``grpo`` kernel: GRPO is build_grpo_datums + ``importance_sampling``, so
+    unset/"grpo" maps there; dapo/gspo/cispo carry their own clip config."""
     eps = algorithm_config.eps_clip
     eps_high = algorithm_config.eps_clip_high
     name = algorithm_config.loss_fn or "grpo"
@@ -462,17 +451,14 @@ class FireworksPolicyTrainer:
         """
         from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
 
-        # A custom rLLM loss (e.g. dppo_tv, icepop) uses forward_backward_custom, not a builtin
-        # kernel — nothing to resolve here (self._builtin_loss stays unused). Do this check
-        # BEFORE touching training.utils.rl so a custom-loss run never imports the builtin API
-        # (fireworks-ai >=1.2.1 reshaped it).
+        # Custom rLLM loss (icepop/dppo_tv) -> forward_backward_custom, no builtin kernel. Check
+        # first so a custom-loss run never imports the (1.2.1-reshaped) builtin API.
         if resolve_loss(algorithm_config, native_losses=native_loss_names("fireworks")) is not None:
             self._builtin_loss = None
             logger.info("Custom rLLM loss %r -> forward_backward_custom (no builtin kernel)", algorithm_config.loss_fn)
             return
 
-        # Builtin server-side kernel path. fireworks-ai >=1.2.1 dropped validate_loss_path /
-        # get_builtin_loss_config; the loss is just a (name, config) pair for forward_backward.
+        # Builtin kernel: just a (loss_fn, config) name pair for forward_backward.
         self._builtin_loss = builtin_loss_args(algorithm_config)
         logger.info("Resolved builtin loss: kernel=%s, config=%s", self._builtin_loss[0], self._builtin_loss[1])
 
@@ -593,10 +579,8 @@ class FireworksPolicyTrainer:
             )
             adv_metrics["time/proximal_forward"] = time.perf_counter() - t0
 
-        # Build datums for the builtin kernel. fireworks-ai >=1.2.1: build_grpo_datums folds the
-        # advantage + TIS weight into the per-token advantages (server sees only logprobs +
-        # advantages); the policy loss is no longer selected here but passed to forward_backward
-        # as loss_fn (see resolve_builtin_loss / self._builtin_loss).
+        # build_grpo_datums folds advantage + TIS into per-token advantages (fireworks-ai 1.2.1);
+        # the loss name is passed separately to forward_backward (self._builtin_loss).
         tis_config = TISConfig(level=rc.tis_mode or "token", cap=rc.tis_cap) if rc.tis_mode else None
         builtin_datums = build_grpo_datums(
             clean_datums,
