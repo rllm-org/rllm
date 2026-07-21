@@ -82,6 +82,29 @@ class EnrichMismatchError(RuntimeError):
     """
 
 
+def _exception_error_info(error: BaseException) -> dict[str, Any]:
+    """Serialize an exception without discarding its actionable cause chain."""
+
+    def describe(item: BaseException) -> dict[str, str]:
+        return {
+            "message": str(item),
+            "error_type": type(item).__name__,
+            "module": type(item).__module__,
+        }
+
+    info: dict[str, Any] = describe(error)
+    causes: list[dict[str, str]] = []
+    current = error.__cause__ or error.__context__
+    seen = {id(error)}
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        causes.append(describe(current))
+        current = current.__cause__ or current.__context__
+    if causes:
+        info["cause_chain"] = causes
+    return info
+
+
 @dataclass
 class TaskContext:
     """Per-task state returned by :meth:`TaskHooks.setup`.
@@ -594,6 +617,36 @@ class AgentFlowEngine:
                     # SANDBOX_ERROR) wins; otherwise map the exception class name
                     # (sandbox/harbor errors → their reason) and fall back to ERROR.
                     reason = getattr(e, "_rllm_termination_reason", None) or termination_reason_from_error(type(e).__name__, default=TerminationReason.ERROR)
+                    # The flow may fail after many successful model turns (for
+                    # example, an agent command kills its own sandbox control
+                    # process). Those turns already live in the gateway and are
+                    # essential for diagnosing the failure. Preserve them even
+                    # though there is no raw Episode to enrich or evaluate.
+                    traces: list[TraceRecord] = []
+                    try:
+                        traces = await self.gateway.aget_traces(uid)
+                    except Exception:
+                        logger.exception("[%s] failed to recover traces after rollout error", uid)
+
+                    steps: list[Step] = []
+                    try:
+                        steps = [trace_record_to_step(trace) for trace in traces]
+                    except Exception:
+                        logger.exception("[%s] failed to convert recovered traces after rollout error", uid)
+
+                    trajectories = []
+                    if steps:
+                        trajectories.append(
+                            Trajectory(
+                                uid=uid,
+                                name=getattr(self.agent_flow, "name", type(self.agent_flow).__name__),
+                                task=task_for_episode,
+                                steps=steps,
+                            )
+                        )
+                    metrics = compute_step_metrics(trajectories)
+                    metrics["empty"] = int(not steps)
+                    metrics["steps_collected"] = len(steps)
                     return (
                         task_id,
                         rollout_idx,
@@ -603,7 +656,9 @@ class AgentFlowEngine:
                             task=task_for_episode,
                             is_correct=False,
                             termination_reason=reason,
-                            metadata={"error": {"message": str(e), "error_type": type(e).__name__}},
+                            trajectories=trajectories,
+                            metrics=metrics,
+                            metadata={"error": _exception_error_info(e)},
                         ),
                     )
 

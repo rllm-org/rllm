@@ -27,6 +27,14 @@ class _Evaluator:
         return EvalOutput(reward=0.0, is_correct=False)
 
 
+class _ExplodingAgent:
+    async def arun(self, task, config):
+        try:
+            raise ValueError("sandbox transport vanished")
+        except ValueError as error:
+            raise RuntimeError("agent flow failed") from error
+
+
 class _Gateway:
     """Minimal gateway double; stocked traces are returned for every session."""
 
@@ -125,6 +133,52 @@ def test_strict_enrichment_follows_is_validation(is_validation):
                 asyncio.run(engine._run_single(task, "task:0", is_validation=False))
     finally:
         engine.shutdown()
+
+
+def test_final_rollout_error_preserves_gateway_traces_and_exception_chain():
+    """A terminal/sandbox exception must not erase model turns already traced."""
+    gateway = _Gateway(traces=[_empty_token_trace("task:0")])
+    engine = AgentFlowEngine(
+        agent_flow=_ExplodingAgent(),
+        evaluator=_Evaluator(),
+        gateway=gateway,
+        model="test-model",
+        n_parallel_tasks=1,
+        retry_limit=1,
+        raise_on_error=False,
+    )
+    task = task_from_row({"question": "q"}, "task")
+
+    try:
+        _, _, _, episode = asyncio.run(
+            engine.process_task_with_retry(
+                task,
+                "task",
+                0,
+                0,
+                is_validation=True,
+            )
+        )
+    finally:
+        engine.shutdown()
+
+    assert episode.termination_reason == TerminationReason.ERROR
+    assert len(episode.trajectories) == 1
+    assert len(episode.trajectories[0].steps) == 1
+    assert episode.trajectories[0].steps[0].model_response == "A"
+    assert episode.metrics["steps_collected"] == 1
+    assert episode.metadata["error"] == {
+        "message": "agent flow failed",
+        "error_type": "RuntimeError",
+        "module": "builtins",
+        "cause_chain": [
+            {
+                "message": "sandbox transport vanished",
+                "error_type": "ValueError",
+                "module": "builtins",
+            }
+        ],
+    }
 
 
 def test_needs_env_flow_must_declare_env_param():
