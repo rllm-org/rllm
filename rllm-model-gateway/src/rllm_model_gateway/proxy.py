@@ -92,28 +92,42 @@ def _to_openai_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, An
 
 
 def _assistant_message_from_completion(
-    text: str,
+    choice: dict[str, Any],
     completion_token_ids: list[int] | None,
     request_body: dict[str, Any],
     renderer: Any,
 ) -> dict[str, Any]:
-    """Build the assistant ``message`` for a cumulative-mode chat response.
+    """Build the assistant chat ``message`` for a cumulative-mode turn.
 
-    Default (and for every client today): the raw completion ``text`` as ``content`` —
-    byte-identical to the prior behavior. Text-protocol harnesses (Terminus-2 etc.) send
-    no OpenAI ``tools`` field and parse the raw output themselves, so they are unaffected.
+    Two producers feed the cumulative-turn path:
 
-    When the client DID send ``tools`` (OpenAI function-calling clients such as opencode),
-    parse the completion tokens via the renderer into structured
-    ``content`` / ``reasoning_content`` / ``tool_calls``. The ``/v1/completions`` bridge
-    used in ``cumulative_token_mode`` skips the serving stack's own chat tool-call parser,
-    so without this such clients receive only raw ``<think>…</think><tool_call>…`` text,
-    never see structured ``tool_calls``, and take no action (0 reward in training). This
-    only shapes the CLIENT-facing message; training token capture uses the raw
-    ``completion_token_ids`` and is unchanged. Falls back to raw ``text`` if the renderer
-    can't parse or finds nothing structured.
+    * The in-process handler (Fireworks/Tinker ``local_handler``) already parsed the
+      completion with the engine's renderer, so its choice carries structured
+      ``tool_calls`` / ``reasoning`` (see ``rllm.gateway.tinker_adapter``). Pass them
+      straight through — this is the source of truth.
+    * A raw vLLM ``/v1/completions`` worker (verl backend) returns only ``text``. When
+      the client sent ``tools`` (OpenAI function-calling clients such as opencode), parse
+      the completion tokens via the renderer into structured tool_calls; the
+      ``/v1/completions`` bridge skips the serving stack's own chat tool-call parser, so
+      without this such clients get only raw ``<tool_call>…`` text and take no action.
+
+    Text-protocol harnesses (Terminus-2) send no ``tools`` and get the raw text (unchanged).
+    Only the CLIENT-facing message is shaped; training token capture uses the raw
+    ``completion_token_ids`` and is untouched.
     """
-    message: dict[str, Any] = {"role": "assistant", "content": text}
+    text = choice.get("text", "") if isinstance(choice, dict) else ""
+
+    # (a) Handler already produced structured fields — pass through.
+    if isinstance(choice, dict) and (choice.get("tool_calls") or choice.get("reasoning")):
+        message: dict[str, Any] = {"role": "assistant", "content": text}
+        if choice.get("reasoning"):
+            message["reasoning"] = choice["reasoning"]
+        if choice.get("tool_calls"):
+            message["tool_calls"] = choice["tool_calls"]
+        return message
+
+    # (b) Raw completion (HTTP worker): parse tokens when the client wants tool calls.
+    message = {"role": "assistant", "content": text}
     if not request_body.get("tools"):
         return message
     parse = getattr(renderer, "parse_response", None)
@@ -706,11 +720,16 @@ class ReverseProxy:
         acc.ingest_turn(prompt_token_ids, completion_token_ids, advance=not replay)
         acc.update_prefix(request_body.get("messages", []))
 
-        # Translate to chat format
+        # Translate to chat format. The handler (Fireworks/Tinker) may have parsed
+        # tool_calls/reasoning onto the choice; _assistant_message_from_completion prefers
+        # those, else parses tokens (raw vLLM worker) when the client sent tools.
         choices = response_body.get("choices") or []
         if choices:
             first_choice = choices[0]
-            first_choice["message"] = _assistant_message_from_completion(first_choice.pop("text", ""), completion_token_ids, request_body, acc.renderer)
+            message = _assistant_message_from_completion(first_choice, completion_token_ids, request_body, acc.renderer)
+            for k in ("text", "tool_calls", "reasoning"):
+                first_choice.pop(k, None)  # completions-level fields now live in message
+            first_choice["message"] = message
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:
@@ -865,8 +884,11 @@ class ReverseProxy:
                 # completion and fake-stream it (role → content+tool_calls → finish → DONE).
                 if tools_mode and chunks:
                     built_trace = _build_trace()
+                    # Raw vLLM stream: no per-choice tool_calls, so pass a text-only choice
+                    # and let the renderer parse the buffered completion tokens.
+                    joined_text = "".join((c.get("choices") or [{}])[0].get("text", "") for c in chunks)
                     message = _assistant_message_from_completion(
-                        "".join((c.get("choices") or [{}])[0].get("text", "") for c in chunks),
+                        {"text": joined_text},
                         built_trace.completion_token_ids,
                         request_body,
                         acc.renderer,
@@ -950,17 +972,18 @@ class ReverseProxy:
         acc.update_prefix(request_body.get("messages", []))
 
         choices = response_body.get("choices") or []
-        content = choices[0].pop("text", "") if choices else ""
-        finish_reason = (choices[0].get("finish_reason") if choices else None) or "stop"
-        completion_logprobs = choices[0].get("logprobs") if choices else None
+        choice0 = choices[0] if choices else {}
+        finish_reason = choice0.get("finish_reason") or "stop"
+        completion_logprobs = choice0.get("logprobs")
 
-        # When the client requested OpenAI tools, reconstruct structured
-        # content/reasoning_content/tool_calls; otherwise `message` is just the raw
-        # content and `extra_delta` is empty (behavior unchanged). See
-        # _assistant_message_from_completion.
-        message = _assistant_message_from_completion(content, completion_token_ids, request_body, acc.renderer)
+        # Prefer the handler's structured tool_calls/reasoning (parsed onto the choice);
+        # else raw content. extra_delta carries the structured fields into the streamed
+        # content chunk. See _assistant_message_from_completion.
+        message = _assistant_message_from_completion(choice0, completion_token_ids, request_body, acc.renderer)
+        for k in ("text", "tool_calls", "reasoning"):
+            choice0.pop(k, None)  # completions-level fields now live in message
         content = message["content"]
-        extra_delta = {k: message[k] for k in ("reasoning_content", "tool_calls") if k in message}
+        extra_delta = {k: message[k] for k in ("reasoning", "reasoning_content", "tool_calls") if k in message}
 
         if session_id and response_body:
             chat_body = dict(response_body)

@@ -10,8 +10,9 @@ Uses a fake engine so no Tinker service / model is required.
 """
 
 import asyncio
+from types import SimpleNamespace
 
-from rllm.gateway.tinker_adapter import create_tinker_handler
+from rllm.gateway.tinker_adapter import _to_openai_tool_calls, create_tinker_handler
 
 
 class _ModelOutput:
@@ -89,3 +90,60 @@ def test_non_int_prompt_falls_through_to_chat():
     asyncio.run(handler({"prompt": "hello", "messages": [{"role": "user", "content": "hi"}]}))
     assert engine.token_input is None
     assert engine.messages == [{"role": "user", "content": "hi"}]
+
+
+# ---------------------------------------------------------------------------
+# Tool-call conversion. The prime-rl ``renderers`` parsers (parse_qwen35 etc.)
+# return tool calls nested under ``function`` — reading top-level ``name`` there
+# silently produced empty tool calls, which broke OpenAI function-calling clients
+# (opencode) in cumulative-mode training. Both handler paths must now emit correct,
+# structured tool_calls, and must NOT reinject the raw <tool_call> XML into content.
+# ---------------------------------------------------------------------------
+
+
+def test_to_openai_tool_calls_handles_all_producer_shapes():
+    # prime-rl nested shape (the one that used to yield name="").
+    assert _to_openai_tool_calls([{"function": {"name": "bash", "arguments": {"command": "ls"}}}]) == [
+        {"id": "call_0", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}}
+    ]
+    # flat dict and ToolCall object still work.
+    assert _to_openai_tool_calls([{"name": "edit", "arguments": {"p": 1}}])[0]["function"]["name"] == "edit"
+    assert _to_openai_tool_calls([SimpleNamespace(name="read", arguments={"f": "x"})])[0]["function"]["name"] == "read"
+
+
+class _ToolModelOutput(_ModelOutput):
+    content = ""  # parse-stripped when the whole turn is a tool call
+    text = "<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>"
+    reasoning = "let me think"
+    tool_calls = [{"function": {"name": "bash", "arguments": {"command": "ls"}}}]  # prime-rl nested
+
+
+class _ToolEngine(_FakeEngine):
+    def assemble_model_output(self, token_input, token_output):
+        return _ToolModelOutput()
+
+    async def get_model_response(self, messages, **kwargs):
+        self.messages = messages
+        return _ToolModelOutput()
+
+
+_TOOLS = [{"type": "function", "function": {"name": "bash"}}]
+
+
+def test_token_path_emits_structured_tool_calls():
+    handler = create_tinker_handler(_ToolEngine())
+    resp = asyncio.run(handler({"prompt": [1, 2, 3, 4], "tools": _TOOLS, "model": "qwen"}))
+    ch = resp["choices"][0]
+    assert ch["tool_calls"][0]["function"] == {"name": "bash", "arguments": '{"command": "ls"}'}
+    assert ch["finish_reason"] == "tool_calls"
+    assert ch["reasoning"] == "let me think"
+    assert ch["text"] == ""  # raw XML NOT reinjected into content
+
+
+def test_chat_path_emits_structured_tool_calls():
+    handler = create_tinker_handler(_ToolEngine())
+    resp = asyncio.run(handler({"messages": [{"role": "user", "content": "hi"}], "tools": _TOOLS, "model": "qwen"}))
+    ch = resp["choices"][0]
+    assert ch["message"]["tool_calls"][0]["function"] == {"name": "bash", "arguments": '{"command": "ls"}'}
+    assert ch["message"]["content"] == ""  # raw XML NOT reinjected
+    assert ch["finish_reason"] == "tool_calls"
