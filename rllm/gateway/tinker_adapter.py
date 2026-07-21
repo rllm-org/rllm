@@ -23,15 +23,31 @@ logger = logging.getLogger(__name__)
 
 
 def _to_openai_tool_calls(tool_calls: list) -> list[dict[str, Any]]:
-    """Convert rLLM ToolCall objects to OpenAI-format tool_calls."""
+    """Convert tool calls from any producer shape to the OpenAI wire format.
+
+    ``ModelOutput.tool_calls`` arrives in one of three shapes depending on which parser
+    ``assemble_model_output`` used:
+
+    * prime-rl ``renderers`` (the unified renderer, e.g. ``parse_qwen35``): a **nested**
+      dict ``{"function": {"name", "arguments"}}`` — the OpenAI-ish shape.
+    * rLLM ``ToolCall`` object: ``.name`` / ``.arguments`` attributes.
+    * flat dict: ``{"name", "arguments"}``.
+
+    The nested form is easy to mis-read: pulling top-level ``name``/``arguments`` off it
+    yields empty tool calls (name=""), which is exactly what broke OpenAI function-calling
+    clients like opencode — they received a structurally-present but empty tool call and
+    took no action. Extract ``function`` first, then object attrs, then flat keys.
+    """
     result = []
     for i, tc in enumerate(tool_calls):
-        name = tc.name if hasattr(tc, "name") else tc.get("name", "")
-        args = tc.arguments if hasattr(tc, "arguments") else tc.get("arguments", {})
-        if isinstance(args, dict):
-            args_str = json.dumps(args)
-        else:
-            args_str = str(args)
+        fn = tc.get("function") if isinstance(tc, dict) else None
+        if isinstance(fn, dict):  # prime-rl nested shape
+            name, args = fn.get("name", ""), fn.get("arguments", {})
+        elif isinstance(tc, dict):  # flat dict
+            name, args = tc.get("name", ""), tc.get("arguments", {})
+        else:  # rLLM ToolCall object
+            name, args = getattr(tc, "name", ""), getattr(tc, "arguments", {})
+        args_str = json.dumps(args) if isinstance(args, dict) else str(args)
         result.append(
             {
                 "id": f"call_{i}",
@@ -85,12 +101,23 @@ async def _token_prompt_completion(
     token_output = await engine.get_token_output_from_token_input(prompt_ids, **sampling_kwargs)
     model_output = engine.assemble_model_output(prompt_ids, token_output)
 
-    # Text the agent sees as the assistant turn (same precedence as the chat path).
-    text = model_output.content or model_output.text or ""
+    # Structured tool calls (parsed by the engine's renderer). Carried on the choice
+    # so the gateway's cumulative-turn translation can surface them to OpenAI
+    # function-calling clients (opencode) — the token-in bridge skips the serving
+    # stack's own chat parser, so this is the only place they get produced here.
+    raw_tool_calls = getattr(model_output, "tool_calls", None)
+    tool_calls = _to_openai_tool_calls(raw_tool_calls) if raw_tool_calls else None
+    # Text the agent sees as the assistant turn. With structured tool calls, use the
+    # parse-stripped content (may be "") — don't fall back to model_output.text, which
+    # would reinject the raw <tool_call> XML. Without tool calls, keep the text fallback
+    # so text-protocol harnesses (Terminus-2) still see the full output.
+    text = (model_output.content or "") if tool_calls else (model_output.content or model_output.text or "")
     out_prompt_ids = list(model_output.prompt_ids) if model_output.prompt_ids else list(prompt_ids)
     completion_ids = list(model_output.completion_ids) if model_output.completion_ids else []
     logprobs = model_output.logprobs or []
     finish_reason = model_output.finish_reason or "stop"
+    if tool_calls and finish_reason == "stop":
+        finish_reason = "tool_calls"
     prompt_len = model_output.prompt_length or len(out_prompt_ids)
     completion_len = model_output.completion_length or len(completion_ids)
     # R3 router replay: read matrices off the TokenOutput (assemble_model_output
@@ -98,21 +125,25 @@ async def _token_prompt_completion(
     # them every cumulative turn.
     routing_matrices = getattr(token_output, "routing_matrices", None)
 
+    choice: dict[str, Any] = {
+        "index": 0,
+        "text": text,
+        "token_ids": completion_ids,
+        "finish_reason": finish_reason,
+        "routing_matrices": routing_matrices,
+        "logprobs": {"token_logprobs": logprobs},
+    }
+    if tool_calls:
+        choice["tool_calls"] = tool_calls
+    if getattr(model_output, "reasoning", None):
+        choice["reasoning"] = model_output.reasoning
+
     return {
         "id": f"cmpl-{uuid.uuid4().hex[:12]}",
         "object": "text_completion",
         "created": int(time.time()),
         "model": request_body.get("model", getattr(engine, "model_name", "default")),
-        "choices": [
-            {
-                "index": 0,
-                "text": text,
-                "token_ids": completion_ids,
-                "finish_reason": finish_reason,
-                "routing_matrices": routing_matrices,
-                "logprobs": {"token_logprobs": logprobs},
-            }
-        ],
+        "choices": [choice],
         "usage": {
             "prompt_tokens": prompt_len,
             "completion_tokens": completion_len,
@@ -177,7 +208,10 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
         except TerminationEvent as e:
             raise _termination_http_error(e.reason) from e
 
-        response_text = model_output.content or model_output.text or ""
+        # With structured tool calls, use parse-stripped content (don't fall back to
+        # model_output.text, which reinjects the raw <tool_call> XML); otherwise keep
+        # the text fallback so text-protocol harnesses see the full output.
+        response_text = (model_output.content or "") if model_output.tool_calls else (model_output.content or model_output.text or "")
         prompt_ids = list(model_output.prompt_ids) if model_output.prompt_ids else []
         completion_ids = list(model_output.completion_ids) if model_output.completion_ids else []
         logprobs = model_output.logprobs or []
