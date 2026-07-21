@@ -185,9 +185,7 @@ def test_cumulative_local_streaming_emits_tool_calls():
     acc = TokenAccumulator(renderer=None)
     acc.ingest_turn([1, 2, 3], [4, 5])
     bridged = [1, 2, 3, 4, 5, 6, 7]
-    resp = asyncio.run(
-        proxy._handle_cumulative_streaming_local(_Request(), {"messages": _MSGS, "tools": _TOOLS}, {"prompt": bridged}, "sess1", acc, bridged)
-    )
+    resp = asyncio.run(proxy._handle_cumulative_streaming_local(_Request(), {"messages": _MSGS, "tools": _TOOLS}, {"prompt": bridged}, "sess1", acc, bridged))
     chunks = []
 
     async def drain():
