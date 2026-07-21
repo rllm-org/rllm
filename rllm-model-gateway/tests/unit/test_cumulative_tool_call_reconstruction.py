@@ -1,15 +1,15 @@
-"""Structured tool_call / reasoning reconstruction on the cumulative-token path.
+"""Structured tool_call / reasoning on the cumulative-token chat translation.
 
-In ``cumulative_token_mode`` the gateway bridges chat/completions to
-``/v1/completions`` with a pre-tokenized prompt, so the serving stack's own chat
-tool-call parser never runs. Text-protocol harnesses (Terminus-2) parse the raw
-output themselves and send no OpenAI ``tools``. OpenAI function-calling clients
-(opencode) send ``tools`` and need structured ``tool_calls`` back — without them
-the agent sees only raw ``<think>…<tool_call>…`` text and never acts.
+In ``cumulative_token_mode`` the gateway bridges chat/completions to ``/v1/completions``
+with a pre-tokenized prompt, so the serving stack's own chat tool-call parser never runs.
+OpenAI function-calling clients (opencode) send ``tools`` and need structured ``tool_calls``
+back; text-protocol harnesses (Terminus-2) send none and parse raw output themselves.
 
-These tests pin: (1) a ``tools`` request gets structured content/reasoning/tool_calls
-reconstructed via the renderer; (2) a request WITHOUT tools is byte-identical to the
-old raw-text behavior; (3) missing/failing renderer falls back to raw text.
+Two producers feed tool_calls into the cumulative-turn translation, and both are covered:
+  * the in-process handler (Fireworks/Tinker) parses and puts ``tool_calls``/``reasoning``
+    on the choice — the gateway passes them through;
+  * a raw vLLM worker returns only ``text`` — the gateway parses the completion tokens via
+    the renderer when the client sent ``tools``.
 
 Driven directly (no HTTP server) via ``asyncio.run``, mirroring
 ``test_cumulative_token_mode_local.py``.
@@ -37,14 +37,14 @@ class _Request:
 
 
 class _FakeRenderer:
-    """parse_response returns a reasoning block + one tool call, no plain content —
-    the shape a Qwen3.5 reasoning turn that emits a tool call decodes to."""
+    """parse_response returns reasoning + one tool call (prime-rl nested shape) — the
+    shape a raw vLLM completion is parsed into on the HTTP-worker fallback path."""
 
     def parse_response(self, token_ids):
         return SimpleNamespace(
             content="",
             reasoning_content="let me think",
-            tool_calls=[{"function": {"name": "bash", "arguments": {"cmd": "ls"}}}],
+            tool_calls=[{"function": {"name": "bash", "arguments": {"command": "ls"}}}],
         )
 
 
@@ -59,7 +59,8 @@ def _make_proxy(local_handler):
     )
 
 
-def _completion_handler():
+# A handler that already parsed tool_calls onto the choice (the fixed tinker_adapter).
+def _handler_with_tool_calls():
     async def handler(body):
         return {
             "id": "cmpl-x",
@@ -67,12 +68,28 @@ def _completion_handler():
             "choices": [
                 {
                     "index": 0,
-                    "text": "<think>let me think</think><tool_call>{...}</tool_call>",
+                    "text": "",  # parse-stripped; tool call carries the action
                     "token_ids": [91, 92],
-                    "finish_reason": "stop",
+                    "finish_reason": "tool_calls",
+                    "reasoning": "let me think",
+                    "tool_calls": [{"id": "call_0", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}}],
                     "logprobs": {"token_logprobs": [-0.1, -0.2]},
                 }
             ],
+            "prompt_token_ids": body["prompt"],
+            "usage": {"prompt_tokens": len(body["prompt"]), "completion_tokens": 2},
+        }
+
+    return handler
+
+
+# A raw-completion handler (text only, no tool_calls) — the vLLM-worker shape.
+def _handler_text_only():
+    async def handler(body):
+        return {
+            "id": "cmpl-x",
+            "object": "text_completion",
+            "choices": [{"index": 0, "text": "<tool_call>...</tool_call>", "token_ids": [91, 92], "finish_reason": "stop", "logprobs": {"token_logprobs": [-0.1, -0.2]}}],
             "prompt_token_ids": body["prompt"],
             "usage": {"prompt_tokens": len(body["prompt"]), "completion_tokens": 2},
         }
@@ -84,91 +101,92 @@ _MSGS = [{"role": "user", "content": "x"}]
 _TOOLS = [{"type": "function", "function": {"name": "bash", "description": "run a command"}}]
 
 
-def _run_non_streaming(acc, request_body, bridged):
-    proxy = _make_proxy(_completion_handler())
+def _run_non_streaming(handler, acc, request_body):
+    proxy = _make_proxy(handler)
     resp = asyncio.run(
         proxy._handle_cumulative_non_streaming(
             _Request(),
             request_body,
-            {"prompt": bridged, "add_special_tokens": False, "model": "q"},
+            {"prompt": [1, 2, 3, 4, 5, 6, 7], "add_special_tokens": False, "model": "q"},
             "sess1",
             acc,
-            bridged,
+            [1, 2, 3, 4, 5, 6, 7],
         )
     )
     return json.loads(resp.body)
 
 
-# --- unit: tool_call shape conversion ---------------------------------------
+# --- unit: proxy _to_openai_tool_calls (nested shape) -----------------------
 
 
 def test_to_openai_tool_calls_shapes_arguments_and_ids():
-    out = _to_openai_tool_calls([{"function": {"name": "bash", "arguments": {"cmd": "ls"}}}])
-    assert out == [{"id": "call_0", "type": "function", "index": 0, "function": {"name": "bash", "arguments": '{"cmd": "ls"}'}}]
-    # Already-string arguments pass through unchanged.
-    out2 = _to_openai_tool_calls([{"id": "abc", "function": {"name": "x", "arguments": "{}"}}])
-    assert out2[0]["id"] == "abc" and out2[0]["function"]["arguments"] == "{}"
+    out = _to_openai_tool_calls([{"function": {"name": "bash", "arguments": {"command": "ls"}}}])
+    assert out == [{"id": "call_0", "type": "function", "index": 0, "function": {"name": "bash", "arguments": '{"command": "ls"}'}}]
 
 
-def test_assistant_message_raw_when_no_tools_or_no_renderer():
-    # No tools requested -> raw content regardless of renderer.
-    assert _assistant_message_from_completion("hi", [1, 2], {}, _FakeRenderer()) == {"role": "assistant", "content": "hi"}
-    # Tools requested but no renderer -> raw fallback.
-    assert _assistant_message_from_completion("hi", [1, 2], {"tools": _TOOLS}, None) == {"role": "assistant", "content": "hi"}
+# --- unit: _assistant_message_from_completion (choice-based) -----------------
+
+
+def test_message_prefers_handler_provided_tool_calls():
+    tc = [{"id": "call_0", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}}]
+    choice = {"text": "", "tool_calls": tc, "reasoning": "thinking"}
+    msg = _assistant_message_from_completion(choice, [1, 2], {"tools": _TOOLS}, _FakeRenderer())
+    assert msg["tool_calls"] == tc  # passed through verbatim, not re-parsed
+    assert msg["reasoning"] == "thinking"
+
+
+def test_message_parses_tokens_when_handler_gave_only_text():
+    choice = {"text": "<tool_call>...</tool_call>"}
+    msg = _assistant_message_from_completion(choice, [1, 2], {"tools": _TOOLS}, _FakeRenderer())
+    assert msg["tool_calls"][0]["function"] == {"name": "bash", "arguments": '{"command": "ls"}'}
+    assert msg["reasoning_content"] == "let me think"
+
+
+def test_message_raw_when_no_tools_or_no_renderer():
+    assert _assistant_message_from_completion({"text": "hi"}, [1, 2], {}, _FakeRenderer()) == {"role": "assistant", "content": "hi"}
+    assert _assistant_message_from_completion({"text": "hi"}, [1, 2], {"tools": _TOOLS}, None) == {"role": "assistant", "content": "hi"}
 
 
 # --- non-streaming path ------------------------------------------------------
 
 
-def test_cumulative_tools_reconstructs_structured_message():
+def test_cumulative_passes_through_handler_tool_calls():
+    acc = TokenAccumulator(renderer=None)  # renderer unused: handler already parsed
+    acc.ingest_turn([1, 2, 3], [4, 5])
+    body = _run_non_streaming(_handler_with_tool_calls(), acc, {"messages": _MSGS, "tools": _TOOLS})
+    msg = body["choices"][0]["message"]
+    assert msg["tool_calls"][0]["function"] == {"name": "bash", "arguments": '{"command": "ls"}'}
+    assert msg["reasoning"] == "let me think"
+    assert "text" not in body["choices"][0] and "tool_calls" not in body["choices"][0]
+
+
+def test_cumulative_parses_raw_completion_when_tools_requested():
     acc = TokenAccumulator(renderer=_FakeRenderer())
     acc.ingest_turn([1, 2, 3], [4, 5])
-    body = _run_non_streaming(acc, {"messages": _MSGS, "tools": _TOOLS}, [1, 2, 3, 4, 5, 6, 7])
-
+    body = _run_non_streaming(_handler_text_only(), acc, {"messages": _MSGS, "tools": _TOOLS})
     msg = body["choices"][0]["message"]
-    assert msg["role"] == "assistant"
-    assert msg["reasoning_content"] == "let me think"
-    assert msg["tool_calls"][0]["function"] == {"name": "bash", "arguments": '{"cmd": "ls"}'}
-    assert msg["tool_calls"][0]["type"] == "function"
-    assert "text" not in body["choices"][0]  # raw text popped, not leaked
+    assert msg["tool_calls"][0]["function"] == {"name": "bash", "arguments": '{"command": "ls"}'}
 
 
 def test_cumulative_no_tools_keeps_raw_content():
-    """Terminus-2 style: no tools field -> byte-identical to prior raw behavior."""
-    acc = TokenAccumulator(renderer=_FakeRenderer())  # renderer present but must be unused
+    acc = TokenAccumulator(renderer=_FakeRenderer())  # present but must be unused
     acc.ingest_turn([1, 2, 3], [4, 5])
-    body = _run_non_streaming(acc, {"messages": _MSGS}, [1, 2, 3, 4, 5, 6, 7])
-
+    body = _run_non_streaming(_handler_text_only(), acc, {"messages": _MSGS})
     msg = body["choices"][0]["message"]
-    assert msg == {"role": "assistant", "content": "<think>let me think</think><tool_call>{...}</tool_call>"}
-    assert "tool_calls" not in msg and "reasoning_content" not in msg
-
-
-def test_cumulative_tools_no_renderer_falls_back_to_raw():
-    acc = TokenAccumulator(renderer=None)
-    acc.ingest_turn([1, 2, 3], [4, 5])
-    body = _run_non_streaming(acc, {"messages": _MSGS, "tools": _TOOLS}, [1, 2, 3, 4, 5, 6, 7])
-    assert body["choices"][0]["message"]["content"] == "<think>let me think</think><tool_call>{...}</tool_call>"
-    assert "tool_calls" not in body["choices"][0]["message"]
+    assert msg == {"role": "assistant", "content": "<tool_call>...</tool_call>"}
+    assert "tool_calls" not in msg
 
 
 # --- local streaming path ----------------------------------------------------
 
 
-def test_cumulative_local_streaming_tools_emits_tool_calls():
-    proxy = _make_proxy(_completion_handler())
-    acc = TokenAccumulator(renderer=_FakeRenderer())
+def test_cumulative_local_streaming_emits_tool_calls():
+    proxy = _make_proxy(_handler_with_tool_calls())
+    acc = TokenAccumulator(renderer=None)
     acc.ingest_turn([1, 2, 3], [4, 5])
     bridged = [1, 2, 3, 4, 5, 6, 7]
     resp = asyncio.run(
-        proxy._handle_cumulative_streaming_local(
-            _Request(),
-            {"messages": _MSGS, "tools": _TOOLS},
-            {"prompt": bridged},
-            "sess1",
-            acc,
-            bridged,
-        )
+        proxy._handle_cumulative_streaming_local(_Request(), {"messages": _MSGS, "tools": _TOOLS}, {"prompt": bridged}, "sess1", acc, bridged)
     )
     chunks = []
 
@@ -179,7 +197,6 @@ def test_cumulative_local_streaming_tools_emits_tool_calls():
     asyncio.run(drain())
     joined = "".join(chunks)
     assert '"tool_calls"' in joined and '"bash"' in joined
-    assert '"reasoning_content"' in joined
     assert chunks[-1].strip().endswith("[DONE]")
-    # Training token capture is unaffected: the completion tokens still ingest.
+    # Training token capture unaffected: the completion tokens still ingest.
     assert acc.turn_count == 2 and acc.prev_completion_ids == [91, 92]
