@@ -144,6 +144,12 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             else:
                 raise RuntimeError(f"AutoProcessor for {self.full_config.model.name!r} has no .image_processor attribute; this model isn't a VLM or transformers can't expose its image processor.")
 
+        rollout_extra = dict(self.full_config.get("rollout_engine", {}))
+        # Resolve turn-0 rendering with the same renderer the gateway uses for the
+        # cumulative bridge (rllm.gateway.renderer_family), so engine and gateway
+        # agree across turns. An explicit rollout_engine.renderer_family wins.
+        gateway_family = self.full_config.rllm.gateway.get("renderer_family", "auto") if self.full_config.rllm.get("gateway") else "auto"
+        rollout_extra.setdefault("renderer_family", gateway_family)
         self.rollout_engine = TinkerEngine(
             base_url=self.full_config.tinker_base_url,
             model_name=self.full_config.model.name,
@@ -153,8 +159,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             max_response_length=self.full_config.data.max_response_length,
             max_model_length=self.full_config.training.max_length,
             sampling_params=self.full_config.rllm.rollout,
-            **self.full_config.rollout_engine,
             image_processor=image_processor,
+            **rollout_extra,
         )
         return self.rollout_engine
 

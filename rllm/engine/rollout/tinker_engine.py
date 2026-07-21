@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Any, cast
 
 import tinker
@@ -12,6 +13,8 @@ from rllm.engine.rollout.types import ImageProcessor, Processor, TinkerTokenInpu
 from rllm.parser import ChatTemplateParser
 from rllm.tools.tool_base import ToolCall
 from rllm.types import TerminationEvent, TerminationReason
+
+logger = logging.getLogger(__name__)
 
 """
 Utility functions for Tinker engine. Partly borrowed from
@@ -157,13 +160,14 @@ class TinkerEngine(RolloutEngine):
         max_response_length: int = 4096,
         max_model_length: int = 32768,
         sampling_params: dict | None = None,
-        bypass_render_with_parser: bool = True,  # default to True now
+        bypass_render_with_parser: bool = False,
         processor: Processor | None = None,
         image_processor: ImageProcessor | None = None,
         disable_thinking: bool = False,
         accumulate_reasoning: bool = False,
         reasoning_effort: str = "medium",
         renderer_name: str | None = None,
+        renderer_family: str = "auto",
         **kwargs,
     ):
         """
@@ -178,13 +182,24 @@ class TinkerEngine(RolloutEngine):
             max_response_length: Maximum response length in tokens
             max_model_length: Maximum total length (prompt + response) in tokens
             sampling_params: Default sampling parameters (temperature, top_p, etc.)
-            bypass_render_with_parser: If True, use ChatTemplateParser instead of Tinker's renderer
-            processor: Optional processor for multimodal models (used when bypass_render_with_parser=True)
-            image_processor: Optional image processor for vision-language models (used with renderer)
-            disable_thinking: Whether to disable thinking in generation prompt (used when bypass_render_with_parser=True)
-            accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
-            reasoning_effort: The effort level for reasoning (used when bypass_render_with_parser=True)
-            renderer_name: The name of the renderer to use (used when bypass_render_with_parser=True)
+            bypass_render_with_parser: Escape hatch. If True, force the legacy
+                ChatTemplateParser for rendering+parsing and skip the unified
+                renderer entirely. Default False: resolve the rllm.renderers
+                unified renderer (the same one the gateway uses for the
+                cumulative-token bridge), which owns rendering AND completion
+                parsing — including tool_calls. The tinker_cookbook renderer is
+                used only for VLM (image chunking); ChatTemplateParser is the
+                extreme fallback (no unified renderer resolves for the model).
+            processor: Optional processor for multimodal models (ChatTemplateParser path)
+            image_processor: Optional image processor for vision-language models
+                (VLM keeps the tinker_cookbook renderer, which owns image chunking)
+            disable_thinking: Whether to disable thinking in generation prompt (ChatTemplateParser path)
+            accumulate_reasoning: Whether to accumulate reasoning (ChatTemplateParser path)
+            reasoning_effort: The effort level for reasoning (ChatTemplateParser path)
+            renderer_name: Pin a specific renderer (tinker-style name, e.g. "qwen3_5").
+            renderer_family: Pin a prime-rl renderer family (e.g. "qwen3.6"); "auto"
+                infers from the model id. Should match rllm.gateway.renderer_family
+                so the engine renders turn 0 like the gateway bridges turns 1+.
         """
         super().__init__()
         self.base_url = base_url
@@ -193,35 +208,79 @@ class TinkerEngine(RolloutEngine):
         self.max_response_length = max_response_length
         self.max_model_length = max_model_length - 1
         self.tokenizer = tokenizer
-        self.bypass_render_with_parser = bypass_render_with_parser
         self.accumulate_reasoning = accumulate_reasoning
         self.reasoning_effort = reasoning_effort
-        # Optional unified renderer (rllm.renderers). When set, it owns prompt
-        # rendering and completion parsing for both backends; ``renderer`` (the
-        # tinker_cookbook renderer) and ``chat_parser`` remain the fallbacks.
-        # Base TinkerEngine leaves this None (no behavior change); FireworksEngine
-        # sets it via rllm.renderers.resolve.
-        self.unified_renderer = None
+        # Retained so a separate-process gateway can rebuild an equivalent engine.
+        self.renderer_family = renderer_family
 
         self.train_sampling_params = dict(sampling_params.get("train", {})) if sampling_params else {}
         self.val_sampling_params = dict(sampling_params.get("val", {})) if sampling_params else {}
         # Initialize Tinker service client
         self.service_client = service_client
 
-        # Initialize the renderer
-        if renderer_name is None:
-            try:
-                renderer_name = model_info.get_recommended_renderer_name(self.model_name)
-            except KeyError as e:
-                raise ValueError(
-                    f"tinker_cookbook's model_info does not know '{self.model_name}' (the cookbook release can lag "
-                    f"models the Tinker service already supports). Set rollout_engine.renderer_name explicitly to a "
-                    f"renderer matching the model's chat template (e.g. 'qwen3_5' for Qwen3.6 models)."
-                ) from e
-        # Pass image_processor for VLM support with Tinker renderer
-        self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
+        # --- Renderer / parser resolution --------------------------------------
+        # Mirror FireworksEngine so the engine renders turn 0 with the SAME renderer
+        # the gateway uses for the turn-1+ cumulative bridge (rllm.renderers, resolved
+        # from the model id + renderer_family/renderer_name). Priority:
+        #   1. rllm.renderers unified renderer (prime-rl / tinker-cookbook adapter):
+        #      owns rendering AND completion parsing, incl. <tool_call> -> tool_calls.
+        #      This is the default — Tinker's OpenAI endpoint and ChatTemplateParser do
+        #      NOT surface structured tool_calls, so function-calling harnesses
+        #      (opencode) get an empty tool call and take no action without a real
+        #      renderer. (assemble_model_output / _render_prompt_token_input prefer it.)
+        #   2. tinker_cookbook renderer: VLM only (owns image-chunk rendering).
+        #   3. ChatTemplateParser: extreme fallback — explicit bypass_render_with_parser,
+        #      or no unified renderer resolves for a text model.
+        self.unified_renderer = None
+        self.renderer = None
+        self.chat_parser = None
 
-        if bypass_render_with_parser:
+        if not bypass_render_with_parser and image_processor is None:
+            from rllm.renderers import resolve as _resolve_unified
+
+            res = _resolve_unified(
+                self.model_name,
+                self.tokenizer,
+                backend="tinker",
+                family=renderer_family,
+                renderer_name=renderer_name,
+            )
+            if res.source != "chat_template":
+                self.unified_renderer = res.renderer
+                logger.info("TinkerEngine rendering via %s renderer (source=%s)", res.name, res.source)
+            else:
+                logger.warning(
+                    "No prime-rl/tinker renderer resolved for model=%r (renderer_family=%r, renderer_name=%r); "
+                    "falling back to ChatTemplateParser. Tool-call parsing then depends on the served model "
+                    "matching the hand-rolled template — pin rollout_engine.renderer_name or "
+                    "rllm.gateway.renderer_family to a renderer matching the served model.",
+                    self.model_name,
+                    renderer_family,
+                    renderer_name,
+                )
+
+        if self.unified_renderer is not None:
+            # Unified renderer owns render+parse. bypass stays False so
+            # assemble_model_output/_render_prompt_token_input take the unified branch.
+            self.bypass_render_with_parser = False
+            self.stop_sequences = self.unified_renderer.get_stop_token_ids()
+        elif not bypass_render_with_parser and image_processor is not None:
+            # VLM: the tinker_cookbook renderer owns multimodal (image chunk) rendering.
+            self.bypass_render_with_parser = False
+            if renderer_name is None:
+                try:
+                    renderer_name = model_info.get_recommended_renderer_name(self.model_name)
+                except KeyError as e:
+                    raise ValueError(
+                        f"tinker_cookbook's model_info does not know '{self.model_name}' (the cookbook release can lag "
+                        f"models the Tinker service already supports). Set rollout_engine.renderer_name explicitly to a "
+                        f"renderer matching the model's chat template (e.g. 'qwen3_5' for Qwen3.6 models)."
+                    ) from e
+            self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
+            self.stop_sequences = self.renderer.get_stop_sequences()
+        else:
+            # Extreme fallback / explicit escape hatch: ChatTemplateParser owns render+parse.
+            self.bypass_render_with_parser = True
             self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
             if hasattr(self.chat_parser, "stop_sequences") and self.chat_parser.stop_sequences:
                 self.stop_sequences = self.chat_parser.stop_sequences
@@ -229,9 +288,6 @@ class TinkerEngine(RolloutEngine):
                 self.stop_sequences = [tokenizer.eos_token_id]
             else:
                 raise ValueError("No stop sequences found for tokenizer or chat parser")
-        else:
-            self.chat_parser = None
-            self.stop_sequences = self.renderer.get_stop_sequences()
 
         # Sampling client will be set via set_sampling_client()
         self.sampling_client = None
