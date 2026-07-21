@@ -19,6 +19,13 @@ class TestLoadAgent:
         agent = load_agent("react")
         assert hasattr(agent, "run") and callable(agent.run)
 
+    def test_load_builtin_native_react_harness(self):
+        from rllm.harnesses.native_react import NativeReactHarness
+
+        agent = load_agent("native-react")
+
+        assert isinstance(agent, NativeReactHarness)
+
     def test_load_by_import_path_class_auto_instantiates(self):
         """Loading a module:ClassName path auto-instantiates the class."""
         agent = load_agent("rllm.harnesses.react:ReActHarness")

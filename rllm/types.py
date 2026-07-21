@@ -39,6 +39,10 @@ class TerminationReason(Enum):
     MAX_RESPONSE_LENGTH_EXCEEDED = "max_response_length_exceeded"
     ENV_DONE = "env_done"
     MAX_TURNS_EXCEEDED = "max_turns_exceeded"
+    # The model repeatedly failed a required agent/tool protocol. Unlike an
+    # upstream MODEL_ERROR, this is policy behavior with a trustworthy verifier
+    # reward, so it deliberately remains outside INFRA_ERROR_REASONS.
+    TOOL_PROTOCOL_ERROR = "tool_protocol_error"
     TIMEOUT = "timeout"  # agent execution wall-clock budget — reward is still graded on partial state
     UNKNOWN = "unknown"
     ERROR = "error"
