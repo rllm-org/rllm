@@ -80,13 +80,15 @@ class TestSessionRouter:
         with pytest.raises(RuntimeError, match="No healthy workers"):
             router.route("sess-1")
 
-    def test_all_dead_raises(self):
+    def test_all_dead_health_state_fails_open_to_registered_worker(self):
         router = SessionRouter()
         router.add_worker(_w("w1", "http://w1"))
         router.dead_workers.add("http://w1")
 
-        with pytest.raises(RuntimeError, match="No healthy workers"):
-            router.route("sess-1")
+        worker = router.route("sess-1")
+
+        assert worker.url == "http://w1"
+        assert router.active_counts["http://w1"] == 1
 
     def test_dead_worker_excluded(self):
         router = SessionRouter()

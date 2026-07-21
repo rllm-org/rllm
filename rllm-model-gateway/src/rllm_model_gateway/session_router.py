@@ -163,6 +163,7 @@ class SessionRouter:
         self._failure_threshold = failure_threshold
         self._health_task: asyncio.Task[None] | None = None
         self._http: httpx.AsyncClient | None = None
+        self._all_workers_unhealthy_logged = False
 
     # -- Worker management -------------------------------------------------
 
@@ -203,8 +204,24 @@ class SessionRouter:
     def route(self, session_id: str | None = None) -> WorkerInfo:
         healthy = [w for w in self.workers if w.url not in self.dead_workers]
         if not healthy:
-            raise RuntimeError("No healthy workers available")
-        worker = self.policy.select_worker(healthy, session_id, self.active_counts)
+            if not self.workers:
+                raise RuntimeError("No healthy workers available")
+            # A health probe is advisory. Under high concurrency an otherwise
+            # usable proxy can answer /health too slowly and be marked dead.
+            # Refusing the entire registered pool then creates a guaranteed
+            # outage from an uncertain signal. Fail open and let the real
+            # request path determine whether the worker is reachable.
+            if not self._all_workers_unhealthy_logged:
+                logger.warning(
+                    "All %d registered workers failed health checks; routing fail-open",
+                    len(self.workers),
+                )
+                self._all_workers_unhealthy_logged = True
+            candidates = self.workers
+        else:
+            self._all_workers_unhealthy_logged = False
+            candidates = healthy
+        worker = self.policy.select_worker(candidates, session_id, self.active_counts)
         self.active_counts[worker.url] = self.active_counts.get(worker.url, 0) + 1
         return worker
 
