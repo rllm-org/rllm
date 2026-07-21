@@ -11,11 +11,13 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from openai import APITimeoutError, OpenAI
+from openai import APIConnectionError, APITimeoutError, BadRequestError, OpenAI
+from openai.types.chat import ChatCompletion
 
 from rllm.harnesses.native_react import (
     NATIVE_SYSTEM_PROMPT,
     NATIVE_TOOL_SCHEMAS,
+    NativeModelResponseError,
     NativeReactHarness,
     PersistentBashSession,
     PersistentShellError,
@@ -23,6 +25,7 @@ from rllm.harnesses.native_react import (
     ShellResult,
     ToolNotice,
     ToolObservation,
+    _is_context_length_exception,
     _is_timeout_exception,
     format_shell_result,
     initial_messages,
@@ -39,6 +42,43 @@ from rllm.sandbox.protocol import SandboxCommandTimeout
 from rllm.types import INFRA_ERROR_REASONS, AgentConfig, Task, TerminationReason
 
 requires_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for the native-react terminal integration")
+
+
+def _run_with_native_response(monkeypatch, response_or_error, *, max_tokens=32_768):
+    import openai
+
+    import rllm.harnesses.native_react as native_react
+
+    class Completions:
+        def create(self, **kwargs):
+            if isinstance(response_or_error, BaseException):
+                raise response_or_error
+            return response_or_error
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=Completions())
+
+        def close(self):
+            pass
+
+    class FakeShell:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self, *, workdir=None):
+            pass
+
+        def run(self, command, timeout):
+            return SimpleNamespace(output="", exit_code=0, timed_out=False)
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(native_react, "PersistentBashSession", FakeShell)
+    return NativeReactHarness(max_turns=1, max_tokens=max_tokens).run(
+        Task(id="model-response-task", instruction="inspect", metadata={"workdir": "/tmp", "agent_timeout": 30}),
+        AgentConfig(base_url="http://gateway/v1", model="qwen", session_uid="model-response-session"),
+        env=SimpleNamespace(),
+    )
 
 
 class _OuterWaitTimeoutSandbox:
@@ -454,6 +494,22 @@ def test_timeout_exception_detection_covers_backend_and_sandbox_timeouts():
     assert _is_timeout_exception(BackendTimeoutError("gateway deadline exceeded"))
     assert _is_timeout_exception(SandboxCommandTimeout("command timed out"))
     assert not _is_timeout_exception(RuntimeError("ordinary failure"))
+
+
+def test_context_length_exception_detection_covers_nested_gateway_error():
+    body = {
+        "detail": {
+            "error": {
+                "code": "context_length_exceeded",
+                "message": "Rollout terminated: TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED",
+            }
+        }
+    }
+    response = httpx.Response(400, request=httpx.Request("POST", "http://gateway/v1/chat/completions"), json=body)
+    error = BadRequestError("prompt window exceeded", response=response, body=body)
+
+    assert _is_context_length_exception(error)
+    assert not _is_context_length_exception(RuntimeError("ordinary bad request"))
 
 
 @requires_tmux
@@ -1845,3 +1901,131 @@ def test_api_timeout_returns_typed_timeout_episode(monkeypatch):
     assert episode.termination_reason is TerminationReason.TIMEOUT
     assert episode.metadata["error"]["error_type"] == "AgentTimeoutError"
     assert "APITimeoutError" in episode.metadata["error"]["message"]
+
+
+def test_context_length_error_returns_typed_prompt_limit_episode(monkeypatch):
+    import openai
+
+    import rllm.harnesses.native_react as native_react
+
+    body = {
+        "detail": {
+            "error": {
+                "code": "context_length_exceeded",
+                "message": "Rollout terminated: TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED",
+            }
+        }
+    }
+
+    class Completions:
+        def create(self, **kwargs):
+            response = httpx.Response(400, request=httpx.Request("POST", "http://gateway/v1/chat/completions"), json=body)
+            raise BadRequestError("prompt window exceeded", response=response, body=body)
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=Completions())
+
+        def close(self):
+            pass
+
+    class FakeShell:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self, *, workdir=None):
+            pass
+
+        def run(self, command, timeout):
+            return SimpleNamespace(output="", exit_code=0, timed_out=False)
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(native_react, "PersistentBashSession", FakeShell)
+
+    episode = NativeReactHarness(max_turns=1).run(
+        Task(id="prompt-limit-task", instruction="inspect", metadata={"workdir": "/tmp", "agent_timeout": 30}),
+        AgentConfig(base_url="http://gateway/v1", model="qwen", session_uid="prompt-limit-session"),
+        env=SimpleNamespace(),
+    )
+
+    assert episode.termination_reason is TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED
+    assert episode.metadata["native_react"] == {"turns": 0, "parse_errors": 0}
+    assert episode.metadata["error"]["error_type"] == "ContextLengthExceededError"
+
+
+def test_heartbeat_context_error_returns_typed_prompt_limit_episode(monkeypatch):
+    payload = {
+        "detail": {
+            "error": {
+                "code": "context_length_exceeded",
+                "message": "Rollout terminated: TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED",
+            }
+        }
+    }
+
+    episode = _run_with_native_response(monkeypatch, ChatCompletion.model_construct(**payload))
+
+    assert episode.termination_reason is TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED
+    assert episode.metadata["error"]["error_type"] == "ContextLengthExceededError"
+    assert "contained no choices" in episode.metadata["error"]["message"]
+
+
+def test_heartbeat_timeout_returns_typed_timeout_episode(monkeypatch):
+    payload = {
+        "error": {
+            "message": "gateway heartbeat budget exhausted waiting for upstream",
+            "type": "gateway_upstream_timeout",
+            "code": 504,
+        }
+    }
+
+    episode = _run_with_native_response(monkeypatch, ChatCompletion.model_construct(**payload))
+
+    assert episode.termination_reason is TerminationReason.TIMEOUT
+    assert episode.metadata["error"]["error_type"] == "AgentTimeoutError"
+    assert "NativeModelResponseError" in episode.metadata["error"]["message"]
+
+
+def test_heartbeat_gateway_error_is_tagged_for_model_error_retry(monkeypatch):
+    payload = {
+        "error": {
+            "message": "gateway upstream failure: connection reset",
+            "type": "gateway_upstream_error",
+            "code": 502,
+        }
+    }
+
+    with pytest.raises(NativeModelResponseError) as exc_info:
+        _run_with_native_response(monkeypatch, ChatCompletion.model_construct(**payload))
+
+    assert exc_info.value.body == payload
+    assert exc_info.value._rllm_termination_reason is TerminationReason.MODEL_ERROR
+
+
+def test_finish_reason_length_returns_typed_response_limit_episode(monkeypatch):
+    class SDKMessage:
+        def model_dump(self, **kwargs):
+            assert kwargs == {"exclude_unset": True}
+            return {"role": "assistant", "content": "partial response"}
+
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SDKMessage(), finish_reason="length")],
+    )
+
+    episode = _run_with_native_response(monkeypatch, response, max_tokens=123)
+
+    assert episode.termination_reason is TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED
+    assert episode.metadata["native_react"] == {"turns": 1, "parse_errors": 0}
+    assert episode.metadata["error"] == {
+        "error_type": "OutputLengthExceededError",
+        "message": "model response reached the per-turn output limit of 123 tokens",
+    }
+
+
+def test_openai_transport_error_is_tagged_for_model_error_retry(monkeypatch):
+    error = APIConnectionError(request=httpx.Request("POST", "http://gateway/v1/chat/completions"))
+
+    with pytest.raises(APIConnectionError) as exc_info:
+        _run_with_native_response(monkeypatch, error)
+
+    assert exc_info.value._rllm_termination_reason is TerminationReason.MODEL_ERROR

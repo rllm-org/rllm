@@ -147,6 +147,37 @@ _TIMEOUT_ERROR_NAMES = frozenset(
 )
 
 
+class NativeModelResponseError(RuntimeError):
+    """Malformed/error gateway response that should use model-error retries."""
+
+    _rllm_termination_reason = TerminationReason.MODEL_ERROR
+
+    def __init__(self, message: str, *, body: Any = None) -> None:
+        super().__init__(message)
+        self.body = body
+
+
+def _response_payload(response: Any) -> Any:
+    """Extract an OpenAI response payload for error classification."""
+    if isinstance(response, dict):
+        return response
+    model_dump = getattr(response, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return model_dump(exclude_none=True)
+        except Exception:
+            pass
+    return {"response_type": type(response).__name__, "response": str(response)}
+
+
+def _invalid_model_response(response: Any, message: str) -> NativeModelResponseError:
+    payload = _response_payload(response)
+    detail = json.dumps(payload, default=str)
+    if len(detail) > 2_000:
+        detail = f"{detail[:2_000]}..."
+    return NativeModelResponseError(f"{message}: {detail}", body=payload)
+
+
 def _is_timeout_exception(error: BaseException) -> bool:
     """Recognize timeout failures raised by model clients and sandbox backends."""
     current: BaseException | None = error
@@ -159,8 +190,34 @@ def _is_timeout_exception(error: BaseException) -> bool:
             return True
         if getattr(current, "status_code", None) in _TIMEOUT_STATUS_CODES:
             return True
-        message = str(current).lower()
-        if any(marker in message for marker in ("timed out", "timeout exceeded", "deadline exceeded")):
+        parts = [str(current)]
+        body = getattr(current, "body", None)
+        if body is not None:
+            parts.append(json.dumps(body, default=str))
+        message = " ".join(parts).lower()
+        if any(marker in message for marker in ("timed out", "timeout exceeded", "deadline exceeded", "gateway_upstream_timeout")):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _is_context_length_exception(error: BaseException) -> bool:
+    """Recognize the gateway's OpenAI-style prompt-window rejection."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    markers = (
+        "context_length_exceeded",
+        "max_prompt_length_exceeded",
+        "maximum context length",
+        "exceeded the model's prompt window",
+    )
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts = [str(current)]
+        body = getattr(current, "body", None)
+        if body is not None:
+            parts.append(json.dumps(body, default=str))
+        if any(marker in " ".join(parts).lower() for marker in markers):
             return True
         current = current.__cause__ or current.__context__
     return False
@@ -1120,7 +1177,7 @@ class NativeReactHarness(SandboxedAgentFlow):
         )
 
     def run(self, task: Task, config: AgentConfig, *, env: Sandbox) -> Episode:
-        from openai import OpenAI
+        from openai import OpenAI, OpenAIError
 
         client = OpenAI(base_url=config.base_url, api_key="EMPTY", max_retries=0)
         agent_user = task.metadata.get("agent_user")
@@ -1167,9 +1224,33 @@ class NativeReactHarness(SandboxedAgentFlow):
                     max_tokens=self.max_tokens,
                     timeout=remaining,
                 )
-                assistant = preserve_assistant_message(response.choices[0].message)
+                choices = response.get("choices") if isinstance(response, dict) else getattr(response, "choices", None)
+                if not choices:
+                    raise _invalid_model_response(response, "model response contained no choices")
+                choice = choices[0]
+                response_message = choice.get("message") if isinstance(choice, dict) else getattr(choice, "message", None)
+                if response_message is None:
+                    raise _invalid_model_response(response, "model response choice contained no assistant message")
+                try:
+                    assistant = preserve_assistant_message(response_message)
+                except Exception as error:
+                    raise _invalid_model_response(response, "model response contained an invalid assistant message") from error
                 messages.append(assistant)
                 turns += 1
+
+                finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else getattr(choice, "finish_reason", None)
+                if finish_reason == "length":
+                    return self._outcome_episode(
+                        task,
+                        config,
+                        termination_reason=TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED,
+                        turns=turns,
+                        parse_errors=parse_errors,
+                        error={
+                            "error_type": "OutputLengthExceededError",
+                            "message": f"model response reached the per-turn output limit of {self.max_tokens} tokens",
+                        },
+                    )
 
                 tool_calls = parse_native_tool_calls(assistant)
                 if not tool_calls:
@@ -1261,6 +1342,23 @@ class NativeReactHarness(SandboxedAgentFlow):
                     parse_errors=parse_errors,
                     cause=error,
                 )
+            if _is_context_length_exception(error):
+                return self._outcome_episode(
+                    task,
+                    config,
+                    termination_reason=TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,
+                    turns=turns,
+                    parse_errors=parse_errors,
+                    error={"error_type": "ContextLengthExceededError", "message": str(error)},
+                )
+            if isinstance(error, OpenAIError):
+                # Preserve retries for transient upstream failures, but make an
+                # exhausted retry budget resolve to MODEL_ERROR rather than the
+                # engine's generic ERROR bucket.
+                try:
+                    error._rllm_termination_reason = TerminationReason.MODEL_ERROR
+                except Exception:
+                    raise NativeModelResponseError(str(error), body=getattr(error, "body", None)) from error
             raise
         finally:
             # The verifier runs in this same task sandbox after the harness
@@ -1277,6 +1375,7 @@ __all__ = [
     "NATIVE_USER_PROMPT",
     "NativeToolCall",
     "NativeReactHarness",
+    "NativeModelResponseError",
     "PersistentBashSession",
     "PersistentShellError",
     "PersistentShellProtocolError",

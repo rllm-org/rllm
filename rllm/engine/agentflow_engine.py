@@ -578,6 +578,7 @@ class AgentFlowEngine:
         task_obj = task if isinstance(task, Task) else task_from_row(task, task_id)
 
         async with self._semaphore:
+            retry_errors: list[dict[str, Any]] = []
             for retry_attempt in range(1, self.retry_limit + 1):
                 uid = f"{task_id}:{rollout_idx}"
                 if retry_attempt > 1:
@@ -600,6 +601,10 @@ class AgentFlowEngine:
                         reward_strs.append(f"{traj.name}: {reward}")
 
                     timing_str = _format_timing_breakdown(episode.metrics)
+                    episode.metrics["retry/count"] = retry_attempt - 1
+                    episode.metrics["retry/recovered"] = int(bool(retry_errors))
+                    if retry_errors:
+                        episode.metadata["retry_errors"] = retry_errors
                     colorful_print(
                         f"[{uid}] Rewards: [{', '.join(reward_strs)}]{timing_str}, Termination: {episode.termination_reason}",
                         fg="green" if episode.is_correct else "yellow",
@@ -610,6 +615,7 @@ class AgentFlowEngine:
                 except Exception as e:
                     logger.error("[%s] Attempt %d/%d failed: %r (type=%s)", uid, retry_attempt, self.retry_limit, e, type(e).__name__)
                     if retry_attempt < self.retry_limit:
+                        retry_errors.append(_exception_error_info(e))
                         continue
                     if self.raise_on_error:
                         raise
@@ -647,6 +653,11 @@ class AgentFlowEngine:
                     metrics = compute_step_metrics(trajectories)
                     metrics["empty"] = int(not steps)
                     metrics["steps_collected"] = len(steps)
+                    metrics["retry/count"] = retry_attempt - 1
+                    metrics["retry/recovered"] = 0
+                    metadata = {"error": _exception_error_info(e)}
+                    if retry_errors:
+                        metadata["retry_errors"] = retry_errors
                     return (
                         task_id,
                         rollout_idx,
@@ -658,7 +669,7 @@ class AgentFlowEngine:
                             termination_reason=reason,
                             trajectories=trajectories,
                             metrics=metrics,
-                            metadata={"error": _exception_error_info(e)},
+                            metadata=metadata,
                         ),
                     )
 
@@ -854,13 +865,18 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
-        if _no_usable_model_output(enriched) and not enriched.is_correct and enriched.termination_reason not in INFRA_ERROR_REASONS:
+        if (
+            _no_usable_model_output(enriched)
+            and not enriched.is_correct
+            and enriched.termination_reason in {None, TerminationReason.UNKNOWN, TerminationReason.ENV_DONE}
+        ):
             # The agent produced nothing usable — no LLM calls at all, or every
             # call came back empty: a downed/erroring upstream (proxy died, auth or
             # tunnel failure), NOT a clean rollout. The reward (0) is meaningless;
             # this is the root cause, so it beats a downstream grading_error and the
-            # ENV_DONE default. (A harness-set infra reason already wins, above; a
-            # *correct* rollout is never reclassified.)
+            # ENV_DONE default. Any explicit harness verdict (including prompt,
+            # response, turn, protocol, and timeout limits) is authoritative; a
+            # *correct* rollout is never reclassified.
             enriched.termination_reason = TerminationReason.MODEL_ERROR
             enriched.metadata.setdefault("error", {"error_type": "EmptyCompletion", "message": "no usable model output — no LLM calls or all completions empty (upstream/proxy/gateway failure)"})
         elif eval_output.error:
