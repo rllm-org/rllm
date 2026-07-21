@@ -173,6 +173,23 @@ class SnapshotRegistry:
         self._groups: dict[str, dict] = groups if groups is not None else {}
         self._lock = threading.Lock()
 
+    def __getstate__(self) -> dict:
+        # ``threading.Lock`` is not picklable. This class instance travels
+        # through ``ray.put`` / actor arg serialization when ``SandboxTaskHooks``
+        # (which holds a ``_registry: SnapshotRegistry``) is sent to a verl
+        # ``VerlTaskRunner`` actor. Ray uses cloudpickle, which rejects locks
+        # with ``TypeError: cannot pickle '_thread.lock' object``. Strip the
+        # lock on pickle; it will be recreated fresh on unpickle. Any
+        # cross-process consistency was already going to break at the object-
+        # copy boundary — locks don't survive serialization semantically.
+        state = self.__dict__.copy()
+        del state["_lock"]
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._lock = threading.Lock()
+
     @classmethod
     def load(cls) -> SnapshotRegistry:
         path = _registry_path()
