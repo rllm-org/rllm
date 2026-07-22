@@ -453,13 +453,16 @@ def _process_trajectory_group(trajectory_group: TrajectoryGroup, task_id: str, a
     return total_steps
 
 
-def _compute_merge_metrics(accumulated: AccumulatedData, total_agent_steps: int) -> dict[str, float]:
+def _compute_merge_metrics(accumulated: AccumulatedData, total_agent_steps: int, unmerged_steps_per_traj: list[int]) -> dict[str, float]:
     """Per-batch metrics characterising the merge step.
 
     Naming matches Tinker's transform_trajectory_groups_to_datums so the
     same metric paths show up regardless of backend:
 
-    - batch/steps_per_traj/{mean,min,max}: number of rows emitted per
+    - batch/steps_per_traj/{mean,min,max}: unmerged agent steps (LLM turns)
+      per trajectory, before prefix-merging (len(traj.steps)).
+
+    - batch/merged_steps_per_traj/{mean,min,max}: number of rows emitted per
       trajectory after prefix-merging. =1 for cumulative trajectories,
       >1 if a prefix break forced a split mid-trajectory.
 
@@ -495,10 +498,10 @@ def _compute_merge_metrics(accumulated: AccumulatedData, total_agent_steps: int)
             action_token_ratios.append(float(mask.sum().item()) / n)
     total_emitted_rows = len(accumulated.responses)
 
-    return {
-        "batch/steps_per_traj/mean": float(_np.mean(rows_per_traj)),
-        "batch/steps_per_traj/min": int(_np.min(rows_per_traj)),
-        "batch/steps_per_traj/max": int(_np.max(rows_per_traj)),
+    metrics = {
+        "batch/merged_steps_per_traj/mean": float(_np.mean(rows_per_traj)),
+        "batch/merged_steps_per_traj/min": int(_np.min(rows_per_traj)),
+        "batch/merged_steps_per_traj/max": int(_np.max(rows_per_traj)),
         "batch/step_response_length/mean": float(_np.mean(response_lens)),
         "batch/step_response_length/min": int(_np.min(response_lens)),
         "batch/step_response_length/max": int(_np.max(response_lens)),
@@ -507,6 +510,11 @@ def _compute_merge_metrics(accumulated: AccumulatedData, total_agent_steps: int)
         "batch/action_token_ratio/max": float(_np.max(action_token_ratios)) if action_token_ratios else 0.0,
         "batch/merge_compression_ratio": (total_agent_steps / total_emitted_rows if total_emitted_rows > 0 else 0.0),
     }
+    if unmerged_steps_per_traj:
+        metrics["batch/steps_per_traj/mean"] = float(_np.mean(unmerged_steps_per_traj))
+        metrics["batch/steps_per_traj/min"] = int(_np.min(unmerged_steps_per_traj))
+        metrics["batch/steps_per_traj/max"] = int(_np.max(unmerged_steps_per_traj))
+    return metrics
 
 
 def transform_episodes_to_dataproto(
@@ -526,7 +534,8 @@ def transform_episodes_to_dataproto(
         stepwise_advantage_mode: The mode of stepwise advantage computation.
     Returns:
         DataProto: The DataProto built from the episodes. Per-batch merge
-        metrics (batch/steps_per_traj, batch/step_response_length) are
+        metrics (batch/steps_per_traj, batch/merged_steps_per_traj,
+        batch/step_response_length) are
         stashed on ``meta_info["merge_metrics"]`` so the caller can lift
         them into trainer_state.metrics without a signature change.
     """
@@ -535,16 +544,19 @@ def transform_episodes_to_dataproto(
 
     accumulated = AccumulatedData()
     total_agent_steps = 0
+    unmerged_steps_per_traj: list[int] = []
     for episode in episodes:
         task_id = episode.task_id
-        total_agent_steps += sum(len(traj.steps) for traj in episode.trajectories)
+        traj_step_counts = [len(traj.steps) for traj in episode.trajectories]
+        total_agent_steps += sum(traj_step_counts)
+        unmerged_steps_per_traj.extend(traj_step_counts)
         total_steps = _process_episode(episode, task_id, accumulated)
         accumulated.repeat_counts.append(total_steps)
 
     assert hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
     pad_token_id = tokenizer.pad_token_id
     batch = _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, processor)
-    batch.meta_info["merge_metrics"] = _compute_merge_metrics(accumulated, total_agent_steps)
+    batch.meta_info["merge_metrics"] = _compute_merge_metrics(accumulated, total_agent_steps, unmerged_steps_per_traj)
     return batch
 
 
