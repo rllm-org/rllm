@@ -898,11 +898,7 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
-        if (
-            _no_usable_model_output(enriched)
-            and not enriched.is_correct
-            and enriched.termination_reason in {None, TerminationReason.UNKNOWN, TerminationReason.ENV_DONE}
-        ):
+        if _no_usable_model_output(enriched) and not enriched.is_correct and enriched.termination_reason in {None, TerminationReason.UNKNOWN, TerminationReason.ENV_DONE}:
             # The agent produced nothing usable — no LLM calls at all, or every
             # call came back empty: a downed/erroring upstream (proxy died, auth or
             # tunnel failure), NOT a clean rollout. The reward (0) is meaningless;

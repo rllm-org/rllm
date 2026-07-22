@@ -117,7 +117,10 @@ def main() -> None:
     if not rows:
         raise SystemExit("no rows produced")
     DatasetRegistry.register_dataset(
-        args.name, rows, split=args.split, source=f"distill-from-eval:{os.path.basename(run_dir)}",
+        args.name,
+        rows,
+        split=args.split,
+        source=f"distill-from-eval:{os.path.basename(run_dir)}",
         description="thinking-SFT distillation from deepseek-v4-pro terminus2 trajectories",
         category="agentic",
     )
