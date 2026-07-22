@@ -29,6 +29,7 @@ from rllm_model_gateway.session_router import SessionRouter
 from rllm_model_gateway.store.base import TraceStore
 from rllm_model_gateway.token_accumulator import (
     ResetReason,
+    SessionSlots,
     TokenAccumulator,
 )
 
@@ -233,7 +234,10 @@ class ReverseProxy:
         self.weight_version: int | None = None
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
-        self._accumulators: dict[str, TokenAccumulator] = {}
+        # One SessionSlots per session, holding an accumulator per conversation
+        # lineage (parent agent + any subagents) so interleaved lineages each
+        # stay bridged (drift-free) instead of forcing resets on each switch.
+        self._accumulators: dict[str, SessionSlots] = {}
         # Loop-health instrumentation (diagnostic only; see _loop_health_monitor).
         # _inflight counts concurrent in-flight generations; _recent_lag_ms is the
         # latest event-loop lag sample, stamped onto duplicate logs for correlation.
@@ -242,11 +246,13 @@ class ReverseProxy:
         self._recent_lag_ms: float = 0.0
         self._monitor_task: asyncio.Task[None] | None = None
 
-    def _get_accumulator(self, session_id: str) -> TokenAccumulator:
-        """Return the TokenAccumulator for *session_id*, creating if needed."""
-        if session_id not in self._accumulators:
-            self._accumulators[session_id] = TokenAccumulator(self.renderer, session_id=session_id)
-        return self._accumulators[session_id]
+    def _session_slots(self, session_id: str) -> SessionSlots:
+        """Return the SessionSlots registry for *session_id*, creating if needed."""
+        slots = self._accumulators.get(session_id)
+        if slots is None:
+            slots = SessionSlots(self.renderer, session_id=session_id)
+            self._accumulators[session_id] = slots
+        return slots
 
     def _track_inflight(self, task: asyncio.Future) -> None:
         """Count *task* (an in-flight generation) toward the in-flight gauge until
@@ -360,9 +366,12 @@ class ReverseProxy:
         # Cumulative token mode interception: if enabled and past first turn,
         # rewrite to /v1/completions with pre-tokenized prompt to avoid drift.
         if self.cumulative_token_mode and session_id and request.url.path.endswith("/chat/completions"):
-            acc = self._get_accumulator(session_id)
+            messages = request_body.get("messages", [])
+            # Route to the slot whose lineage this request continues (a new slot
+            # if it continues none — e.g. a subagent turn), and mark it active so
+            # this request's turn-0 ingest below lands on the same slot.
+            acc = self._session_slots(session_id).select(messages)
             if acc.should_rewrite():
-                messages = request_body.get("messages", [])
                 # Classify the incoming request against the accumulated snapshot.
                 # plan.action is "extend" (build a /v1/completions bridge) or
                 # "reset" (fall through to the chat path as a fresh turn-0). Every
@@ -568,9 +577,11 @@ class ReverseProxy:
         if session_id and response_body:
             await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version)
 
-            # Ingest first turn into accumulator for cumulative token mode
+            # Ingest first turn into accumulator for cumulative token mode.
+            # Use the slot handle() selected for this request (active), so a new
+            # lineage (e.g. a subagent turn-0) seeds its own slot.
             if self.cumulative_token_mode and request.url.path.endswith("/chat/completions"):
-                acc = self._get_accumulator(session_id)
+                acc = self._session_slots(session_id).active
                 if acc.turn_count == 0:
                     prompt_ids = extract_prompt_token_ids(response_body)
                     completion_ids = extract_completion_token_ids(response_body)
@@ -1166,9 +1177,11 @@ class ReverseProxy:
                     self._pending_traces.add(task)
                     task.add_done_callback(self._pending_traces.discard)
 
-                    # Ingest first turn into accumulator for cumulative token mode
+                    # Ingest first turn into accumulator for cumulative token
+                    # mode. Use the slot handle() selected (active) so a new
+                    # lineage (e.g. a subagent turn-0) seeds its own slot.
                     if self.cumulative_token_mode:
-                        acc = self._get_accumulator(session_id)
+                        acc = self._session_slots(session_id).active
                         if acc.turn_count == 0:
                             prompt_ids = trace.prompt_token_ids
                             completion_ids = trace.completion_token_ids
