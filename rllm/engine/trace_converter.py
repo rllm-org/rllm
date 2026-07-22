@@ -78,6 +78,14 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
     chat_completions = list(trace.messages)
     chat_completions.append(trace.response_message)
 
+    # Carry the gateway-assigned lineage id (parent vs subagent conversation)
+    # onto the step so episode enrichment can split a session's steps into one
+    # trajectory per lineage. None when cumulative mode is off (no slots).
+    metadata = dict(trace.metadata or {})
+    lineage_id = getattr(trace, "lineage_id", None)
+    if lineage_id is not None:
+        metadata["lineage_id"] = lineage_id
+
     return Step(
         id=trace.trace_id,
         chat_completions=chat_completions,
@@ -85,7 +93,7 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
         model_response=content,
         output=content,
         thought=reasoning,
-        metadata=trace.metadata,
+        metadata=metadata,
         weight_version=trace.weight_version,
     )
 

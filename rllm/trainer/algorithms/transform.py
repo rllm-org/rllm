@@ -47,7 +47,14 @@ def _impute_trajectory_names(
         for traj_idx, trajectory in enumerate(episode.trajectories):
             if not trajectory.name or trajectory.name == config.default_traj_name:  # is unnamed
                 if config.impute_missing_names:
-                    new_name = f"{config.default_traj_name}_{traj_idx}"
+                    # Name by the ORIGINATING trajectory, not post-split position:
+                    # lineage-splits of one trajectory (parent + its subagents,
+                    # tagged with the same origin_traj_idx during enrichment) share
+                    # one role/group, while genuine multi-agent trajectories keep
+                    # distinct position names. Falls back to position when no split
+                    # happened (origin_traj_idx absent) — unchanged behavior.
+                    role_idx = (trajectory.metadata or {}).get("origin_traj_idx", traj_idx)
+                    new_name = f"{config.default_traj_name}_{role_idx}"
                     warnings.append(f"Episode {episode.id}: Trajectory at position {traj_idx} renamed to '{new_name}'")
                     trajectory.name = new_name
                 elif config.drop_unnamed_traj:
