@@ -1,6 +1,6 @@
 # Design: Multi-lineage (DAG) prefix merge for subagent trajectories
 
-- **Status:** Layer 1 implemented (trainer-side multi-segment merger in `rllm/trainer/verl/transform.py` + `rllm/trainer/tinker/transform.py`, with tests). Layer 2 (gateway multi-slot accumulator) proposed.
+- **Status:** Layer 1 implemented (trainer-side multi-segment merger in `rllm/trainer/verl/transform.py` + `rllm/trainer/tinker/transform.py`, with tests) — PR #773. Layer 2 implemented (gateway multi-slot accumulator, `SessionSlots` in `rllm-model-gateway`) — PR #774; required when `cumulative_token_mode` is on.
 - **Related:** `design/gateway-dag-token-storage.md` (delta-chain token storage — this is its deferred §7 "full branching DAG", motivated by subagents); `PR_dev-multiturn-merged-rows.md` (the `merge_compression_ratio` metric); `rllm-model-gateway` `token_accumulator.py` / `proxy.py`; `rllm/harnesses/{opencode,cli_harness}.py`.
 - **Scope:** how a multi-turn rollout whose turns do **not** all share one growing prefix (a subagent runs mid-rollout) is merged into training rows, and (proposed) how the gateway should tag such turns.
 
@@ -88,16 +88,24 @@ Replace the single running segment with a **list of open segments**. For each st
 weight (scale advantage by `1/#lineages`) or keep per-row weighting. Layer 1 works either way;
 default keeps current behavior, revisit if it skews.
 
-## 3. Layer 2 — gateway multi-slot accumulator (proposed)
+## 3. Layer 2 — gateway multi-slot accumulator (implemented, PR #774)
 
-This is the user's "dict of prefix tokens → new prefix takes a new slot → the trajectory becomes a
-DAG," and the fix for the *generation-time* reset storm.
+This is the "dict of prefix tokens → new prefix takes a new slot → the trajectory becomes a DAG,"
+and the fix for the *generation-time* reset storm. **It is required when `cumulative_token_mode` is
+on**: there, a subagent switch resets the single accumulator and the parent's resumed turn is
+re-tokenized from text (drifting off the pre-subagent tokens), so the per-lineage tokens are no
+longer byte-exact and Layer 1's merge cannot fully stitch the parent back together.
 
-Replace the single-prefix `TokenAccumulator` with a **registry of live slots**, each carrying its
-own `prev_prompt_ids` / `prev_completion_ids` / `_prefix_fps`. `plan_turn` matches an incoming
-request against **all** slots (message-prefix match): extend the matching slot; if none matches,
-**open a new slot instead of `reset()`**. `DUPLICATE`/replay is handled per-slot. A genuine
-compaction (history shrank under an existing slot's snapshot) still resets that slot.
+A new `SessionSlots` registry holds one `TokenAccumulator` ("slot") per lineage; the per-slot
+accumulator (its `plan_turn`/extend/replay/reset + bridging) is **unchanged**. Each request is
+routed to the slot it *continues* (`TokenAccumulator.continues` — a cumulative extension or an exact
+resend); if it continues none, a **new slot is opened instead of `reset()`**. The chosen slot is
+marked *active* so the proxy's turn-0 ingest lands on it. `DUPLICATE`/replay is handled per-slot; a
+genuine compaction (history shrank under an existing slot's snapshot) still resets that slot.
+Requests within a session are sequential (a subagent `task` call blocks the parent), so no locking;
+a defensive `max_slots` evicts the least-recently-used non-active lineage. Only 3 proxy call sites
+change (`_accumulators` → `dict[str, SessionSlots]`, the `handle()` selection, and the two turn-0
+ingest sites); single-lineage sessions behave identically.
 
 Wins beyond Layer 1:
 
@@ -131,8 +139,10 @@ unlocks its other deferred win (G GRPO rollouts sharing one system prefix, store
   module isn't importable in the doc env; the merge algorithm was additionally validated with a
   standalone replica (interleaved → 2, single-lineage → 1, sequential non-prefix → 2, two
   subagents → 3).
-- **Layer 2** (proposed): `TokenAccumulator` multi-slot routing across extend / new-slot / replay /
-  reset; parent-pointer round-trip; parity of reconstructed prompts against full-mode output.
+- **Layer 2** (PR #774, `rllm-model-gateway/tests/unit/test_token_accumulator.py`): `SessionSlots`
+  routing — parent→subagent→parent-resume re-selects the parent slot, a new lineage opens a slot, a
+  duplicate resend stays on its slot, eviction caps slots while keeping the active one; plus the
+  `continues()` predicate. Full gateway suite green (261 passed, 16 skipped).
 
 ## 6. Impact
 
