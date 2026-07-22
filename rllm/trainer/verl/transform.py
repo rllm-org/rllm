@@ -174,6 +174,7 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         "episode_ids": np.array(accumulated.episode_ids),  # unique identifier for each rollout
         "trajectory_ids": np.array(accumulated.trajectory_ids),
         "step_ids": np.array(accumulated.step_ids),
+        "task_ids": np.array(accumulated.task_ids),
         "batch_ids": np.array([str(uuid.uuid4())] * len(accumulated.trajectory_ids)),
         "step_nums": np.array(accumulated.step_nums),
         "is_correct": np.array(accumulated.is_correct),
@@ -362,6 +363,7 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
         accumulated.add_step(
             step_data=step_data,
             trajectory_id=trajectory_id,
+            task_id=task_id,
             traj_reward=traj_reward,
             step_num=1,
             is_last=True,
