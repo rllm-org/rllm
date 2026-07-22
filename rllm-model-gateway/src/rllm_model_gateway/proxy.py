@@ -9,6 +9,7 @@ import functools
 import json
 import logging
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -18,6 +19,7 @@ from starlette.responses import Response, StreamingResponse
 
 from rllm_model_gateway import fastjson
 from rllm_model_gateway.data_process import (
+    apply_chain,
     build_trace_record,
     build_trace_record_from_chunks,
     extract_completion_token_ids,
@@ -74,13 +76,18 @@ def _build_trace_data(
     latency_ms: float,
     weight_version: int | None,
     capture_raw: bool,
+    trace_id: str | None = None,
+    parent_len: int | None = None,
+    parent_trace_id: str | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
     """Build a TraceRecord and serialize it to a dict.
 
     Runs in a worker thread (see ``ReverseProxy._persist_trace``) so the token-id
     list copies + ``model_dump`` stay off the event-loop thread. Reads
     ``request_body``/``response_body`` without mutating them, so it's safe to run
-    concurrently with the response path.
+    concurrently with the response path. ``trace_id`` / ``parent_len`` /
+    ``parent_trace_id`` carry the delta-chain link computed synchronously by the
+    caller (see ``ReverseProxy._chain_link``).
     """
     trace = build_trace_record(
         session_id,
@@ -89,6 +96,9 @@ def _build_trace_data(
         latency_ms,
         weight_version=weight_version,
         capture_raw=capture_raw,
+        trace_id=trace_id,
+        parent_len=parent_len,
+        parent_trace_id=parent_trace_id,
     )
     return trace.trace_id, trace.session_id, trace.model_dump()
 
@@ -164,6 +174,26 @@ class ReverseProxy:
         if session_id not in self._accumulators:
             self._accumulators[session_id] = TokenAccumulator(self.renderer, session_id=session_id)
         return self._accumulators[session_id]
+
+    def _chain_link(self, acc: TokenAccumulator, trace_id: str) -> tuple[int, str | None]:
+        """Compute the delta-chain link for a turn about to be persisted.
+
+        Returns ``(parent_len, parent_trace_id)`` where ``parent_len`` is the length
+        of the parent turn's cumulative sequence (prompt+completion) — i.e. the
+        offset at which this turn's newly rendered tokens begin — and
+        ``parent_trace_id`` is the previous turn's id (None at a segment root).
+        These feed ``data_process.apply_chain`` to store only the prompt delta.
+
+        MUST be called **before** the matching ``acc.ingest_turn`` and synchronously
+        in request order, so ``prev_*`` still holds the parent's cumulative and the
+        chain pointer advances in order (the async store write can then land whenever).
+        Advances ``acc.last_trace_id`` to *trace_id* regardless of whether this turn
+        ends up a root or a link, so the next turn points at it.
+        """
+        parent_len = len(acc.prev_prompt_ids) + len(acc.prev_completion_ids)
+        parent = acc.last_trace_id
+        acc.last_trace_id = trace_id
+        return parent_len, parent
 
     def _track_inflight(self, task: asyncio.Future) -> None:
         """Count *task* (an in-flight generation) toward the in-flight gauge until
@@ -483,17 +513,33 @@ class ReverseProxy:
 
         # Persist trace
         if session_id and response_body:
-            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version)
+            trace_id = str(uuid.uuid4())
+            parent_len: int | None = None
+            parent_trace_id: str | None = None
 
-            # Ingest first turn into accumulator for cumulative token mode
+            # Ingest first turn into accumulator for cumulative token mode, and
+            # register this trace as the delta chain's head so turn 1 links to it.
+            # (Turn 0 is a chain root: parent_len is 0, so it is stored full.)
             if self.cumulative_token_mode and request.url.path.endswith("/chat/completions"):
                 acc = self._get_accumulator(session_id)
                 if acc.turn_count == 0:
                     prompt_ids = extract_prompt_token_ids(response_body)
                     completion_ids = extract_completion_token_ids(response_body)
                     if prompt_ids or completion_ids:
+                        parent_len, parent_trace_id = self._chain_link(acc, trace_id)
                         acc.ingest_turn(prompt_ids, completion_ids)
                         acc.update_prefix(request_body.get("messages", []))
+
+            await self._persist_trace(
+                session_id,
+                request_body,
+                response_body,
+                latency_ms,
+                request.state.weight_version,
+                trace_id=trace_id,
+                parent_len=parent_len,
+                parent_trace_id=parent_trace_id,
+            )
 
         # Sanitise response
         needs_strip_vllm = self.strip_vllm
@@ -634,6 +680,10 @@ class ReverseProxy:
         prompt_token_ids = extract_prompt_token_ids(response_body) or token_ids
         completion_token_ids = extract_completion_token_ids(response_body)
 
+        # Link into the delta chain BEFORE ingest (prev_* still holds the parent
+        # cumulative), then advance the accumulator.
+        trace_id = str(uuid.uuid4())
+        parent_len, parent_trace_id = self._chain_link(acc, trace_id)
         acc.ingest_turn(prompt_token_ids, completion_token_ids, advance=not replay)
         acc.update_prefix(request_body.get("messages", []))
 
@@ -645,7 +695,16 @@ class ReverseProxy:
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:
-            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version)
+            await self._persist_trace(
+                session_id,
+                request_body,
+                response_body,
+                latency_ms,
+                request.state.weight_version,
+                trace_id=trace_id,
+                parent_len=parent_len,
+                parent_trace_id=parent_trace_id,
+            )
 
         sanitized = response_body
         if isinstance(response_body, dict) and response_body:
@@ -791,6 +850,10 @@ class ReverseProxy:
                     prompt_ids = trace.prompt_token_ids or token_ids
                     completion_ids = trace.completion_token_ids
 
+                    # Compress this turn's prompt into a delta against the parent
+                    # (chain-link before ingest, while prev_* is the parent cumulative).
+                    parent_len, parent_trace_id = self._chain_link(acc, trace.trace_id)
+                    apply_chain(trace, parent_len, parent_trace_id)
                     acc.ingest_turn(prompt_ids, completion_ids, advance=not replay)
                     acc.update_prefix(request_body.get("messages", []))
 
@@ -833,6 +896,9 @@ class ReverseProxy:
 
         prompt_token_ids = extract_prompt_token_ids(response_body) or token_ids
         completion_token_ids = extract_completion_token_ids(response_body)
+        # Link into the delta chain before ingest (prev_* is the parent cumulative).
+        trace_id = str(uuid.uuid4())
+        parent_len, parent_trace_id = self._chain_link(acc, trace_id)
         acc.ingest_turn(prompt_token_ids, completion_token_ids, advance=not replay)
         acc.update_prefix(request_body.get("messages", []))
 
@@ -846,7 +912,17 @@ class ReverseProxy:
             chat_body["object"] = "chat.completion"
             if chat_body.get("choices"):
                 chat_body["choices"][0]["message"] = {"role": "assistant", "content": content}
-            trace = build_trace_record(session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
+            trace = build_trace_record(
+                session_id,
+                request_body,
+                chat_body,
+                latency_ms,
+                weight_version=request.state.weight_version,
+                capture_raw=self.capture_raw_payloads,
+                trace_id=trace_id,
+                parent_len=parent_len,
+                parent_trace_id=parent_trace_id,
+            )
             await self._persist(trace)
 
         chat_id = response_body.get("id", "chatcmpl-local")
@@ -1012,6 +1088,20 @@ class ReverseProxy:
                 # on real async I/O (e.g. aiosqlite) is not reliable.
                 if session_id and chunks:
                     trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
+
+                    # Ingest first turn into accumulator for cumulative token mode,
+                    # and register this trace as the delta chain's head (turn 0 is a
+                    # root, stored full) so turn 1 links to it.
+                    if self.cumulative_token_mode:
+                        acc = self._get_accumulator(session_id)
+                        if acc.turn_count == 0:
+                            prompt_ids = trace.prompt_token_ids
+                            completion_ids = trace.completion_token_ids
+                            if prompt_ids or completion_ids:
+                                self._chain_link(acc, trace.trace_id)
+                                acc.ingest_turn(prompt_ids, completion_ids)
+                                acc.update_prefix(request_body.get("messages", []))
+
                     task = asyncio.create_task(
                         self._safe_store(
                             trace.trace_id,
@@ -1021,16 +1111,6 @@ class ReverseProxy:
                     )
                     self._pending_traces.add(task)
                     task.add_done_callback(self._pending_traces.discard)
-
-                    # Ingest first turn into accumulator for cumulative token mode
-                    if self.cumulative_token_mode:
-                        acc = self._get_accumulator(session_id)
-                        if acc.turn_count == 0:
-                            prompt_ids = trace.prompt_token_ids
-                            completion_ids = trace.completion_token_ids
-                            if prompt_ids or completion_ids:
-                                acc.ingest_turn(prompt_ids, completion_ids)
-                                acc.update_prefix(request_body.get("messages", []))
 
         return StreamingResponse(
             event_generator(),
@@ -1193,6 +1273,10 @@ class ReverseProxy:
         response_body: dict[str, Any],
         latency_ms: float,
         weight_version: int | None,
+        *,
+        trace_id: str | None = None,
+        parent_len: int | None = None,
+        parent_trace_id: str | None = None,
     ) -> None:
         """Build + store a trace off the event-loop thread and off the response
         critical path.
@@ -1202,13 +1286,17 @@ class ReverseProxy:
         Here they run in the executor (``_build_trace_data``); only the async store
         write touches the loop, and the response no longer waits for any of it.
         ``sync_traces`` still forces synchronous completion for callers that need it.
+
+        ``trace_id`` / ``parent_len`` / ``parent_trace_id`` carry the delta-chain
+        link (see ``_chain_link``); when the caller computed them, the stored trace
+        keeps only the prompt delta.
         """
         loop = asyncio.get_running_loop()
         capture_raw = self.capture_raw_payloads
 
         async def _run() -> None:
             try:
-                trace_id, sess, data = await loop.run_in_executor(
+                built_trace_id, sess, data = await loop.run_in_executor(
                     None,
                     _build_trace_data,
                     session_id,
@@ -1217,8 +1305,11 @@ class ReverseProxy:
                     latency_ms,
                     weight_version,
                     capture_raw,
+                    trace_id,
+                    parent_len,
+                    parent_trace_id,
                 )
-                await self._safe_store(trace_id, sess, data)
+                await self._safe_store(built_trace_id, sess, data)
             except Exception:
                 logger.exception("Failed to persist trace (session=%s)", session_id)
 

@@ -172,6 +172,10 @@ class TokenAccumulator:
         # Survives reset(): how many times this session has reset. A climbing
         # count on one session is the signal for a reset storm.
         self.reset_count: int = 0
+        # trace_id of the most recently linked turn in the current segment — the
+        # parent pointer for the next turn's delta-chain trace (see token_chain.py).
+        # None at a segment root (turn 0 or just after reset()).
+        self.last_trace_id: str | None = None
 
     @property
     def cumulative_ids(self) -> list[int]:
@@ -331,6 +335,8 @@ class TokenAccumulator:
         self.message_count = 0
         self._prefix_fps = []
         self._snapshot_mono = None
+        # Break the delta chain: the next turn becomes a fresh segment root.
+        self.last_trace_id = None
 
     def ingest_turn(self, prompt_token_ids: list[int], completion_token_ids: list[int], *, advance: bool = True) -> None:
         """Record the token IDs from a completed turn.

@@ -1,6 +1,6 @@
 # Design: Linear (DAG) token storage for gateway traces — store deltas, not the closure
 
-- **Status:** Proposed (RFC for review; no code landed yet)
+- **Status:** Phase 1 implemented (transparent delta-chain storage — `token_chain.py`, `TraceRecord.{prompt_delta_token_ids,parent_trace_id}`, `data_process.apply_chain`, proxy `_chain_link`, reconstruction in the read endpoints; tests in `tests/unit/test_token_chain.py`). Phase 2 (end-to-end deltas into the transforms) still proposed.
 - **Related:** verifiers v1 "message graph" (https://www.primeintellect.ai/blog/verifiers-v1); `rllm-model-gateway` (`token_accumulator.py`, `proxy.py`, `models.py`, `store/`); `rllm/engine/trace_converter.py`; `rllm/trainer/verl/transform.py`; `rllm/trainer/tinker/transform.py`; cumulative-token-mode PRs (#692 reset classification)
 - **Scope:** how the gateway *persists* per-turn token IDs for a multi-turn RL session, and (optionally) how the trainer consumes them. The generation path, the renderer bridge, and the reset taxonomy are unchanged.
 

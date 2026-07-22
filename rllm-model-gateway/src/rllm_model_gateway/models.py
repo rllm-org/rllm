@@ -15,6 +15,15 @@ class TraceRecord(BaseModel):
     # Input
     messages: list[dict[str, Any]] = Field(default_factory=list)
     prompt_token_ids: list[int] = Field(default_factory=list)
+    # Linear (delta-chain) token storage — see token_chain.py.
+    # In cumulative_token_mode a turn's prompt starts byte-for-byte with the prior
+    # turn's prompt+completion (the renderer bridge invariant), so only the newly
+    # rendered suffix (``prompt_delta_token_ids``) plus a pointer to the previous
+    # turn (``parent_trace_id``) are stored; ``prompt_token_ids`` is left empty on
+    # disk and rebuilt on read by walking the chain. Both None ⇒ a chain root or a
+    # legacy/non-cumulative trace whose ``prompt_token_ids`` is already the full prompt.
+    prompt_delta_token_ids: list[int] | None = None
+    parent_trace_id: str | None = None
     # Output
     response_message: dict[str, Any] = Field(default_factory=dict)
     completion_token_ids: list[int] = Field(default_factory=list)

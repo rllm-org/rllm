@@ -179,6 +179,31 @@ def strip_vllm_fields(response: dict[str, Any]) -> dict[str, Any]:
 # ------------------------------------------------------------------
 
 
+def apply_chain(trace: TraceRecord, parent_len: int | None, parent_trace_id: str | None) -> None:
+    """Compress ``trace.prompt_token_ids`` into a delta relative to a parent turn.
+
+    In cumulative_token_mode a turn's prompt starts byte-for-byte with the parent
+    turn's prompt+completion (length ``parent_len``), so we store only the suffix
+    (``prompt_delta_token_ids``) plus ``parent_trace_id`` and clear the full prompt;
+    ``token_chain.reconstruct_prompt_ids`` rebuilds it on read. The full prompt is
+    the delta-chain's linear (vs. quadratic) storage win.
+
+    No-op — leaving the full prompt as a chain root — when there is no parent, or
+    the prompt is shorter than the parent cumulative (turn 0, post-reset, or a
+    duplicate replay). The length guard, together with the accumulator's
+    prefix-extension invariant, guarantees the reconstructed prompt is byte-identical
+    to the full prompt.
+    """
+    if not parent_trace_id or not parent_len:
+        return
+    full = trace.prompt_token_ids
+    if len(full) < parent_len:
+        return  # prompt doesn't extend the parent → keep as a full-prompt root
+    trace.prompt_delta_token_ids = full[parent_len:]
+    trace.parent_trace_id = parent_trace_id
+    trace.prompt_token_ids = []
+
+
 def build_trace_record(
     session_id: str,
     request_body: dict[str, Any],
@@ -188,6 +213,9 @@ def build_trace_record(
     metadata: dict[str, Any] | None = None,
     weight_version: int | None = None,
     capture_raw: bool = False,
+    trace_id: str | None = None,
+    parent_len: int | None = None,
+    parent_trace_id: str | None = None,
 ) -> TraceRecord:
     """Assemble a ``TraceRecord`` from raw request/response dicts.
 
@@ -197,6 +225,11 @@ def build_trace_record(
     dicts (a ≤120K-token prompt + its full response) balloons ``model_dump``
     serialization on the gateway's event loop — the dominant per-request CPU
     cost at high concurrency. Enable only for debugging.
+
+    ``trace_id`` pins the record's id (so the caller can link it into the
+    delta chain before it is persisted); a fresh uuid is minted when omitted.
+    ``parent_len`` / ``parent_trace_id`` enable delta-chain storage — see
+    :func:`apply_chain`.
     """
     choices = response_body.get("choices") or []
     first_choice = choices[0] if choices else {}
@@ -213,8 +246,8 @@ def build_trace_record(
     if weight_version is None:
         weight_version = extract_weight_version(response_body)
 
-    return TraceRecord(
-        trace_id=str(uuid.uuid4()),
+    trace = TraceRecord(
+        trace_id=trace_id or str(uuid.uuid4()),
         session_id=session_id,
         model=request_body.get("model", response_body.get("model", "")),
         messages=request_body.get("messages", []),
@@ -232,6 +265,8 @@ def build_trace_record(
         raw_request=request_body if capture_raw else None,
         raw_response=response_body if capture_raw else None,
     )
+    apply_chain(trace, parent_len, parent_trace_id)
+    return trace
 
 
 def build_trace_record_from_chunks(

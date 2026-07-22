@@ -23,6 +23,7 @@ from rllm_model_gateway.proxy import ReverseProxy
 from rllm_model_gateway.session_manager import SessionManager
 from rllm_model_gateway.session_router import SessionRouter
 from rllm_model_gateway.store.base import TraceStore
+from rllm_model_gateway.token_chain import reconstruct_prompt_ids
 
 logger = logging.getLogger(__name__)
 
@@ -275,7 +276,9 @@ def create_app(
         limit: int | None = Query(None),
     ):
         traces = await store.get_session_traces(session_id, since=since, limit=limit)
-        return traces
+        # Rebuild full prompt_token_ids from the delta chain so clients/trainer see
+        # the same TraceRecord shape regardless of on-disk delta storage.
+        return reconstruct_prompt_ids(traces)
 
     @app.get("/sessions/{session_id:path}")
     async def get_session(session_id: str):
@@ -313,6 +316,12 @@ def create_app(
                 status_code=404,
                 content={"error": f"Trace {trace_id} not found"},
             )
+        # A delta-chain link stores only its prompt suffix; rebuild the full prompt
+        # from its session's chain (roots/legacy traces are returned as-is).
+        if trace.get("prompt_delta_token_ids") is not None and trace.get("session_id"):
+            session_traces = await store.get_session_traces(trace["session_id"])
+            reconstruct_prompt_ids(session_traces)
+            trace = next((t for t in session_traces if t.get("trace_id") == trace_id), trace)
         return trace
 
     @app.post("/traces/query")
@@ -326,7 +335,8 @@ def create_app(
                 since=body.get("since"),
                 limit=body.get("limit"),
             )
-            results.extend(traces)
+            # Reconstruct per session (chains never cross session boundaries).
+            results.extend(reconstruct_prompt_ids(traces))
         return results
 
     # -- Admin endpoints ---------------------------------------------------
