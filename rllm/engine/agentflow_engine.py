@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from tqdm import tqdm
 
 from rllm.data.utils import task_from_row
-from rllm.engine.trace_converter import compute_step_metrics, trace_record_to_step
+from rllm.engine.trace_converter import compute_step_metrics, filter_empty_response_traces, trace_record_to_step
 from rllm.eval.types import EvalOutput
 from rllm.gateway.manager import container_reachable_url
 from rllm.types import INFRA_ERROR_REASONS, AgentConfig, Episode, Step, Task, TerminationReason, Trajectory, flow_accepts_env, run_agent_flow, termination_reason_from_error
@@ -149,6 +149,16 @@ def enrich_episode_with_traces(
     the evaluator reads ``model_response`` / ``chat_completions``, which are
     populated regardless of token-ID availability.
     """
+    trace_attempt_count = len(traces)
+    traces = filter_empty_response_traces(traces)
+    empty_response_traces_dropped = trace_attempt_count - len(traces)
+    if empty_response_traces_dropped:
+        logger.warning(
+            "[%s] dropping %d empty-response trace(s) before episode enrichment",
+            uid,
+            empty_response_traces_dropped,
+        )
+
     if not traces:
         logger.warning("[%s] No traces found — returning episode without token data", uid)
         # Coerce to the canonical Trajectory/Episode shape so downstream
@@ -160,7 +170,12 @@ def enrich_episode_with_traces(
             is_correct=episode.is_correct,
             termination_reason=episode.termination_reason,
             trajectories=[t if isinstance(t, Trajectory) else Trajectory(**t.model_dump()) for t in episode.trajectories],
-            metrics=episode.metrics,
+            metrics={
+                **episode.metrics,
+                "empty": 1,
+                "steps_collected": 0,
+                "empty_response_traces_dropped": empty_response_traces_dropped,
+            },
             metadata=episode.metadata,
             artifacts=episode.artifacts,
         )
@@ -254,8 +269,10 @@ def enrich_episode_with_traces(
 
     # Compute metrics
     metrics = compute_step_metrics(enriched_trajectories)
-    metrics["empty"] = int(len(traces) == 0)
-    metrics["steps_collected"] = len(traces)
+    steps_collected = sum(len(trajectory.steps) for trajectory in enriched_trajectories)
+    metrics["empty"] = int(steps_collected == 0)
+    metrics["steps_collected"] = steps_collected
+    metrics["empty_response_traces_dropped"] = empty_response_traces_dropped
     metrics.update(episode.metrics)
 
     return Episode(
@@ -785,7 +802,7 @@ class AgentFlowEngine:
             _llm_sum_s, _llm_wall_s = _summarize_llm_latencies(traces, _agentflow_s)
             _timings["time/agentflow_llm_sum_s"] = _llm_sum_s
             _timings["time/agentflow_llm_wall_s"] = _llm_wall_s
-            _timings["n_turns"] = float(len(traces))
+            _timings["n_turns"] = float(enriched.metrics.get("steps_collected", 0))
 
         # Preserve per-trajectory rewards set by multi-trajectory evaluators.
         for traj in enriched.trajectories:
