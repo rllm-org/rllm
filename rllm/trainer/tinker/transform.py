@@ -185,9 +185,11 @@ def transform_trajectory_groups_to_datums(
     # per-Datum action-token fraction so the caller can log the same
     # metrics across backends. Metric semantics shared with verl's
     # transform_episodes_to_dataproto:
-    #   - steps_per_traj: number of training rows/datums one trajectory
-    #     becomes after prefix-merging. =1 for healthy cumulative agents;
-    #     >1 indicates a prefix break (re-tokenization quirk, mid-
+    #   - steps_per_traj: unmerged agent steps (LLM turns) per trajectory,
+    #     before prefix-merging (len(trajectory.steps)).
+    #   - merged_steps_per_traj: number of training rows/datums one
+    #     trajectory becomes after prefix-merging. =1 for healthy cumulative
+    #     agents; >1 indicates a prefix break (re-tokenization quirk, mid-
     #     trajectory context reset).
     #   - step_response_length: length of the response region per row,
     #     i.e. everything from the first action token onward (action
@@ -200,7 +202,8 @@ def transform_trajectory_groups_to_datums(
     #     trainable (mask=1) per row. =1.0 for single-step rows (no
     #     observations); <1.0 for merged multi-turn (tool/observation
     #     tokens are mask=0 between actions).
-    steps_per_traj = []
+    unmerged_steps_per_traj = []
+    merged_steps_per_traj = []
     step_response_lengths = []
     action_token_ratios = []
     total_agent_steps = 0
@@ -234,7 +237,8 @@ def transform_trajectory_groups_to_datums(
                 )
                 continue
             total_agent_steps += len(trajectory.steps)
-            steps_per_traj.append(len(traj_datums))
+            unmerged_steps_per_traj.append(len(trajectory.steps))
+            merged_steps_per_traj.append(len(traj_datums))
             for d in traj_datums:
                 mask_data = d.loss_fn_inputs["mask"].data
                 # Response region = total Datum length - leading prompt
@@ -258,13 +262,16 @@ def transform_trajectory_groups_to_datums(
     adv_metrics["batch/dropped_oov_sequences"] = dropped_oov_sequences
     adv_metrics["batch/oov_drop_rate"] = dropped_oov_sequences / max(1, total_trajectories)
 
-    if steps_per_traj:
+    if merged_steps_per_traj:
         import numpy as _np
 
-        total_emitted_rows = sum(steps_per_traj)
-        adv_metrics["batch/steps_per_traj/mean"] = _np.mean(steps_per_traj)
-        adv_metrics["batch/steps_per_traj/min"] = _np.min(steps_per_traj)
-        adv_metrics["batch/steps_per_traj/max"] = _np.max(steps_per_traj)
+        total_emitted_rows = sum(merged_steps_per_traj)
+        adv_metrics["batch/steps_per_traj/mean"] = _np.mean(unmerged_steps_per_traj)
+        adv_metrics["batch/steps_per_traj/min"] = _np.min(unmerged_steps_per_traj)
+        adv_metrics["batch/steps_per_traj/max"] = _np.max(unmerged_steps_per_traj)
+        adv_metrics["batch/merged_steps_per_traj/mean"] = _np.mean(merged_steps_per_traj)
+        adv_metrics["batch/merged_steps_per_traj/min"] = _np.min(merged_steps_per_traj)
+        adv_metrics["batch/merged_steps_per_traj/max"] = _np.max(merged_steps_per_traj)
         adv_metrics["batch/step_response_length/mean"] = _np.mean(step_response_lengths)
         adv_metrics["batch/step_response_length/min"] = _np.min(step_response_lengths)
         adv_metrics["batch/step_response_length/max"] = _np.max(step_response_lengths)

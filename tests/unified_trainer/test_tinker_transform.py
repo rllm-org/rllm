@@ -539,6 +539,37 @@ class TestTrajectoryToDataEdgeCases:
 # =============================================================================
 
 
+class TestMergeMetricNaming:
+    """batch/steps_per_traj = unmerged agent steps (LLM turns) per trajectory;
+    batch/merged_steps_per_traj = training rows per trajectory after prefix-merging.
+    A cumulative multi-step trajectory keeps the two distinct (unmerged > merged) —
+    guards against the two metrics being swapped."""
+
+    def _alg(self):
+        from omegaconf import OmegaConf
+
+        from rllm.trainer.algorithms.config import AlgorithmConfig
+
+        return AlgorithmConfig.from_config(OmegaConf.create({"adv_estimator": "grpo"}))
+
+    def test_unmerged_vs_merged_steps_per_traj(self):
+        from rllm.agents.agent import TrajectoryGroup
+        from rllm.trainer.tinker.transform import transform_trajectory_groups_to_datums
+
+        # One trajectory, two steps; step2 extends step1's full sequence, so the
+        # two agent steps merge into a single training row.
+        step1 = make_step(prompt_ids=[1, 2], response_tokens=[3, 4], response_logprobs=[-0.1, -0.2], advantage=0.5)
+        step2 = make_step(prompt_ids=[1, 2, 3, 4, 5], response_tokens=[6, 7], response_logprobs=[-0.3, -0.4], advantage=0.6)
+        group = TrajectoryGroup(group_id="g0", trajectories=[Trajectory(steps=[step1, step2])])
+
+        datums, metrics = transform_trajectory_groups_to_datums([group], algorithm_config=self._alg())
+
+        assert len(datums) == 1  # merged into one row
+        assert metrics["batch/steps_per_traj/mean"] == 2.0  # unmerged: 2 agent steps
+        assert metrics["batch/merged_steps_per_traj/mean"] == 1.0  # merged: 1 row
+        assert metrics["batch/merge_compression_ratio"] == 2.0  # 2 steps / 1 row
+
+
 class TestAllMalformedBatch:
     """When every trajectory is malformed (empty logprobs — e.g. failed/overloaded
     generations that returned no completion), transform drops them all and returns empty

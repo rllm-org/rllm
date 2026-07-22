@@ -551,7 +551,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         if trainer_state.episodes is not None:
             batch = transform_episodes_to_dataproto(trainer_state.episodes, self.rollout_engine, max_prompt_length, max_total_length)
             # Lift per-batch merge metrics (batch/steps_per_traj,
-            # batch/step_response_length) out of meta_info so they show up in
+            # batch/merged_steps_per_traj, batch/step_response_length) out of meta_info so they show up in
             # the standard trainer_state.metrics path. Same metric names the
             # tinker backend logs, so dashboards work across both.
             merge_metrics = batch.meta_info.pop("merge_metrics", None)
