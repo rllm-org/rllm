@@ -325,6 +325,26 @@ class TestSessionSlots:
         assert slots.slot_count == 2  # capped
         assert slots.active is made[-1]  # most recent lineage kept & active
 
+    def test_lineage_ids_are_distinct_and_stable(self):
+        """Each lineage gets a distinct stable id; a resumed lineage keeps its id
+        (so its traces are tagged consistently for trainer-side splitting)."""
+        from rllm_model_gateway.token_accumulator import SessionSlots
+
+        slots = SessionSlots(renderer=_MockRenderer(), session_id="sess")
+        p0 = [SYS_PARENT, {"role": "user", "content": "X"}]
+        parent = slots.select(p0)
+        _seed(parent, p0)
+        sub = slots.select([SYS_SUB, {"role": "user", "content": "s"}])
+        _seed(sub, [SYS_SUB, {"role": "user", "content": "s"}])
+
+        assert parent.lineage_id == "sess#0"
+        assert sub.lineage_id == "sess#1"
+        assert parent.lineage_id != sub.lineage_id
+
+        # parent resumes → same slot → same lineage id
+        resume = p0 + [{"role": "assistant", "content": "a"}, {"role": "tool", "content": "r"}]
+        assert slots.select(resume).lineage_id == "sess#0"
+
 
 class TestExtractNewMessages:
     def test_extract_new_user_message(self):

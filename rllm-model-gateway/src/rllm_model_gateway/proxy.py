@@ -158,13 +158,15 @@ def _build_trace_data(
     latency_ms: float,
     weight_version: int | None,
     capture_raw: bool,
+    lineage_id: str | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
     """Build a TraceRecord and serialize it to a dict.
 
     Runs in a worker thread (see ``ReverseProxy._persist_trace``) so the token-id
     list copies + ``model_dump`` stay off the event-loop thread. Reads
     ``request_body``/``response_body`` without mutating them, so it's safe to run
-    concurrently with the response path.
+    concurrently with the response path. ``lineage_id`` is resolved on the loop
+    (the active slot) before dispatch, so this stays side-effect-free.
     """
     trace = build_trace_record(
         session_id,
@@ -172,6 +174,7 @@ def _build_trace_data(
         response_body,
         latency_ms,
         weight_version=weight_version,
+        lineage_id=lineage_id,
         capture_raw=capture_raw,
     )
     return trace.trace_id, trace.session_id, trace.model_dump()
@@ -253,6 +256,23 @@ class ReverseProxy:
             slots = SessionSlots(self.renderer, session_id=session_id)
             self._accumulators[session_id] = slots
         return slots
+
+    def _active_lineage_id(self, session_id: str | None) -> str | None:
+        """Lineage id of the slot serving the current request, for trace tagging.
+
+        Read (never create) the active slot so a trace is stamped with the
+        lineage ``handle()`` selected for it. ``None`` when cumulative mode is
+        off or no slot has been selected — the reader then treats the whole
+        session as one lineage, as before. Must be called synchronously on the
+        request path (before the next request re-selects), not from a deferred
+        store task.
+        """
+        if not (self.cumulative_token_mode and session_id):
+            return None
+        slots = self._accumulators.get(session_id)
+        if slots is None or slots._active is None:
+            return None
+        return slots._active.lineage_id
 
     def _track_inflight(self, task: asyncio.Future) -> None:
         """Count *task* (an in-flight generation) toward the in-flight gauge until
@@ -828,7 +848,9 @@ class ReverseProxy:
 
         def _build_trace():
             latency_ms = (time.perf_counter() - t0) * 1000
-            return build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
+            return build_trace_record_from_chunks(
+                session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, lineage_id=self._active_lineage_id(session_id), capture_raw=self.capture_raw_payloads
+            )
 
         async def event_generator():
             built_trace = None
@@ -1001,7 +1023,9 @@ class ReverseProxy:
             chat_body["object"] = "chat.completion"
             if chat_body.get("choices"):
                 chat_body["choices"][0]["message"] = message
-            trace = build_trace_record(session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
+            trace = build_trace_record(
+                session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version, lineage_id=self._active_lineage_id(session_id), capture_raw=self.capture_raw_payloads
+            )
             await self._persist(trace)
 
         chat_id = response_body.get("id", "chatcmpl-local")
@@ -1166,7 +1190,9 @@ class ReverseProxy:
                 # finally block may run during GeneratorExit, where await
                 # on real async I/O (e.g. aiosqlite) is not reliable.
                 if session_id and chunks:
-                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
+                    trace = build_trace_record_from_chunks(
+                        session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, lineage_id=self._active_lineage_id(session_id), capture_raw=self.capture_raw_payloads
+                    )
                     task = asyncio.create_task(
                         self._safe_store(
                             trace.trace_id,
@@ -1210,7 +1236,9 @@ class ReverseProxy:
 
         # Persist trace from the full response
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=weight_version, capture_raw=self.capture_raw_payloads)
+            trace = build_trace_record(
+                session_id, request_body, response_body, latency_ms, weight_version=weight_version, lineage_id=self._active_lineage_id(session_id), capture_raw=self.capture_raw_payloads
+            )
             await self._persist(trace)
 
         needs_strip_vllm = self.strip_vllm
@@ -1362,6 +1390,7 @@ class ReverseProxy:
         """
         loop = asyncio.get_running_loop()
         capture_raw = self.capture_raw_payloads
+        lineage_id = self._active_lineage_id(session_id)
 
         async def _run() -> None:
             try:
@@ -1374,6 +1403,7 @@ class ReverseProxy:
                     latency_ms,
                     weight_version,
                     capture_raw,
+                    lineage_id,
                 )
                 await self._safe_store(trace_id, sess, data)
             except Exception:

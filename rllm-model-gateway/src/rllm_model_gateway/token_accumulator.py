@@ -158,6 +158,10 @@ class TokenAccumulator:
     def __init__(self, renderer: Any, session_id: str | None = None) -> None:
         self.renderer = renderer
         self.session_id = session_id or "unknown"
+        # Stable id of the conversation lineage this slot serves, assigned by
+        # SessionSlots. Stamped on every trace so the trainer can split a
+        # session's traces into one trajectory per lineage.
+        self.lineage_id: str | None = None
         self.prev_prompt_ids: list[int] = []
         self.prev_completion_ids: list[int] = []
         self.turn_count: int = 0
@@ -430,6 +434,16 @@ class SessionSlots:
         # Monotonic selection counter → least-recently-selected eviction.
         self._use_clock: int = 0
         self._last_use: dict[int, int] = {}
+        # Monotonic lineage counter → stable per-lineage ids (never reused, so
+        # an evicted-then-reappearing lineage still gets a fresh id).
+        self._next_lineage_num: int = 0
+
+    def _new_slot(self) -> TokenAccumulator:
+        slot = TokenAccumulator(self._renderer, session_id=self._session_id)
+        slot.lineage_id = f"{self._session_id}#{self._next_lineage_num}"
+        self._next_lineage_num += 1
+        self._slots.append(slot)
+        return slot
 
     def select(self, messages: list[dict[str, Any]]) -> TokenAccumulator:
         """Return the slot *messages* continues (deepest match), or a fresh slot.
@@ -446,8 +460,7 @@ class SessionSlots:
                 best = slot
                 best_depth = slot.message_count
         if best is None:
-            best = TokenAccumulator(self._renderer, session_id=self._session_id)
-            self._slots.append(best)
+            best = self._new_slot()
             self._evict_if_needed(keep=best)
         self._mark_active(best)
         return best
@@ -460,9 +473,7 @@ class SessionSlots:
         that ``handle()`` selected for the request. Never ``None``.
         """
         if self._active is None:
-            slot = TokenAccumulator(self._renderer, session_id=self._session_id)
-            self._slots.append(slot)
-            self._mark_active(slot)
+            self._mark_active(self._new_slot())
         return self._active  # type: ignore[return-value]
 
     def _mark_active(self, slot: TokenAccumulator) -> None:
