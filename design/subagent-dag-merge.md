@@ -1,6 +1,6 @@
 # Design: Subagent lineages as trajectories (gateway-tagged DAG)
 
-- **Status:** design finalized; supersedes the transform-side multi-slot merge (PR #773, to be closed). Gateway `SessionSlots` (PR #774) stays and is extended with a lineage tag.
+- **Status:** implemented. Supersedes the transform-side multi-slot merge (#773, closed). Gateway `SessionSlots` + `lineage_id` tag in #774; collection split + advantage dedup in #775.
 - **Related:** `rllm-model-gateway` (`token_accumulator.py` `SessionSlots`, `proxy.py`, `models.py`); `rllm/engine/agentflow_engine.py` (`enrich_episode_with_traces`), `rllm/engine/trace_converter.py`; `rllm/trainer/algorithms/{transform.py,advantage.py,rl_algo.py}`; the gateway-dag-token-storage RFC.
 
 ---
@@ -71,10 +71,11 @@ multi-slot logic is removed from `verl/transform.py` and `tinker/transform.py`.
   the exact defect that blocked moving the split above the advantage layer.
 - `merge_compression_ratio` = total turns / #lineages, same as #773.
 
-## Rollout / PRs (all base `terminal-rl`)
-- Extend #774: `lineage_id` on `SessionSlots`/`TraceRecord` + proxy stamping.
-- New trainer PR: collection split + imputation fix + advantage dedup + revert the #773 transform change +
-  tests. Close #773.
+## Rollout / PRs
+- #774 (base `terminal-rl`): gateway `SessionSlots` multi-slot accumulator + `lineage_id` on
+  `SessionSlots`/`TraceRecord` + proxy stamping.
+- #775 (stacked on #774): collection split + imputation fix + advantage dedup; the transform stays the plain
+  linear merge (#773's change not included). #773 closed as superseded.
 
 ## Testing
 - Gateway: each lineage's traces carry a distinct stable `lineage_id`; parent-resume traces carry the
