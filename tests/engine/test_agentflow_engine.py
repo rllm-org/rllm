@@ -126,6 +126,62 @@ def _valid_token_trace(session_id: str):
     )
 
 
+def _lineage_trace(session_id: str, trace_id: str, lineage_id: str | None):
+    from rllm_model_gateway.models import TraceRecord
+
+    return TraceRecord(
+        trace_id=trace_id,
+        session_id=session_id,
+        lineage_id=lineage_id,
+        model="m",
+        messages=[{"role": "user", "content": "Q"}],
+        response_message={"role": "assistant", "content": "A"},
+        prompt_token_ids=[1, 2],
+        completion_token_ids=[3],
+        logprobs=[-0.1],
+        finish_reason="stop",
+        metadata={},
+    )
+
+
+def test_enrich_splits_traces_by_lineage():
+    """A CLI-harness episode (one empty trajectory) whose traces carry gateway
+    lineage ids is split into one trajectory per lineage — parent turns grouped
+    even when a subagent turn is interleaved between them."""
+    session_id = "task:0"
+    episode = Episode(id=session_id, trajectories=[Trajectory()])  # unnamed, no steps
+    traces = [
+        _lineage_trace(session_id, "p1", "task:0#0"),  # parent
+        _lineage_trace(session_id, "s1", "task:0#1"),  # subagent (interleaved)
+        _lineage_trace(session_id, "p2", "task:0#0"),  # parent resumes
+    ]
+
+    enriched = enrich_episode_with_traces(episode, traces, session_id, {"question": "q"}, strict=True)
+
+    assert len(enriched.trajectories) == 2
+    by_lineage = {t.metadata.get("lineage_id"): t for t in enriched.trajectories}
+    assert [s.id for s in by_lineage["task:0#0"].steps] == ["p1", "p2"]  # parent turns merged
+    assert [s.id for s in by_lineage["task:0#1"].steps] == ["s1"]  # subagent separate
+    # all splits share the originating trajectory's role for grouping
+    assert all(t.metadata.get("origin_traj_idx") == 0 for t in enriched.trajectories)
+
+
+def test_enrich_no_lineage_tags_stays_one_trajectory():
+    """Without lineage ids (cumulative mode off / eval), traces collapse to a
+    single trajectory — unchanged from before the feature."""
+    session_id = "task:0"
+    episode = Episode(id=session_id, trajectories=[Trajectory()])
+    traces = [
+        _lineage_trace(session_id, "a", None),
+        _lineage_trace(session_id, "b", None),
+    ]
+
+    enriched = enrich_episode_with_traces(episode, traces, session_id, {"question": "q"}, strict=True)
+
+    assert len(enriched.trajectories) == 1
+    assert [s.id for s in enriched.trajectories[0].steps] == ["a", "b"]
+
+
 def test_empty_response_retries_are_filtered_before_strict_enrichment():
     """Transient API attempts have no response envelope and must not poison
     the successful same-turn retry that follows them."""
