@@ -4,6 +4,8 @@ from rllm_model_gateway.models import TraceRecord
 
 from rllm.engine.trace_converter import (
     _parse_openai_tool_calls,
+    filter_empty_response_traces,
+    is_empty_response_trace,
     trace_record_to_step,
 )
 
@@ -183,3 +185,53 @@ class TestTraceRecordToStep:
         )
         step = trace_record_to_step(trace)
         assert step.model_output.tool_calls is None
+
+
+class TestEmptyResponseTraceFilter:
+    def _make_trace(self, **overrides) -> TraceRecord:
+        defaults = {
+            "trace_id": "t-001",
+            "session_id": "s-001",
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "prompt_token_ids": [],
+            "response_message": {},
+            "completion_token_ids": [],
+            "logprobs": [],
+            "finish_reason": None,
+        }
+        defaults.update(overrides)
+        return TraceRecord(**defaults)
+
+    def test_detects_empty_response_without_consulting_logprobs(self):
+        trace = self._make_trace(logprobs=[-0.1])
+
+        assert is_empty_response_trace(trace)
+        assert filter_empty_response_traces([trace]) == []
+
+    def test_preserves_external_response_without_token_ids(self):
+        trace = self._make_trace(
+            response_message={"role": "assistant", "content": "answer"},
+            finish_reason="stop",
+        )
+
+        assert not is_empty_response_trace(trace)
+        assert filter_empty_response_traces([trace]) == [trace]
+
+    def test_preserves_tool_only_response_with_empty_content(self):
+        trace = self._make_trace(
+            response_message={
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command":"pwd"}'},
+                    }
+                ],
+            },
+            finish_reason="tool_calls",
+        )
+
+        assert not is_empty_response_trace(trace)

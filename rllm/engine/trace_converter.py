@@ -10,6 +10,23 @@ from rllm.tools.tool_base import ToolCall
 from rllm.types import Step, Trajectory
 
 
+def is_empty_response_trace(trace: TraceRecord) -> bool:
+    """Return whether a stored request attempt produced no model response.
+
+    Transient HTTP failures can be persisted as traces even though they have
+    no assistant response envelope.  They are request-attempt diagnostics, not
+    model turns, and must be discarded before strict token validation.  A
+    response with empty text is still valid when it has an assistant envelope
+    or a finish reason (for example, a tool-only turn).
+    """
+    return not trace.response_message and trace.finish_reason is None and not trace.completion_token_ids
+
+
+def filter_empty_response_traces(traces: list[TraceRecord]) -> list[TraceRecord]:
+    """Keep only traces that contain evidence of a model response."""
+    return [trace for trace in traces if not is_empty_response_trace(trace)]
+
+
 def _parse_openai_tool_calls(raw_tool_calls: list[dict[str, Any]]) -> list[ToolCall]:
     """Convert OpenAI-format tool_calls to rLLM ToolCall objects."""
     result = []
