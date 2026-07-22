@@ -306,7 +306,7 @@ class TestCumulativeTokenMode:
         assert "prompt" not in mock_vllm.request_log[1]
         # Reset + re-ingest: prefix snapshot now reflects turn-2's 3 messages,
         # not turn-1's single message (the bug leaves this at 1).
-        assert acc_store["cum-decline"].message_count == 3
+        assert acc_store["cum-decline"].active.message_count == 3
 
         # Turn 3 — cumulative extension resumes from the re-ingested turn-2 state.
         oai.chat.completions.create(

@@ -215,6 +215,23 @@ class TokenAccumulator:
         """
         return self._classify_prefix(messages) in (_REL_FIRST_TURN, _REL_EXTENDS)
 
+    def continues(self, messages: list[dict[str, Any]]) -> bool:
+        """Whether *messages* continues THIS established lineage.
+
+        Used by :class:`SessionSlots` to route a request to the slot it belongs
+        to. True when the incoming list extends the verified snapshot prefix or
+        is an exact resend (a replay of this lineage's current turn); False on a
+        fresh (turn-0) accumulator and when the snapshot prefix diverges — the
+        latter is precisely a *different* lineage (e.g. a subagent with its own
+        system prompt), which should open its own slot rather than reset this
+        one. Unlike :meth:`is_cumulative`, this excludes the turn-0 case (a fresh
+        slot is never a continuation target) and includes the duplicate/replay
+        case (a resend still belongs to this lineage).
+        """
+        if self.turn_count == 0:
+            return False
+        return self._classify_prefix(messages) in (_REL_EXTENDS, _REL_DUPLICATE)
+
     def plan_turn(self, messages: list[dict[str, Any]]) -> TurnPlan:
         """Decide how to handle an incoming chat request for an active session.
 
@@ -379,3 +396,105 @@ class TokenAccumulator:
         if rendered is None:
             return None
         return list(rendered.token_ids)
+
+
+class SessionSlots:
+    """The open conversation *lineages* of a single gateway session.
+
+    One session URL (``/sessions/<uid>/v1``) can carry several concurrent
+    lineages that do **not** share a growing prefix — most importantly a
+    subagent (opencode / claude-code ``task`` tool) that runs under the same
+    session but with its own system prompt and tool set. A single
+    :class:`TokenAccumulator` would ``reset()`` on every switch between the
+    parent and a subagent, and after a reset the resumed turn is re-tokenized
+    from text (drifting off the pre-subagent tokens) — defeating cumulative
+    token mode and fragmenting the training trajectory.
+
+    This holds one accumulator ("slot") per lineage and routes each incoming
+    request to the slot it *continues* (:meth:`TokenAccumulator.continues`),
+    opening a **new** slot when it continues none instead of resetting an
+    existing one. So the parent lineage stays bridged (drift-free) straight
+    through a subagent interruption, each subagent lineage is bridged
+    internally, and the session's turns form a forest / DAG of prefix chains.
+
+    Requests within a session are issued sequentially by the agent (a subagent
+    ``task`` call blocks the parent until it returns), so no locking is needed.
+    """
+
+    def __init__(self, renderer: Any, session_id: str | None = None, *, max_slots: int = 64) -> None:
+        self._renderer = renderer
+        self._session_id = session_id or "unknown"
+        self._max_slots = max_slots
+        self._slots: list[TokenAccumulator] = []
+        self._active: TokenAccumulator | None = None
+        # Monotonic selection counter → least-recently-selected eviction.
+        self._use_clock: int = 0
+        self._last_use: dict[int, int] = {}
+
+    def select(self, messages: list[dict[str, Any]]) -> TokenAccumulator:
+        """Return the slot *messages* continues (deepest match), or a fresh slot.
+
+        The chosen slot is marked active so the request's later ingest
+        (``ingest_turn`` / ``update_prefix`` in the proxy) lands on the same
+        slot. Prefer the deepest (longest-snapshot) matching lineage; distinct
+        lineages have distinct roots, so at most one normally matches.
+        """
+        best: TokenAccumulator | None = None
+        best_depth = -1
+        for slot in self._slots:
+            if slot.message_count > best_depth and slot.continues(messages):
+                best = slot
+                best_depth = slot.message_count
+        if best is None:
+            best = TokenAccumulator(self._renderer, session_id=self._session_id)
+            self._slots.append(best)
+            self._evict_if_needed(keep=best)
+        self._mark_active(best)
+        return best
+
+    @property
+    def active(self) -> TokenAccumulator:
+        """The slot chosen by the last :meth:`select` (created lazily if none).
+
+        The proxy's turn-0 ingest sites read this to ingest into the same slot
+        that ``handle()`` selected for the request. Never ``None``.
+        """
+        if self._active is None:
+            slot = TokenAccumulator(self._renderer, session_id=self._session_id)
+            self._slots.append(slot)
+            self._mark_active(slot)
+        return self._active  # type: ignore[return-value]
+
+    def _mark_active(self, slot: TokenAccumulator) -> None:
+        self._active = slot
+        self._use_clock += 1
+        self._last_use[id(slot)] = self._use_clock
+
+    def _evict_if_needed(self, *, keep: TokenAccumulator) -> None:
+        """Cap the number of open lineages; drop the least-recently-selected.
+
+        The slot count is bounded by the session's turn count (one new slot per
+        non-continuing request) and sessions are deleted after each rollout, so
+        this practically never fires — it is a defensive bound against a
+        pathological reset/lineage storm. The active and just-added slots are
+        never evicted, so an in-progress parent lineage survives a subagent.
+        """
+        if len(self._slots) <= self._max_slots:
+            return
+        evictable = [s for s in self._slots if s is not keep and s is not self._active]
+        if not evictable:
+            return
+        victim = min(evictable, key=lambda s: self._last_use.get(id(s), 0))
+        self._slots.remove(victim)
+        self._last_use.pop(id(victim), None)
+        logger.warning(
+            "SessionSlots(session=%s) exceeded max_slots=%d; evicted least-recently-used lineage (turn=%d, msgs=%d). Possible reset/lineage storm.",
+            self._session_id,
+            self._max_slots,
+            victim.turn_count,
+            victim.message_count,
+        )
+
+    @property
+    def slot_count(self) -> int:
+        return len(self._slots)
