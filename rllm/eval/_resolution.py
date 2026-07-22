@@ -208,7 +208,10 @@ def _create_base_sandbox(task: Task, backend: str, *, image: str | None = None, 
     if name is None:
         safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
         name = f"rllm-{safe_id}-{uuid.uuid4().hex[:6]}"
-    return create_sandbox(backend, name=name, image=image, **_sandbox_resource_kwargs(task, backend), **backend_kwargs)
+    # Explicit caller kwargs override the per-task resource defaults — both may
+    # carry Modal's ``timeout`` (e.g. the snapshot builder's build_timeout).
+    kwargs = {**_sandbox_resource_kwargs(task, backend), **backend_kwargs}
+    return create_sandbox(backend, name=name, image=image, **kwargs)
 
 
 def _should_replay_dockerfile(task: Task) -> bool:

@@ -28,6 +28,12 @@ class SFTSpec:
         train_dataset: training data (a registered/loaded :class:`Dataset` with a
             ``messages`` column).
         val_dataset: optional validation data.
+        lora_rank: LoRA rank; ``0`` selects full-parameter fine-tuning. Backend
+            support varies (fireworks/verl train full-parameter; tinker is
+            LoRA-only and rejects ``0`` in ``validate_spec``).
+        logger: tracking backend names for :class:`rllm.utils.tracking.Tracking`
+            (e.g. ``["console", "wandb", "ui"]``); ``None`` keeps the backend
+            yaml default.
         overrides: deep-merged into the backend's native config as an escape
             hatch for backend-specific knobs not surfaced as fields.
     """
@@ -46,5 +52,10 @@ class SFTSpec:
     val_freq: int = 10
     project: str = "rllm-sft"
     experiment: str | None = None
+    logger: list[str] | None = None
     output_dir: str | None = None
     overrides: dict | None = None
+
+    def __post_init__(self) -> None:
+        if self.lora_rank < 0:
+            raise ValueError(f"lora_rank must be >= 0 (got {self.lora_rank}); 0 selects full-parameter fine-tuning.")

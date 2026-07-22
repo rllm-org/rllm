@@ -45,7 +45,7 @@ from rllm.trainer.algorithms import AlgorithmConfig, simple_timer
 # def _patched_rc_optim_step(self, params, grad_accumulation_normalization=None):
 #     return self._client.optim_step(params).result(timeout=self._default_timeout)
 # _RC.optim_step = _patched_rc_optim_step
-from rllm.trainer.fireworks.fireworks_policy_trainer import FireworksPolicyTrainer, builtin_loss_args
+from rllm.trainer.fireworks.fireworks_policy_trainer import FireworksPolicyTrainer
 from rllm.trainer.tinker.tinker_backend import TinkerBackend
 from rllm.trainer.tinker.tinker_metrics_utils import (
     update_training_metrics,
@@ -151,17 +151,9 @@ class FireworksBackend(TinkerBackend):
         """Provision the trainer job, deployment, and sampler via the
         cookbook's ``training.provision.init_fireworks_infra``."""
         cfg = self.full_config
-        # Fail fast on loss misconfiguration before provisioning any
-        # (expensive, slow-to-create) remote infrastructure.
-        from training.utils.rl.losses import validate_loss_path
-
-        from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
-
         algorithm_config = kwargs.get("algorithm_config") or AlgorithmConfig.from_config(cfg.rllm.algorithm)
-        # A custom rLLM loss (e.g. dppo_tv) runs on the client forward_backward_custom path,
-        # not a Fireworks builtin kernel, so the builtin-loss validation does not apply.
-        if resolve_loss(algorithm_config, native_losses=native_loss_names("fireworks")) is None:
-            validate_loss_path(builtin_loss_args(algorithm_config))
+        # (fireworks-ai >=1.2.1 dropped validate_loss_path; builtin loss is resolved in
+        # FireworksPolicyTrainer.resolve_builtin_loss instead.)
 
         provision_cfg = self._build_provision_config(algorithm_config)
 

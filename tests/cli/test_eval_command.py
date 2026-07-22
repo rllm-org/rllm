@@ -242,3 +242,71 @@ def test_eval_with_explicit_evaluator(runner, tmp_rllm_home, mock_dataset):
 
     assert result.exit_code == 0
     mock_load_eval.assert_called_once_with("math_reward_fn")
+
+
+_TINKER_CKPT = "tinker://b244fa1e-941c-5d3f-b6b9-ad7bd4ce136d:train:0/sampler_weights/final"
+
+
+def test_eval_tinker_checkpoint_routes_to_tinker_provider(runner, tmp_rllm_home, mock_dataset, monkeypatch):
+    """A ``tinker://`` checkpoint model routes through the tinker provider even
+    when the local config selects a different provider."""
+    monkeypatch.setenv("TINKER_API_KEY", "tml-test-key")
+    # Config points at an unrelated provider — must be overridden by the model.
+    config = RllmConfig(provider="openai", model="gpt-5-mini", api_keys={"openai": "sk-test"})
+
+    mock_pm = MagicMock()
+    mock_pm.get_proxy_url.return_value = "http://127.0.0.1:4000/v1"
+    mock_pm.build_proxy_config.return_value = {"model_list": []}
+
+    with (
+        patch("rllm.eval.config.load_config", return_value=config),
+        patch("rllm.eval.proxy.EvalProxyManager", return_value=mock_pm) as mock_pm_cls,
+        patch("rllm.cli.eval._run_eval"),
+    ):
+        result = runner.invoke(cli, ["eval", "test_math", "--agent", "math", "--model", _TINKER_CKPT])
+
+    assert result.exit_code == 0, result.output
+    assert "tinker://" in result.output  # informative routing line
+    mock_pm_cls.assert_called_once()
+    kwargs = mock_pm_cls.call_args.kwargs
+    assert kwargs["provider"] == "tinker"
+    assert kwargs["model_name"] == _TINKER_CKPT
+    assert kwargs["api_key"] == "tml-test-key"
+
+
+def test_eval_tinker_checkpoint_without_config(runner, tmp_rllm_home, mock_dataset, monkeypatch):
+    """A ``tinker://`` checkpoint works even when no provider config exists."""
+    monkeypatch.setenv("TINKER_API_KEY", "tml-test-key")
+
+    mock_pm = MagicMock()
+    mock_pm.get_proxy_url.return_value = "http://127.0.0.1:4000/v1"
+    mock_pm.build_proxy_config.return_value = {"model_list": []}
+
+    with (
+        patch("rllm.eval.config.load_config", return_value=RllmConfig()),
+        patch("rllm.eval.proxy.EvalProxyManager", return_value=mock_pm) as mock_pm_cls,
+        patch("rllm.cli.eval._run_eval"),
+    ):
+        result = runner.invoke(cli, ["eval", "test_math", "--agent", "math", "--model", _TINKER_CKPT])
+
+    assert result.exit_code == 0, result.output
+    assert "rllm setup" not in result.output  # the is_configured() gate is bypassed
+    mock_pm_cls.assert_called_once()
+    assert mock_pm_cls.call_args.kwargs["provider"] == "tinker"
+
+
+def test_eval_tinker_checkpoint_requires_api_key(runner, tmp_rllm_home, monkeypatch):
+    """A ``tinker://`` checkpoint without TINKER_API_KEY fails with an actionable error."""
+    monkeypatch.delenv("TINKER_API_KEY", raising=False)
+
+    with (
+        patch("rllm.eval.config.load_config", return_value=RllmConfig()),
+        patch("rllm.eval.proxy.EvalProxyManager") as mock_pm_cls,
+        patch("rllm.cli.eval._run_eval") as mock_run,
+    ):
+        result = runner.invoke(cli, ["eval", "test_math", "--agent", "math", "--model", _TINKER_CKPT])
+
+    assert result.exit_code != 0
+    assert "TINKER_API_KEY" in result.output
+    mock_pm_cls.assert_not_called()
+    mock_run.assert_not_called()
