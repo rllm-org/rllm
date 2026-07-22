@@ -112,8 +112,12 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             transform_config=kwargs.get("transform_config"),
             algorithm_config=kwargs.get("algorithm_config"),
         )
+        # model.name may be a Tinker model id (e.g. "nvidia/...:peft:262144") that
+        # isn't a valid HF repo id; render/tokenize from the HF tokenizer_model when
+        # set, falling back to model.name. (Mirrors the fireworks + SFT tinker backends.)
+        tokenizer_name = self.full_config.model.get("tokenizer_model") or self.full_config.model.name
         # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been initialized yet
-        self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
         # Load image processor for vision-language models.
         # For VLM models, the tinker renderer requires an image_processor to
@@ -121,28 +125,28 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # on the first multimodal message). Fail fast here with an actionable
         # message rather than silently leaving image_processor=None.
         image_processor = None
-        model_name_lower = self.full_config.model.name.lower()
+        model_name_lower = tokenizer_name.lower()
         if "vl" in model_name_lower or "vision" in model_name_lower:
             try:
                 from transformers import AutoProcessor
 
-                processor = AutoProcessor.from_pretrained(self.full_config.model.name, trust_remote_code=True)
+                processor = AutoProcessor.from_pretrained(tokenizer_name, trust_remote_code=True)
             except ImportError as e:
                 # Common case: Qwen3-VL needs torchvision for the video
                 # processor, even though we only use the image side.
                 raise RuntimeError(
-                    f"Failed to load AutoProcessor for VLM model {self.full_config.model.name!r}: {e}. "
+                    f"Failed to load AutoProcessor for VLM model {tokenizer_name!r}: {e}. "
                     f"Install the missing dependency (e.g. `uv pip install torchvision` for Qwen3-VL) "
                     f"and retry — the tinker renderer needs an image_processor."
                 ) from e
             except Exception as e:
-                raise RuntimeError(f"Failed to load AutoProcessor for VLM model {self.full_config.model.name!r}: {e}") from e
+                raise RuntimeError(f"Failed to load AutoProcessor for VLM model {tokenizer_name!r}: {e}") from e
 
             if hasattr(processor, "image_processor") and processor.image_processor is not None:
                 image_processor = processor.image_processor
-                logger.info(f"Loaded image_processor for VLM model: {self.full_config.model.name}")
+                logger.info(f"Loaded image_processor for VLM model: {tokenizer_name}")
             else:
-                raise RuntimeError(f"AutoProcessor for {self.full_config.model.name!r} has no .image_processor attribute; this model isn't a VLM or transformers can't expose its image processor.")
+                raise RuntimeError(f"AutoProcessor for {tokenizer_name!r} has no .image_processor attribute; this model isn't a VLM or transformers can't expose its image processor.")
 
         rollout_extra = dict(self.full_config.get("rollout_engine", {}))
         # Resolve turn-0 rendering with the same renderer the gateway uses for the
