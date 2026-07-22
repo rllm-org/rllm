@@ -263,11 +263,15 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
     Tinker's per-Datum aggregation. Without merging, verl emits one row per
     step and per-trajectory weight scales with step count.
 
-    A step that is *not* a prefix-extension of the running segment (e.g.
-    the agent reset its context mid-trajectory) closes the current segment
-    and starts a new one — the trajectory then contributes multiple rows.
-    For typical agents this never fires, so the common case is one row per
-    trajectory.
+    Steps are grouped into one or more *open* segments (lineages): each
+    step is merged into the deepest open segment whose full sequence it
+    prefix-extends, and a step that extends none opens a new segment. This
+    handles interleaved sub-conversations — e.g. a subagent that runs under
+    the same gateway session but with a different system prompt/tool set,
+    whose turns are not prefix-extensions of the parent conversation — so
+    each lineage merges into its own row instead of the whole trajectory
+    fragmenting into one row per turn. A single-lineage trajectory keeps
+    exactly one segment, so the common case is still one row per trajectory.
 
     Args:
         trajectory: Trajectory to process.
@@ -367,38 +371,54 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             group_role=name,
         )
 
-    seg = _new_segment(valid_steps[0])
-    segments_emitted = 0
+    def _extend_segment(seg, step, prompt_ids):
+        # Cumulative — merge this step into an existing open segment.
+        delta_obs = prompt_ids[len(seg["full_seq"]) :]
+        action = list(step.model_output.completion_ids)
+        action_lp = list(step.model_output.logprobs or [])
+        if action_lp and len(action_lp) != len(action):
+            action_lp = list(action_lp) + [0.0] * (len(action) - len(action_lp))
+
+        seg["response"].extend(delta_obs)
+        seg["response"].extend(action)
+        seg["mask"].extend([0] * len(delta_obs))
+        seg["mask"].extend([1] * len(action))
+        seg["logprobs"].extend([0.0] * len(delta_obs))
+        seg["logprobs"].extend(action_lp)
+        seg["full_seq"].extend(delta_obs)
+        seg["full_seq"].extend(action)
+
+        if step.routing_matrices is not None:
+            seg["last_routing_step"] = step
+
+    def _match_segment(open_segments, prompt_ids):
+        # Deepest (longest) open segment whose full_seq is a prefix of
+        # prompt_ids. Distinct lineages have distinct roots, so at most one
+        # segment matches; ``longest`` also keeps a true DAG branch attached
+        # to its nearest ancestor. Compare lengths before the slice so the
+        # per-step cost stays ~O(#open_segments · prefix_len).
+        best = None
+        best_len = -1
+        for seg in open_segments:
+            fs_len = len(seg["full_seq"])
+            if fs_len > best_len and len(prompt_ids) >= fs_len and prompt_ids[:fs_len] == seg["full_seq"]:
+                best = seg
+                best_len = fs_len
+        return best
+
+    open_segments = [_new_segment(valid_steps[0])]
     for step in valid_steps[1:]:
         prompt_ids = list(step.model_output.prompt_ids)
-        if len(prompt_ids) >= len(seg["full_seq"]) and prompt_ids[: len(seg["full_seq"])] == seg["full_seq"]:
-            # Cumulative — extend the current segment.
-            delta_obs = prompt_ids[len(seg["full_seq"]) :]
-            action = list(step.model_output.completion_ids)
-            action_lp = list(step.model_output.logprobs or [])
-            if action_lp and len(action_lp) != len(action):
-                action_lp = list(action_lp) + [0.0] * (len(action) - len(action_lp))
-
-            seg["response"].extend(delta_obs)
-            seg["response"].extend(action)
-            seg["mask"].extend([0] * len(delta_obs))
-            seg["mask"].extend([1] * len(action))
-            seg["logprobs"].extend([0.0] * len(delta_obs))
-            seg["logprobs"].extend(action_lp)
-            seg["full_seq"].extend(delta_obs)
-            seg["full_seq"].extend(action)
-
-            if step.routing_matrices is not None:
-                seg["last_routing_step"] = step
+        seg = _match_segment(open_segments, prompt_ids)
+        if seg is not None:
+            _extend_segment(seg, step, prompt_ids)
         else:
-            # Non-cumulative — close out current segment, start a new one.
-            _emit(seg)
-            segments_emitted += 1
-            seg = _new_segment(step)
+            # Extends no open lineage — start a new segment (new DAG branch).
+            open_segments.append(_new_segment(step))
 
-    _emit(seg)
-    segments_emitted += 1
-    return segments_emitted
+    for seg in open_segments:
+        _emit(seg)
+    return len(open_segments)
 
 
 def _process_episode(episode: Episode, task_id: str, accumulated: AccumulatedData) -> int:
