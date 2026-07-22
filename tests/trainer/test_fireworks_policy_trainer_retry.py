@@ -9,8 +9,36 @@ pytest-asyncio needed.
 import asyncio
 
 import pytest
+from omegaconf import OmegaConf
 
-from rllm.trainer.fireworks.fireworks_policy_trainer import FireworksPolicyTrainer
+from rllm.trainer.algorithms.config import AlgorithmConfig
+from rllm.trainer.fireworks.fireworks_policy_trainer import (
+    FireworksPolicyTrainer,
+    builtin_loss_args,
+)
+
+
+def test_grpo_resolves_to_clipped_ppo_kernel():
+    from training.utils.rl.losses import get_builtin_loss_config, validate_loss_path
+
+    algorithm = AlgorithmConfig.from_config(
+        OmegaConf.create(
+            {
+                "adv_estimator": "grpo",
+                "loss_fn": "grpo",
+                "eps_clip": 0.2,
+                "kl_beta": 0.0,
+            }
+        )
+    )
+    args = builtin_loss_args(algorithm)
+    validate_loss_path(args)
+
+    assert args.policy_loss == "grpo"
+    assert get_builtin_loss_config(args) == (
+        "ppo",
+        {"clip_low_threshold": 0.8, "clip_high_threshold": 1.2},
+    )
 
 
 class _FakeClient:
