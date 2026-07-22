@@ -192,6 +192,37 @@ class TestRolloutLogProbsPropagation:
         response_mask = batch.batch["response_mask"][0]
         assert response_mask[:6].tolist() == [1, 1, 0, 1, 1, 1]
 
+    def test_interleaved_subagent_lineage_remerges(self):
+        """A subagent turn between two parent turns must not fragment the parent.
+
+        opencode/claude-code subagents run under the same gateway session but
+        with a different system prompt, so their turns are not prefix-extensions
+        of the parent conversation. With a single running segment the parent's
+        second turn could no longer re-merge onto the first, giving one row per
+        turn (3 rows) and driving merge_compression_ratio toward 1. Keeping
+        every lineage open re-merges the parent into one row → 2 rows total.
+        """
+        parent1 = ModelOutput(prompt_ids=[1, 2], completion_ids=[3, 4], logprobs=[-0.1, -0.2])
+        subagent = ModelOutput(prompt_ids=[100, 101, 102], completion_ids=[103, 104], logprobs=[-0.5, -0.6])
+        # Parent resumes: [1,2,3,4,5] prefix-extends parent1's full seq [1,2,3,4].
+        parent2 = ModelOutput(prompt_ids=[1, 2, 3, 4, 5], completion_ids=[6, 7], logprobs=[-0.3, -0.4])
+        steps = [
+            Step(prompt_ids=m.prompt_ids, response_ids=m.completion_ids, model_output=m, reward=0.0)
+            for m in (parent1, subagent, parent2)
+        ]
+        trajectory = Trajectory(steps=steps, reward=1.0)
+        episode = Episode(id="task_0:0", trajectories=[trajectory], is_correct=True)
+
+        engine = _make_mock_rollout_engine()
+        batch = transform_episodes_to_dataproto([episode], engine, max_prompt_length=8, max_response_length=8)
+
+        # Parent lineage merges to 1 row; subagent is its own row → 2, not 3.
+        assert batch.batch["responses"].shape[0] == 2
+
+        # The parent row's response is [3,4,(5),6,7] with mask [1,1,0,1,1].
+        masks = [batch.batch["response_mask"][i][:5].tolist() for i in range(2)]
+        assert [1, 1, 0, 1, 1] in masks, masks
+
     def test_other_batch_fields_unchanged(self):
         """Adding logprobs should not affect existing batch fields."""
         episodes = [

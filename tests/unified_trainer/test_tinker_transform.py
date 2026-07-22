@@ -357,6 +357,50 @@ class TestTrajectoryToDataNoPrefix:
         for datum in datums:
             verify_datum_structure(datum)
 
+    def test_interleaved_subagent_lineage_remerges(self):
+        """A subagent turn between two parent turns must not fragment the parent.
+
+        This is the opencode/claude-code subagent case: the parent conversation
+        (O1, A1) / (O1+A1+O4, A4) is interleaved with a subagent turn (O3, A3)
+        that runs under the same session but with a different system prompt, so
+        it is NOT a prefix-extension of the parent. With a single running
+        accumulator the parent's second turn could no longer re-merge onto the
+        first (3 Datums); keeping both lineages open yields 2 Datums.
+        """
+        parent1 = make_step(prompt_ids=[1, 2], response_tokens=[3, 4], advantage=1.0)
+        subagent = make_step(prompt_ids=[100, 101, 102], response_tokens=[103, 104], advantage=1.0)
+        # parent resumes: extends parent1's full sequence [1,2,3,4] with obs [5]
+        parent2 = make_step(prompt_ids=[1, 2, 3, 4, 5], response_tokens=[6, 7], advantage=1.0)
+        trajectory = Trajectory(steps=[parent1, subagent, parent2])
+
+        datums = trajectory_to_datums(trajectory)
+
+        # parent1 + parent2 merge; subagent is its own Datum → 2, not 3.
+        assert len(datums) == 2
+        for datum in datums:
+            verify_datum_structure(datum)
+
+        # The parent lineage merged both turns: full seq [1,2,3,4,5,6,7],
+        # mask before shift [0,0,1,1,0,1,1] → after [1:] shift [0,1,1,0,1,1].
+        parent_datum = max(datums, key=lambda d: len(d.loss_fn_inputs["mask"].data))
+        assert parent_datum.loss_fn_inputs["mask"].data == [0.0, 1.0, 1.0, 0.0, 1.0, 1.0]
+
+    def test_two_subagents_between_parent_turns(self):
+        """Several distinct lineages stay open concurrently (parent + 2 subagents)."""
+        p1 = make_step(prompt_ids=[1, 2], response_tokens=[3, 4])
+        sub_a = make_step(prompt_ids=[100, 101], response_tokens=[102])
+        sub_b = make_step(prompt_ids=[200, 201], response_tokens=[202])
+        p2 = make_step(prompt_ids=[1, 2, 3, 4, 5], response_tokens=[6, 7])
+        sub_a2 = make_step(prompt_ids=[100, 101, 102, 103], response_tokens=[104])  # extends sub_a
+        trajectory = Trajectory(steps=[p1, sub_a, sub_b, p2, sub_a2])
+
+        datums = trajectory_to_datums(trajectory)
+
+        # Three lineages: parent {p1,p2}, sub_a {sub_a,sub_a2}, sub_b {sub_b}.
+        assert len(datums) == 3
+        for datum in datums:
+            verify_datum_structure(datum)
+
 
 # =============================================================================
 # Tests for trajectory_to_datums - With Chunks

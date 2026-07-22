@@ -57,33 +57,40 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
 
     Then we will merge the first two observation-action pairs into a single Datum,
     and the last observation-action pair into a separate Datum.
+
+    Multiple lineages are kept open at once, so *interleaved* sequences also
+    merge correctly. Given
+
+    (O1, A1)
+    (O3, A3)          # a subagent turn — a fresh conversation, not an extension
+    (O1+A1+O4, A4)    # the parent conversation resumes
+
+    the parent turns (O1,A1) and (O1+A1+O4,A4) merge into one Datum even
+    though a subagent turn ran between them, and (O3,A3) becomes its own
+    Datum — two Datums, not three. Each step attaches to the deepest open
+    lineage it prefix-extends; one that extends none starts a new lineage.
     """
 
     class SequenceAccumulator:
-        full_sequence: TinkerTokenInput = []
-        sampled_logprobs: list[float] = []
-        advantages: list[float] = []
-        mask: list[float] = []
-        routing_matrices: list[str] = []
+        """One open lineage: a growing (obs+action) sequence with aligned arrays."""
 
-        @classmethod
-        def clear(cls):
-            cls.full_sequence = []
-            cls.sampled_logprobs = []
-            cls.advantages = []
-            cls.mask = []
-            cls.routing_matrices = []
+        def __init__(self) -> None:
+            self.full_sequence: TinkerTokenInput = []
+            self.sampled_logprobs: list[float] = []
+            self.advantages: list[float] = []
+            self.mask: list[float] = []
+            self.routing_matrices: list[str] = []
 
-    def make_datum_from_state():
-        all_tokens_T = _flat_token_input_to_model_input(SequenceAccumulator.full_sequence)
+    def make_datum_from_segment(seg: SequenceAccumulator):
+        all_tokens_T = _flat_token_input_to_model_input(seg.full_sequence)
         # this should help handle image chunk as well
         input_tokens_T, target_tokens_T = create_rightshifted_model_input_and_leftshifted_targets(list(all_tokens_T.chunks))
-        sampled_logprobs_T = SequenceAccumulator.sampled_logprobs[1:]
-        advantages_T = SequenceAccumulator.advantages[1:]
-        mask_T = SequenceAccumulator.mask[1:]
+        sampled_logprobs_T = seg.sampled_logprobs[1:]
+        advantages_T = seg.advantages[1:]
+        mask_T = seg.mask[1:]
         assert input_tokens_T.length == len(target_tokens_T) == len(sampled_logprobs_T) == len(advantages_T) == len(mask_T)
-        if router_replay and SequenceAccumulator.routing_matrices:
-            rm_shifted = SequenceAccumulator.routing_matrices[1:]  # match rightshift
+        if router_replay and seg.routing_matrices:
+            rm_shifted = seg.routing_matrices[1:]  # match rightshift
             input_tokens_T = input_tokens_T.model_copy(update={"routing_matrices": rm_shifted})
         return tinker.Datum(
             model_input=input_tokens_T,
@@ -95,7 +102,14 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
             },
         )
 
-    data: list[tinker.Datum] = []
+    # Open lineages. Each step merges into the deepest open segment whose
+    # full sequence it prefix-extends; a step that extends none opens a new
+    # segment. This keeps interleaved sub-conversations (e.g. a subagent run
+    # under the same gateway session with a different system prompt/tool set,
+    # whose turns are not prefix-extensions of the parent) each merged into
+    # their own Datum instead of fragmenting into one Datum per turn. A
+    # single-lineage trajectory keeps exactly one segment.
+    segments: list[SequenceAccumulator] = []
     for step in traj.steps:
         token_input = cast(TinkerTokenInput, step.prompt_ids)
         token_input_flat = _flatten_token_input(token_input)
@@ -111,29 +125,33 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
         else:  # float
             advantages = [step.advantage] * len(output_token_ids)
 
-        if len(SequenceAccumulator.full_sequence) == 0:
+        # Deepest open segment this step prefix-extends (longest full_sequence).
+        # Distinct lineages have distinct roots, so at most one matches.
+        seg = None
+        seg_len = -1
+        for candidate in segments:
+            clen = len(candidate.full_sequence)
+            if clen > seg_len and _is_prefix(candidate.full_sequence, token_input_flat):
+                seg = candidate
+                seg_len = clen
+        if seg is None:
+            seg = SequenceAccumulator()
+            segments.append(seg)
             delta_token_input_flat = token_input_flat
-        elif _is_prefix(SequenceAccumulator.full_sequence, token_input_flat):
-            delta_token_input_flat = token_input_flat[len(SequenceAccumulator.full_sequence) :]
         else:
-            data.append(make_datum_from_state())
-            SequenceAccumulator.clear()
-            delta_token_input_flat = token_input_flat
+            delta_token_input_flat = token_input_flat[len(seg.full_sequence) :]
 
         delta_token_input_length = _flat_token_input_length(delta_token_input_flat)
-        SequenceAccumulator.full_sequence.extend(delta_token_input_flat)
-        SequenceAccumulator.full_sequence.extend(output_token_ids)
-        SequenceAccumulator.sampled_logprobs.extend([0.0] * delta_token_input_length + output_logprobs)
-        SequenceAccumulator.advantages.extend([0] * delta_token_input_length + advantages)
-        SequenceAccumulator.mask.extend([0.0] * delta_token_input_length + [1.0] * len(output_token_ids))
+        seg.full_sequence.extend(delta_token_input_flat)
+        seg.full_sequence.extend(output_token_ids)
+        seg.sampled_logprobs.extend([0.0] * delta_token_input_length + output_logprobs)
+        seg.advantages.extend([0] * delta_token_input_length + advantages)
+        seg.mask.extend([0.0] * delta_token_input_length + [1.0] * len(output_token_ids))
         if router_replay:
             step_rm = step.routing_matrices or []
-            SequenceAccumulator.routing_matrices.extend([""] * delta_token_input_length + (list(step_rm) if step_rm else [""] * len(output_token_ids)))
+            seg.routing_matrices.extend([""] * delta_token_input_length + (list(step_rm) if step_rm else [""] * len(output_token_ids)))
 
-    if SequenceAccumulator.full_sequence:
-        data.append(make_datum_from_state())
-
-    return data
+    return [make_datum_from_segment(seg) for seg in segments]
 
 
 def transform_trajectory_groups_to_datums(
