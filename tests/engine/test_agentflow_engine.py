@@ -4,7 +4,7 @@ import pytest
 
 from rllm.agents.agent import Episode, Trajectory
 from rllm.data.utils import task_from_row
-from rllm.engine.agentflow_engine import AgentFlowEngine
+from rllm.engine.agentflow_engine import AgentFlowEngine, enrich_episode_with_traces
 from rllm.eval.types import EvalOutput
 from rllm.workflows.workflow import TerminationReason
 
@@ -90,6 +90,64 @@ def _empty_token_trace(session_id: str):
         finish_reason="stop",
         metadata={},
     )
+
+
+def _empty_response_trace(session_id: str, trace_id: str):
+    from rllm_model_gateway.models import TraceRecord
+
+    return TraceRecord(
+        trace_id=trace_id,
+        session_id=session_id,
+        model="m",
+        messages=[{"role": "user", "content": "Q"}],
+        response_message={},
+        prompt_token_ids=[],
+        completion_token_ids=[],
+        logprobs=[],
+        finish_reason=None,
+        metadata={},
+    )
+
+
+def _valid_token_trace(session_id: str):
+    from rllm_model_gateway.models import TraceRecord
+
+    return TraceRecord(
+        trace_id=f"valid-{session_id}",
+        session_id=session_id,
+        model="m",
+        messages=[{"role": "user", "content": "Q"}],
+        response_message={"role": "assistant", "content": "A"},
+        prompt_token_ids=[1, 2],
+        completion_token_ids=[3],
+        logprobs=[-0.1],
+        finish_reason="stop",
+        metadata={},
+    )
+
+
+def test_empty_response_retries_are_filtered_before_strict_enrichment():
+    """Transient API attempts have no response envelope and must not poison
+    the successful same-turn retry that follows them."""
+    session_id = "task:0"
+    episode = Episode(id=session_id, trajectories=[Trajectory(name="solver")])
+    traces = [
+        _empty_response_trace(session_id, "empty-1"),
+        _empty_response_trace(session_id, "empty-2"),
+        _valid_token_trace(session_id),
+    ]
+
+    enriched = enrich_episode_with_traces(
+        episode,
+        traces,
+        session_id,
+        {"question": "q"},
+        strict=True,
+    )
+
+    assert [step.id for step in enriched.trajectories[0].steps] == [f"valid-{session_id}"]
+    assert enriched.metrics["steps_collected"] == 1
+    assert enriched.metrics["empty_response_traces_dropped"] == 2
 
 
 @pytest.mark.parametrize("is_validation", [False, True])

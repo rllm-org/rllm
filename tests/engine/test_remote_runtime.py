@@ -227,6 +227,31 @@ class TestBuildEpisodeWithTraces:
         assert episode.metrics["steps_collected"] == 3
         assert episode.metrics["empty"] == 0
 
+    def test_empty_response_attempt_is_not_converted_to_a_step(self):
+        empty_trace = MagicMock(
+            response_message={},
+            finish_reason=None,
+            completion_token_ids=[],
+        )
+        valid_trace = MagicMock(
+            response_message={"role": "assistant", "content": "answer"},
+            finish_reason="stop",
+            completion_token_ids=[1],
+        )
+        result = RemoteTaskResult(
+            finished=True,
+            session_id="sess-1",
+            task_id="task-1",
+            reward=1.0,
+        )
+
+        with patch("rllm.engine.remote_agent_flow_engine.trace_record_to_step", return_value=_make_step()) as mock_convert:
+            episode = _build_episode([empty_trace, valid_trace], result, "task-1:0", {"prompt": "test"})
+
+        mock_convert.assert_called_once_with(valid_trace)
+        assert episode.metrics["steps_collected"] == 1
+        assert episode.metrics["empty_response_traces_dropped"] == 1
+
 
 class TestBuildEpisodeNoTraces:
     def test_no_traces_with_reward(self):
