@@ -449,3 +449,55 @@ class TestCumulativeStreaming:
         usage = usage_chunks[-1]["usage"]
         assert "prompt_tokens" in usage
         assert "completion_tokens" in usage
+
+
+class TestLocalStreamingTurn0Ingest:
+    """The local (Tinker) fake-streaming path must seed the accumulator on turn 0.
+
+    Regression: it used to persist the trace but never ``ingest_turn`` /
+    ``update_prefix``, so the slot stayed at turn 0. Then ``continues()`` was False
+    for every later turn, so each turn opened a NEW lineage — one trajectory per turn
+    for a streaming session (opencode/claude-code), with cumulative bridging never
+    engaging. The HTTP-streaming and non-streaming turn-0 paths always ingested; only
+    the local-handler streaming path was missing it.
+    """
+
+    async def test_streaming_local_turn0_seeds_slot_and_stays_one_lineage(self):
+        async def fake_handler(request_body):
+            # Mirrors the Tinker adapter: chat.completion carrying token ids.
+            return {
+                "object": "chat.completion",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "token_ids": [5, 6], "finish_reason": "stop"}],
+                "prompt_token_ids": [1, 2, 3],
+            }
+
+        config = GatewayConfig(
+            store_worker="memory",
+            workers=[{"url": "http://127.0.0.1:1/v1", "worker_id": "w0"}],
+            health_check_interval=999,
+            sync_traces=True,
+            cumulative_token_mode=False,  # inject a mock renderer instead of loading one
+        )
+        proxy = create_app(config).state.proxy
+        proxy.renderer = _MockRenderer()
+        proxy.cumulative_token_mode = True
+        proxy.local_handler = fake_handler
+
+        sid = "loc-stream-1"
+        turn0 = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hello"}]
+        slots = proxy._session_slots(sid)
+        slots.select(turn0)  # mirror handle() routing before it dispatches to streaming
+
+        await proxy._handle_streaming_local({"messages": turn0, "stream": True}, sid, False, 1)
+
+        turn0_slot = slots.active
+        # The fix: turn-0 ingest advanced the slot (was stuck at 0 before).
+        assert turn0_slot.turn_count == 1
+        assert turn0_slot.message_count == len(turn0)
+
+        # A cumulative turn 1 must route back to the SAME lineage, not fork a new one.
+        turn1 = turn0 + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "next"}]
+        acc1 = slots.select(turn1)
+        assert acc1 is turn0_slot
+        assert len(slots._slots) == 1
+        assert acc1.lineage_id == turn0_slot.lineage_id

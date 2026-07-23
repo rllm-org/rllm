@@ -1241,6 +1241,21 @@ class ReverseProxy:
             )
             await self._persist(trace)
 
+            # Seed the accumulator on turn 0 (streaming local/Tinker path). Without
+            # this the slot never advances past turn 0, so should_rewrite() and
+            # continues() both stay False — every subsequent turn opens a NEW
+            # lineage, exploding one streaming session into one trajectory per turn
+            # (and cumulative bridging never engages). Mirrors the turn-0 ingest in
+            # _non_streaming_result and the HTTP-streaming _handle_streaming.
+            if self.cumulative_token_mode:
+                acc = self._session_slots(session_id).active
+                if acc.turn_count == 0:
+                    prompt_ids = trace.prompt_token_ids
+                    completion_ids = trace.completion_token_ids
+                    if prompt_ids or completion_ids:
+                        acc.ingest_turn(prompt_ids, completion_ids)
+                        acc.update_prefix(request_body.get("messages", []))
+
         needs_strip_vllm = self.strip_vllm
         needs_strip_logprobs = not originally_requested_logprobs
 
