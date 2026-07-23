@@ -612,6 +612,32 @@ class ReverseProxy:
         needs_strip_vllm = self.strip_vllm
         needs_strip_logprobs = not originally_requested_logprobs
 
+        # [MMCODEX-DIAG] temporary — surface upstream status + error body so
+        # we can see WHY chunks stay empty when vLLM 4xx/5xx. Remove after L3
+        # root cause is found. On non-2xx we drain the body (SSE wouldn't have
+        # valid data anyway) so aiter_lines below just gets the empty tail.
+        if resp.status_code >= 400:
+            _err_body = await resp.aread()
+            _err_snip = _err_body[:800].decode("utf-8", errors="replace")
+            _sent_body_snip = raw_body[:800].decode("utf-8", errors="replace")
+            logger.warning(
+                "[MMCODEX-DIAG] upstream error: status=%d url=%s session=%s\n"
+                "    upstream_body[0:800]=%s\n"
+                "    sent_body[0:800]=%s",
+                resp.status_code,
+                url,
+                session_id,
+                _err_snip,
+                _sent_body_snip,
+            )
+        else:
+            logger.info(
+                "[MMCODEX-DIAG] upstream ok: status=%d url=%s session=%s",
+                resp.status_code,
+                url,
+                session_id,
+            )
+
         async def event_generator():
             try:
                 async for line in resp.aiter_lines():
