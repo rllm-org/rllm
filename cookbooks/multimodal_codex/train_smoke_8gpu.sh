@@ -68,6 +68,10 @@ export UV_FROZEN=1
 export HF_HUB_DISABLE_XET=1
 export RLLM_HOME=/local-ssd/rllm_home
 export PATH="/tmp/uv-venv/bin:${PATH}"
+# Codex CLI speaks Responses API — every gateway process (external + verl-internal
+# spawned by Ray) needs ResponsesAdapterMiddleware registered. Global export so
+# Ray-spawned children inherit it, not just the L113 external-gateway prefix.
+export RLLM_API_FORMAT=responses
 _VENV_SITE=$(ls -d /tmp/uv-venv/lib/python*/site-packages 2>/dev/null | head -1)
 if [[ -n "$_VENV_SITE" && -d "$_VENV_SITE/nvidia/cu13/lib" ]]; then
     export LD_LIBRARY_PATH="$_VENV_SITE/nvidia/cu13/lib:${LD_LIBRARY_PATH:-}"
@@ -110,8 +114,7 @@ done
 
 # --------- 8. Gateway (harness OpenAI API interceptor) ---------
 echo "[smoke] starting gateway on port $GATEWAY_PORT"
-RLLM_API_FORMAT=responses \
-    "$VENV_PY" -m rllm_model_gateway.server \
+"$VENV_PY" -m rllm_model_gateway.server \
     --cumulative-token-mode \
     --renderer-family qwen3.5 \
     --model "$MODEL" \
