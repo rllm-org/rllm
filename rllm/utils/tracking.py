@@ -225,6 +225,11 @@ class Tracking:
             if backend is None or default_backend in backend:
                 if default_backend == "ui":
                     logger_instance.log(data=data, step=step, episodes=episodes, trajectory_groups=trajectory_groups)
+                elif default_backend == "wandb":
+                    # W&B defaults to commit=False when an explicit step is supplied,
+                    # which otherwise leaves the newest training step invisible until
+                    # the following step is logged (or the run finishes).
+                    logger_instance.log(data=data, step=step, commit=True)
                 else:
                     logger_instance.log(data=data, step=step)
 
