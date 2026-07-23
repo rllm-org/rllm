@@ -51,14 +51,16 @@ def _infer_rule(key: str) -> str:
         if key.startswith(prefix):
             return "mean"
 
-    # Keyword inference from the key name
-    if "/max" in key:
+    # Infer extrema from the final path component only. Metric namespaces may
+    # contain these strings (for example, ``mini-swe-agent``).
+    suffix = key.rsplit("/", 1)[-1]
+    if suffix == "max":
         return "max"
-    if "/min" in key:
+    if suffix == "min":
         return "min"
-    if "/mean" in key or "/avg" in key:
+    if suffix in ("mean", "avg"):
         return "mean"
-    if "/std" in key or "/fraction" in key:
+    if suffix == "std" or suffix.startswith("fraction"):
         return "mean"
 
     return "mean"

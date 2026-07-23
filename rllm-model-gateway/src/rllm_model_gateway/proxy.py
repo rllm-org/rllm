@@ -202,6 +202,7 @@ class ReverseProxy:
         heartbeat_interval_s: float = 25.0,
         heartbeat_budget_s: float = 3600.0,
         capture_raw_payloads: bool = False,
+        loop_health_enabled: bool = False,
         worker_label: str = "",
     ) -> None:
         self.router = router
@@ -220,6 +221,7 @@ class ReverseProxy:
         # dicts (≤120K-token prompt + full response) is the dominant per-request
         # CPU cost on the event loop at high concurrency. Enable for debugging.
         self.capture_raw_payloads = capture_raw_payloads
+        self.loop_health_enabled = loop_health_enabled
         # Whitespace heartbeat for slow non-streaming completions: middleboxes
         # on the response path (Cloudflare quick tunnel: 120s; ngrok: ~300s;
         # NAT flow tables) silently kill responses that stay byte-silent while
@@ -318,7 +320,7 @@ class ReverseProxy:
             limits=httpx.Limits(max_connections=500, max_keepalive_connections=100),
             follow_redirects=True,
         )
-        if self._monitor_task is None:
+        if self.loop_health_enabled and self._monitor_task is None:
             self._monitor_task = asyncio.ensure_future(self._loop_health_monitor())
 
     async def stop(self) -> None:

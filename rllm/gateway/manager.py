@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 from rllm_model_gateway.client import AsyncGatewayClient, GatewayClient
 from rllm_model_gateway.models import TraceRecord
 
-from rllm.env import env_float
+from rllm.env import env_bool, env_float
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
@@ -528,6 +528,7 @@ class GatewayManager:
             add_return_token_ids=self.add_return_token_ids,
             cumulative_token_mode=self.cumulative_token_mode,
             renderer_family=self.renderer_family,
+            loop_health_enabled=env_bool("RLLM_LOOP_HEALTH_ENABLED", False),
         )
         app = create_app(config=gw_config, local_handler=local_handler)
 

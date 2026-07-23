@@ -52,6 +52,23 @@ def env_str(name: str, default: str) -> str:
     return value if value else default
 
 
+def env_bool(name: str, default: bool) -> bool:
+    """Return ``$name`` parsed as a boolean, or ``default`` when unset.
+
+    Accepted true values are ``1``, ``true``, ``yes``, and ``on``; accepted
+    false values are ``0``, ``false``, ``no``, and ``off`` (case-insensitive).
+    """
+    value = os.environ.get(name)
+    if not value:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean (1/0, true/false, yes/no, on/off), got {value!r}")
+
+
 def env_int(name: str, default: int) -> int:
     """Return ``$name`` parsed as ``int`` if set and non-empty, else ``default``.
 

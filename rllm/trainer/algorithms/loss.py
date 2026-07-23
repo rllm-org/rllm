@@ -414,7 +414,16 @@ def dppo_tv(ctx: LossContext):
     # region, so truncating would reintroduce the low-prob-token bias DPPO avoids (paper Sec. 5.4).
     tr = _ratio(ctx).detach()
     p_curr, p_old = ctx.logp_curr.exp(), ctx.logp_old.exp()
-    keep = torch.where(ctx.advantages > 0, (p_curr - p_old) <= delta_hi, (p_curr - p_old) >= -delta_lo).detach().to(ctx.logp_curr.dtype)
+    probability_delta = p_curr - p_old
+    keep = torch.where(
+        ctx.advantages > 0,
+        probability_delta <= delta_hi,
+        torch.where(
+            ctx.advantages < 0,
+            probability_delta >= -delta_lo,
+            torch.ones_like(probability_delta, dtype=torch.bool),
+        ),
+    ).detach().to(ctx.logp_curr.dtype)
     pg = -ctx.advantages * tr * ctx.logp_curr * keep
     am = ctx.action_mask
     mask_frac = ((1.0 - keep) * am).sum() / am.sum().clamp(min=1.0)

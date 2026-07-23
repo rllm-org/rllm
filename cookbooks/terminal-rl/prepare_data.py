@@ -41,13 +41,30 @@ from pathlib import Path
 TRAIN_DATASET = "tb-opus-pass"
 TRAIN_SPLIT = "train"
 
+DEBUG_DATASET = "tb_v2_debug"
+DEBUG_TASKS = (
+    "bottleneck-path-oracle",
+    "debug-rl-library",
+    "ecc-curve-audit",
+    "erniekit-config-validator",
+    "fix-numerical-bugs",
+    "maxwell-cavity-modes",
+    "mx-format-gemm",
+    "parametric-qp-breakpoints",
+)
+
 # Terminal-Bench eval version (Harbor registry). 2.0 is what the registry
 # publishes today; flip to 2.1 (or any published version) via TB_EVAL_VERSION.
 EVAL_VERSION = os.environ.get("TB_EVAL_VERSION", "2.0")
 EVAL_DATASET = f"terminal-bench@{EVAL_VERSION}"
 
 # Local training tarball (Harbor tasks). Override with TB_TRAIN_TARBALL.
-DEFAULT_TARBALL = os.path.expanduser(os.environ.get("TB_TRAIN_TARBALL", "~/terminal_train_tasks.tar.zst"))
+DEFAULT_TARBALL = os.path.expanduser(
+    os.environ.get(
+        "TB_TRAIN_TARBALL",
+        str(Path(__file__).resolve().parent / "tb-v2-tasks" / "tb_v2_tasks.tar.zst"),
+    )
+)
 
 
 def _tasks_root() -> Path:
@@ -113,6 +130,40 @@ def _register_train(tasks_root: Path, limit: int | None) -> int:
     return len(rows)
 
 
+def _register_debug(tasks_root: Path) -> int:
+    """Register the selected eight-task debug subset from the training archive."""
+    from rllm.data import DatasetRegistry
+    from rllm.integrations.harbor.dataset_loader import harbor_task_to_row
+
+    task_dirs = {d.name: d for d in tasks_root.iterdir() if d.is_dir() and (d / "task.toml").exists()}
+    missing = [name for name in DEBUG_TASKS if name not in task_dirs]
+    if missing:
+        missing_names = ", ".join(missing)
+        raise RuntimeError(f"Training tarball is missing debug tasks: {missing_names}")
+
+    rows = []
+    invalid = []
+    for name in DEBUG_TASKS:
+        row = harbor_task_to_row(task_dirs[name])
+        if row is None:
+            invalid.append(name)
+        else:
+            rows.append(row)
+    if invalid:
+        invalid_names = ", ".join(invalid)
+        raise RuntimeError(f"Invalid debug tasks: {invalid_names}")
+
+    DatasetRegistry.register_dataset(
+        name=DEBUG_DATASET,
+        data=rows,
+        split=TRAIN_SPLIT,
+        source=f"local:{Path(DEFAULT_TARBALL).name}",
+        description="Eight-task Terminal-Bench v2 debug subset",
+        category="agentic",
+    )
+    return len(rows)
+
+
 def _pull_eval() -> None:
     """Pull the Terminal-Bench eval split from the Harbor registry."""
     name = f"harbor:{EVAL_DATASET}"
@@ -148,10 +199,13 @@ def main() -> None:
     n_train = _register_train(tasks_root, args.train_limit)
     print(f"[terminal-rl] Registered {TRAIN_DATASET}/{TRAIN_SPLIT} ({n_train} tasks)", flush=True)
 
+    n_debug = _register_debug(tasks_root)
+    print(f"[terminal-rl] Registered {DEBUG_DATASET}/{TRAIN_SPLIT} ({n_debug} tasks)", flush=True)
+
     _pull_eval()
 
     print(
-        f"\n[terminal-rl] Done. Train: {TRAIN_DATASET} ({n_train})   Eval: {EVAL_DATASET}\n        Run `bash cookbooks/terminal-rl/train_tinker.sh` to train.",
+        f"\n[terminal-rl] Done. Train: {TRAIN_DATASET} ({n_train})   Debug: {DEBUG_DATASET} ({n_debug})   Eval: {EVAL_DATASET}\n        Run `bash cookbooks/terminal-rl/train_tinker.sh` to train.",
         flush=True,
     )
 

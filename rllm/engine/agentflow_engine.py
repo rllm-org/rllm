@@ -787,15 +787,30 @@ class AgentFlowEngine:
             strict=not is_validation,
         )
 
-        # The hook-resolved evaluator always receives the Task (legacy
-        # dict-style evaluators are adapted at hook-construction time).
-        t = time.perf_counter()
-        eval_output: EvalOutput = await loop.run_in_executor(
-            self.executor,
-            ctx.evaluator.evaluate,
-            task_obj,
-            enriched,
+        # Some flows have an explicit submission protocol. They may opt out of
+        # grading incomplete attempts while still returning reward-zero trajectories
+        # whose generated tokens participate in training.
+        verify_only_on_env_done = bool(
+            getattr(self.agent_flow, "verify_only_on_env_done", False)
         )
+        skip_verifier = verify_only_on_env_done and enriched.termination_reason != TerminationReason.ENV_DONE
+        t = time.perf_counter()
+        if skip_verifier:
+            eval_output = EvalOutput(
+                reward=float(getattr(self.agent_flow, "skipped_verifier_reward", 0.0)),
+                is_correct=False,
+                metadata={"verifier_skipped": 1.0},
+            )
+        else:
+            # The hook-resolved evaluator receives the Task (legacy dict-style
+            # evaluators are adapted at hook-construction time).
+            eval_output = await loop.run_in_executor(
+                self.executor,
+                ctx.evaluator.evaluate,
+                task_obj,
+                enriched,
+            )
+            eval_output.metadata.setdefault("verifier_skipped", 0.0)
         if _timings is not None:
             _timings["time/evaluator_s"] = time.perf_counter() - t
             _agentflow_s = _timings.get("time/agentflow_s", 0.0)

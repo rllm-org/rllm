@@ -11,11 +11,15 @@ the engine builds the trajectory.
 
 from __future__ import annotations
 
+import json
+import logging
 import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
 from rllm.sandbox.protocol import Sandbox
-from rllm.types import AgentConfig, Task
+from rllm.types import AgentConfig, Episode, Task, TerminationReason
+
+logger = logging.getLogger(__name__)
 
 # Model-name prefix → provider env-var mapping. Mirrors litellm's logic
 # without taking the dependency.
@@ -98,6 +102,14 @@ class MiniSweAgentHarness(BaseCliHarness):
     name = "mini-swe-agent"
     sandbox_backend = "docker"
     stdout_log_path = "/tmp/mini-swe-agent.log"
+    max_turns: int | None = None
+    max_consecutive_format_errors: int | None = None
+    command_timeout: int | None = None
+    capture_exit_status: bool = False
+    verify_only_on_env_done: bool = False
+    skipped_verifier_reward: float = 0.0
+    cost_limit: float | None = None
+    trajectory_output_path: str = "/tmp/rllm-mini-swe-trajectory.json"
 
     def install_script(self) -> str:
         return _INSTALL_SCRIPT
@@ -166,6 +178,69 @@ class MiniSweAgentHarness(BaseCliHarness):
             env=env,
         )
 
+    def _read_exit_outcome(self, sandbox: Sandbox) -> tuple[str | None, str | None]:
+        try:
+            raw = sandbox.exec(
+                f"cat {shlex.quote(self.trajectory_output_path)}",
+                timeout=10,
+                user=self.agent_user,
+            )
+            data = json.loads(raw)
+        except Exception as e:
+            logger.debug("Could not read mini-SWE trajectory outcome: %s", e)
+            return None, None
+
+        info = data.get("info", {}) if isinstance(data, dict) else {}
+        status = info.get("exit_status") if isinstance(info, dict) else None
+        status = str(status).strip() if status else None
+
+        finish_reason = None
+        messages = data.get("messages", []) if isinstance(data, dict) else []
+        if isinstance(messages, list):
+            for message in reversed(messages):
+                if not isinstance(message, dict):
+                    continue
+                extra = message.get("extra")
+                if not isinstance(extra, dict) or extra.get("interrupt_type") != "FormatError":
+                    continue
+                response = extra.get("response")
+                choices = response.get("choices") if isinstance(response, dict) else None
+                if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                    raw_finish_reason = choices[0].get("finish_reason")
+                    finish_reason = str(raw_finish_reason).strip() if raw_finish_reason else None
+                break
+
+        return status, finish_reason
+
+    @staticmethod
+    def _map_exit_status(status: str | None, finish_reason: str | None = None) -> TerminationReason:
+        if status == "Submitted":
+            return TerminationReason.ENV_DONE
+        if status == "LimitsExceeded":
+            return TerminationReason.MAX_TURNS_EXCEEDED
+        if status == "TimeExceeded":
+            return TerminationReason.TIMEOUT
+        if status == "RepeatedFormatError":
+            if (finish_reason or "").lower() in {"length", "max_tokens", "max_output_tokens"}:
+                return TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED
+            return TerminationReason.FORMAT_ERROR
+        if status in (None, "", "UserInterruption"):
+            return TerminationReason.UNKNOWN
+        return TerminationReason.ERROR
+
+    def run(self, task: Task, config: AgentConfig, *, env: Sandbox) -> Episode:
+        episode = super().run(task, config, env=env)
+        if not self.capture_exit_status:
+            return episode
+
+        status, finish_reason = self._read_exit_outcome(env)
+        episode.metadata["miniswe_exit_status"] = status or "missing"
+        if status is not None:
+            episode.termination_reason = self._map_exit_status(status, finish_reason)
+        elif episode.termination_reason is None:
+            episode.termination_reason = TerminationReason.UNKNOWN
+        return episode
+
     def build_invocation(
         self,
         instruction: str,
@@ -182,12 +257,56 @@ class MiniSweAgentHarness(BaseCliHarness):
         # which breaks the build with missing ``system_template`` etc.
         # The dotenv we write in :meth:`write_configs` carries the base
         # URL into the agent's environment so litellm picks it up.
+        config_overrides: list[str] = []
+        if self.cost_limit is not None:
+            cost_limit = float(self.cost_limit)
+            if cost_limit < 0:
+                raise ValueError(f"cost_limit must be non-negative, got {self.cost_limit!r}")
+            config_overrides.append(f"agent.cost_limit={cost_limit}")
+        if self.max_turns is not None:
+            max_turns = int(self.max_turns)
+            if max_turns <= 0:
+                raise ValueError(f"max_turns must be positive, got {self.max_turns!r}")
+            config_overrides.append(f"agent.step_limit={max_turns}")
+        if self.max_consecutive_format_errors is not None:
+            max_format_errors = int(self.max_consecutive_format_errors)
+            if max_format_errors < 0:
+                raise ValueError(
+                    "max_consecutive_format_errors must be non-negative, "
+                    f"got {self.max_consecutive_format_errors!r}"
+                )
+            config_overrides.append(f"agent.max_consecutive_format_errors={max_format_errors}")
+        if self.command_timeout is not None:
+            command_timeout = int(self.command_timeout)
+            if command_timeout <= 0:
+                raise ValueError(f"command_timeout must be positive, got {self.command_timeout!r}")
+            config_overrides.append(f"environment.timeout={command_timeout}")
+
+        config_args = ""
+        if config_overrides:
+            # Supplying any -c flag disables mini-SWE's implicit default config,
+            # so include mini.yaml explicitly before layering our overrides.
+            config_args = (
+                "--config=mini.yaml "
+                + " ".join(f"--config={value}" for value in config_overrides)
+                + " "
+            )
+
+        outcome_prefix = ""
+        outcome_arg = ""
+        if self.capture_exit_status:
+            output_path = shlex.quote(self.trajectory_output_path)
+            outcome_prefix = f"rm -f {output_path}; "
+            outcome_arg = f"--output={output_path} "
         return (
             f"{self._cd_prefix(task)}"
             f'export PATH="$HOME/.local/bin:$PATH"; '
+            f"{outcome_prefix}"
             f"mini-swe-agent --yolo "
+            f"{config_args}"
             f"--model={shlex.quote(qualified)} "
             f"--task={shlex.quote(instruction)} "
+            f"{outcome_arg}"
             f"--exit-immediately "
             f"2>&1 | tee {shlex.quote(self.stdout_log_path)}"
         )

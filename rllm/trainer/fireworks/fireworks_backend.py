@@ -130,6 +130,8 @@ class FireworksBackend(TinkerBackend):
         # rllm owns these knobs; mirror them into the provision document.
         common["kl_beta"] = float(algorithm_config.kl_beta)
         common["learning_rate"] = self.learning_rate
+        common["router_replay"] = algorithm_config.router_replay == "R3"
+        common["router_replay_completion_only"] = True
         if cfg.get("concurrency") is not None:
             common["concurrency"] = OmegaConf.to_container(cfg.concurrency, resolve=True)
         if cfg.training.get("max_length") is not None:

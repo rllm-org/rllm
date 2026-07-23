@@ -194,6 +194,7 @@ def create_app(
         local_handler=local_handler,
         cumulative_token_mode=config.cumulative_token_mode,
         renderer=renderer,
+        loop_health_enabled=config.loop_health_enabled,
         worker_label=str(config.port) if config.port else "",
     )
     sessions = SessionManager(store)
@@ -470,6 +471,7 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         "RLLM_GATEWAY_DB_PATH": "db_path",
         "RLLM_GATEWAY_LOG_LEVEL": "log_level",
         "RLLM_GATEWAY_STORE": "store_worker",
+        "RLLM_LOOP_HEALTH_ENABLED": "loop_health_enabled",
     }
     for env_key, config_key in env_map.items():
         val = os.environ.get(env_key)

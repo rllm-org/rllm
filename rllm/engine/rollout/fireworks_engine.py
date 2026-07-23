@@ -491,12 +491,15 @@ class FireworksEngine(TinkerEngine):
 
         # Fireworks routes requests carrying the same session id to the same
         # replica, so its per-replica prompt-prefix KV is reused across a
-        # trajectory's turns. Set once per turn from the trajectory id.
+        # trajectory's turns. Fireworks accepts either affinity header, and the
+        # OpenAI ``user`` field is also used for routing; keep all three equal.
         session_headers = None
         if session_id:
+            session_id = str(session_id)
+            sampling_params["user"] = session_id
             session_headers = {
-                "x-multi-turn-session-id": str(session_id),
-                "x-session-affinity": str(session_id),
+                "x-multi-turn-session-id": session_id,
+                "x-session-affinity": session_id,
             }
 
         raw, server_metrics = await self._completions_with_retry(

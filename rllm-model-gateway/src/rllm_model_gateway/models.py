@@ -120,6 +120,7 @@ class GatewayConfig(BaseModel):
     routing_policy: str | None = None
     health_check_interval: float = 10.0
     log_level: str = "INFO"
+    loop_health_enabled: bool = False
     sync_traces: bool = False
     model: str | None = None  # When set, overrides ``body.model``
     cumulative_token_mode: bool = False
