@@ -148,6 +148,7 @@ class UnifiedTrainer:
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
         backend_args: dict | None = None,
+        benchmark_dataset: Dataset | None = None,
         *,
         traj_grouping_hook: Callable | None = None,
         traj_group_adv_estimator_map: dict | None = None,
@@ -177,6 +178,7 @@ class UnifiedTrainer:
         self.store = store
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
+        self.benchmark_dataset = benchmark_dataset
 
         # initializing and validating common configs
         self.config = config
@@ -308,9 +310,10 @@ class UnifiedTrainer:
             self.tokenizer = self.backend.tokenizer
 
     def _init_dataloaders(self) -> None:
-        """Build the train and val dataloaders from their datasets."""
+        """Build train, periodic-validation, and boundary-benchmark loaders."""
         self._train_dataloader: StatefulTaskDataLoader | None = None
         self._val_dataloader: StatefulTaskDataLoader | None = None
+        self._benchmark_dataloader: StatefulTaskDataLoader | None = None
         self._total_training_steps: int | None = None
 
         if self.train_dataset is not None:
@@ -335,6 +338,17 @@ class UnifiedTrainer:
             if val_batch_size == -1:
                 val_batch_size = len(self.val_dataset)
             self._val_dataloader = StatefulTaskDataLoader(self.val_dataset, batch_size=val_batch_size, shuffle=False, drop_last=False)
+
+        if self.benchmark_dataset is not None:
+            benchmark_batch_size = self.rllm_config.data.val_batch_size
+            if benchmark_batch_size == -1:
+                benchmark_batch_size = len(self.benchmark_dataset)
+            self._benchmark_dataloader = StatefulTaskDataLoader(
+                self.benchmark_dataset,
+                batch_size=benchmark_batch_size,
+                shuffle=False,
+                drop_last=False,
+            )
 
     def _validate_and_setup_configs(self):
         """Validate and setup common configs."""
@@ -433,8 +447,15 @@ class UnifiedTrainer:
             self._gateway.start(self.backend.rollout_engine)
             self._gateway.set_weight_version(trainer_state.weight_version)
 
-        if self.rllm_config.trainer.get("val_before_train", True):
-            await self._validate_async(trainer_state)
+        val_before_train = self.rllm_config.trainer.get("val_before_train", True)
+        benchmark_before_train = self.rllm_config.trainer.get("benchmark_before_train", False)
+        if val_before_train or benchmark_before_train:
+            await self._run_evaluation_suites_async(
+                trainer_state,
+                run_validation=val_before_train,
+                run_benchmark=benchmark_before_train,
+            )
+        if val_before_train:
             if self.rllm_config.trainer.get("val_only", False):
                 return
 
@@ -483,6 +504,17 @@ class UnifiedTrainer:
                         await self._train_batch_async(batch, trainer_state)
                     await self.backend.on_batch_end(trainer_state)
 
+                    # W&B discards a second committed write at the same explicit
+                    # step, so fold periodic validation into the training row.
+                    if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
+                        with _detached_warm_queue(hooks):
+                            trainer_state.metrics.update(
+                                await self._validate_async(
+                                    trainer_state,
+                                    log_metrics=False,
+                                )
+                            )
+
                     print_metrics_table(trainer_state.metrics, trainer_state.global_step)
                     self.logger.log(
                         data=trainer_state.metrics,
@@ -496,11 +528,6 @@ class UnifiedTrainer:
                         break_via_total_batches = True
                         break
 
-                    # periodic validation
-                    if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
-                        with _detached_warm_queue(hooks):
-                            await self._validate_async(trainer_state)
-
                     trainer_state.global_step += 1
 
                 await self.backend.on_epoch_end(trainer_state)
@@ -509,9 +536,9 @@ class UnifiedTrainer:
                 warm_queue.shutdown()
                 hooks.warm_queue = None
 
-        # final validation after training (queue already shut down + detached above)
-        if self.rllm_config.trainer.test_freq > 0:
-            await self._validate_async(trainer_state)
+        # Final periodic suite + optional benchmark after training. The train warm
+        # queue is already shut down, so evaluation creates its own sandboxes.
+        await self._run_final_evaluations_async(trainer_state)
 
     def _start_train_warm_queue(self, train_dataloader, trainer_state, total_epochs, use_total_batches, hooks):
         """Prefetch upcoming sandboxes ahead of rollout, mirroring eval's warm pool.
@@ -658,18 +685,28 @@ class UnifiedTrainer:
             return " ".join(parts)
 
         monitor_task = asyncio.create_task(run_loop_health_monitor("trainer", gauges=_trainer_gauges))
+        gen_task = None
         try:
             gen_task = asyncio.create_task(self._generation_loop(trainer_state, buffer, coordinator))
             await self._training_loop(trainer_state, buffer, coordinator, aggregator)
-            if not gen_task.done():
-                gen_task.cancel()
-                try:
-                    await gen_task
-                except asyncio.CancelledError:
-                    pass
         finally:
-            monitor_task.cancel()
-            pbar.close()
+            try:
+                coordinator.pause_generation()
+                if gen_task is not None and not gen_task.done():
+                    gen_task.cancel()
+                    try:
+                        await gen_task
+                    except asyncio.CancelledError:
+                        pass
+                await coordinator.wait_for_drain()
+            finally:
+                monitor_task.cancel()
+                pbar.close()
+
+        # The fully-async path historically omitted the documented final
+        # validation. Generation is stopped and drained above, so both suites
+        # observe the final hot-loaded policy without competing train rollouts.
+        await self._run_final_evaluations_async(trainer_state)
 
     async def _generation_loop(
         self,
@@ -869,7 +906,17 @@ class UnifiedTrainer:
             # 7. on_batch_end writes backend metrics (progress, optim, timing)
             await self.backend.on_batch_end(trainer_state)
 
-            # 7. Print and log
+            # W&B discards a second committed write at the same explicit step,
+            # so fold periodic validation into the training row.
+            if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
+                trainer_state.metrics.update(
+                    await self._validate_async(
+                        trainer_state,
+                        log_metrics=False,
+                    )
+                )
+
+            # 8. Print and log
             print_metrics_table(trainer_state.metrics, trainer_state.global_step)
             self.logger.log(
                 data=trainer_state.metrics,
@@ -877,14 +924,6 @@ class UnifiedTrainer:
                 episodes=trainer_state.episodes,
                 trajectory_groups=trainer_state.trajectory_groups,
             )
-
-            # Periodic validation. Eval rollouts run on the shared rollout pool
-            # and preempt training rollouts for slots (PrioritySemaphore), so no
-            # dispatch pause / drain barrier is needed -- eval saturates the pool
-            # and training fills the leftover. Weights stay frozen for the duration
-            # because this await blocks the training loop, so no weight sync runs.
-            if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
-                await self._validate_async(trainer_state)
 
             trainer_state.global_step += 1
 
@@ -908,76 +947,161 @@ class UnifiedTrainer:
         if not self.async_config.partial_rollout:
             coordinator.resume_generation()
 
-    async def _validate_async(self, trainer_state: TrainerState) -> dict:
-        """Validate the model (async implementation)."""
-        if self._val_dataloader is None:
+    async def _validate_async_with_pause(
+        self,
+        trainer_state: TrainerState,
+        coordinator: SyncCoordinator,
+        *,
+        log_metrics: bool = True,
+    ) -> dict:
+        """Validation with dispatch-level pause. Waits for workflows to drain, then runs validation."""
+        coordinator.pause_generation()
+        await coordinator.wait_for_drain()
+        try:
+            return await self._validate_async(
+                trainer_state,
+                log_metrics=log_metrics,
+            )
+        finally:
+            coordinator.resume_generation()
+
+    async def _run_final_evaluations_async(self, trainer_state: TrainerState) -> dict:
+        """Run the periodic validation suite and optional benchmark at final weights."""
+        return await self._run_evaluation_suites_async(
+            trainer_state,
+            run_validation=self.rllm_config.trainer.test_freq > 0,
+            run_benchmark=self.rllm_config.trainer.get("benchmark_after_train", False),
+        )
+
+    async def _run_evaluation_suites_async(
+        self,
+        trainer_state: TrainerState,
+        *,
+        run_validation: bool,
+        run_benchmark: bool,
+    ) -> dict:
+        """Run selected suites and commit one combined metrics row.
+
+        Boundary evaluations can include both the periodic validation suite and a large
+        external benchmark at the same optimizer step. W&B requires those
+        metrics to be committed together; two committed writes at the same
+        explicit step can drop the second suite.
+        """
+        metrics: dict = {}
+        if run_validation:
+            metrics.update(await self._validate_async(trainer_state, log_metrics=False))
+        if run_benchmark:
+            metrics.update(await self._benchmark_async(trainer_state, log_metrics=False))
+        if metrics:
+            self.logger.log(data=metrics, step=trainer_state.global_step)
+        return metrics
+
+    async def _validate_async(self, trainer_state: TrainerState, *, log_metrics: bool = True) -> dict:
+        """Evaluate the periodic validation dataset."""
+        return await self._evaluate_dataloader_async(
+            trainer_state,
+            dataloader=self._val_dataloader,
+            metric_prefix="val",
+            title="Validation",
+            log_metrics=log_metrics,
+        )
+
+    async def _benchmark_async(self, trainer_state: TrainerState, *, log_metrics: bool = True) -> dict:
+        """Evaluate the boundary-only benchmark dataset."""
+        return await self._evaluate_dataloader_async(
+            trainer_state,
+            dataloader=self._benchmark_dataloader,
+            metric_prefix="benchmark",
+            title="Benchmark",
+            log_metrics=log_metrics,
+        )
+
+    async def _evaluate_dataloader_async(
+        self,
+        trainer_state: TrainerState,
+        *,
+        dataloader: StatefulTaskDataLoader | None,
+        metric_prefix: str,
+        title: str,
+        log_metrics: bool,
+    ) -> dict:
+        """Evaluate one dataloader and namespace its metrics."""
+        if dataloader is None:
             return {}
         n_val_samples = self.rllm_config.rollout.n_val
         val_metrics = defaultdict(list)
 
         if not await self.backend.on_validation_start(trainer_state):
             return {}
-        # manually manage the testing time
-        test_begin = time.perf_counter()
-        self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="val", epoch=trainer_state.epoch)
+        try:
+            test_begin = time.perf_counter()
+            self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="val", epoch=trainer_state.epoch)
 
-        is_correct_lst, uid_lst, data_source_lst = [], [], []
-        workflow_metrics_by_source = defaultdict(lambda: defaultdict(list))
+            is_correct_lst, uid_lst, data_source_lst = [], [], []
+            workflow_metrics_by_source = defaultdict(lambda: defaultdict(list))
 
-        for batch in self._val_dataloader:
-            # Generate episodes and transform to trajectory groups
-            val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=True)
-            val_trajectory_groups, _ = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
-            reward_metrics = collect_reward_and_advantage_from_trajectory_groups(val_trajectory_groups, self.algorithm_config, collect_advantage=False)
+            for batch in dataloader:
+                # Generate episodes and transform to trajectory groups
+                val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=True)
+                val_trajectory_groups, _ = transform_episodes_to_trajectory_groups(
+                    val_episodes,
+                    self.transform_config,
+                    self.cf_config,
+                    traj_grouping_hook=self.traj_grouping_hook,
+                )
+                reward_metrics = collect_reward_and_advantage_from_trajectory_groups(val_trajectory_groups, self.algorithm_config, collect_advantage=False)
 
-            is_correct_lst.extend([episode.is_correct for episode in val_episodes])
-            uid_lst.extend([episode.task_id for episode in val_episodes])
+                is_correct_lst.extend([episode.is_correct for episode in val_episodes])
+                uid_lst.extend([episode.task_id for episode in val_episodes])
 
-            data_sources = [episode.info.get("data_source", "unknown") for episode in val_episodes]
-            data_source_lst.extend(data_sources)
+                data_sources = [episode.info.get("data_source", "unknown") for episode in val_episodes]
+                data_source_lst.extend(data_sources)
 
-            for episode, data_source in zip(val_episodes, data_sources, strict=True):
-                for key, value in episode.metrics.items():
-                    # episode.metrics can contain non-numeric values -- skip in the workflow metrics.
-                    try:
-                        workflow_metrics_by_source[data_source][key].append(float(value))
-                    except (TypeError, ValueError):
-                        continue
+                for episode, data_source in zip(val_episodes, data_sources, strict=True):
+                    for key, value in episode.metrics.items():
+                        # episode.metrics can contain non-numeric values -- skip in the workflow metrics.
+                        try:
+                            workflow_metrics_by_source[data_source][key].append(float(value))
+                        except (TypeError, ValueError):
+                            continue
 
-            for key, value in reward_metrics.items():
-                val_metrics[f"val/{key}"].append(value)
+                for key, value in reward_metrics.items():
+                    val_metrics[f"{metric_prefix}/{key}"].append(value)
 
-        test_end = time.perf_counter()
-        val_metrics["time/testing"] = test_end - test_begin
-        is_correct_array = np.array(is_correct_lst)
-        uid_array = np.array(uid_lst)
-        data_source_array = np.array(data_source_lst)
+            test_end = time.perf_counter()
+            timing_key = "time/testing" if metric_prefix == "val" else f"time/{metric_prefix}"
+            val_metrics[timing_key] = test_end - test_begin
+            is_correct_array = np.array(is_correct_lst)
+            uid_array = np.array(uid_lst)
+            data_source_array = np.array(data_source_lst)
 
-        for data_source in np.unique(data_source_array):
-            pass_rates = defaultdict(list)
+            for data_source in np.unique(data_source_array):
+                pass_rates = defaultdict(list)
 
-            data_source_mask = data_source_array == data_source
-            is_correct_data_source = is_correct_array[data_source_mask]
-            uids_data_source = uid_array[data_source_mask]
+                data_source_mask = data_source_array == data_source
+                is_correct_data_source = is_correct_array[data_source_mask]
+                uids_data_source = uid_array[data_source_mask]
 
-            for is_correct, uid in zip(is_correct_data_source, uids_data_source, strict=False):
-                pass_rates[uid].append(is_correct)
+                for is_correct, uid in zip(is_correct_data_source, uids_data_source, strict=False):
+                    pass_rates[uid].append(is_correct)
 
-            val_metrics[f"val/{data_source}/pass@1"] = np.mean(is_correct_data_source)
-            val_metrics[f"val/{data_source}/pass@{n_val_samples}"] = np.mean([1 if any(pass_rate) else 0 for pass_rate in pass_rates.values()])
+                val_metrics[f"{metric_prefix}/{data_source}/pass@1"] = np.mean(is_correct_data_source)
+                val_metrics[f"{metric_prefix}/{data_source}/pass@{n_val_samples}"] = np.mean([1 if any(pass_rate) else 0 for pass_rate in pass_rates.values()])
 
-            # Add workflow metrics for this data source
-            if data_source in workflow_metrics_by_source:
-                for key, values in workflow_metrics_by_source[data_source].items():
-                    if values:
-                        val_metrics[f"val/{data_source}/{key}"] = np.mean(values)
+                # Add workflow metrics for this data source
+                if data_source in workflow_metrics_by_source:
+                    for key, values in workflow_metrics_by_source[data_source].items():
+                        if values:
+                            val_metrics[f"{metric_prefix}/{data_source}/{key}"] = np.mean(values)
 
-        # post-process the val metrics to reduce any "list values" into scalars
-        reduce_metrics_lists(val_metrics)
-        print_metrics_table(val_metrics, trainer_state.global_step, title="Validation")
-        self.logger.log(data=val_metrics, step=trainer_state.global_step)
-        await self.backend.on_validation_end(trainer_state)
-        return val_metrics
+            # Post-process metrics to reduce any list values into scalars.
+            reduce_metrics_lists(val_metrics)
+            print_metrics_table(val_metrics, trainer_state.global_step, title=title)
+            if log_metrics:
+                self.logger.log(data=val_metrics, step=trainer_state.global_step)
+            return val_metrics
+        finally:
+            await self.backend.on_validation_end(trainer_state)
 
     def shutdown(self):
         """Shutdown the trainer and cleanup resources."""
@@ -1033,6 +1157,7 @@ class TrainerLauncher(ABC):
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
         store: Store | None = None,
+        benchmark_dataset: Dataset | None = None,
         **kwargs,
     ):
         """Initialize the TrainerLauncher."""
@@ -1042,6 +1167,7 @@ class TrainerLauncher(ABC):
         self.store = store
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
+        self.benchmark_dataset = benchmark_dataset
         self.kwargs = kwargs
 
     @abstractmethod
@@ -1086,6 +1212,7 @@ class AgentTrainer:
         sandbox_backend: str | None = None,
         sandbox_concurrency: int | None = None,
         store: Store | None = None,
+        benchmark_dataset: Dataset | None = None,
         **kwargs,
     ):
         # Loopback/tunnel pinning must happen here, before the launcher
@@ -1100,7 +1227,13 @@ class AgentTrainer:
                 scan_env_requirements,
             )
 
-            scan = scan_env_requirements(agent_flow, train_dataset, val_dataset, sandbox_backend=sandbox_backend)
+            scan = scan_env_requirements(
+                agent_flow,
+                train_dataset,
+                val_dataset,
+                benchmark_dataset,
+                sandbox_backend=sandbox_backend,
+            )
             if hooks is None and scan.needs_env:
                 hooks = SandboxTaskHooks(
                     evaluation=FixedEvaluation(evaluator) if evaluator is not None else None,
@@ -1149,6 +1282,7 @@ class AgentTrainer:
                 workflow_class=workflow_class,
                 train_dataset=train_dataset,
                 val_dataset=val_dataset,
+                benchmark_dataset=benchmark_dataset,
                 workflow_args=workflow_args,
                 store=store,
                 **kwargs,
@@ -1161,6 +1295,7 @@ class AgentTrainer:
                 workflow_class=workflow_class,
                 train_dataset=train_dataset,
                 val_dataset=val_dataset,
+                benchmark_dataset=benchmark_dataset,
                 workflow_args=workflow_args,
                 store=store,
                 **kwargs,
@@ -1173,6 +1308,7 @@ class AgentTrainer:
                 workflow_class=workflow_class,
                 train_dataset=train_dataset,
                 val_dataset=val_dataset,
+                benchmark_dataset=benchmark_dataset,
                 workflow_args=workflow_args,
                 store=store,
                 **kwargs,

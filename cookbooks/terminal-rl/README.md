@@ -61,26 +61,30 @@ python cookbooks/terminal-rl/prepare_data.py
 python cookbooks/terminal-rl/prepare_data.py --train-limit 50
 ```
 
-This pulls:
+This prepares:
 
 | Dataset | Role | Source | Verifier |
 |---|---|---|---|
-| `tb-opus-pass` | train | local `.tar.zst` or `.zip` archive (set via `TB_TRAIN_TARBALL`) | in-sandbox `tests/test.sh` → `/logs/verifier/reward.txt` |
-| `terminal-bench@2.0` | eval (89) | `harbor:terminal-bench@2.0` | in-sandbox `tests/test.sh` → `/logs/verifier/reward.txt` |
+| `tb-opus-pass/train` | train (all 1,200 archive tasks) | local `.tar.zst` or `.zip` archive (set via `TB_TRAIN_TARBALL`) | in-sandbox `tests/test.sh` → `/logs/verifier/reward.txt` |
+| `terminal-bench@2.0/default` | existing debug/comparison eval (89) | `harbor:terminal-bench@2.0` | in-sandbox `tests/test.sh` → `/logs/verifier/reward.txt` |
+| `terminal-bench@2.1/midtest` | production periodic eval (fixed 8) | deterministic subset of pinned Terminal-Bench 2.1 | in-sandbox `tests/test.sh` → `/logs/verifier/reward.txt` |
+| `terminal-bench@2.1/default` | production boundary benchmark (89) | `harbor:terminal-bench/terminal-bench-2-1@6` | in-sandbox `tests/test.sh` → `/logs/verifier/reward.txt` |
 
-Both materialize as Harbor-format task rows (each row points at a task directory
+All materialize as Harbor-format task rows (each row points at a task directory
 holding `task.toml`, `instruction.md`, prebuilt `docker_image`, and
 `tests/test.sh`). The training tarball is extracted once under the rLLM datasets
-dir and each task directory becomes one row.
+dir and each task directory becomes one row. The eight-task mid-test is external
+Terminal-Bench 2.1 data; it is not carved out of `tb-opus-pass`, so all 1,200
+internal tasks remain available for training.
 
-**Eval version.** `TB_EVAL_VERSION` selects the Terminal-Bench eval version
-(default `2.0`). The Harbor registry only publishes `2.0` today; once `2.1`
-lands, switch with a single env var — `prepare_data.py` and `train.py` both read
-it so the pulled and loaded dataset names stay in sync:
+Terminal-Bench 2.1 is pinned to immutable Harbor package revision `6`. The
+periodic subset is selected deterministically by task ID; reproduce or change
+it with:
 
 ```bash
-TB_EVAL_VERSION=2.1 python cookbooks/terminal-rl/prepare_data.py
-TB_EVAL_VERSION=2.1 bash cookbooks/terminal-rl/train_tinker.sh
+python cookbooks/terminal-rl/prepare_data.py \
+  --midtest-size 8 \
+  --midtest-seed 20260723
 ```
 
 Point `TB_TRAIN_TARBALL` at your training tarball (or pass `--tarball`); it
@@ -151,10 +155,11 @@ synchronous (on-policy) variant is `train_fireworks_sync.sh`.
 | `full` | `accounts/fireworks/trainingShapes/glm-5p2-200k` | 0 | `1e-6` |
 
 Both modes use `accounts/fireworks/models/glm-5p2-fp8`, train on
-`tb-opus-pass`, evaluate on all 89 `terminal-bench@2.0` tasks, place the policy
-trainer in `AP_MALAYSIA_2`, and request one policy-trainer replica plus one
+`tb-opus-pass`, and evaluate on all 89 `terminal-bench@2.0` tasks. The
+comparison profiles request one policy-trainer replica plus one
 rollout-deployment replica. The two supported harnesses are `opencode` and
-`terminus-2`.
+`terminus-2`. Region placement is explicit at launch through
+`TB_TRAINER_REGION`; the cookbook does not hard-code a client-side default.
 
 Install the Fireworks and Harbor dependencies, then register the standalone
 debug set and the full training set. The full archive may be either `.tar.zst`
@@ -181,6 +186,7 @@ export FIREWORKS_API_KEY=...
 export WANDB_API_KEY=...
 export WANDB_ENTITY=...
 export TB_STATE_ROOT="/shared/${USER}/rllm-terminal-rl-glm5p2"
+export TB_TRAINER_REGION=AP_MALAYSIA_2
 ```
 
 Run all four debug combinations first. These use the eight-task debug split,
@@ -231,6 +237,51 @@ job types, tags, gateway ports, and generated deployment IDs. The training
 phase evaluates every 50 optimizer steps and once more at the end of the epoch.
 Inspect the printed trainer job and deployment IDs plus the four log files
 before detaching from the host.
+
+### Full-parameter GLM-5.2 OpenCode production run
+
+The production profile is a separate, guarded launch contract:
+
+- full-parameter `accounts/fireworks/trainingShapes/glm-5p2-200k` with LoRA
+  rank `0`
+- OpenCode harness
+- all 1,200 `tb-opus-pass/train` tasks for training
+- fixed eight-task `terminal-bench@2.1/midtest` every 10 optimizer steps,
+  including step 0
+- all 89 `terminal-bench@2.1/default` tasks at step 0 and final weights only
+- four policy-trainer replicas and four rollout-deployment replicas
+- explicit `AP_MALAYSIA_2` trainer placement
+
+Prepare the full training archive and both evaluation versions:
+
+```bash
+RLLM_HOME="${TB_STATE_ROOT}/state" \
+python cookbooks/terminal-rl/prepare_data.py \
+  --tarball /path/to/tb_v2_opus_pass.zip \
+  --midtest-size 8 \
+  --midtest-seed 20260723
+```
+
+Then launch. The script rejects `production` with any mode/harness other than
+`full opencode`. It does not use or accept a `firectl -p fw-prod` profile.
+
+```bash
+export FIREWORKS_API_KEY=...  # key for the training account
+export WANDB_API_KEY=...
+export WANDB_ENTITY=...
+export TB_STATE_ROOT="/shared/${USER}/rllm-terminal-rl-glm5p2"
+export TB_TRAINER_REGION=AP_MALAYSIA_2
+export TB_RUN_NAME="glm5p2-full-opencode-tb21-production"
+
+bash cookbooks/terminal-rl/train_fireworks_glm5p2.sh \
+  full opencode production
+```
+
+The four-replica values are production defaults. To make the resource contract
+visible in an automation wrapper, set `TB_TRAINER_REPLICAS=4` and
+`TB_ROLLOUT_REPLICAS=4` explicitly. The periodic suite logs under `val/*`; the
+full boundary suite logs under `benchmark/*`, so the two reward curves cannot
+be mistaken for the same task population.
 
 ### ECHO (train on environment feedback)
 

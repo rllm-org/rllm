@@ -45,11 +45,18 @@ from rllm.harnesses.terminus2 import Terminus2Harness
 from rllm.trainer import AgentTrainer
 
 TRAIN_DATASET = os.environ.get("TB_TRAIN_DATASET", "tb-opus-pass")
+TRAIN_SPLIT = os.environ.get("TB_TRAIN_SPLIT", "train")
 
-# Terminal-Bench eval version (Harbor registry). Must match prepare_data.py;
-# both read TB_EVAL_VERSION so the pulled and loaded dataset names agree.
+# The periodic validation suite and boundary-only benchmark are independent.
+# Production uses a fixed eight-task Terminal-Bench 2.1 mid-test split every
+# 10 optimizer steps and the full pinned 89-task split only at step 0 and
+# final weights.
 EVAL_VERSION = os.environ.get("TB_EVAL_VERSION", "2.0")
-VAL_DATASET = f"terminal-bench@{EVAL_VERSION}"
+VAL_DATASET = os.environ.get("TB_VAL_DATASET", f"terminal-bench@{EVAL_VERSION}")
+VAL_SPLIT = os.environ.get("TB_VAL_SPLIT", "default")
+BENCHMARK_DATASET = os.environ.get("TB_BENCHMARK_DATASET", "").strip()
+BENCHMARK_SPLIT = os.environ.get("TB_BENCHMARK_SPLIT", "default")
+BENCHMARK_EXPECTED_TASKS = int(os.environ.get("TB_BENCHMARK_EXPECTED_TASKS", "0"))
 
 # Sandbox backend for the SandboxedAgentFlow path: docker | local | modal | daytona.
 SANDBOX_BACKEND = os.environ.get("TERMINAL_SANDBOX_BACKEND", "modal")
@@ -90,16 +97,34 @@ def _build_agent_flow():
 
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig) -> None:
-    train_dataset = DatasetRegistry.load_dataset(TRAIN_DATASET, "train")
-    val_dataset = DatasetRegistry.load_dataset(VAL_DATASET, "default")
+    train_dataset = DatasetRegistry.load_dataset(TRAIN_DATASET, TRAIN_SPLIT)
+    val_dataset = DatasetRegistry.load_dataset(VAL_DATASET, VAL_SPLIT)
+    benchmark_dataset = DatasetRegistry.load_dataset(BENCHMARK_DATASET, BENCHMARK_SPLIT) if BENCHMARK_DATASET else None
 
     if train_dataset is None:
-        raise RuntimeError(f"Dataset '{TRAIN_DATASET}' not found. Run: python cookbooks/terminal-rl/prepare_data.py")
+        raise RuntimeError(f"Dataset '{TRAIN_DATASET}/{TRAIN_SPLIT}' not found. Run: python cookbooks/terminal-rl/prepare_data.py")
     if val_dataset is None:
-        raise RuntimeError(f"Dataset '{VAL_DATASET}' not found. Run: rllm dataset pull harbor:{VAL_DATASET} (or: python cookbooks/terminal-rl/prepare_data.py)")
+        raise RuntimeError(f"Dataset '{VAL_DATASET}/{VAL_SPLIT}' not found. Run: python cookbooks/terminal-rl/prepare_data.py")
+    if BENCHMARK_DATASET and benchmark_dataset is None:
+        raise RuntimeError(f"Dataset '{BENCHMARK_DATASET}/{BENCHMARK_SPLIT}' not found. Run: python cookbooks/terminal-rl/prepare_data.py")
+    if benchmark_dataset is not None and BENCHMARK_EXPECTED_TASKS > 0:
+        if len(benchmark_dataset) != BENCHMARK_EXPECTED_TASKS:
+            raise RuntimeError(f"Benchmark '{BENCHMARK_DATASET}/{BENCHMARK_SPLIT}' has {len(benchmark_dataset)} tasks; expected {BENCHMARK_EXPECTED_TASKS}")
 
     if TB_VAL_MAX > 0 and TB_VAL_MAX < len(val_dataset):
         val_dataset = val_dataset.select(range(TB_VAL_MAX))
+
+    train_ids = {str(row.get("task_id")) for row in train_dataset.get_data()}
+    val_ids = {str(row.get("task_id")) for row in val_dataset.get_data()}
+    overlap = sorted(train_ids & val_ids)
+    if overlap:
+        raise RuntimeError(f"Training and validation datasets overlap on {len(overlap)} task_id values; first overlap: {overlap[0]}")
+
+    if benchmark_dataset is not None:
+        benchmark_ids = {str(row.get("task_id")) for row in benchmark_dataset.get_data()}
+        benchmark_overlap = sorted(train_ids & benchmark_ids)
+        if benchmark_overlap:
+            raise RuntimeError(f"Training and benchmark datasets overlap on {len(benchmark_overlap)} task_id values; first overlap: {benchmark_overlap[0]}")
 
     # Selected CLI as a SandboxedAgentFlow. Passing ``agent_flow`` (with no
     # explicit evaluator/hooks) makes AgentTrainer auto-wire SandboxTaskHooks
@@ -115,6 +140,7 @@ def main(config: DictConfig) -> None:
         config=config,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
+        benchmark_dataset=benchmark_dataset,
         agent_flow=agent_flow,
         sandbox_backend=SANDBOX_BACKEND,
     )

@@ -8,15 +8,17 @@ sides differ only in *where* the tasks come from:
   directories that you provide (path set via ``TB_TRAIN_TARBALL`` or
   ``--tarball``). The archive is
   extracted once under the rLLM datasets dir and each task directory is
-  converted into a flat row (``task_path`` + ``instruction``) and registered as
-  the ``tb-opus-pass`` dataset's ``train`` split. Each task carries its own
+  converted into a flat row (``task_path`` + ``instruction``) and registered
+  as ``tb-opus-pass/train``. Each task carries its own
   prebuilt ``docker_image`` and a ``tests/test.sh`` that writes
   ``/logs/verifier/reward.txt`` — exactly the signal rLLM's per-task verifier
   reads back.
-* **Eval** — ``harbor:terminal-bench@<version>`` pulled straight from the
-  Harbor registry (the same path the Terminal-Bench eval cookbook uses).
-  ``TB_EVAL_VERSION`` selects the version (default ``2.0``; the registry only
-  publishes ``2.0`` today, so set ``TB_EVAL_VERSION=2.1`` once it lands).
+* **Benchmarks** — Terminal-Bench 2.0 is retained for the existing debug and
+  comparison profiles. The 89-task Terminal-Bench 2.1 package is pulled from
+  the Harbor registry at an immutable revision and registered locally as
+  ``terminal-bench@2.1/default``. A deterministic eight-task subset is also
+  registered as ``terminal-bench@2.1/midtest`` for periodic production
+  evaluation.
 
 Re-runs are cheap: extraction is skipped once the on-disk task tree exists,
 and the eval pull is a no-op once the tasks are cached locally.
@@ -29,17 +31,18 @@ Usage::
         --debug-only --tarball /path/to/tb_v2_debug_tasks.tar.zst
     # smoke run with a small training cap (still extracts the full archive):
     python cookbooks/terminal-rl/prepare_data.py --train-limit 50
-    # evaluate against a different Terminal-Bench version:
-    TB_EVAL_VERSION=2.1 python cookbooks/terminal-rl/prepare_data.py
+    # change the deterministic Terminal-Bench 2.1 mid-test subset:
+    python cookbooks/terminal-rl/prepare_data.py \
+        --midtest-size 8 --midtest-seed 20260723
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import stat
 import subprocess
-import sys
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -59,10 +62,22 @@ DEBUG_TASKS = (
     "parametric-qp-breakpoints",
 )
 
-# Terminal-Bench eval version (Harbor registry). 2.0 is what the registry
-# publishes today; flip to 2.1 (or any published version) via TB_EVAL_VERSION.
-EVAL_VERSION = os.environ.get("TB_EVAL_VERSION", "2.0")
-EVAL_DATASET = f"terminal-bench@{EVAL_VERSION}"
+LEGACY_EVAL_DATASET = "terminal-bench@2.0"
+LEGACY_EVAL_SOURCE = "terminal-bench@2.0"
+LEGACY_EVAL_EXPECTED_TASKS = 89
+
+# Terminal-Bench 2.1 currently resolves to package revision 6 (89 tasks,
+# content hash 7d7bdc1c...a0699a). Pinning the immutable revision prevents a
+# mutable "latest" tag from changing the step-0/final comparison mid-project.
+EVAL_DATASET = os.environ.get("TB_BENCHMARK_DATASET", "terminal-bench@2.1")
+EVAL_SOURCE = os.environ.get(
+    "TB_BENCHMARK_SOURCE",
+    "terminal-bench/terminal-bench-2-1@6",
+)
+EVAL_EXPECTED_TASKS = int(os.environ.get("TB_BENCHMARK_EXPECTED_TASKS", "89"))
+MIDTEST_SPLIT = "midtest"
+DEFAULT_MIDTEST_SIZE = int(os.environ.get("TB_MIDTEST_SIZE", "8"))
+DEFAULT_MIDTEST_SEED = int(os.environ.get("TB_MIDTEST_SEED", "20260723"))
 
 # Local training tarball (Harbor tasks). Override with TB_TRAIN_TARBALL.
 DEFAULT_TARBALL = os.path.expanduser(
@@ -141,8 +156,30 @@ def _extract_archive(archive: Path, dest: Path) -> Path:
     return dest
 
 
+def _select_fixed_subset(rows: list[dict], subset_size: int, subset_seed: int) -> list[dict]:
+    """Select a stable subset by seeded task-id hash."""
+    if not 0 < subset_size <= len(rows):
+        raise ValueError(f"subset size must be between 1 and {len(rows)}, got {subset_size}")
+
+    task_ids = [str(row.get("task_id", "")) for row in rows]
+    if any(not task_id for task_id in task_ids):
+        raise ValueError("every row must have a non-empty task_id")
+    if len(set(task_ids)) != len(task_ids):
+        raise ValueError("task_id values must be unique before selecting a fixed subset")
+
+    ranked_ids = sorted(
+        task_ids,
+        key=lambda task_id: (
+            hashlib.sha256(f"{subset_seed}:{task_id}".encode()).digest(),
+            task_id,
+        ),
+    )
+    selected_ids = set(ranked_ids[:subset_size])
+    return [row for row in rows if str(row["task_id"]) in selected_ids]
+
+
 def _register_train(tasks_root: Path, limit: int | None, tarball: Path) -> int:
-    """Convert each Harbor task dir into a row and register the train split."""
+    """Convert Harbor tasks and register the complete internal training split."""
     from rllm.data import DatasetRegistry
     from rllm.integrations.harbor.dataset_loader import harbor_task_to_row
 
@@ -201,19 +238,81 @@ def _register_debug(tasks_root: Path, tarball: Path) -> int:
     return len(rows)
 
 
-def _pull_eval() -> None:
-    """Pull the Terminal-Bench eval split from the Harbor registry."""
-    name = f"harbor:{EVAL_DATASET}"
-    cmd = [sys.executable, "-m", "rllm.cli.main", "dataset", "pull", name]
-    print(f"[terminal-rl] $ {' '.join(cmd)}", flush=True)
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as e:
-        raise SystemExit(
-            f"[terminal-rl] Failed to pull '{name}'. The Harbor registry currently "
-            f"publishes terminal-bench@2.0; if you requested a version it does not "
-            f"have, set TB_EVAL_VERSION to an available one (e.g. 2.0)."
-        ) from e
+def _pull_eval(midtest_size: int, midtest_seed: int) -> tuple[int, int]:
+    """Register the full pinned benchmark plus a fixed periodic subset."""
+    from rllm.data import DatasetRegistry
+    from rllm.integrations.harbor.dataset_loader import load_harbor_dataset
+
+    info = DatasetRegistry.get_dataset_info(EVAL_DATASET)
+    rows = None
+    if info is not None:
+        split = info.get("splits", {}).get("default", {})
+        source = info.get("metadata", {}).get("source")
+        if split.get("num_examples") == EVAL_EXPECTED_TASKS and source == f"harbor:{EVAL_SOURCE}":
+            dataset = DatasetRegistry.load_dataset(EVAL_DATASET, "default")
+            rows = dataset.get_data() if dataset is not None else None
+            print(
+                f"[terminal-rl] Reusing {EVAL_DATASET}/default ({EVAL_EXPECTED_TASKS} tasks, source {EVAL_SOURCE})",
+                flush=True,
+            )
+
+    if rows is None:
+        print(f"[terminal-rl] Pulling Harbor benchmark {EVAL_SOURCE}", flush=True)
+        rows = load_harbor_dataset(EVAL_SOURCE)
+        if len(rows) != EVAL_EXPECTED_TASKS:
+            raise RuntimeError(f"{EVAL_SOURCE} resolved to {len(rows)} tasks; expected exactly {EVAL_EXPECTED_TASKS}")
+
+        DatasetRegistry.register_dataset(
+            name=EVAL_DATASET,
+            data=rows,
+            split="default",
+            source=f"harbor:{EVAL_SOURCE}",
+            description="Pinned Terminal-Bench 2.1 boundary benchmark",
+            category="agentic",
+        )
+
+    midtest_rows = _select_fixed_subset(rows, midtest_size, midtest_seed)
+    DatasetRegistry.register_dataset(
+        name=EVAL_DATASET,
+        data=midtest_rows,
+        split=MIDTEST_SPLIT,
+        source=f"harbor:{EVAL_SOURCE}",
+        description=(f"Pinned Terminal-Bench 2.1 boundary benchmark with deterministic {midtest_size}-task mid-test subset (seed {midtest_seed})"),
+        category="agentic",
+    )
+    return len(rows), len(midtest_rows)
+
+
+def _pull_legacy_eval() -> int:
+    """Retain Terminal-Bench 2.0 for the debug and four-run profiles."""
+    from rllm.data import DatasetRegistry
+    from rllm.integrations.harbor.dataset_loader import load_harbor_dataset
+
+    info = DatasetRegistry.get_dataset_info(LEGACY_EVAL_DATASET)
+    if info is not None:
+        split = info.get("splits", {}).get("default", {})
+        source = info.get("metadata", {}).get("source")
+        if split.get("num_examples") == LEGACY_EVAL_EXPECTED_TASKS and source == f"harbor:{LEGACY_EVAL_SOURCE}":
+            print(
+                f"[terminal-rl] Reusing {LEGACY_EVAL_DATASET}/default ({LEGACY_EVAL_EXPECTED_TASKS} tasks)",
+                flush=True,
+            )
+            return LEGACY_EVAL_EXPECTED_TASKS
+
+    print(f"[terminal-rl] Pulling Harbor benchmark {LEGACY_EVAL_SOURCE}", flush=True)
+    rows = load_harbor_dataset(LEGACY_EVAL_SOURCE)
+    if len(rows) != LEGACY_EVAL_EXPECTED_TASKS:
+        raise RuntimeError(f"{LEGACY_EVAL_SOURCE} resolved to {len(rows)} tasks; expected exactly {LEGACY_EVAL_EXPECTED_TASKS}")
+
+    DatasetRegistry.register_dataset(
+        name=LEGACY_EVAL_DATASET,
+        data=rows,
+        split="default",
+        source=f"harbor:{LEGACY_EVAL_SOURCE}",
+        description="Terminal-Bench 2.0 comparison benchmark",
+        category="agentic",
+    )
+    return len(rows)
 
 
 def main() -> None:
@@ -234,6 +333,18 @@ def main() -> None:
         "--debug-only",
         action="store_true",
         help=("Register a standalone eight-task debug archive as tb_v2_debug without creating or replacing tb-opus-pass."),
+    )
+    ap.add_argument(
+        "--midtest-size",
+        type=int,
+        default=DEFAULT_MIDTEST_SIZE,
+        help=(f"Number of pinned Terminal-Bench 2.1 tasks registered as {EVAL_DATASET}/{MIDTEST_SPLIT} (default: {DEFAULT_MIDTEST_SIZE})."),
+    )
+    ap.add_argument(
+        "--midtest-seed",
+        type=int,
+        default=DEFAULT_MIDTEST_SEED,
+        help=f"Seed for deterministic mid-test task selection (default: {DEFAULT_MIDTEST_SEED}).",
     )
     args = ap.parse_args()
 
@@ -264,12 +375,23 @@ def main() -> None:
                 flush=True,
             )
 
-    _pull_eval()
+    n_legacy_eval = _pull_legacy_eval()
+    n_eval, n_midtest = _pull_eval(args.midtest_size, args.midtest_seed)
 
     if args.debug_only:
-        summary = f"Debug: {DEBUG_DATASET} ({n_debug})   Eval: {EVAL_DATASET}"
+        summary = (
+            f"Debug: {DEBUG_DATASET} ({n_debug})   "
+            f"Legacy eval: {LEGACY_EVAL_DATASET}/default ({n_legacy_eval})   "
+            f"Mid-test: {EVAL_DATASET}/{MIDTEST_SPLIT} ({n_midtest})   "
+            f"Benchmark: {EVAL_DATASET}/default ({n_eval})"
+        )
     else:
-        summary = f"Train: {TRAIN_DATASET} ({n_train})   Eval: {EVAL_DATASET}"
+        summary = (
+            f"Train: {TRAIN_DATASET}/{TRAIN_SPLIT} ({n_train})   "
+            f"Legacy eval: {LEGACY_EVAL_DATASET}/default ({n_legacy_eval})   "
+            f"Mid-test: {EVAL_DATASET}/{MIDTEST_SPLIT} ({n_midtest})   "
+            f"Benchmark: {EVAL_DATASET}/default ({n_eval})"
+        )
     print(f"\n[terminal-rl] Done. {summary}", flush=True)
 
 

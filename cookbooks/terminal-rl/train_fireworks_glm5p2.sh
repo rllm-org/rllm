@@ -3,19 +3,22 @@
 # GLM-5.2 Terminal-Bench RL launcher for the Fireworks backend.
 #
 # Usage:
-#   train_fireworks_glm5p2.sh <lora|full> <opencode|terminus-2> <debug|train>
+#   train_fireworks_glm5p2.sh <lora|full> <opencode|terminus-2> <debug|train|production>
 #
 # The debug phase uses the eight-task tb_v2_debug split, one optimizer batch,
 # and two Terminal-Bench 2.0 validation tasks. The train phase uses the full
 # tb-opus-pass training split and the complete Terminal-Bench 2.0 validation
-# split.
+# split. The production phase is intentionally restricted to full-parameter
+# OpenCode: train on all of tb-opus-pass/train, validate a fixed eight-task
+# Terminal-Bench 2.1 mid-test split every ten optimizer steps, and benchmark
+# all 89 pinned Terminal-Bench 2.1 tasks at step 0 and final weights.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-mode="${1:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train>}"
-harness="${2:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train>}"
-phase="${3:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train>}"
+mode="${1:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|production>}"
+harness="${2:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|production>}"
+phase="${3:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|production>}"
 
 case "$mode" in
     lora)
@@ -45,21 +48,41 @@ esac
 case "$phase" in
     debug)
         train_dataset="tb_v2_debug"
+        train_split="train"
+        val_dataset="terminal-bench@2.0"
+        val_split="default"
+        benchmark_dataset=""
+        benchmark_split="default"
+        benchmark_expected_tasks=0
+        benchmark_before_train=false
+        benchmark_after_train=false
         val_max="${TB_DEBUG_VAL_MAX:-2}"
         total_batches="${TB_DEBUG_TOTAL_BATCHES:-1}"
         total_epochs=1
         test_freq=1
         val_before_train=true
+        trainer_replicas="${TB_TRAINER_REPLICAS:-1}"
+        rollout_replicas="${TB_ROLLOUT_REPLICAS:-1}"
         n_parallel_tasks="${TB_DEBUG_N_PARALLEL_TASKS:-16}"
         async_mini_batch_size="${TB_DEBUG_ASYNC_MINI_BATCH_SIZE:-1}"
         ;;
     train)
         train_dataset="tb-opus-pass"
+        train_split="train"
+        val_dataset="terminal-bench@2.0"
+        val_split="default"
+        benchmark_dataset=""
+        benchmark_split="default"
+        benchmark_expected_tasks=0
+        benchmark_before_train=false
+        benchmark_after_train=false
         val_max=0
         total_batches=-1
         total_epochs=1
         test_freq=50
         val_before_train=false
+        trainer_replicas="${TB_TRAINER_REPLICAS:-1}"
+        rollout_replicas="${TB_ROLLOUT_REPLICAS:-1}"
         # Keep local Docker sandbox creation aligned with the rollout engine's
         # default 64-way concurrency. Higher values mostly pre-create queued
         # containers and can overload a shared Docker host when four matrix
@@ -67,8 +90,32 @@ case "$phase" in
         n_parallel_tasks="${TB_TRAIN_N_PARALLEL_TASKS:-64}"
         async_mini_batch_size="${TB_TRAIN_ASYNC_MINI_BATCH_SIZE:-8}"
         ;;
+    production)
+        if [ "$mode" != "full" ] || [ "$harness" != "opencode" ]; then
+            echo "production phase requires: full opencode production" >&2
+            exit 2
+        fi
+        train_dataset="tb-opus-pass"
+        train_split="train"
+        val_dataset="terminal-bench@2.1"
+        val_split="midtest"
+        benchmark_dataset="terminal-bench@2.1"
+        benchmark_split="default"
+        benchmark_expected_tasks=89
+        benchmark_before_train=true
+        benchmark_after_train=true
+        val_max=0
+        total_batches=-1
+        total_epochs=1
+        test_freq=10
+        val_before_train=true
+        trainer_replicas="${TB_TRAINER_REPLICAS:-4}"
+        rollout_replicas="${TB_ROLLOUT_REPLICAS:-4}"
+        n_parallel_tasks="${TB_TRAIN_N_PARALLEL_TASKS:-64}"
+        async_mini_batch_size="${TB_TRAIN_ASYNC_MINI_BATCH_SIZE:-8}"
+        ;;
     *)
-        echo "unsupported phase '$phase' (expected debug or train)" >&2
+        echo "unsupported phase '$phase' (expected debug, train, or production)" >&2
         exit 2
         ;;
 esac
@@ -88,6 +135,7 @@ run_name="${TB_RUN_NAME:-${comparison}-${phase}-${mode}-${harness}}"
 gateway_port="${RLLM_GATEWAY_PORT:-9200}"
 python_bin="${RLLM_PYTHON:-python}"
 state_root="${TB_STATE_ROOT:-${HOME}/.rllm/glm5p2-terminal-rl}"
+trainer_region="${TB_TRAINER_REGION:-}"
 stamp_slug="${run_stamp,,}"
 stamp_slug="${stamp_slug//[^a-z0-9-]/-}"
 stamp_slug="${stamp_slug:0:20}"
@@ -97,8 +145,13 @@ deployment_id="${TB_DEPLOYMENT_ID:-tb-glm5p2-${phase}-${mode}-${harness}-${stamp
 export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-docker}"
 export TB_HARNESS="$harness"
 export TB_TRAIN_DATASET="$train_dataset"
-export TB_EVAL_VERSION=2.0
+export TB_TRAIN_SPLIT="$train_split"
+export TB_VAL_DATASET="$val_dataset"
+export TB_VAL_SPLIT="$val_split"
 export TB_VAL_MAX="$val_max"
+export TB_BENCHMARK_DATASET="$benchmark_dataset"
+export TB_BENCHMARK_SPLIT="$benchmark_split"
+export TB_BENCHMARK_EXPECTED_TASKS="$benchmark_expected_tasks"
 export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
 export TERMINUS_ENABLE_SUMMARIZE="${TERMINUS_ENABLE_SUMMARIZE:-0}"
 export RLLM_HARNESS_INSTALL_TIMEOUT_S="${RLLM_HARNESS_INSTALL_TIMEOUT_S:-900}"
@@ -112,12 +165,19 @@ export WANDB_MODE=online
 export WANDB_DIR="${WANDB_DIR:-${state_root}/wandb}"
 export WANDB_RUN_GROUP="$comparison"
 export WANDB_JOB_TYPE="${phase}-${mode}-${harness}"
-export WANDB_TAGS="terminal-bench-2.0,glm-5.2,${mode},${harness},${phase},AP_MALAYSIA_2"
+export WANDB_TAGS="terminal-bench,glm-5.2,${mode},${harness},${phase},${trainer_region:-auto-region}"
 
 mkdir -p "$RLLM_HOME" "$WANDB_DIR" "${state_root}/logs"
 
-printf 'run=%s mode=%s harness=%s phase=%s dataset=%s eval=terminal-bench@2.0 region=AP_MALAYSIA_2 gateway_port=%s deployment=%s async_mini_batch_size=%s\n' \
-    "$run_name" "$mode" "$harness" "$phase" "$train_dataset" "$gateway_port" "$deployment_id" "$async_mini_batch_size"
+printf 'run=%s mode=%s harness=%s phase=%s train=%s/%s val=%s/%s benchmark=%s region=%s trainer_replicas=%s rollout_replicas=%s gateway_port=%s deployment=%s async_mini_batch_size=%s\n' \
+    "$run_name" "$mode" "$harness" "$phase" "$train_dataset" "$train_split" \
+    "$val_dataset" "$val_split" "${benchmark_dataset:-disabled}" "${trainer_region:-control-plane-selected}" \
+    "$trainer_replicas" "$rollout_replicas" "$gateway_port" "$deployment_id" "$async_mini_batch_size"
+
+region_override=()
+if [ -n "$trainer_region" ]; then
+    region_override+=("fireworks_infra.trainers.policy.region=$trainer_region")
+fi
 
 exec "$python_bin" -u train.py \
     rllm/backend=fireworks \
@@ -125,10 +185,10 @@ exec "$python_bin" -u train.py \
     model.tokenizer_model=zai-org/GLM-5.2 \
     model.lora_rank="$lora_rank" \
     fireworks_config.policy_trainer_shape_id="$shape_id" \
-    fireworks_config.policy_trainer_replica_count=1 \
-    fireworks_config.rollout_deployment_replica_count=1 \
+    fireworks_config.policy_trainer_replica_count="$trainer_replicas" \
+    fireworks_config.rollout_deployment_replica_count="$rollout_replicas" \
     fireworks_infra.deployments.rollout.deployment_id="$deployment_id" \
-    fireworks_infra.trainers.policy.region=AP_MALAYSIA_2 \
+    "${region_override[@]}" \
     training.group_size=16 \
     training.learning_rate="$learning_rate" \
     training.beta2=0.999 \
@@ -168,6 +228,8 @@ exec "$python_bin" -u train.py \
     rllm.trainer.project_name=terminal-rl \
     rllm.trainer.experiment_name="$run_name" \
     rllm.trainer.val_before_train="$val_before_train" \
+    rllm.trainer.benchmark_before_train="$benchmark_before_train" \
+    rllm.trainer.benchmark_after_train="$benchmark_after_train" \
     rllm.trainer.test_freq="$test_freq" \
     rllm.trainer.save_freq=20 \
     "${@:4}"

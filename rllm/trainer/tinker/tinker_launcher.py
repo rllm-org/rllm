@@ -41,6 +41,7 @@ class TinkerTrainerLauncher(TrainerLauncher):
                 workflow_class=self.workflow_class,
                 train_dataset=self.train_dataset,
                 val_dataset=self.val_dataset,
+                benchmark_dataset=self.benchmark_dataset,
                 workflow_args=self.workflow_args,
                 store=self.store,
                 **self.kwargs,

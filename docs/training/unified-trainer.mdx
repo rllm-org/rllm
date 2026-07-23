@@ -47,6 +47,7 @@ trainer = AgentTrainer(
     workflow_class=MyWorkflow,
     train_dataset=train_dataset,
     val_dataset=val_dataset,
+    benchmark_dataset=benchmark_dataset,
     backend="tinker",
 )
 trainer.train()
@@ -65,6 +66,7 @@ trainer = UnifiedTrainer(
     workflow_class=MyWorkflow,
     train_dataset=train_dataset,
     val_dataset=val_dataset,
+    benchmark_dataset=benchmark_dataset,
     workflow_args={"my_param": 42},
     backend_args={"device": "cuda:0"},
 )
@@ -80,6 +82,7 @@ trainer.fit()
 | `workflow_class` | `type[Workflow]` | The workflow class for episode generation |
 | `train_dataset` | `Dataset \| None` | Training dataset |
 | `val_dataset` | `Dataset \| None` | Validation dataset |
+| `benchmark_dataset` | `Dataset \| None` | Optional boundary-only benchmark dataset |
 | `workflow_args` | `dict \| None` | Extra kwargs passed to each workflow instance |
 | `backend_args` | `dict \| None` | Extra kwargs passed to the backend constructor |
 | `traj_grouping_hook` | `Callable \| None` | Optional custom episode-to-trajectory-group hook |
@@ -208,6 +211,13 @@ The validation loop calls `backend.generate_episodes(..., is_validation=True)`,
 transforms the results, and computes reward metrics (no advantage computation or
 policy updates). Pass@1 and pass@K metrics are computed per data source and logged.
 
+An optional `benchmark_dataset` uses the same evaluation path but is independent
+of periodic validation. Set `benchmark_before_train=true` and/or
+`benchmark_after_train=true` to run it at step 0 and/or final weights. Periodic
+metrics use the `val/*` namespace; boundary benchmark metrics use
+`benchmark/*`. When both suites run at the same optimizer step, their metrics
+are committed in one tracking row.
+
 The backend can control validation via hooks:
 
 - `on_validation_start` returns a `bool` -- return `False` to skip validation entirely
@@ -225,7 +235,7 @@ full Hydra config). Key config groups:
 | `rllm.rejection_sample` | `RejectionSamplingConfig` | Rejection sampling settings |
 | `rllm.algorithm` | `AlgorithmConfig` | Advantage estimator, loss fn, LR schedule |
 | `rllm.workflow` | *(direct)* | `n_parallel_tasks`, `retry_limit`, `raise_on_error` |
-| `rllm.trainer` | *(direct)* | `total_epochs`, `total_batches`, `test_freq`, `save_freq`, logger |
+| `rllm.trainer` | *(direct)* | `total_epochs`, `total_batches`, `test_freq`, `save_freq`, validation/benchmark boundaries, logger |
 | `rllm.rollout` | *(direct)* | `n` (group size), `n_val` (val samples per task) |
 
 For the full configuration reference, see [configuration](/training/configuration).

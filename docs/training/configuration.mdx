@@ -89,10 +89,12 @@ Core training loop settings.
 | `logger` | `list[str]` | `['console']` | Logging backends (options: `console`, `wandb`, `tensorboard`) |
 | `project_name` | `str` | `rllm-training` | Project name for logging |
 | `experiment_name` | `str` | `default` | Experiment name for logging |
-| `test_freq` | `int` | `5` | Frequency of validation (in epochs) |
-| `save_freq` | `int` | `20` | Frequency of checkpoint saving (in epochs) |
-| `val_before_train` | `bool` | `True` | Whether to run validation before training starts |
+| `test_freq` | `int` | `5` | Frequency of periodic validation in optimizer steps |
+| `save_freq` | `int` | `20` | Frequency of checkpoint saving in optimizer steps |
+| `val_before_train` | `bool` | `False` | Whether to run periodic validation before training starts |
 | `val_only` | `bool` | `False` | Whether to only run validation (no training) |
+| `benchmark_before_train` | `bool` | `False` | Whether to run the optional boundary benchmark at step 0 |
+| `benchmark_after_train` | `bool` | `False` | Whether to run the optional boundary benchmark at final weights |
 
 ### Algorithm configuration
 

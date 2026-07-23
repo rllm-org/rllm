@@ -15,6 +15,19 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _registry_client_for(identifier: str):
+    """Return the Harbor client matching a legacy or package dataset reference."""
+    dataset_name = identifier.rsplit("@", 1)[0]
+    if "/" in dataset_name:
+        from harbor.registry.client.package import PackageDatasetClient
+
+        return PackageDatasetClient()
+
+    from harbor.registry.client.factory import RegistryClientFactory
+
+    return RegistryClientFactory.create()
+
+
 def harbor_task_to_row(task_dir: Path, task_name: str | None = None, task_digest: str | None = None) -> dict | None:
     """Convert a single Harbor task directory into a flat dict row.
 
@@ -115,16 +128,17 @@ def load_harbor_dataset_from_registry(identifier: str) -> list[dict]:
     Downloads all referenced tasks and converts them to flat rows.
 
     Args:
-        identifier: Dataset identifier, e.g., "terminal-bench" or "terminal-bench@2.0".
-            The ``harbor:`` prefix should already be stripped by the caller.
+        identifier: Dataset identifier, e.g., ``"terminal-bench@2.0"`` for
+            the legacy registry or ``"terminal-bench/terminal-bench-2-1@6"``
+            for the package registry. The ``harbor:`` prefix should already be
+            stripped by the caller.
 
     Returns:
         List of task row dicts.
     """
-    from harbor.registry.client.factory import RegistryClientFactory
 
     async def _download():
-        client = RegistryClientFactory.create()
+        client = _registry_client_for(identifier)
         items = await client.download_dataset(identifier)
         return items
 
@@ -166,6 +180,7 @@ def load_harbor_dataset(identifier: str) -> list[dict]:
         identifier: One of:
             - An absolute path to a directory containing ``dataset.toml``
             - A registry name like ``"terminal-bench"`` or ``"terminal-bench@2.0"``
+            - A package reference like ``"terminal-bench/terminal-bench-2-1@6"``
             - A path to a directory containing individual task directories
 
     Returns:

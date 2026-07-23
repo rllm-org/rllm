@@ -70,6 +70,10 @@ trainer:
   save_freq: 20
   val_before_train: false
   val_only: false
+  # Optional second evaluation suite. Unlike val_dataset/test_freq, this
+  # benchmark runs only at explicitly enabled training boundaries.
+  benchmark_before_train: false
+  benchmark_after_train: false
 
 # Algorithm Configuration
 algorithm:

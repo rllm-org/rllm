@@ -147,6 +147,7 @@ class VerlTrainerLauncher(TrainerLauncher):
                     hydra_overrides=hydra_overrides,
                     train_dataset=self.train_dataset,
                     val_dataset=self.val_dataset,
+                    benchmark_dataset=self.benchmark_dataset,
                     **self.kwargs,
                 )
             )

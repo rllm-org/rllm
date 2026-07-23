@@ -44,6 +44,16 @@ def test_harbor_loader_importable():
     assert hasattr(mod, "harbor_task_to_row")
 
 
+def test_harbor_loader_selects_package_client_for_namespaced_dataset():
+    mod = importlib.import_module("rllm.integrations.harbor.dataset_loader")
+
+    package_client = mod._registry_client_for("terminal-bench/terminal-bench-2-1@6")
+    legacy_client = mod._registry_client_for("terminal-bench@2.0")
+
+    assert type(package_client).__name__ == "PackageDatasetClient"
+    assert type(legacy_client).__name__ != "PackageDatasetClient"
+
+
 # -- Cookbook scripts ---------------------------------------------------------
 
 
@@ -52,6 +62,7 @@ def test_train_module_imports():
     mod = _import_cookbook_module("train")
     assert mod.TRAIN_DATASET == "tb-opus-pass"
     assert mod.VAL_DATASET.startswith("terminal-bench@")
+    assert mod.BENCHMARK_DATASET == ""
     assert callable(mod.main)
 
 
@@ -60,9 +71,28 @@ def test_prepare_data_module_imports():
     mod = _import_cookbook_module("prepare_data")
     assert mod.TRAIN_DATASET == "tb-opus-pass"
     assert mod.DEBUG_DATASET == "tb_v2_debug"
-    assert mod.EVAL_DATASET.startswith("terminal-bench@")
+    assert mod.LEGACY_EVAL_DATASET == "terminal-bench@2.0"
+    assert mod.LEGACY_EVAL_EXPECTED_TASKS == 89
+    assert mod.MIDTEST_SPLIT == "midtest"
+    assert mod.EVAL_DATASET == "terminal-bench@2.1"
+    assert mod.EVAL_SOURCE == "terminal-bench/terminal-bench-2-1@6"
+    assert mod.EVAL_EXPECTED_TASKS == 89
+    assert mod.DEFAULT_MIDTEST_SIZE == 8
     assert mod._tasks_root() != mod._debug_tasks_root()
     assert callable(mod.main)
+
+
+def test_prepare_data_midtest_is_deterministic_fixed_benchmark_subset():
+    mod = _import_cookbook_module("prepare_data")
+    rows = [{"task_id": f"task-{idx:03d}"} for idx in range(100)]
+
+    midtest_a = mod._select_fixed_subset(rows, subset_size=8, subset_seed=20260723)
+    midtest_b = mod._select_fixed_subset(list(reversed(rows)), subset_size=8, subset_seed=20260723)
+
+    midtest_ids_a = {row["task_id"] for row in midtest_a}
+    assert len(midtest_a) == 8
+    assert midtest_ids_a <= {row["task_id"] for row in rows}
+    assert midtest_ids_a == {row["task_id"] for row in midtest_b}
 
 
 def test_prepare_data_extracts_wrapped_zip_and_ignores_macosx(tmp_path):
@@ -86,3 +116,17 @@ def test_prepare_data_rejects_zip_parent_traversal(tmp_path):
 
     with pytest.raises(ValueError, match="Unsafe ZIP member path"):
         mod._extract_archive(archive, tmp_path / "extracted")
+
+
+def test_glm5p2_production_profile_is_full_opencode_four_replica_boundary_eval():
+    script = (_COOKBOOK_DIR / "train_fireworks_glm5p2.sh").read_text()
+
+    assert "production phase requires: full opencode production" in script
+    assert 'val_dataset="terminal-bench@2.1"' in script
+    assert 'val_split="midtest"' in script
+    assert 'benchmark_dataset="terminal-bench@2.1"' in script
+    assert "benchmark_expected_tasks=89" in script
+    assert "test_freq=10" in script
+    assert "val_before_train=true" in script
+    assert 'trainer_replicas="${TB_TRAINER_REPLICAS:-4}"' in script
+    assert 'rollout_replicas="${TB_ROLLOUT_REPLICAS:-4}"' in script
