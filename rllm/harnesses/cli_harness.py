@@ -32,6 +32,7 @@ import logging
 import os
 import shlex
 import time
+import traceback
 import uuid
 from abc import abstractmethod
 
@@ -427,7 +428,11 @@ class BaseCliHarness(SandboxedAgentFlow):
             return self._outcome_episode(
                 task,
                 termination_reason=reason,
-                error={"message": str(e), "error_type": type(e).__name__},
+                error={
+                    "message": str(e),
+                    "error_type": type(e).__name__,
+                    "traceback": traceback.format_exc(),
+                },
             )
         elapsed = time.monotonic() - start
 

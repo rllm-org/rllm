@@ -23,6 +23,7 @@ import asyncio
 import logging
 import resource
 import time
+import traceback
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -508,7 +509,7 @@ class AgentFlowEngine:
                 # upstream returned nothing (dead litellm proxy, gateway "no healthy
                 # workers", or the model itself). Surface it loudly — otherwise the
                 # run silently produces garbage (every rollout scores 0).
-                if episode is not None and episode.termination_reason == TerminationReason.ERROR:
+                if episode is not None and episode.termination_reason in INFRA_ERROR_REASONS:
                     error = episode.metadata.get("error", {})
                     error = error if isinstance(error, dict) else {}
                     error_type = error.get("error_type", "unknown")
@@ -516,18 +517,20 @@ class AgentFlowEngine:
                     traceback_text = error.get("traceback")
                     if traceback_text:
                         logger.error(
-                            "[%s:%d] ERROR termination (%s): %s\n%s",
+                            "[%s:%d] %s termination (%s): %s\n%s",
                             task_id,
                             rollout_idx,
+                            episode.termination_reason.value,
                             error_type,
                             message,
                             traceback_text,
                         )
                     else:
                         logger.error(
-                            "[%s:%d] ERROR termination (%s): %s [no traceback captured]",
+                            "[%s:%d] %s termination (%s): %s [no traceback captured]",
                             task_id,
                             rollout_idx,
+                            episode.termination_reason.value,
                             error_type,
                             message,
                         )
@@ -626,6 +629,7 @@ class AgentFlowEngine:
                     return task_id, rollout_idx, result_idx, episode
 
                 except Exception as e:
+                    error_traceback = traceback.format_exc()
                     logger.error("[%s] Attempt %d/%d failed: %r (type=%s)", uid, retry_attempt, self.retry_limit, e, type(e).__name__)
                     if retry_attempt < self.retry_limit:
                         continue
@@ -644,7 +648,13 @@ class AgentFlowEngine:
                             task=task_for_episode,
                             is_correct=False,
                             termination_reason=reason,
-                            metadata={"error": {"message": str(e), "error_type": type(e).__name__}},
+                            metadata={
+                                "error": {
+                                    "message": str(e),
+                                    "error_type": type(e).__name__,
+                                    "traceback": error_traceback,
+                                }
+                            },
                         ),
                     )
 
@@ -873,7 +883,13 @@ class AgentFlowEngine:
             # already SANDBOX_ERROR'd): that's the root cause, first-write-wins.
             if enriched.termination_reason not in INFRA_ERROR_REASONS:
                 enriched.termination_reason = termination_reason_from_error(eval_output.error, default=TerminationReason.GRADING_ERROR)
-            enriched.metadata.setdefault("error", {"error_type": eval_output.error, "message": eval_output.metadata.get("error", "")})
+            error = {
+                "error_type": eval_output.error,
+                "message": eval_output.metadata.get("error", ""),
+            }
+            if eval_output.metadata.get("traceback"):
+                error["traceback"] = eval_output.metadata["traceback"]
+            enriched.metadata.setdefault("error", error)
         elif enriched.termination_reason is None:
             # Harness sets TIMEOUT/ERROR itself; a clean exit is ENV_DONE. (Length /
             # turn-cap aren't reliably recoverable from gateway traces on this path.)

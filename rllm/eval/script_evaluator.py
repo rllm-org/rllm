@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import traceback
 from pathlib import Path
 
 from rllm.eval.types import EvalOutput, Signal
@@ -116,7 +117,10 @@ class ShellScriptEvaluator:
                 reward=0.0,
                 is_correct=False,
                 error="VerifierTimeoutError",
-                metadata={"error": f"verifier timed out after {self.verifier_timeout}s"},
+                metadata={
+                    "error": f"verifier timed out after {self.verifier_timeout}s",
+                    "traceback": traceback.format_exc(),
+                },
             )
         except Exception as e:
             # Verifier exit != 0 is the *expected* outcome when an agent

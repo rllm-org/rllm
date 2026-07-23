@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import logging
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 
@@ -83,7 +84,15 @@ class PythonModuleEvaluator:
             # in metrics; the engine maps any non-timeout grading error to
             # GRADING_ERROR and filters the reward from training.
             logger.exception("Verifier %s raised: %s", self.module_name, e)
-            return EvalOutput(reward=0.0, is_correct=False, error=type(e).__name__, metadata={"error": f"verifier exception: {e}"})
+            return EvalOutput(
+                reward=0.0,
+                is_correct=False,
+                error=type(e).__name__,
+                metadata={
+                    "error": f"verifier exception: {e}",
+                    "traceback": traceback.format_exc(),
+                },
+            )
 
         return _coerce_eval_result(result)
 
