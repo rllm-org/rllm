@@ -465,6 +465,19 @@ class SessionSlots:
         self._mark_active(best)
         return best
 
+    def fork(self) -> TokenAccumulator:
+        """Open a fresh chain (new lineage) and make it active.
+
+        Used when a request matched a chain but can't extend it as tokens (the
+        renderer can't bridge, or an empty delta): start a new immutable chain and
+        re-ingest this turn as its turn-0, rather than resetting the matched chain
+        in place. Preserves the invariant that one lineage == one token chain.
+        """
+        slot = self._new_slot()
+        self._evict_if_needed(keep=slot)
+        self._mark_active(slot)
+        return slot
+
     @property
     def active(self) -> TokenAccumulator:
         """The slot chosen by the last :meth:`select` (created lazily if none).

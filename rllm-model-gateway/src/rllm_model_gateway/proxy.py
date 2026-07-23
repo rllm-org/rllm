@@ -28,7 +28,6 @@ from rllm_model_gateway.models import TraceRecord
 from rllm_model_gateway.session_router import SessionRouter
 from rllm_model_gateway.store.base import TraceStore
 from rllm_model_gateway.token_accumulator import (
-    ResetReason,
     SessionSlots,
     TokenAccumulator,
 )
@@ -257,22 +256,37 @@ class ReverseProxy:
             self._accumulators[session_id] = slots
         return slots
 
-    def _active_lineage_id(self, session_id: str | None) -> str | None:
-        """Lineage id of the slot serving the current request, for trace tagging.
+    def _request_slot(self, request: Request) -> Any:
+        """The chain (slot) ``select()``/``fork()`` bound to THIS request, or None.
 
-        Read (never create) the active slot so a trace is stamped with the
-        lineage ``handle()`` selected for it. ``None`` when cumulative mode is
-        off or no slot has been selected — the reader then treats the whole
-        session as one lineage, as before. Must be called synchronously on the
-        request path (before the next request re-selects), not from a deferred
-        store task.
+        Read this — never ``SessionSlots.active`` — in the post-generation
+        ingest/tag. ``active`` is a shared per-session pointer that a concurrent
+        same-session request (e.g. opencode's async title-generation call) can
+        clobber between ``select()`` and here, appending/tagging a trace onto the
+        wrong lineage. ``request.state.slot`` is fixed for the request's lifetime,
+        so the lineage is a pure function of the chain this request extends.
+        ``None`` when cumulative mode is off / no slot was selected.
         """
-        if not (self.cumulative_token_mode and session_id):
-            return None
-        slots = self._accumulators.get(session_id)
-        if slots is None or slots._active is None:
-            return None
-        return slots._active.lineage_id
+        return getattr(request.state, "slot", None)
+
+    @staticmethod
+    def _slot_lineage_id(slot: Any) -> str | None:
+        return slot.lineage_id if slot is not None else None
+
+    def _request_lineage_id(self, request: Request) -> str | None:
+        return self._slot_lineage_id(self._request_slot(request))
+
+    @staticmethod
+    def _ingest_turn0(slot: Any, prompt_ids: list[int], completion_ids: list[int], messages: list[dict[str, Any]]) -> None:
+        """Seed a freshly selected/forked chain with its turn-0 tokens.
+
+        No-op when the slot is absent, already advanced past turn 0, or carries no
+        tokens. Bound to the request's own chain (via ``_request_slot``), so a
+        concurrent request touching ``.active`` can't misdirect the ingest.
+        """
+        if slot is not None and slot.turn_count == 0 and (prompt_ids or completion_ids):
+            slot.ingest_turn(prompt_ids, completion_ids)
+            slot.update_prefix(messages)
 
     def _track_inflight(self, task: asyncio.Future) -> None:
         """Count *task* (an in-flight generation) toward the in-flight gauge until
@@ -387,16 +401,21 @@ class ReverseProxy:
         # rewrite to /v1/completions with pre-tokenized prompt to avoid drift.
         if self.cumulative_token_mode and session_id and request.url.path.endswith("/chat/completions"):
             messages = request_body.get("messages", [])
-            # Route to the slot whose lineage this request continues (a new slot
-            # if it continues none — e.g. a subagent turn), and mark it active so
-            # this request's turn-0 ingest below lands on the same slot.
+            # Route to the chain whose lineage this request continues (a new chain
+            # if it continues none — e.g. a subagent / title-generation turn).
             acc = self._session_slots(session_id).select(messages)
+            # Bind THIS request to the chain select() chose, so its turn-0 ingest
+            # and lineage tag use this chain — not the shared .active pointer a
+            # concurrent same-session request could clobber between here and the
+            # post-generation ingest/tag.
+            request.state.slot = acc
             if acc.should_rewrite():
-                # Classify the incoming request against the accumulated snapshot.
-                # plan.action is "extend" (build a /v1/completions bridge) or
-                # "reset" (fall through to the chat path as a fresh turn-0). Every
-                # reset is logged with its classified ResetReason + diagnostics so
-                # the *why* is recoverable from the gateway log.
+                # Classify the incoming request against the matched chain.
+                # plan.action is "extend" (build a /v1/completions bridge),
+                # "replay" (duplicate resend — regenerate in place), or a reset
+                # reason (empty-delta / renderer-can't-bridge) which we handle by
+                # FORKING a fresh chain and re-ingesting this turn as its turn-0 —
+                # the matched chain stays immutable (one lineage == one token chain).
                 plan = acc.plan_turn(messages)
                 if plan.action == "extend":
                     # bridge_to_next_turn renders the new messages and concatenates
@@ -425,17 +444,20 @@ class ReverseProxy:
                         )
                     # Structurally a valid extension, but the renderer couldn't
                     # prove the prefix-extension contract (e.g. DefaultRenderer).
-                    # Reset so this turn is re-ingested as a fresh turn-0;
-                    # otherwise the stale prefix would drop this turn's completion
-                    # tokens from the next cumulative prompt and break extension.
-                    acc.reset(
-                        ResetReason.RENDERER_NO_BRIDGE,
-                        diagnostics={
-                            **plan.diagnostics,
-                            "renderer": type(acc.renderer).__name__,
-                            "new_roles": [m.get("role") for m in plan.new_messages],
-                        },
+                    # Fork a fresh chain and re-ingest this turn as its turn-0,
+                    # rather than resetting the matched chain in place — chains stay
+                    # immutable (one lineage == one token chain), so a bridge gap
+                    # never splits the matched lineage into two token segments.
+                    logger.info(
+                        "%sTokenAccumulator renderer_no_bridge session=%s turn=%d renderer=%s new_roles=%s: forking new lineage",
+                        self.worker_label,
+                        session_id,
+                        acc.turn_count,
+                        type(acc.renderer).__name__,
+                        [m.get("role") for m in plan.new_messages],
                     )
+                    acc = self._session_slots(session_id).fork()
+                    request.state.slot = acc
                 elif plan.action == "replay" and acc.prev_prompt_ids:
                     # Duplicate resend (upstream retry): the conversation did not
                     # advance. Regenerate from the same prompt and overwrite this
@@ -462,7 +484,17 @@ class ReverseProxy:
                         replay=True,
                     )
                 else:
-                    acc.reset(plan.reason, diagnostics=plan.diagnostics)
+                    # Matched chain but nothing renderable to bridge (empty delta):
+                    # fork a fresh chain instead of resetting the matched one.
+                    logger.info(
+                        "%sTokenAccumulator %s session=%s turn=%d: forking new lineage",
+                        self.worker_label,
+                        plan.reason.value if plan.reason else "reset",
+                        session_id,
+                        acc.turn_count,
+                    )
+                    acc = self._session_slots(session_id).fork()
+                    request.state.slot = acc
 
         if is_stream:
             return await self._handle_streaming(request, body, request_body, session_id, originally_requested_logprobs)
@@ -595,19 +627,16 @@ class ReverseProxy:
 
         # Persist trace
         if session_id and response_body:
-            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version)
+            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version, self._request_lineage_id(request))
 
-            # Ingest first turn into accumulator for cumulative token mode.
-            # Use the slot handle() selected for this request (active), so a new
-            # lineage (e.g. a subagent turn-0) seeds its own slot.
+            # Ingest turn-0 into the chain this request was bound to (never .active).
             if self.cumulative_token_mode and request.url.path.endswith("/chat/completions"):
-                acc = self._session_slots(session_id).active
-                if acc.turn_count == 0:
-                    prompt_ids = extract_prompt_token_ids(response_body)
-                    completion_ids = extract_completion_token_ids(response_body)
-                    if prompt_ids or completion_ids:
-                        acc.ingest_turn(prompt_ids, completion_ids)
-                        acc.update_prefix(request_body.get("messages", []))
+                self._ingest_turn0(
+                    self._request_slot(request),
+                    extract_prompt_token_ids(response_body),
+                    extract_completion_token_ids(response_body),
+                    request_body.get("messages", []),
+                )
 
         # Sanitise response
         needs_strip_vllm = self.strip_vllm
@@ -764,7 +793,7 @@ class ReverseProxy:
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:
-            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version)
+            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version, self._request_lineage_id(request))
 
         sanitized = response_body
         if isinstance(response_body, dict) and response_body:
@@ -849,7 +878,7 @@ class ReverseProxy:
         def _build_trace():
             latency_ms = (time.perf_counter() - t0) * 1000
             return build_trace_record_from_chunks(
-                session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, lineage_id=self._active_lineage_id(session_id), capture_raw=self.capture_raw_payloads
+                session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, lineage_id=self._request_lineage_id(request), capture_raw=self.capture_raw_payloads
             )
 
         async def event_generator():
@@ -1024,7 +1053,7 @@ class ReverseProxy:
             if chat_body.get("choices"):
                 chat_body["choices"][0]["message"] = message
             trace = build_trace_record(
-                session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version, lineage_id=self._active_lineage_id(session_id), capture_raw=self.capture_raw_payloads
+                session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version, lineage_id=self._request_lineage_id(request), capture_raw=self.capture_raw_payloads
             )
             await self._persist(trace)
 
@@ -1094,7 +1123,7 @@ class ReverseProxy:
         originally_requested_logprobs: bool = False,
     ) -> StreamingResponse:
         if self.local_handler is not None:
-            return await self._handle_streaming_local(request_body, session_id, originally_requested_logprobs, request.state.weight_version)
+            return await self._handle_streaming_local(request_body, session_id, originally_requested_logprobs, request.state.weight_version, slot=self._request_slot(request))
 
         worker = self.router.route(session_id)
         url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
@@ -1191,7 +1220,7 @@ class ReverseProxy:
                 # on real async I/O (e.g. aiosqlite) is not reliable.
                 if session_id and chunks:
                     trace = build_trace_record_from_chunks(
-                        session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, lineage_id=self._active_lineage_id(session_id), capture_raw=self.capture_raw_payloads
+                        session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, lineage_id=self._request_lineage_id(request), capture_raw=self.capture_raw_payloads
                     )
                     task = asyncio.create_task(
                         self._safe_store(
@@ -1203,17 +1232,14 @@ class ReverseProxy:
                     self._pending_traces.add(task)
                     task.add_done_callback(self._pending_traces.discard)
 
-                    # Ingest first turn into accumulator for cumulative token
-                    # mode. Use the slot handle() selected (active) so a new
-                    # lineage (e.g. a subagent turn-0) seeds its own slot.
+                    # Ingest turn-0 into the chain this request was bound to.
                     if self.cumulative_token_mode:
-                        acc = self._session_slots(session_id).active
-                        if acc.turn_count == 0:
-                            prompt_ids = trace.prompt_token_ids
-                            completion_ids = trace.completion_token_ids
-                            if prompt_ids or completion_ids:
-                                acc.ingest_turn(prompt_ids, completion_ids)
-                                acc.update_prefix(request_body.get("messages", []))
+                        self._ingest_turn0(
+                            self._request_slot(request),
+                            trace.prompt_token_ids,
+                            trace.completion_token_ids,
+                            request_body.get("messages", []),
+                        )
 
         return StreamingResponse(
             event_generator(),
@@ -1227,6 +1253,7 @@ class ReverseProxy:
         session_id: str | None,
         originally_requested_logprobs: bool = False,
         weight_version: int | None = None,
+        slot: Any = None,
     ) -> StreamingResponse:
         """Handle streaming when using a local handler (fake-streaming)."""
         assert self.local_handler is not None
@@ -1237,24 +1264,17 @@ class ReverseProxy:
         # Persist trace from the full response
         if session_id and response_body:
             trace = build_trace_record(
-                session_id, request_body, response_body, latency_ms, weight_version=weight_version, lineage_id=self._active_lineage_id(session_id), capture_raw=self.capture_raw_payloads
+                session_id, request_body, response_body, latency_ms, weight_version=weight_version, lineage_id=self._slot_lineage_id(slot), capture_raw=self.capture_raw_payloads
             )
             await self._persist(trace)
 
-            # Seed the accumulator on turn 0 (streaming local/Tinker path). Without
-            # this the slot never advances past turn 0, so should_rewrite() and
-            # continues() both stay False — every subsequent turn opens a NEW
-            # lineage, exploding one streaming session into one trajectory per turn
-            # (and cumulative bridging never engages). Mirrors the turn-0 ingest in
-            # _non_streaming_result and the HTTP-streaming _handle_streaming.
+            # Seed turn-0 into the chain this request was bound to (`slot`, chosen
+            # by the caller). Without a turn-0 ingest the chain never advances, so
+            # continues() stays False and every later turn forks a new lineage —
+            # one trajectory per turn. Binding to `slot` (not .active) also stops a
+            # concurrent same-session request from misdirecting the ingest.
             if self.cumulative_token_mode:
-                acc = self._session_slots(session_id).active
-                if acc.turn_count == 0:
-                    prompt_ids = trace.prompt_token_ids
-                    completion_ids = trace.completion_token_ids
-                    if prompt_ids or completion_ids:
-                        acc.ingest_turn(prompt_ids, completion_ids)
-                        acc.update_prefix(request_body.get("messages", []))
+                self._ingest_turn0(slot, trace.prompt_token_ids, trace.completion_token_ids, request_body.get("messages", []))
 
         needs_strip_vllm = self.strip_vllm
         needs_strip_logprobs = not originally_requested_logprobs
@@ -1393,6 +1413,7 @@ class ReverseProxy:
         response_body: dict[str, Any],
         latency_ms: float,
         weight_version: int | None,
+        lineage_id: str | None = None,
     ) -> None:
         """Build + store a trace off the event-loop thread and off the response
         critical path.
@@ -1405,7 +1426,6 @@ class ReverseProxy:
         """
         loop = asyncio.get_running_loop()
         capture_raw = self.capture_raw_payloads
-        lineage_id = self._active_lineage_id(session_id)
 
         async def _run() -> None:
             try:
