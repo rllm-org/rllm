@@ -4,12 +4,14 @@ End-to-end agentic-RL recipe for terminal agents: train on **a local set of
 Harbor-format terminal-agent tasks** that you provide (a `.tar.zst` of task
 directories) and validate on
 [Terminal-Bench](https://www.tbench.ai) pulled from the Harbor registry. The
-agent harness is Harbor's [Terminus-2](https://www.harborframework.com/docs/agents/terminus-2)
-(a tmux-driven mono-tool terminal agent); the base model is `Qwen/Qwen3.5-4B`.
+agent harness defaults to Harbor's
+[Terminus-2](https://www.harborframework.com/docs/agents/terminus-2) (a
+tmux-driven mono-tool terminal agent), and the Fireworks GLM-5.2 launcher can
+also select the pinned OpenCode CLI. The base model is chosen by the launcher.
 
 This cookbook ships **no custom AgentFlow and no custom evaluator** — it's a thin
-wrapper around primitives that already live in `rllm/`. The flow is Terminus-2
-running *inside* each task's sandbox, and the evaluator is each task's own
+wrapper around primitives that already live in `rllm/`. The selected CLI agent
+runs *inside* each task's sandbox, and the evaluator is each task's own
 `tests/test.sh`. Both the training tasks and the Terminal-Bench eval tasks ship
 that verifier with the dataset. This is the same machinery as the
 [Terminal-Bench eval cookbook](../../docs/cookbooks/terminal_bench.mdx), packaged
@@ -22,8 +24,8 @@ AgentTrainer.train()
   │
   ├── for each task: launch a sandbox (Modal / Daytona / Docker)
   │       │
-  │       └── terminus2 driver runs IN the sandbox
-  │             │   (multi-turn tmux loop; each LLM call → gateway)
+  │       └── selected CLI harness runs IN the sandbox
+  │             │   (multi-turn agent loop; each LLM call → gateway)
   │             │
   │             └── rLLM gateway routes to the trainer-hosted policy,
   │                  capturing the full trajectory (prompt + response
@@ -63,7 +65,7 @@ This pulls:
 
 | Dataset | Role | Source | Verifier |
 |---|---|---|---|
-| `tb-opus-pass` | train | local tarball (set via `TB_TRAIN_TARBALL`) | in-sandbox `tests/test.sh` → `/logs/verifier/reward.txt` |
+| `tb-opus-pass` | train | local `.tar.zst` or `.zip` archive (set via `TB_TRAIN_TARBALL`) | in-sandbox `tests/test.sh` → `/logs/verifier/reward.txt` |
 | `terminal-bench@2.0` | eval (89) | `harbor:terminal-bench@2.0` | in-sandbox `tests/test.sh` → `/logs/verifier/reward.txt` |
 
 Both materialize as Harbor-format task rows (each row points at a task directory
@@ -138,6 +140,97 @@ shape but no 3.5-4B; swap `model.name` / `model.tokenizer_model` /
 `fireworks_config.policy_trainer_shape_id` together to change it — see
 [`docs/backends/fireworks.mdx`](../../docs/backends/fireworks.mdx)). The
 synchronous (on-policy) variant is `train_fireworks_sync.sh`.
+
+### Fireworks GLM-5.2 four-run comparison
+
+`train_fireworks_glm5p2.sh` defines the validated comparison matrix:
+
+| Mode | Training shape | LoRA rank | Learning rate |
+|---|---|---:|---:|
+| `lora` | `accounts/fireworks/trainingShapes/glm-5p2-200k-lora` | 128 | `2e-5` |
+| `full` | `accounts/fireworks/trainingShapes/glm-5p2-200k` | 0 | `1e-6` |
+
+Both modes use `accounts/fireworks/models/glm-5p2-fp8`, train on
+`tb-opus-pass`, evaluate on all 89 `terminal-bench@2.0` tasks, place the policy
+trainer in `AP_MALAYSIA_2`, and request one policy-trainer replica plus one
+rollout-deployment replica. The two supported harnesses are `opencode` and
+`terminus-2`.
+
+Install the Fireworks and Harbor dependencies, then register the standalone
+debug set and the full training set. The full archive may be either `.tar.zst`
+or `.zip`:
+
+```bash
+uv pip install -e ".[fireworks,harbor]"
+uv pip install --no-deps -e cookbooks/terminal-rl
+
+python cookbooks/terminal-rl/prepare_data.py \
+  --debug-only --tarball /path/to/tb_v2_debug_tasks.tar.zst
+python cookbooks/terminal-rl/prepare_data.py \
+  --tarball /path/to/tb_v2_opus_pass.zip
+```
+
+Export credentials without putting their values in source files or command
+arguments. For the internal four-run comparison, `FIREWORKS_API_KEY` must
+belong to the `training` account. Account selection comes from the key; this
+launcher does not require a `firectl` profile flag. In particular, do not add
+`-p fw-prod`; it is not a valid option for this launch path.
+
+```bash
+export FIREWORKS_API_KEY=...
+export WANDB_API_KEY=...
+export WANDB_ENTITY=...
+export TB_STATE_ROOT="/shared/${USER}/rllm-terminal-rl-glm5p2"
+```
+
+Run all four debug combinations first. These use the eight-task debug split,
+one optimizer batch, and two validation tasks:
+
+```bash
+bash cookbooks/terminal-rl/train_fireworks_glm5p2.sh lora opencode debug
+bash cookbooks/terminal-rl/train_fireworks_glm5p2.sh lora terminus-2 debug
+bash cookbooks/terminal-rl/train_fireworks_glm5p2.sh full opencode debug
+bash cookbooks/terminal-rl/train_fireworks_glm5p2.sh full terminus-2 debug
+```
+
+After all four debug runs finish successfully and emit W&B metrics, launch the
+full matrix in parallel. Each run starts a four-worker local gateway, so base
+ports must be at least five ports apart; the example uses ten-port spacing.
+
+```bash
+run_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+comparison="glm5p2-tb-${run_stamp}"
+mkdir -p "${TB_STATE_ROOT}/logs"
+
+launch_glm5p2_run() {
+  mode="$1"
+  harness="$2"
+  port="$3"
+  run_name="${comparison}-train-${mode}-${harness}"
+  log_path="${TB_STATE_ROOT}/logs/${run_name}.log"
+
+  nohup env \
+    TB_RUN_STAMP="${run_stamp}" \
+    TB_COMPARISON_ID="${comparison}" \
+    TB_RUN_NAME="${run_name}" \
+    RLLM_GATEWAY_PORT="${port}" \
+    bash cookbooks/terminal-rl/train_fireworks_glm5p2.sh \
+      "${mode}" "${harness}" train \
+      >"${log_path}" 2>&1 &
+  echo "$! ${run_name} ${log_path}"
+}
+
+launch_glm5p2_run lora opencode 9400
+launch_glm5p2_run lora terminus-2 9410
+launch_glm5p2_run full opencode 9420
+launch_glm5p2_run full terminus-2 9430
+```
+
+All four runs share `WANDB_RUN_GROUP=${comparison}` and use distinct run names,
+job types, tags, gateway ports, and generated deployment IDs. The training
+phase evaluates every 50 optimizer steps and once more at the end of the epoch.
+Inspect the printed trainer job and deployment IDs plus the four log files
+before detaching from the host.
 
 ### ECHO (train on environment feedback)
 
@@ -223,6 +316,7 @@ then error out and get dropped instead of scored.
 | `train_tinker.sh` | Tinker backend — Qwen3.5-4B LoRA, GRPO + async, Modal sandboxes |
 | `train_tinker_sync.sh` | Tinker backend — synchronous (on-policy) variant, simpler for testing |
 | `train_fireworks.sh` | Fireworks backend — Qwen3.5-9B LoRA, GRPO + async, managed trainer/deployment |
+| `train_fireworks_glm5p2.sh` | Fireworks GLM-5.2 — LoRA/full × OpenCode/Terminus-2 debug and full-run matrix |
 | `train_fireworks_sync.sh` | Fireworks backend — synchronous (on-policy) variant |
 | `train_verl.sh` | Verl backend — same recipe with vLLM + FSDP |
 | `test.py` | Harness/loader import + script-wiring smoke tests |

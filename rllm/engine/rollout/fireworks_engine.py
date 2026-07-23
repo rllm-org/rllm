@@ -298,7 +298,7 @@ class FireworksEngine(TinkerEngine):
         # Resolve the renderer the same way the gateway does, so the engine renders
         # turn 0 with the same renderer the gateway uses for the turn-1+ cumulative
         # bridge. resolve() auto-detects Fireworks-cookbook models (e.g. GLM-5.2 ->
-        # "glm5") with no config. We adopt the unified renderer — and skip
+        # "glm_moe_dsa") with no config. We adopt the unified renderer — and skip
         # ChatTemplateParser, whose eager apply_chat_template check rejects some
         # served templates (GLM-5.2 -> "'str object' has no attribute 'items'") —
         # when it is explicitly pinned, or when auto-detection lands on a

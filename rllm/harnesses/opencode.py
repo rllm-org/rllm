@@ -32,13 +32,21 @@ _PROVIDER_AUTH = {
     "xai": "XAI_API_KEY",
 }
 
-_INSTALL_SCRIPT = r"""
+OPENCODE_VERSION = "1.18.4"
+
+
+def _install_script(version: str) -> str:
+    """Return an idempotent installer pinned to an exact OpenCode release."""
+    version_q = shlex.quote(version)
+    return rf"""
 set -e
 # DEBIAN_FRONTEND=noninteractive: Modal exec leaves stdin connected and
 # debconf prompts (e.g. tzdata) hang forever when apt installs pull in
 # interactive packages.
 export DEBIAN_FRONTEND=noninteractive
-if ! command -v opencode >/dev/null 2>&1; then
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+if ! command -v opencode >/dev/null 2>&1 || [ "$(opencode --version 2>/dev/null)" != {version_q} ]; then
     # Only touch apt when curl is actually missing — running apt-get
     # update unconditionally bombs on swebench testbeds where the
     # Ubuntu jammy repo signatures have expired.
@@ -50,16 +58,22 @@ if ! command -v opencode >/dev/null 2>&1; then
         fi
     fi
     if ! command -v node >/dev/null 2>&1; then
-        export NVM_DIR="$HOME/.nvm"
         curl -fsSL -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash
         \. "$NVM_DIR/nvm.sh"
         nvm install 22
     fi
     [ -s "$HOME/.nvm/nvm.sh" ] && \. "$HOME/.nvm/nvm.sh"
-    npm install -g opencode-ai@latest
+    npm install -g opencode-ai@{version_q}
 fi
-opencode --version >/dev/null
+actual="$(opencode --version)"
+[ "$actual" = {version_q} ] || {{
+    echo "OpenCode version mismatch: expected {version_q}, got $actual" >&2
+    exit 1
+}}
 """
+
+
+_INSTALL_SCRIPT = _install_script(OPENCODE_VERSION)
 
 
 class OpenCodeHarness(BaseCliHarness):

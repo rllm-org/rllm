@@ -33,15 +33,18 @@ class Backend(str, Enum):
 
 
 # Fireworks-cookbook renderer names (training/renderer/__init__.py registers
-# glm5, deepseek_v4, gemma4, kimi_k27_code, minimax_m2, ...), keyed by canonical
+# glm5, glm_moe_dsa, deepseek_v4, gemma4, kimi_k27_code, minimax_m2, ...),
+# keyed by canonical
 # HF-id prefix. The cookbook ships the renderer *implementations* but no
 # model->renderer map, and tinker_cookbook's recommender doesn't know these
 # models — so we own the mapping. prime-rl's exact-match map is tried first, so
 # this only catches models prime-rl doesn't cover (e.g. GLM-5.2). Family-level:
-# one cookbook renderer serves a whole minor series (glm5 -> GLM-5.x). Prefix
-# match (not exact) so new point releases resolve without a code change; extend
-# as the cookbook adds families.
+# one cookbook renderer generally serves a minor series. GLM-5.2 is an explicit
+# exception: its ``glm_moe_dsa`` template differs from GLM-5/5.1's ``glm5``
+# template, so the most-specific prefix must come first.
 _FW_COOKBOOK_BY_PREFIX: tuple[tuple[str, str], ...] = (
+    ("zai-org/glm-5.2", "glm_moe_dsa"),
+    ("zai-org/glm-5p2", "glm_moe_dsa"),
     ("zai-org/glm-5", "glm5"),
     ("deepseek-ai/deepseek-v4", "deepseek_v4"),
 )

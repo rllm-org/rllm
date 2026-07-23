@@ -11,18 +11,101 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from typing import Any
 
 from .bridging import BridgingRendererMixin
 from .types import ParsedResponse, RenderedTokens
 
 
-def _to_parsed(content: str, reasoning: str | None, tool_calls: Any) -> ParsedResponse:
+def _split_content_parts(content: Any) -> tuple[str, str]:
+    """Flatten OpenAI-style assistant content parts into text + reasoning.
+
+    Fireworks cookbook reasoning renderers (including ``glm_moe_dsa``) return
+    ``message.content`` as ``[{"type": "thinking", ...}, {"type": "text",
+    ...}]``. The canonical renderer contract requires strings: leaking that
+    list reaches the OpenAI wire response and breaks both LiteLLM and CLI
+    harness schemas before they can execute a tool.
+    """
+    if not isinstance(content, list):
+        return (content or "", "")
+
+    text_parts: list[str] = []
+    thinking_parts: list[str] = []
+    for part in content:
+        if isinstance(part, dict):
+            part_type = part.get("type")
+            if part_type == "thinking" and part.get("thinking"):
+                thinking_parts.append(str(part["thinking"]))
+            elif part_type in ("text", "output_text") and part.get("text"):
+                text_parts.append(str(part["text"]))
+    return "\n".join(text_parts), "\n".join(thinking_parts)
+
+
+def _to_parsed(content: Any, reasoning: str | None, tool_calls: Any) -> ParsedResponse:
+    text, parts_reasoning = _split_content_parts(content)
     return ParsedResponse(
-        content=content or "",
-        reasoning_content=reasoning or None,
+        content=text,
+        reasoning_content=reasoning or parts_reasoning or None,
         tool_calls=list(tool_calls) if tool_calls else None,
     )
+
+
+def _to_tinker_tool_call(tool_call: Any) -> Any:
+    """Convert an OpenAI/rLLM tool call into cookbook's typed ToolCall.
+
+    The canonical renderer accepts OpenAI message dictionaries, while
+    tinker-cookbook renderers expect ``ToolCall`` objects in historical
+    assistant messages. CLI clients send those historical calls back as
+    dictionaries on turn two, so leaving them untyped breaks renderers that
+    access ``tool_call.function`` (including GLM-5).
+    """
+    from tinker_cookbook.renderers.base import ToolCall
+
+    if isinstance(tool_call, ToolCall):
+        return tool_call
+    if hasattr(tool_call, "model_dump"):
+        payload = tool_call.model_dump()
+    elif isinstance(tool_call, Mapping):
+        payload = dict(tool_call)
+    else:
+        payload = {
+            "id": getattr(tool_call, "id", None),
+            "name": getattr(tool_call, "name", ""),
+            "arguments": getattr(tool_call, "arguments", {}),
+        }
+
+    function = payload.get("function")
+    if isinstance(function, Mapping):
+        function = dict(function)
+    else:
+        function = {
+            "name": payload.pop("name", ""),
+            "arguments": payload.pop("arguments", {}),
+        }
+    arguments = function.get("arguments", "")
+    if not isinstance(arguments, str):
+        arguments = json.dumps(arguments, ensure_ascii=False)
+    function["arguments"] = arguments
+
+    normalized = {
+        "type": payload.get("type", "function"),
+        "id": payload.get("id"),
+        "function": function,
+    }
+    return ToolCall.model_validate(normalized)
+
+
+def _to_tinker_messages(messages: list[dict]) -> list[dict]:
+    normalized: list[dict] = []
+    for message in messages:
+        converted = dict(message)
+        tool_calls = converted.get("tool_calls")
+        if tool_calls:
+            converted["tool_calls"] = [_to_tinker_tool_call(call) for call in tool_calls]
+        normalized.append(converted)
+    return normalized
 
 
 class TinkerRendererAdapter(BridgingRendererMixin):
@@ -46,7 +129,7 @@ class TinkerRendererAdapter(BridgingRendererMixin):
         return list(prefix) + msgs
 
     def render_ids(self, messages, *, tools=None, add_generation_prompt: bool = False) -> list[int]:
-        msgs = self._with_tools(list(messages), tools)
+        msgs = self._with_tools(_to_tinker_messages(list(messages)), tools)
         if add_generation_prompt:
             model_input = self._inner.build_generation_prompt(msgs)
         else:

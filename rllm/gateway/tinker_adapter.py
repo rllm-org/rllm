@@ -13,7 +13,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from rllm.engine.rollout.tinker_engine import TinkerEngine
@@ -22,14 +22,21 @@ from rllm.types import TerminationEvent, TerminationReason
 logger = logging.getLogger(__name__)
 
 
+def _get_field(value: Any, key: str, default: Any = None) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(key, default)
+    return getattr(value, key, default)
+
+
 def _to_openai_tool_calls(tool_calls: list) -> list[dict[str, Any]]:
     """Convert tool calls from any producer shape to the OpenAI wire format.
 
-    ``ModelOutput.tool_calls`` arrives in one of three shapes depending on which parser
+    ``ModelOutput.tool_calls`` arrives in one of four shapes depending on which parser
     ``assemble_model_output`` used:
 
     * prime-rl ``renderers`` (the unified renderer, e.g. ``parse_qwen35``): a **nested**
       dict ``{"function": {"name", "arguments"}}`` — the OpenAI-ish shape.
+    * tinker-cookbook ``ToolCall``: a typed object with a typed ``.function`` body.
     * rLLM ``ToolCall`` object: ``.name`` / ``.arguments`` attributes.
     * flat dict: ``{"name", "arguments"}``.
 
@@ -40,17 +47,17 @@ def _to_openai_tool_calls(tool_calls: list) -> list[dict[str, Any]]:
     """
     result = []
     for i, tc in enumerate(tool_calls):
-        fn = tc.get("function") if isinstance(tc, dict) else None
-        if isinstance(fn, dict):  # prime-rl nested shape
-            name, args = fn.get("name", ""), fn.get("arguments", {})
-        elif isinstance(tc, dict):  # flat dict
-            name, args = tc.get("name", ""), tc.get("arguments", {})
-        else:  # rLLM ToolCall object
-            name, args = getattr(tc, "name", ""), getattr(tc, "arguments", {})
-        args_str = json.dumps(args) if isinstance(args, dict) else str(args)
+        fn = _get_field(tc, "function")
+        if fn is not None:
+            name = _get_field(fn, "name", "")
+            args = _get_field(fn, "arguments", {})
+        else:
+            name = _get_field(tc, "name", "")
+            args = _get_field(tc, "arguments", {})
+        args_str = args if isinstance(args, str) else json.dumps(args)
         result.append(
             {
-                "id": f"call_{i}",
+                "id": _get_field(tc, "id") or f"call_{i}",
                 "type": "function",
                 "function": {"name": name, "arguments": args_str},
             }

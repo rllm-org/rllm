@@ -3,12 +3,12 @@ Terminal-Bench.
 
 This cookbook deliberately ships no custom AgentFlow or evaluator:
 
-* The **agent** is the in-tree ``terminus2`` harness
-  (:class:`rllm.harnesses.terminus2.Terminus2Harness`) — a
-  :class:`~rllm.sandbox.sandboxed_flow.SandboxedAgentFlow` that runs Harbor's
-  Terminus-2 tmux/terminal agent inside each task's sandbox. The rLLM gateway
-  intercepts every LLM call, so the trainer sees full trajectories without the
-  harness knowing it's being trained.
+* The **agent** is selected with ``TB_HARNESS``: ``terminus-2`` runs Harbor's
+  Terminus-2 tmux/terminal agent and ``opencode`` runs the pinned OpenCode CLI.
+  Both are in-tree :class:`~rllm.sandbox.sandboxed_flow.SandboxedAgentFlow`
+  harnesses and run inside each task's sandbox. The rLLM gateway intercepts
+  every LLM call, so the trainer sees full trajectories without the harness
+  knowing it's being trained.
 * The **evaluator** is each task's own verifier (sandbox-shell), resolved
   per-task by :class:`rllm.hooks.SandboxTaskHooks`. Both the local training
   tasks and the Terminal-Bench eval tasks ship a ``tests/test.sh`` that writes
@@ -40,10 +40,11 @@ import hydra
 from omegaconf import DictConfig
 
 from rllm.data.dataset import DatasetRegistry
+from rllm.harnesses.opencode import OpenCodeHarness
 from rllm.harnesses.terminus2 import Terminus2Harness
 from rllm.trainer import AgentTrainer
 
-TRAIN_DATASET = "tb-opus-pass"
+TRAIN_DATASET = os.environ.get("TB_TRAIN_DATASET", "tb-opus-pass")
 
 # Terminal-Bench eval version (Harbor registry). Must match prepare_data.py;
 # both read TB_EVAL_VERSION so the pulled and loaded dataset names agree.
@@ -71,6 +72,21 @@ TERMINUS_MAX_TURNS = int(_terminus_max_turns) if _terminus_max_turns and int(_te
 # TERMINUS_ENABLE_SUMMARIZE=0 to disable it. Unset = Harbor's default (on).
 TERMINUS_ENABLE_SUMMARIZE = os.environ.get("TERMINUS_ENABLE_SUMMARIZE", "1").strip().lower() not in ("0", "false", "no", "off")
 
+# Terminal harness: terminus-2 | opencode.
+TB_HARNESS = os.environ.get("TB_HARNESS", "terminus-2").strip().lower()
+
+
+def _build_agent_flow():
+    if TB_HARNESS in ("terminus-2", "terminus2"):
+        return Terminus2Harness(
+            sandbox_backend=SANDBOX_BACKEND,
+            max_turns=TERMINUS_MAX_TURNS,
+            enable_summarize=TERMINUS_ENABLE_SUMMARIZE,
+        )
+    if TB_HARNESS == "opencode":
+        return OpenCodeHarness(sandbox_backend=SANDBOX_BACKEND)
+    raise ValueError(f"Unsupported TB_HARNESS={TB_HARNESS!r}; expected 'terminus-2' or 'opencode'")
+
 
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig) -> None:
@@ -85,14 +101,14 @@ def main(config: DictConfig) -> None:
     if TB_VAL_MAX > 0 and TB_VAL_MAX < len(val_dataset):
         val_dataset = val_dataset.select(range(TB_VAL_MAX))
 
-    # terminus2 as a SandboxedAgentFlow. Passing ``agent_flow`` (with no
+    # Selected CLI as a SandboxedAgentFlow. Passing ``agent_flow`` (with no
     # explicit evaluator/hooks) makes AgentTrainer auto-wire SandboxTaskHooks
     # for the sandbox lifecycle + per-task verifier, and route rollouts through
     # AgentFlowEngine — rLLM's own runtime, not the remote Harbor runtime.
     # enable_summarize controls Terminus-2 context compaction; the train_*.sh
     # scripts set TERMINUS_ENABLE_SUMMARIZE=0 to turn it off so summarization
     # subagents don't fragment the captured trajectory during training.
-    agent_flow = Terminus2Harness(sandbox_backend=SANDBOX_BACKEND, max_turns=TERMINUS_MAX_TURNS, enable_summarize=TERMINUS_ENABLE_SUMMARIZE)
+    agent_flow = _build_agent_flow()
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),

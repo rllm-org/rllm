@@ -25,13 +25,22 @@ class DockerSandbox:
 
         self.name = name
         self.image = image
-        self._client = docker.from_env()
+        # The SDK's 60-second default covers both daemon requests and streamed
+        # image/container operations.  A busy rollout host can legitimately
+        # exceed it while many task sandboxes start in parallel.
+        client_timeout_s = float(os.environ.get("RLLM_DOCKER_CLIENT_TIMEOUT_S", "300"))
+        self._client = docker.from_env(timeout=client_timeout_s)
         self._container = self._client.containers.run(
             image,
             command="sleep infinity",
             name=f"rllm-sandbox-{name}",
             detach=True,
             remove=False,
+            # Gateway URLs are rewritten from host loopback to this name by
+            # ``container_reachable_url``. Docker Desktop defines it
+            # automatically; Linux bridge networking needs the explicit
+            # host-gateway mapping.
+            extra_hosts={"host.docker.internal": "host-gateway"},
         )
         logger.info("DockerSandbox %s created (container: %s, image: %s)", name, self._container.short_id, image)
 

@@ -123,6 +123,19 @@ def test_to_openai_tool_calls_shapes_arguments_and_ids():
     out = _to_openai_tool_calls([{"function": {"name": "bash", "arguments": {"command": "ls"}}}])
     assert out == [{"id": "call_0", "type": "function", "index": 0, "function": {"name": "bash", "arguments": '{"command": "ls"}'}}]
 
+    typed = SimpleNamespace(
+        id="typed_1",
+        function=SimpleNamespace(name="write", arguments='{"path":"x"}'),
+    )
+    assert _to_openai_tool_calls([typed]) == [
+        {
+            "id": "typed_1",
+            "type": "function",
+            "index": 0,
+            "function": {"name": "write", "arguments": '{"path":"x"}'},
+        }
+    ]
+
 
 # --- unit: _assistant_message_from_completion (choice-based) -----------------
 

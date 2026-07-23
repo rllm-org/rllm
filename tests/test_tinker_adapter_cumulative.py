@@ -109,6 +109,16 @@ def test_to_openai_tool_calls_handles_all_producer_shapes():
     # flat dict and ToolCall object still work.
     assert _to_openai_tool_calls([{"name": "edit", "arguments": {"p": 1}}])[0]["function"]["name"] == "edit"
     assert _to_openai_tool_calls([SimpleNamespace(name="read", arguments={"f": "x"})])[0]["function"]["name"] == "read"
+    # tinker-cookbook ToolCall has a typed nested function body.
+    typed = SimpleNamespace(
+        id="typed_1",
+        function=SimpleNamespace(name="write", arguments='{"path":"x"}'),
+    )
+    assert _to_openai_tool_calls([typed])[0] == {
+        "id": "typed_1",
+        "type": "function",
+        "function": {"name": "write", "arguments": '{"path":"x"}'},
+    }
 
 
 class _ToolModelOutput(_ModelOutput):

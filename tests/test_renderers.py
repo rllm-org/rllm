@@ -7,6 +7,7 @@ are skipped if it (or tinker_cookbook) is unavailable. Run offline.
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -15,7 +16,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from rllm.renderers import BridgingRendererMixin, get_renderer, resolve  # noqa: E402
-from rllm.renderers.adapters import ChatTemplateAdapter  # noqa: E402
+from rllm.renderers.adapters import ChatTemplateAdapter, TinkerRendererAdapter  # noqa: E402
 
 QWEN = "Qwen/Qwen3-0.6B"
 
@@ -114,9 +115,9 @@ def _tinker_qwen3(tokenizer):
 
 
 def _prime_qwen3(tokenizer):
-    from renderers import create_renderer
+    from renderers import config_from_name, create_renderer
 
-    return create_renderer(tokenizer, renderer="qwen3")
+    return create_renderer(tokenizer, config_from_name("qwen3"))
 
 
 def test_tinker_adapter_renders(qwen_tokenizer):
@@ -124,6 +125,77 @@ def test_tinker_adapter_renders(qwen_tokenizer):
     ids = a.render_ids([{"role": "user", "content": "hi"}], add_generation_prompt=True)
     assert ids and isinstance(ids[0], int)
     assert a.get_stop_token_ids()  # non-empty
+
+
+def test_tinker_adapter_flattens_reasoning_content_parts():
+    """Cookbook reasoning renderers must not leak multipart content to clients."""
+
+    class _StubRenderer:
+        def get_stop_sequences(self):
+            return [9]
+
+        def parse_response(self, _token_ids):
+            return (
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "inspect the files"},
+                        {"type": "text", "text": '{"commands": ["ls"]}'},
+                    ],
+                },
+                "stop",
+            )
+
+    parsed = TinkerRendererAdapter(_StubRenderer()).parse_response([1, 2, 3])
+
+    assert parsed.content == '{"commands": ["ls"]}'
+    assert parsed.reasoning_content == "inspect the files"
+    assert parsed.tool_calls is None
+
+
+def test_tinker_adapter_types_openai_tool_calls_before_multiturn_render():
+    """Turn-two OpenAI history must satisfy cookbook's typed Message contract."""
+    pytest.importorskip("tinker_cookbook")
+
+    class _Rendered:
+        def to_ints(self):
+            return [1, 2, 3]
+
+    class _StubRenderer:
+        def get_stop_sequences(self):
+            return [9]
+
+        def build_generation_prompt(self, messages):
+            call = messages[1]["tool_calls"][0]
+            assert call.id == "call_1"
+            assert call.function.name == "bash"
+            assert json.loads(call.function.arguments) == {"command": "ls"}
+            return _Rendered()
+
+    messages = [
+        {"role": "user", "content": "inspect the workspace"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": {"command": "ls"},
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "README.md"},
+    ]
+
+    rendered = TinkerRendererAdapter(_StubRenderer()).render_ids(
+        messages,
+        add_generation_prompt=True,
+    )
+    assert rendered == [1, 2, 3]
 
 
 def test_tinker_adapter_bridge_matches_prime(qwen_tokenizer):
@@ -146,6 +218,8 @@ def test_tinker_adapter_bridge_matches_prime(qwen_tokenizer):
     ):
         a_out = adapter.bridge_to_next_turn(prompt, completion, new)
         p_out = prime.bridge_to_next_turn(prompt, completion, new)
+        if p_out is None:
+            pytest.skip("installed prime renderer requires a full rerender for its thinking-retention policy")
         assert a_out is not None and p_out is not None
         assert a_out.token_ids == p_out.token_ids, f"bridge mismatch for new={new}"
 
@@ -242,7 +316,9 @@ def test_cookbook_renderer_name_prefix_match():
     point releases prime-rl's exact-match map doesn't list (GLM-5.2)."""
     from rllm.renderers.registry import _cookbook_renderer_name
 
-    assert _cookbook_renderer_name("zai-org/GLM-5.2") == "glm5"
+    assert _cookbook_renderer_name("zai-org/GLM-5.2") == "glm_moe_dsa"
+    assert _cookbook_renderer_name("zai-org/GLM-5.2-FP8") == "glm_moe_dsa"
+    assert _cookbook_renderer_name("zai-org/GLM-5p2-finetune") == "glm_moe_dsa"
     assert _cookbook_renderer_name("zai-org/GLM-5") == "glm5"
     assert _cookbook_renderer_name("zai-org/GLM-5.1") == "glm5"
     assert _cookbook_renderer_name("deepseek-ai/DeepSeek-V4") == "deepseek_v4"

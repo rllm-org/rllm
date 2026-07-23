@@ -501,20 +501,67 @@ def _resolve_image(task: Task, backend: str) -> str:
 
 
 def _build_docker_image(context_dir: Path, task_id: str) -> str:
-    """Build via subprocess (avoids docker-py credential helper issues on macOS)."""
+    """Build via subprocess, once per task/context across local processes.
+
+    Rollout workers are separate processes and can resolve the same task at the
+    same time.  Without a host-wide lock every worker independently invokes
+    ``docker build`` for the same tag, which can overload the daemon before any
+    sandbox starts.  The image carries a build-context fingerprint so the cache
+    remains correct when a task's Dockerfile context changes.
+    """
+    import fcntl
+    import hashlib
+    import os
     import subprocess
+    import tempfile
 
     tag = "rllm-task-" + re.sub(r"[^a-zA-Z0-9_.-]", "-", task_id).lower()
-    logger.info("Building Docker image '%s' from %s", tag, context_dir)
-    result = subprocess.run(
-        ["docker", "build", "-t", tag, "--rm", "."],
-        cwd=str(context_dir),
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"Docker build failed for {task_id}:\n{result.stderr[:1000]}")
-    return tag
+    fingerprint = _dockerfile_context_fingerprint(context_dir / "Dockerfile")
+    context_label = "ai.rllm.build-context"
+
+    configured_lock_dir = os.environ.get("RLLM_DOCKER_BUILD_LOCK_DIR")
+    lock_dir = Path(configured_lock_dir) if configured_lock_dir else Path(tempfile.gettempdir()) / f"rllm-docker-build-locks-{os.getuid()}"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_name = hashlib.sha256(tag.encode("utf-8")).hexdigest() + ".lock"
+
+    with (lock_dir / lock_name).open("a") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        inspected = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                f'{{{{ index .Config.Labels "{context_label}" }}}}',
+                tag,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if inspected.returncode == 0 and inspected.stdout.strip() == fingerprint:
+            logger.info("Reusing Docker image '%s' for context %s", tag, fingerprint)
+            return tag
+
+        logger.info("Building Docker image '%s' from %s", tag, context_dir)
+        result = subprocess.run(
+            [
+                "docker",
+                "build",
+                "-t",
+                tag,
+                "--label",
+                f"{context_label}={fingerprint}",
+                "--rm",
+                ".",
+            ],
+            cwd=str(context_dir),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Docker build failed for {task_id}:\n{result.stderr[:1000]}")
+        return tag
 
 
 def _run_healthcheck(task: Task, sandbox: Sandbox) -> None:

@@ -23,7 +23,7 @@ from rllm.harnesses.claude_code import ClaudeCodeHarness
 from rllm.harnesses.codex import CodexHarness
 from rllm.harnesses.kimi_cli import KimiCliHarness
 from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
-from rllm.harnesses.opencode import OpenCodeHarness
+from rllm.harnesses.opencode import OPENCODE_VERSION, OpenCodeHarness
 from rllm.harnesses.qwen_code import QwenCodeHarness
 from rllm.sandbox.protocol import SandboxCommandTimeout
 from rllm.types import AgentConfig, Episode, Task, TerminationReason
@@ -272,6 +272,13 @@ def test_install_script_is_nonempty_and_idempotent(harness_cls):
 # ---------------------------------------------------------------------------
 # OpenCodeHarness — env + config file
 # ---------------------------------------------------------------------------
+
+
+def test_opencode_installer_is_exactly_version_pinned():
+    script = OpenCodeHarness().install_script()
+    assert f"opencode-ai@{OPENCODE_VERSION}" in script
+    assert "opencode-ai@latest" not in script
+    assert 'actual="$(opencode --version)"' in script
 
 
 def test_heredoc_write_rejects_paths_with_shell_variables():

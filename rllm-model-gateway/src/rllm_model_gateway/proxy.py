@@ -10,7 +10,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 import httpx
@@ -68,7 +68,13 @@ def _strip_logprobs(response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _to_openai_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _get_field(value: Any, key: str, default: Any = None) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(key, default)
+    return getattr(value, key, default)
+
+
+def _to_openai_tool_calls(tool_calls: list[Any]) -> list[dict[str, Any]]:
     """Renderer ``parse_response`` tool_calls -> OpenAI chat ``tool_calls`` shape.
 
     The renderer emits ``{"function": {"name", "arguments": <dict|str>}}``; the OpenAI
@@ -77,16 +83,21 @@ def _to_openai_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, An
     """
     out: list[dict[str, Any]] = []
     for i, tc in enumerate(tool_calls):
-        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-        args = fn.get("arguments", {})
+        fn = _get_field(tc, "function")
+        if fn is not None:
+            name = _get_field(fn, "name", "")
+            args = _get_field(fn, "arguments", {})
+        else:
+            name = _get_field(tc, "name", "")
+            args = _get_field(tc, "arguments", {})
         if not isinstance(args, str):
             args = json.dumps(args)
         out.append(
             {
-                "id": tc.get("id") or f"call_{i}",
+                "id": _get_field(tc, "id") or f"call_{i}",
                 "type": "function",
                 "index": i,
-                "function": {"name": fn.get("name", ""), "arguments": args},
+                "function": {"name": name, "arguments": args},
             }
         )
     return out
