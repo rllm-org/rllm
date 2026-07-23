@@ -275,7 +275,7 @@ def _dockerfile_run_commands(task: Task) -> list[str]:
                 if i >= len(lines):
                     break
                 parts.append(lines[i])
-            cmd = "\n".join(parts).strip()
+            cmd = " ".join(part.strip() for part in parts).strip()
             if cmd:
                 commands.append(cmd)
         i += 1
