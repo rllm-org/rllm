@@ -94,6 +94,8 @@ CUDA_VISIBLE_DEVICES=0,1 "$VENV_VLLM" serve "$MODEL" \
     --dtype bfloat16 \
     --trust-remote-code \
     --gdn-prefill-backend triton \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
     > "$LOG_ROOT/vllm.log" 2>&1 &
 VLLM_PID=$!
 trap 'kill $VLLM_PID 2>/dev/null || true; kill ${GATEWAY_PID:-} 2>/dev/null || true' EXIT
@@ -182,6 +184,8 @@ CUDA_VISIBLE_DEVICES=2,3,4,5,6,7 "$VENV_PY" cookbooks/multimodal_codex/train.py 
     actor_rollout_ref.rollout.temperature=1.0 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=5120 \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_auto_tool_choice=true \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.tool_call_parser=qwen3_coder \
     actor_rollout_ref.rollout.n=1 \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
