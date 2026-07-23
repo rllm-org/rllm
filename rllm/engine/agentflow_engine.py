@@ -508,6 +508,30 @@ class AgentFlowEngine:
                 # upstream returned nothing (dead litellm proxy, gateway "no healthy
                 # workers", or the model itself). Surface it loudly — otherwise the
                 # run silently produces garbage (every rollout scores 0).
+                if episode is not None and episode.termination_reason == TerminationReason.ERROR:
+                    error = episode.metadata.get("error", {})
+                    error = error if isinstance(error, dict) else {}
+                    error_type = error.get("error_type", "unknown")
+                    message = error.get("message", "")
+                    traceback_text = error.get("traceback")
+                    if traceback_text:
+                        logger.error(
+                            "[%s:%d] ERROR termination (%s): %s\n%s",
+                            task_id,
+                            rollout_idx,
+                            error_type,
+                            message,
+                            traceback_text,
+                        )
+                    else:
+                        logger.error(
+                            "[%s:%d] ERROR termination (%s): %s [no traceback captured]",
+                            task_id,
+                            rollout_idx,
+                            error_type,
+                            message,
+                        )
+
                 if episode is not None:
                     _steps = [s for t in (episode.trajectories or []) for s in (t.steps or [])]
                     if _steps and all(not (s.model_response or "").strip() for s in _steps):

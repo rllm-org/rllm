@@ -178,7 +178,9 @@ class MiniSweAgentHarness(BaseCliHarness):
             env=env,
         )
 
-    def _read_exit_outcome(self, sandbox: Sandbox) -> tuple[str | None, str | None]:
+    def _read_exit_outcome(
+        self, sandbox: Sandbox
+    ) -> tuple[str | None, str | None, dict[str, str] | None]:
         try:
             raw = sandbox.exec(
                 f"cat {shlex.quote(self.trajectory_output_path)}",
@@ -188,29 +190,46 @@ class MiniSweAgentHarness(BaseCliHarness):
             data = json.loads(raw)
         except Exception as e:
             logger.debug("Could not read mini-SWE trajectory outcome: %s", e)
-            return None, None
+            return None, None, None
 
         info = data.get("info", {}) if isinstance(data, dict) else {}
         status = info.get("exit_status") if isinstance(info, dict) else None
         status = str(status).strip() if status else None
 
         finish_reason = None
+        error_extra = info if isinstance(info, dict) and (info.get("exception_str") or info.get("traceback")) else None
         messages = data.get("messages", []) if isinstance(data, dict) else []
         if isinstance(messages, list):
             for message in reversed(messages):
                 if not isinstance(message, dict):
                     continue
                 extra = message.get("extra")
-                if not isinstance(extra, dict) or extra.get("interrupt_type") != "FormatError":
+                if not isinstance(extra, dict):
                     continue
-                response = extra.get("response")
-                choices = response.get("choices") if isinstance(response, dict) else None
-                if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-                    raw_finish_reason = choices[0].get("finish_reason")
-                    finish_reason = str(raw_finish_reason).strip() if raw_finish_reason else None
-                break
+                if status is None and extra.get("exit_status"):
+                    status = str(extra["exit_status"]).strip()
+                if error_extra is None and (extra.get("exception_str") or extra.get("traceback")):
+                    error_extra = extra
+                if finish_reason is None and extra.get("interrupt_type") == "FormatError":
+                    response = extra.get("response")
+                    choices = response.get("choices") if isinstance(response, dict) else None
+                    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                        raw_finish_reason = choices[0].get("finish_reason")
+                        finish_reason = str(raw_finish_reason).strip() if raw_finish_reason else None
 
-        return status, finish_reason
+        error = None
+        if error_extra is not None:
+            error_type = error_extra.get("exit_status") or status or "MiniSweAgentError"
+            message = error_extra.get("exception_str") or ""
+            traceback_text = error_extra.get("traceback") or ""
+            error = {
+                "error_type": str(error_type),
+                "message": str(message),
+            }
+            if traceback_text:
+                error["traceback"] = str(traceback_text)
+
+        return status, finish_reason, error
 
     @staticmethod
     def _map_exit_status(status: str | None, finish_reason: str | None = None) -> TerminationReason:
@@ -233,8 +252,10 @@ class MiniSweAgentHarness(BaseCliHarness):
         if not self.capture_exit_status:
             return episode
 
-        status, finish_reason = self._read_exit_outcome(env)
+        status, finish_reason, error = self._read_exit_outcome(env)
         episode.metadata["miniswe_exit_status"] = status or "missing"
+        if error is not None:
+            episode.metadata["error"] = error
         if status is not None:
             episode.termination_reason = self._map_exit_status(status, finish_reason)
         elif episode.termination_reason is None:
