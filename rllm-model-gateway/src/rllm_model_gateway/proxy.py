@@ -9,6 +9,7 @@ import functools
 import json
 import logging
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -158,6 +159,7 @@ def _build_trace_data(
     weight_version: int | None,
     capture_raw: bool,
     lineage_id: str | None = None,
+    trace_id: str | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
     """Build a TraceRecord and serialize it to a dict.
 
@@ -174,6 +176,7 @@ def _build_trace_data(
         latency_ms,
         weight_version=weight_version,
         lineage_id=lineage_id,
+        trace_id=trace_id,
         capture_raw=capture_raw,
     )
     return trace.trace_id, trace.session_id, trace.model_dump()
@@ -287,6 +290,19 @@ class ReverseProxy:
         if slot is not None and slot.turn_count == 0 and (prompt_ids or completion_ids):
             slot.ingest_turn(prompt_ids, completion_ids)
             slot.update_prefix(messages)
+
+    @staticmethod
+    def _turn_trace_id(slot: Any, replay: bool) -> str:
+        """Trace id for this turn's persisted trace.
+
+        Delegates to the slot so a replay reuses the turn's existing id — the
+        store upserts by trace_id, so it overwrites that turn's trace in place
+        instead of appending a second, superseded trace. Falls back to a fresh id
+        when there is no slot (cumulative mode off / non-chat request).
+        """
+        if slot is None:
+            return str(uuid.uuid4())
+        return slot.next_trace_id(replay)
 
     def _track_inflight(self, task: asyncio.Future) -> None:
         """Count *task* (an in-flight generation) toward the in-flight gauge until
@@ -627,7 +643,7 @@ class ReverseProxy:
 
         # Persist trace
         if session_id and response_body:
-            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version, self._request_lineage_id(request))
+            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version, self._request_lineage_id(request), self._turn_trace_id(self._request_slot(request), replay=False))
 
             # Ingest turn-0 into the chain this request was bound to (never .active).
             if self.cumulative_token_mode and request.url.path.endswith("/chat/completions"):
@@ -793,7 +809,7 @@ class ReverseProxy:
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:
-            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version, self._request_lineage_id(request))
+            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version, self._request_lineage_id(request), self._turn_trace_id(acc, replay))
 
         sanitized = response_body
         if isinstance(response_body, dict) and response_body:
@@ -875,10 +891,12 @@ class ReverseProxy:
         # unchanged. See _assistant_message_from_completion.
         tools_mode = bool(request_body.get("tools"))
 
+        stream_trace_id = self._turn_trace_id(acc, replay)
+
         def _build_trace():
             latency_ms = (time.perf_counter() - t0) * 1000
             return build_trace_record_from_chunks(
-                session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, lineage_id=self._request_lineage_id(request), capture_raw=self.capture_raw_payloads
+                session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, lineage_id=self._request_lineage_id(request), trace_id=stream_trace_id, capture_raw=self.capture_raw_payloads
             )
 
         async def event_generator():
@@ -1053,7 +1071,7 @@ class ReverseProxy:
             if chat_body.get("choices"):
                 chat_body["choices"][0]["message"] = message
             trace = build_trace_record(
-                session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version, lineage_id=self._request_lineage_id(request), capture_raw=self.capture_raw_payloads
+                session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version, lineage_id=self._request_lineage_id(request), trace_id=self._turn_trace_id(acc, replay), capture_raw=self.capture_raw_payloads
             )
             await self._persist(trace)
 
@@ -1220,7 +1238,7 @@ class ReverseProxy:
                 # on real async I/O (e.g. aiosqlite) is not reliable.
                 if session_id and chunks:
                     trace = build_trace_record_from_chunks(
-                        session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, lineage_id=self._request_lineage_id(request), capture_raw=self.capture_raw_payloads
+                        session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, lineage_id=self._request_lineage_id(request), trace_id=self._turn_trace_id(self._request_slot(request), replay=False), capture_raw=self.capture_raw_payloads
                     )
                     task = asyncio.create_task(
                         self._safe_store(
@@ -1264,7 +1282,7 @@ class ReverseProxy:
         # Persist trace from the full response
         if session_id and response_body:
             trace = build_trace_record(
-                session_id, request_body, response_body, latency_ms, weight_version=weight_version, lineage_id=self._slot_lineage_id(slot), capture_raw=self.capture_raw_payloads
+                session_id, request_body, response_body, latency_ms, weight_version=weight_version, lineage_id=self._slot_lineage_id(slot), trace_id=self._turn_trace_id(slot, replay=False), capture_raw=self.capture_raw_payloads
             )
             await self._persist(trace)
 
@@ -1414,6 +1432,7 @@ class ReverseProxy:
         latency_ms: float,
         weight_version: int | None,
         lineage_id: str | None = None,
+        trace_id: str | None = None,
     ) -> None:
         """Build + store a trace off the event-loop thread and off the response
         critical path.
@@ -1429,7 +1448,7 @@ class ReverseProxy:
 
         async def _run() -> None:
             try:
-                trace_id, sess, data = await loop.run_in_executor(
+                built_trace_id, sess, data = await loop.run_in_executor(
                     None,
                     _build_trace_data,
                     session_id,
@@ -1439,8 +1458,9 @@ class ReverseProxy:
                     weight_version,
                     capture_raw,
                     lineage_id,
+                    trace_id,
                 )
-                await self._safe_store(trace_id, sess, data)
+                await self._safe_store(built_trace_id, sess, data)
             except Exception:
                 logger.exception("Failed to persist trace (session=%s)", session_id)
 

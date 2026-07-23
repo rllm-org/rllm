@@ -188,6 +188,7 @@ def build_trace_record(
     metadata: dict[str, Any] | None = None,
     weight_version: int | None = None,
     lineage_id: str | None = None,
+    trace_id: str | None = None,
     capture_raw: bool = False,
 ) -> TraceRecord:
     """Assemble a ``TraceRecord`` from raw request/response dicts.
@@ -215,7 +216,7 @@ def build_trace_record(
         weight_version = extract_weight_version(response_body)
 
     return TraceRecord(
-        trace_id=str(uuid.uuid4()),
+        trace_id=trace_id or str(uuid.uuid4()),
         session_id=session_id,
         lineage_id=lineage_id,
         model=request_body.get("model", response_body.get("model", "")),
@@ -245,6 +246,7 @@ def build_trace_record_from_chunks(
     metadata: dict[str, Any] | None = None,
     weight_version: int | None = None,
     lineage_id: str | None = None,
+    trace_id: str | None = None,
     capture_raw: bool = False,
 ) -> TraceRecord:
     """Assemble a ``TraceRecord`` from accumulated streaming SSE chunks.
@@ -305,7 +307,7 @@ def build_trace_record_from_chunks(
         token_counts["completion"] = usage["completion_tokens"]
 
     return TraceRecord(
-        trace_id=str(uuid.uuid4()),
+        trace_id=trace_id or str(uuid.uuid4()),
         session_id=session_id,
         lineage_id=lineage_id,
         model=model,

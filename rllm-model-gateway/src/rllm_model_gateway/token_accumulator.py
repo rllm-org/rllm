@@ -24,6 +24,7 @@ import hashlib
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -176,6 +177,10 @@ class TokenAccumulator:
         # Survives reset(): how many times this session has reset. A climbing
         # count on one session is the signal for a reset storm.
         self.reset_count: int = 0
+        # Trace id of this slot's latest persisted turn. A replay (duplicate
+        # resend) reuses it so the store overwrites that turn's trace in place
+        # rather than appending a second, superseded trace for one logical turn.
+        self.trace_id: str | None = None
 
     @property
     def cumulative_ids(self) -> list[int]:
@@ -189,6 +194,19 @@ class TokenAccumulator:
     def should_rewrite(self) -> bool:
         """Return True if this session should use /v1/completions rewriting."""
         return self.turn_count > 0
+
+    def next_trace_id(self, replay: bool) -> str:
+        """Trace id for the turn just processed.
+
+        A replay (duplicate resend regenerating the SAME turn) reuses the turn's
+        existing id so the store overwrites it in place — one trace per logical
+        turn — instead of appending a second, superseded trace. Otherwise mint a
+        fresh id and remember it as this slot's latest.
+        """
+        if replay and self.trace_id is not None:
+            return self.trace_id
+        self.trace_id = str(uuid.uuid4())
+        return self.trace_id
 
     def _classify_prefix(self, messages: list[dict[str, Any]]) -> str:
         """Structural relationship of *messages* to the snapshot prefix.
