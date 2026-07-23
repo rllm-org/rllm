@@ -239,7 +239,15 @@ def create_app(
     # Only registered when RLLM_API_FORMAT=responses; the middleware itself is
     # path-scoped (only touches /v1/responses) so passing through when other
     # requests arrive is free.
-    if os.getenv("RLLM_API_FORMAT", "chat") == "responses":
+    _rllm_api_format = os.getenv("RLLM_API_FORMAT", "chat")
+    # [MMCODEX-DIAG] temporary — verify env var reaches the gateway process.
+    # Remove together with proxy/trace_converter DIAG logs once root cause is fixed.
+    print(
+        f"[MMCODEX-DIAG] gateway startup: RLLM_API_FORMAT={_rllm_api_format!r} "
+        f"(responses_middleware_registered={_rllm_api_format == 'responses'})",
+        flush=True,
+    )
+    if _rllm_api_format == "responses":
         from rllm_model_gateway.responses_middleware import ResponsesAdapterMiddleware
 
         app.add_middleware(ResponsesAdapterMiddleware, session_manager=sessions)

@@ -134,6 +134,12 @@ for _ in $(seq 1 60); do
     sleep 2
 done
 
+# [MMCODEX-DIAG] surface gateway startup markers to stdout so koala S3 log
+# captures them (gateway.log itself is only inside /local-ssd/).
+echo "[smoke] === gateway startup markers ==="
+grep -E "MMCODEX-DIAG|RLLM_API_FORMAT" "$LOG_ROOT/gateway.log" | head -20 || echo "[smoke] (no MMCODEX-DIAG lines in gateway.log)"
+echo "[smoke] === end gateway startup markers ==="
+
 # --------- 9. Sanity probe (D-path: gateway → vLLM → image → answer) ---------
 echo "[smoke] running probe_rollout to verify e2e path"
 if "$VENV_PY" cookbooks/multimodal_codex/probe_rollout.py 2>&1 | tee "$LOG_ROOT/probe.log"; then
