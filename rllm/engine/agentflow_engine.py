@@ -50,6 +50,12 @@ logger = logging.getLogger(__name__)
 
 _MIN_FD_LIMIT = 8192
 
+_TRACEBACK_LOG_REASONS = INFRA_ERROR_REASONS - {
+    TerminationReason.AGENT_SETUP_TIMEOUT,
+    TerminationReason.ENV_START_TIMEOUT,
+    TerminationReason.VERIFIER_TIMEOUT,
+}
+
 
 def _step_returned_nothing(step) -> bool:
     """True when a model call produced no usable output — empty content AND no tool
@@ -509,7 +515,7 @@ class AgentFlowEngine:
                 # upstream returned nothing (dead litellm proxy, gateway "no healthy
                 # workers", or the model itself). Surface it loudly — otherwise the
                 # run silently produces garbage (every rollout scores 0).
-                if episode is not None and episode.termination_reason in INFRA_ERROR_REASONS:
+                if episode is not None and episode.termination_reason in _TRACEBACK_LOG_REASONS:
                     error = episode.metadata.get("error", {})
                     error = error if isinstance(error, dict) else {}
                     error_type = error.get("error_type", "unknown")
