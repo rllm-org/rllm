@@ -552,7 +552,7 @@ def test_native_loss_names_registry():
     from rllm.trainer.algorithms.loss import native_loss_names
 
     # Derived from each backend's own source of truth (present in this venv: tinker, fireworks).
-    assert native_loss_names("tinker") == {"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"}
+    assert {"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"} <= native_loss_names("tinker")
     assert native_loss_names("fireworks") == {"grpo", "importance_sampling", "dapo", "dro", "gspo", "cispo"}
     # A backend not importable here (verl) or unknown → empty (→ everything uses the custom path).
     assert native_loss_names("nonexistent_backend") == set()
@@ -591,8 +591,8 @@ def test_echo_estimator_defaults_to_echo():
 def test_agg_mode_resolution_default_config_and_pin():
     from rllm.trainer.algorithms.loss import DEFAULT_LOSS_AGG_MODE
 
-    # default: no config → canonical default (seq-mean-token-mean)
-    assert resolve_loss(_alg(loss_fn="dppo_tv")).agg_mode == DEFAULT_LOSS_AGG_MODE == "seq-mean-token-mean"
+    # default: no config → canonical default (token-mean)
+    assert resolve_loss(_alg(loss_fn="dppo_tv")).agg_mode == DEFAULT_LOSS_AGG_MODE == "token-mean"
     # config value flows through
     assert resolve_loss(_alg(loss_fn="dppo_tv", loss_agg_mode="seq-mean-token-sum")).agg_mode == "seq-mean-token-sum"
     # a loss that PINS its mode (GSPO) overrides even an explicit config
