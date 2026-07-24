@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# qwen3p5-debug_lora_grpo_bypass_tokenmean — Qwen3.5-35B-A3B LoRA with GRPO
+# qwen3p5-debug_lora_dppo_tv_bypass_tokenmean — Qwen3.5-35B-A3B LoRA with GRPO
 # advantages, DPPO-TV loss, rollout-logprob bypass, and R3 router replay.
 #
 # Fireworks backend + Modal sandboxes + native_react. Snapshot of the tuned config:
@@ -18,11 +18,11 @@
 #   No tunnel is needed: native_react calls the gateway from the trainer host.
 #
 # Run (from anywhere; the script cd's itself):
-#   bash cookbooks/terminal-rl/qwen3p5-debug_lora_grpo_bypass_tokenmean.sh
+#   bash cookbooks/terminal-rl/qwen3p5-debug_lora_dppo_tv_bypass_tokenmean.sh
 # Override anything by appending Hydra args, e.g.:
-#   bash qwen3p5-debug_lora_grpo_bypass_tokenmean.sh fireworks_config.rollout_deployment_replica_count=4
+#   bash qwen3p5-debug_lora_dppo_tv_bypass_tokenmean.sh fireworks_config.rollout_deployment_replica_count=4
 # Reattach an existing rollout deployment (it is still deleted at shutdown):
-#   bash qwen3p5-debug_lora_grpo_bypass_tokenmean.sh fireworks_infra.deployments.rollout.deployment_id=accounts/rllm-project/deployments/<id>
+#   bash qwen3p5-debug_lora_dppo_tv_bypass_tokenmean.sh fireworks_infra.deployments.rollout.deployment_id=accounts/rllm-project/deployments/<id>
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -113,7 +113,7 @@ python -u train.py \
     rllm.trainer.dump_batch_dir=null \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='terminal-rl' \
-    rllm.trainer.experiment_name='qwen3p5-35b-a3b-tb-v2-debug-lora-r3-grpo-dppo-tv-bypass-tokenmean-b2-0999' \
+    rllm.trainer.experiment_name='qwen3p5-35b-a3b-tb-v2-debug-lora-r3-dppo-tv-bypass-tokenmean-b2-0999' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=-1 \
     rllm.trainer.save_freq=10 \
