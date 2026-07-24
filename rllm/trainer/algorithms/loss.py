@@ -180,10 +180,11 @@ def offpolicy_metrics(
 # optimizer-step normalization) realizes these semantics with GLOBAL normalization spanning
 # the whole optimizer step (all micro-batches / grad-accumulation passes / DP ranks):
 #   token-mean           Σ_tokens(loss·mask) / Σ_tokens(mask)          — every token equal
+#   token-sum            Σ_tokens(loss·mask)                            — no normalization
 #   seq-mean-token-mean  mean within a sequence, then mean over sequences — every seq equal
 #   seq-mean-token-sum   sum within a sequence, then mean over sequences
-LOSS_AGG_MODES = ("token-mean", "seq-mean-token-mean", "seq-mean-token-sum")
-DEFAULT_LOSS_AGG_MODE = "seq-mean-token-mean"  # rLLM default: weight every sequence equally
+LOSS_AGG_MODES = ("token-mean", "token-sum", "seq-mean-token-mean", "seq-mean-token-sum")
+DEFAULT_LOSS_AGG_MODE = "token-mean"  # rLLM default: weight every token equally
 
 RLLM_LOSS_REGISTRY: dict[str, LossFn] = {}
 # Optional per-loss aggregation-mode override. A sequence-level loss (e.g. GSPO) must
