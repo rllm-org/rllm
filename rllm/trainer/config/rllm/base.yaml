@@ -81,7 +81,7 @@ algorithm:
   # Loss-specific hyperparameters → ctx.params, e.g. {delta: 0.2} for dppo_tv, or
   # {env_loss_coef: 0.05} for echo's env-observation cross-entropy term (arXiv:2605.24517).
   loss_params: {}
-  loss_agg_mode: seq-mean-token-mean     # [null, token-mean, seq-mean-token-sum, seq-mean-token-mean]; null lets verl's own default stand
+  loss_agg_mode: token-mean     # [null, token-mean, token-sum, seq-mean-token-sum, seq-mean-token-mean]; null lets verl's own default stand
   lr_schedule: constant   # [constant, linear, cosine]
   warmup_steps: -1        # Absolute optimizer-step warmup; <=0 uses warmup_steps_ratio
   warmup_steps_ratio: 0.0 # Fractional warmup fallback

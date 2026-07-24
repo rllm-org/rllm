@@ -340,7 +340,7 @@ class AlgorithmConfig:
     kl_beta: float = 0.0
     eps_clip: float = 0.2
     eps_clip_high: float | None = None
-    loss_agg_mode: Literal["token-mean", "seq-mean-token-sum", "seq-mean-token-mean", None] = "seq-mean-token-mean"
+    loss_agg_mode: Literal["token-mean", "token-sum", "seq-mean-token-sum", "seq-mean-token-mean", None] = "token-mean"
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
     router_replay: Literal["disabled", "R2", "R3"] = "disabled"
 
@@ -383,7 +383,7 @@ class AlgorithmConfig:
             kl_beta=algorithm_config.get("kl_beta", 0.0),
             eps_clip=algorithm_config.get("eps_clip", 0.2),
             eps_clip_high=algorithm_config.get("eps_clip_high", None),
-            loss_agg_mode=algorithm_config.get("loss_agg_mode", "seq-mean-token-mean"),
+            loss_agg_mode=algorithm_config.get("loss_agg_mode", "token-mean"),
             rollout_correction=rollout_correction,
             router_replay=algorithm_config.get("router_replay", "disabled"),
         )

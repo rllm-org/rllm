@@ -121,6 +121,8 @@ def build_custom_loss(
 
         if server_normalized:
             loss = total  # server divides by NUM_LOSS_TOKENS / NUM_SEQUENCES across the window
+        elif agg_mode == "token-sum":
+            loss = total  # raw token-sum, no normalization
         elif agg_mode == "token-mean":
             loss = total / max(num_tokens, 1.0)
         else:  # seq-mean-token-mean / seq-mean-token-sum
