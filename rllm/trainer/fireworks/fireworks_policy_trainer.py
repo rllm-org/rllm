@@ -30,7 +30,7 @@ from rllm.trainer.algorithms import (
     CompactFilteringConfig,
     TransformConfig,
 )
-from rllm.trainer.algorithms.loss import native_loss_names, offpolicy_metrics, resolve_loss
+from rllm.trainer.algorithms.loss import DEFAULT_LOSS_AGG_MODE, native_loss_names, offpolicy_metrics, resolve_loss
 from rllm.trainer.tinker.tinker_policy_trainer import (
     compute_schedule_lr_multiplier,
     require_training_client,
@@ -392,6 +392,38 @@ class FireworksPolicyTrainer:
 
         return clean_datums, advantages, inf_logprobs, prompt_lens, num_loss_tokens
 
+    @staticmethod
+    def _normalize_advantages(
+        advantages: list[float],
+        num_loss_tokens: list[int],
+        loss_agg_mode: str | None,
+    ) -> list[float]:
+        """Fold the loss-aggregation denominator into the per-sequence advantage (client-side
+        loss normalization; optim_step then passes ``GradAccNormalization.NONE``).
+
+        The server sums the per-token loss ``-(ratio · adv)`` over the whole batch, so dividing
+        each sequence's advantage by the mode's denominator makes that raw sum equal the intended
+        reduction. Denominators span the whole batch (invariant to server-side micro-batching):
+
+        - ``token-sum``:            no scaling.
+        - ``token-mean`` (default): ÷ total active tokens (Σ num_loss_tokens).
+        - ``seq-mean-token-sum``:   ÷ number of sequences.
+        - ``seq-mean-token-mean``:  ÷ (number of sequences · that sequence's active tokens).
+        """
+        mode = loss_agg_mode or DEFAULT_LOSS_AGG_MODE
+        n_seqs = len(advantages)
+        if mode == "token-sum":
+            return advantages
+        if mode == "token-mean":
+            denom = max(1, sum(num_loss_tokens))
+            return [a / denom for a in advantages]
+        if mode == "seq-mean-token-sum":
+            denom = max(1, n_seqs)
+            return [a / denom for a in advantages]
+        if mode == "seq-mean-token-mean":
+            return [a / (max(1, n_seqs) * max(1, num_loss_tokens[i])) for i, a in enumerate(advantages)]
+        raise ValueError(f"Unknown loss_agg_mode {mode!r}")
+
     async def _compute_proximal_logprobs(
         self,
         datums: list[tinker.Datum],
@@ -528,10 +560,12 @@ class FireworksPolicyTrainer:
             # log-probs — the off-policy gap (staleness + train/inference mismatch), free, no
             # proximal forward. (The bypass gate below only applies to the native builtin path.)
 
-            # server_normalized=True: the closure returns a RAW SUM; optim_step sets
-            # GradAccNormalization from resolved.agg_mode so the server normalizes once across all
-            # grad-accum passes. A per-pass mean here + NONE would scale the grad by num passes.
-            stripped, loss_fn = build_custom_loss(resolved, raw_datums, server_normalized=True)
+            # server_normalized=False: rLLM normalizes the loss client-side (the closure divides
+            # by this pass's global token/sequence count per resolved.agg_mode), so optim_step
+            # passes GradAccNormalization.NONE. Correct because the Fireworks path runs a single
+            # forward_backward_custom over the whole batch (one pass); under multi-pass grad
+            # accumulation the client divisor would be per-pass. Matches the Tinker path.
+            stripped, loss_fn = build_custom_loss(resolved, raw_datums, server_normalized=False)
             fwd_bwd_result = await self._run_training_op(
                 self.training_client.forward_backward_custom,
                 stripped,
@@ -551,12 +585,12 @@ class FireworksPolicyTrainer:
         rc = algorithm_config.rollout_correction
         clean_datums, advantages, inf_logprobs, prompt_lens, num_loss_tokens = self._process_datums(raw_datums)
 
-        # seq-mean-token-mean: normalize advantages by number of loss tokens so that
-        # token-sum within each sequence equals token-mean, then NUM_SEQUENCES
-        # at optim_step gives seq-mean-token-mean overall.
-        if algorithm_config.loss_agg_mode == "seq-mean-token-mean":
-            for i in range(len(advantages)):
-                advantages[i] /= max(1, num_loss_tokens[i])
+        # rLLM normalizes the loss client-side by folding the loss-aggregation denominator into
+        # the per-sequence advantage; optim_step then passes GradAccNormalization.NONE. The
+        # server backprops a raw token-sum, so scaling the (per-token) advantage IS the loss
+        # normalization. Denominators are computed over the whole batch, so this is invariant to
+        # server-side micro-batching. num_loss_tokens[i] = active (mask=1) tokens in sequence i.
+        advantages = self._normalize_advantages(advantages, num_loss_tokens, algorithm_config.loss_agg_mode)
 
         # bypass_mode defaults True: one optim step per batch means a recomputed proximal ==
         # pi_theta, so the clip ratio is ~1 (inert) and the recompute is wasted. Using the rollout
@@ -644,24 +678,14 @@ class FireworksPolicyTrainer:
         )
         from fireworks.training.sdk.client import GradAccNormalization
 
-        _LOSS_AGG_MAP = {
-            "token-mean": GradAccNormalization.NUM_LOSS_TOKENS,
-            "seq-mean-token-sum": GradAccNormalization.NUM_SEQUENCES,
-            "seq-mean-token-mean": GradAccNormalization.NUM_SEQUENCES,
-        }
-        grad_norm = _LOSS_AGG_MAP.get(self.algorithm_config.loss_agg_mode)
-        # Custom-loss path (forward_backward_custom): the closure returns a RAW SUM over
-        # sequences (build_custom_loss server_normalized=True), so the server must divide by
-        # the count spanning ALL grad-accumulation passes — NUM_LOSS_TOKENS for token-mean,
-        # NUM_SEQUENCES for seq-mean-*. (NONE here would leave the gradient scaled by the
-        # per-step token/sequence count and inflate it by num_fwd_bwd_passes.)
-        resolved = resolve_loss(self.algorithm_config, native_losses=native_loss_names("fireworks"))
-        if resolved is not None:
-            grad_norm = GradAccNormalization.NUM_LOSS_TOKENS if resolved.agg_mode == "token-mean" else GradAccNormalization.NUM_SEQUENCES
+        # No server-side normalization: rLLM normalizes the loss itself (builtin path folds the
+        # loss-agg denominator into the advantages via _normalize_advantages; custom path divides
+        # client-side via build_custom_loss server_normalized=False). The server backprops a raw
+        # token-sum, so pass NONE. Matches the Tinker path.
         optim_result = await self._run_training_op(
             self.training_client.optim_step,
             adam_params,
-            grad_accumulation_normalization=grad_norm,
+            grad_accumulation_normalization=GradAccNormalization.NONE,
             op_name="optim_step",
             reconnect=True,
         )

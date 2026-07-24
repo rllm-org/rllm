@@ -267,9 +267,9 @@ class FireworksBackend(TinkerBackend):
                 loss_fn,
             )
 
-        valid_loss_agg_modes = {None, "token-mean", "seq-mean-token-sum", "seq-mean-token-mean"}
+        valid_loss_agg_modes = {None, "token-mean", "token-sum", "seq-mean-token-sum", "seq-mean-token-mean"}
         if loss_agg_mode not in valid_loss_agg_modes:
-            raise ValueError(f"rllm.algorithm.loss_agg_mode must be null, 'token-mean', 'seq-mean-token-sum', or 'seq-mean-token-mean' for the Fireworks backend, got {loss_agg_mode!r}")
+            raise ValueError(f"rllm.algorithm.loss_agg_mode must be null, 'token-mean', 'token-sum', 'seq-mean-token-sum', or 'seq-mean-token-mean' for the Fireworks backend, got {loss_agg_mode!r}")
         logger.info("Fireworks loss aggregation mode: %s", loss_agg_mode or "backend default")
 
         if router_replay == "R2":
