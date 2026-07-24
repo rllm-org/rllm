@@ -115,6 +115,7 @@ case "$phase" in
         val_max=0
         total_batches=-1
         total_epochs=1
+        trainer_replicas="${TB_TRAINER_REPLICAS:-4}"
         if [ "$phase" = "sanity" ]; then
             val_split="midtest"
             val_expected_tasks=0
@@ -128,6 +129,7 @@ case "$phase" in
             val_before_train=false
             benchmark_after_train=false
             total_batches="${TB_SANITY_TOTAL_BATCHES:-1}"
+            rollout_replicas="${TB_ROLLOUT_REPLICAS:-4}"
         else
             # Use the full suite as validation so step 0 and every tenth step
             # share one metric namespace. Disable the separate benchmark path
@@ -141,9 +143,8 @@ case "$phase" in
             benchmark_after_train=false
             test_freq=10
             val_before_train=true
+            rollout_replicas="${TB_ROLLOUT_REPLICAS:-12}"
         fi
-        trainer_replicas="${TB_TRAINER_REPLICAS:-4}"
-        rollout_replicas="${TB_ROLLOUT_REPLICAS:-4}"
         n_parallel_tasks="${TB_TRAIN_N_PARALLEL_TASKS:-64}"
         async_mini_batch_size="${TB_TRAIN_ASYNC_MINI_BATCH_SIZE:-8}"
         ;;

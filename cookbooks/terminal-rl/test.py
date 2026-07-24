@@ -121,7 +121,7 @@ def test_prepare_data_rejects_zip_parent_traversal(tmp_path):
         mod._extract_archive(archive, tmp_path / "extracted")
 
 
-def test_glm5p2_production_profile_is_full_opencode_full_suite_every_ten_steps(tmp_path):
+def test_glm5p2_production_profile_is_full_opencode_4x12_full_suite_every_ten_steps(tmp_path):
     script = (_COOKBOOK_DIR / "train_fireworks_glm5p2.sh").read_text()
 
     assert "production phase requires: full opencode production" in script
@@ -136,8 +136,6 @@ def test_glm5p2_production_profile_is_full_opencode_full_suite_every_ten_steps(t
             "TB_STATE_ROOT": str(tmp_path),
             "TB_RUN_STAMP": "dryrun",
             "TB_TRAINER_REGION": "AP_MALAYSIA_2",
-            "TB_TRAINER_REPLICAS": "4",
-            "TB_ROLLOUT_REPLICAS": "4",
         }
     )
     result = subprocess.run(
@@ -151,7 +149,7 @@ def test_glm5p2_production_profile_is_full_opencode_full_suite_every_ten_steps(t
 
     assert "val=terminal-bench@2.1/default benchmark=disabled" in result.stdout
     assert "fireworks_config.policy_trainer_replica_count=4" in result.stdout
-    assert "fireworks_config.rollout_deployment_replica_count=4" in result.stdout
+    assert "fireworks_config.rollout_deployment_replica_count=12" in result.stdout
     assert "fireworks_infra.trainers.policy.region=AP_MALAYSIA_2" in result.stdout
     assert "rllm.trainer.val_before_train=true" in result.stdout
     assert "rllm.trainer.benchmark_before_train=false" in result.stdout

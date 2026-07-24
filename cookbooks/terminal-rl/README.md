@@ -250,7 +250,7 @@ The production profile is a separate, guarded launch contract:
   steps, and final weights
 - no separate boundary-benchmark invocation, so step 0 evaluates the full set
   exactly once
-- four policy-trainer replicas and four rollout-deployment replicas
+- four policy-trainer replicas and twelve rollout-deployment replicas
 - explicit `AP_MALAYSIA_2` trainer placement
 
 Prepare the full training archive and evaluation dataset:
@@ -276,9 +276,9 @@ bash cookbooks/terminal-rl/train_fireworks_glm5p2.sh \
   full opencode production
 ```
 
-The four-replica values are production defaults. To make the resource contract
+The 4+12 replica values are production defaults. To make the resource contract
 visible in an automation wrapper, set `TB_TRAINER_REPLICAS=4` and
-`TB_ROLLOUT_REPLICAS=4` explicitly. Every production evaluation logs under
+`TB_ROLLOUT_REPLICAS=12` explicitly. Every production evaluation logs under
 `val/*`, giving one directly comparable 89-task curve from step 0 through the
 final checkpoint. If the last optimizer step is itself a multiple of 10, the
 trainer recognizes that the final policy was already validated and does not
