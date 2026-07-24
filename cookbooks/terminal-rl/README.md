@@ -283,6 +283,21 @@ visible in an automation wrapper, set `TB_TRAINER_REPLICAS=4` and
 full boundary suite logs under `benchmark/*`, so the two reward curves cannot
 be mistaken for the same task population.
 
+Before spending full-parameter capacity, run the matching LoRA sanity profile.
+It keeps the same datasets, boundary evaluations, and four-plus-four replica
+layout, but uses the rank-128 LoRA shape and evaluates the eight-task mid-test
+after every optimizer step:
+
+```bash
+export TB_TRAINER_REGION=AP_MALAYSIA_2
+export TB_TRAINER_REPLICAS=4
+export TB_ROLLOUT_REPLICAS=4
+export TB_RUN_NAME="glm5p2-lora-opencode-tb21-sanity"
+
+bash cookbooks/terminal-rl/train_fireworks_glm5p2.sh \
+  lora opencode sanity
+```
+
 ### ECHO (train on environment feedback)
 
 [ECHO](https://arxiv.org/abs/2605.24517) adds a cross-entropy loss on the

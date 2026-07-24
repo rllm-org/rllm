@@ -3,22 +3,23 @@
 # GLM-5.2 Terminal-Bench RL launcher for the Fireworks backend.
 #
 # Usage:
-#   train_fireworks_glm5p2.sh <lora|full> <opencode|terminus-2> <debug|train|production>
+#   train_fireworks_glm5p2.sh <lora|full> <opencode|terminus-2> <debug|train|sanity|production>
 #
 # The debug phase uses the eight-task tb_v2_debug split, one optimizer batch,
 # and two Terminal-Bench 2.0 validation tasks. The train phase uses the full
 # tb-opus-pass training split and the complete Terminal-Bench 2.0 validation
-# split. The production phase is intentionally restricted to full-parameter
-# OpenCode: train on all of tb-opus-pass/train, validate a fixed eight-task
-# Terminal-Bench 2.1 mid-test split every ten optimizer steps, and benchmark
-# all 89 pinned Terminal-Bench 2.1 tasks at step 0 and final weights.
+# split. The sanity and production phases train on all of
+# tb-opus-pass/train, validate a fixed eight-task Terminal-Bench 2.1 mid-test
+# split, and benchmark all 89 pinned Terminal-Bench 2.1 tasks at step 0 and
+# final weights. Sanity is LoRA + OpenCode with evaluation every optimizer
+# step; production is full-parameter + OpenCode with evaluation every ten.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-mode="${1:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|production>}"
-harness="${2:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|production>}"
-phase="${3:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|production>}"
+mode="${1:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|sanity|production>}"
+harness="${2:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|sanity|production>}"
+phase="${3:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|sanity|production>}"
 
 case "$mode" in
     lora)
@@ -90,8 +91,16 @@ case "$phase" in
         n_parallel_tasks="${TB_TRAIN_N_PARALLEL_TASKS:-64}"
         async_mini_batch_size="${TB_TRAIN_ASYNC_MINI_BATCH_SIZE:-8}"
         ;;
-    production)
-        if [ "$mode" != "full" ] || [ "$harness" != "opencode" ]; then
+    sanity|production)
+        if [ "$harness" != "opencode" ]; then
+            echo "$phase phase requires the OpenCode harness" >&2
+            exit 2
+        fi
+        if [ "$phase" = "sanity" ] && [ "$mode" != "lora" ]; then
+            echo "sanity phase requires: lora opencode sanity" >&2
+            exit 2
+        fi
+        if [ "$phase" = "production" ] && [ "$mode" != "full" ]; then
             echo "production phase requires: full opencode production" >&2
             exit 2
         fi
@@ -107,7 +116,11 @@ case "$phase" in
         val_max=0
         total_batches=-1
         total_epochs=1
-        test_freq=10
+        if [ "$phase" = "sanity" ]; then
+            test_freq=1
+        else
+            test_freq=10
+        fi
         val_before_train=true
         trainer_replicas="${TB_TRAINER_REPLICAS:-4}"
         rollout_replicas="${TB_ROLLOUT_REPLICAS:-4}"
@@ -115,7 +128,7 @@ case "$phase" in
         async_mini_batch_size="${TB_TRAIN_ASYNC_MINI_BATCH_SIZE:-8}"
         ;;
     *)
-        echo "unsupported phase '$phase' (expected debug, train, or production)" >&2
+        echo "unsupported phase '$phase' (expected debug, train, sanity, or production)" >&2
         exit 2
         ;;
 esac
