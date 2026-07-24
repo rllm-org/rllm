@@ -64,20 +64,6 @@ def builtin_loss_args(algorithm_config: AlgorithmConfig):
     )
 
 
-def _token_mean_grpo_advantages(advantages: list[float], num_loss_tokens: list[int]) -> list[float]:
-    """Scale GRPO advantages so the builtin raw token-sum is a global token mean.
-
-    The native PPO/GRPO surrogate is positively linear in the advantage, so dividing
-    every sequence advantage by the same global action-token count is exactly equivalent
-    to dividing the summed loss by that count. The caller must pass the whole optimizer
-    batch in one forward/backward call.
-    """
-    total_loss_tokens = sum(num_loss_tokens)
-    if total_loss_tokens <= 0:
-        raise ValueError("Cannot compute token-mean GRPO loss without active loss tokens")
-    return [advantage / total_loss_tokens for advantage in advantages]
-
-
 class FireworksPolicyTrainer:
     """Handles policy updates via gradient descent using Fireworks Firetitan.
 
@@ -565,19 +551,12 @@ class FireworksPolicyTrainer:
         rc = algorithm_config.rollout_correction
         clean_datums, advantages, inf_logprobs, prompt_lens, num_loss_tokens = self._process_datums(raw_datums)
 
-        # The builtin kernel returns a raw token-sum and optim_step uses
-        # GradAccNormalization.NONE. For GRPO token-mean, scale the sequence advantages by
-        # the global action-token count before the SDK expands them to per-token advantages.
-        # This is exact when this call contains the whole optimizer batch (the active launcher
-        # sets fwd_bwd_group_size == mini_batch_size). Other builtin aggregation combinations
-        # remain unsupported rather than silently delegating normalization to the server.
-        policy_loss = algorithm_config.loss_fn or "grpo"
-        builtin_agg_applied = algorithm_config.loss_agg_mode in (None, "token-sum")
-        if policy_loss == "grpo" and algorithm_config.loss_agg_mode == "token-mean":
-            advantages = _token_mean_grpo_advantages(advantages, num_loss_tokens)
-            builtin_agg_applied = True
-
-        if not builtin_agg_applied and not getattr(self, "_warned_builtin_agg", False):
+        # Builtin server kernel: the loss is computed server-side (Σ -(ratio·adv)), so rLLM cannot
+        # normalize the loss client-side. We leave it at its default raw token-SUM (optim_step
+        # passes GradAccNormalization.NONE) — same as the Tinker builtin path. loss_agg_mode is
+        # honored only on the custom-loss path (forward_backward_custom), which computes the loss
+        # client-side. Warn so a requested mode is not silently ignored here.
+        if algorithm_config.loss_agg_mode not in (None, "token-sum") and not getattr(self, "_warned_builtin_agg", False):
             self._warned_builtin_agg = True  # log once, not every step
             logger.warning(
                 "loss_agg_mode=%r is not applied to the builtin loss kernel %r, which uses raw token-sum. loss_agg_mode is honored only for rLLM custom losses.",
@@ -618,7 +597,7 @@ class FireworksPolicyTrainer:
             inf_logprobs,
             prompt_lens,
             tis_config=tis_config,
-            policy_loss=policy_loss,
+            policy_loss=algorithm_config.loss_fn or "grpo",
         )
 
         fwd_bwd_result = await self._run_training_op(

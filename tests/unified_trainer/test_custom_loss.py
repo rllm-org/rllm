@@ -654,6 +654,23 @@ def test_managed_client_normalized_matches_agg_mode():
     assert torch.allclose(loss_seq, torch.tensor(0.5))
 
 
+def test_dppo_tv_token_mean_uses_combined_pass_token_count():
+    """One 8/8-style custom-loss call uses one denominator across unequal sequences."""
+    pytest.importorskip("tinker")
+    from rllm.trainer.tinker.custom_loss import build_custom_loss
+
+    d1 = _make_datum(target=[2, 3], logprobs=[-0.5] * 2, adv=[2.0] * 2, mask=[1.0] * 2)
+    d2 = _make_datum(target=list(range(2, 10)), logprobs=[-0.5] * 8, adv=[-4.0] * 8, mask=[1.0] * 8)
+    resolved = ResolvedLoss(name="dppo_tv", fn=get_loss("dppo_tv"), params={"delta": 0.2}, agg_mode="token-mean")
+
+    _, loss_fn = build_custom_loss(resolved, [d1, d2], server_normalized=False)
+    loss, _ = loss_fn([d1, d2], [torch.tensor([-0.5] * 2), torch.tensor([-0.5] * 8)])
+
+    # At current == old, DPPO-TV keeps every token and ratio=1:
+    # raw sum = 2*(2*0.5) + 8*(-4*0.5) = -14; token mean = -14/10.
+    assert torch.allclose(loss, torch.tensor(-1.4))
+
+
 # --------------------------------------------------------------------------- managed adapter (forward_backward_custom)
 def _make_datum(target, logprobs, adv, mask):
     tinker = pytest.importorskip("tinker")

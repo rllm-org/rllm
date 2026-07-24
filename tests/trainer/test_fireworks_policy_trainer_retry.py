@@ -15,7 +15,6 @@ from omegaconf import OmegaConf
 from rllm.trainer.algorithms.config import AlgorithmConfig
 from rllm.trainer.fireworks.fireworks_policy_trainer import (
     FireworksPolicyTrainer,
-    _token_mean_grpo_advantages,
     builtin_loss_args,
 )
 
@@ -41,54 +40,6 @@ def test_grpo_resolves_to_clipped_ppo_kernel():
         "ppo",
         {"clip_low_threshold": 0.8, "clip_high_threshold": 1.2},
     )
-
-
-def test_builtin_grpo_token_mean_uses_one_global_token_count():
-    advantages = [2.0, -4.0]
-    token_counts = [2, 8]
-
-    scaled = _token_mean_grpo_advantages(advantages, token_counts)
-
-    assert scaled == pytest.approx([0.2, -0.4])
-    assert sum(advantage * count for advantage, count in zip(scaled, token_counts, strict=True)) == pytest.approx(
-        sum(advantage * count for advantage, count in zip(advantages, token_counts, strict=True)) / sum(token_counts)
-    )
-
-
-def test_builtin_grpo_token_mean_rejects_empty_denominator():
-    with pytest.raises(ValueError, match="without active loss tokens"):
-        _token_mean_grpo_advantages([1.0], [0])
-
-
-def test_builtin_grpo_token_mean_reaches_per_token_sdk_advantages():
-    import tinker
-    from tinker.types.tensor_data import TensorData
-    from training.utils.rl.losses import build_builtin_loss_datums
-
-    token_counts = [2, 8]
-    scaled = _token_mean_grpo_advantages([2.0, -4.0], token_counts)
-    datums = [
-        tinker.Datum(
-            model_input=tinker.ModelInput.from_ints([1] * count),
-            loss_fn_inputs={
-                "target_tokens": TensorData(data=[2] * count, dtype="int64"),
-                "loss_mask": TensorData(data=[1.0] * count, dtype="float32"),
-            },
-        )
-        for count in token_counts
-    ]
-
-    built = build_builtin_loss_datums(
-        datums,
-        scaled,
-        old_policy_logprobs=[[0.0] * count for count in token_counts],
-        inf_logprobs=[[0.0] * count for count in token_counts],
-        prompt_lens=[1, 1],
-        policy_loss="grpo",
-    )
-
-    assert built[0].loss_fn_inputs["advantages"].data == pytest.approx([0.2] * 2)
-    assert built[1].loss_fn_inputs["advantages"].data == pytest.approx([-0.4] * 8)
 
 
 class _FakeClient:

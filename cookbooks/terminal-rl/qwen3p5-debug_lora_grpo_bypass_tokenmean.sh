@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# qwen3p5-debug_lora_grpo_bypass_tokenmean — Qwen3.5-35B-A3B LoRA + native GRPO with
-# rollout-logprob bypass and R3 router replay on the tb-v2-debug dataset (8 tasks).
+# qwen3p5-debug_lora_grpo_bypass_tokenmean — Qwen3.5-35B-A3B LoRA with GRPO
+# advantages, DPPO-TV loss, rollout-logprob bypass, and R3 router replay.
 #
 # Fireworks backend + Modal sandboxes + native_react. Snapshot of the tuned config:
 #   - 32 rollouts per task (training.group_size) — GRPO advantage group of 32
-#   - Native PPO-clipped GRPO loss with epsilon=0.2; sampler logprobs are the old policy
+#   - DPPO-TV policy loss with delta=0.2; sampler logprobs are the old policy
 #   - 8 task groups in one forward/backward pass per optimizer step
 #     => 256 trajectories per step; tb-v2-debug (8 tasks) = exactly 1 step/epoch
 #   - async in-flight cap: (1+staleness 3.0) x 8 = 32 groups (<=1024 rollouts),
@@ -89,8 +89,9 @@ python -u train.py \
     rllm.compact_filtering.mask_timeout=false \
     rllm.algorithm.adv_estimator=grpo \
     rllm.algorithm.router_replay=R3 \
-    rllm.algorithm.loss_fn=grpo \
+    rllm.algorithm.loss_fn=dppo_tv \
     rllm.algorithm.loss_agg_mode=token-mean \
+    '+rllm.algorithm.loss_params.delta=0.2' \
     rllm.algorithm.eps_clip=0.2 \
     rllm.algorithm.rollout_correction.bypass_mode=true \
     rllm.algorithm.norm_adv_by_std_in_grpo=false \
@@ -112,7 +113,7 @@ python -u train.py \
     rllm.trainer.dump_batch_dir=null \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='terminal-rl' \
-    rllm.trainer.experiment_name='qwen3p5-35b-a3b-tb-v2-debug-lora-r3-grpo-bypass-tokenmean-b2-0999' \
+    rllm.trainer.experiment_name='qwen3p5-35b-a3b-tb-v2-debug-lora-r3-grpo-dppo-tv-bypass-tokenmean-b2-0999' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=-1 \
     rllm.trainer.save_freq=10 \
