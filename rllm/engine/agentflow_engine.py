@@ -416,12 +416,12 @@ def _format_group_finished(task_id: str, episodes: list[Episode]) -> str:
 
     # Reward per trajectory name — this is the GRPO advantage group. A name whose
     # rewards are all equal (flat) yields zero advantage and gets filtered, so mark
-    # it red; a name with spread carries a learning signal, so green.
+    # it yellow; a name with spread carries a learning signal, so green.
     if rewards_by_name:
         for name, rs in rewards_by_name.items():
             flat = len(rs) >= 2 and _pstd(rs) < 1e-9
-            txt = f"{name} μ{_mean(rs):.2f} σ{_pstd(rs):.2f} [{min(rs):.1f}, {max(rs):.1f}]" + (" ⚠ flat" if flat else "")
-            seg.append(click.style(txt, fg="red" if flat else "green"))
+            txt = f"{name} μ{_mean(rs):.2f} σ{_pstd(rs):.2f} [{min(rs):.1f}, {max(rs):.1f}]"
+            seg.append(click.style(txt, fg="yellow" if flat else "green"))
     else:
         seg.append(click.style("reward N/A", fg="white"))
 
