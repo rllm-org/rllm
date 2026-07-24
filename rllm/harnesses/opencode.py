@@ -57,7 +57,10 @@ if ! command -v opencode >/dev/null 2>&1 || [ "$(opencode --version 2>/dev/null)
             apk add --no-cache curl bash ca-certificates
         fi
     fi
-    if ! command -v node >/dev/null 2>&1; then
+    # Some benchmark images ship a bare ``node`` binary without ``npm``.
+    # OpenCode is installed through npm, so bootstrap the pinned Node
+    # toolchain unless both executables are available.
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
         curl -fsSL -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash
         \. "$NVM_DIR/nvm.sh"
         nvm install 22

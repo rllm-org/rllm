@@ -286,7 +286,8 @@ be mistaken for the same task population.
 Before spending full-parameter capacity, run the matching LoRA sanity profile.
 It keeps the same datasets, boundary evaluations, and four-plus-four replica
 layout, but uses the rank-128 LoRA shape and evaluates the eight-task mid-test
-after every optimizer step:
+after every optimizer step. To keep a restart short, it skips the redundant
+pre-training mid-test; the 89-task boundary benchmark still runs at step 0:
 
 ```bash
 export TB_TRAINER_REGION=AP_MALAYSIA_2

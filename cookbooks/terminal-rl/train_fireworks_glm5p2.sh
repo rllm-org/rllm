@@ -118,10 +118,14 @@ case "$phase" in
         total_epochs=1
         if [ "$phase" = "sanity" ]; then
             test_freq=1
+            # Keep the sanity turnaround short: the boundary benchmark still
+            # runs at step 0, and the mid-test still runs after every optimizer
+            # step, so a second pre-training mid-test is redundant here.
+            val_before_train=false
         else
             test_freq=10
+            val_before_train=true
         fi
-        val_before_train=true
         trainer_replicas="${TB_TRAINER_REPLICAS:-4}"
         rollout_replicas="${TB_ROLLOUT_REPLICAS:-4}"
         n_parallel_tasks="${TB_TRAIN_N_PARALLEL_TASKS:-64}"

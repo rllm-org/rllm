@@ -281,6 +281,12 @@ def test_opencode_installer_is_exactly_version_pinned():
     assert 'actual="$(opencode --version)"' in script
 
 
+def test_opencode_installer_bootstraps_node_when_npm_is_missing():
+    script = OpenCodeHarness().install_script()
+    assert "command -v node" in script
+    assert "|| ! command -v npm" in script
+
+
 def test_heredoc_write_rejects_paths_with_shell_variables():
     """$HOME inside _heredoc_write becomes a literal dir name due to single-quoting.
     The helper must reject these so opencode-style ``$HOME/.config/...`` paths

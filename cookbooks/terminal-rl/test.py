@@ -138,5 +138,6 @@ def test_glm5p2_sanity_profile_is_lora_opencode_every_step():
     assert "sanity phase requires: lora opencode sanity" in script
     assert 'if [ "$phase" = "sanity" ]; then' in script
     assert "test_freq=1" in script
+    assert "val_before_train=false" in script
     assert 'trainer_replicas="${TB_TRAINER_REPLICAS:-4}"' in script
     assert 'rollout_replicas="${TB_ROLLOUT_REPLICAS:-4}"' in script
