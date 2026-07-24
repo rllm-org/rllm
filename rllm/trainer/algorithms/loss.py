@@ -9,10 +9,10 @@ adds it inside its own body (see ``echo``).
 
 The same function runs in-process under verl and inside ``forward_backward_custom`` on
 tinker/fireworks. Each backend injects ``ctx.aggregate(per_token, mask) -> scalar`` realizing
-the configured ``algorithm.loss_agg_mode`` (see ``LOSS_AGG_MODES``) with **global**
-normalization spanning the whole optimizer step — verl via ``agg_loss`` + global counts,
-Fireworks via a raw-sum client loss + server-side ``GradAccNormalization``, Tinker via a
-client-side mean over its (single) pass — so the loss body is backend-agnostic.
+the configured ``algorithm.loss_agg_mode`` (see ``LOSS_AGG_MODES``). Verl applies its global
+counts in ``agg_loss``; Fireworks and Tinker reduce each custom-loss call client-side and
+disable server-side gradient-accumulation normalization. The loss body itself remains
+backend-agnostic.
 
 Public API — same decorator style as ``@rllm.rollout`` / ``@rllm.evaluator``:
 

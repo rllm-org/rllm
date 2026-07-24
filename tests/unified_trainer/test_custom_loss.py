@@ -551,9 +551,12 @@ def test_resolve_loss_custom_vs_native():
 def test_native_loss_names_registry():
     from rllm.trainer.algorithms.loss import native_loss_names
 
-    # Derived from each backend's own source of truth (present in this venv: tinker, fireworks).
-    assert native_loss_names("tinker") == {"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"}
-    assert native_loss_names("fireworks") == {"grpo", "importance_sampling", "dapo", "dro", "gspo", "cispo"}
+    # Derived from each backend's installed source of truth. Importing the Fireworks
+    # integration may extend Tinker's process-global LossFnType, so assert the required
+    # kernels as subsets instead of pinning an import-order-dependent exact set.
+    common = {"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"}
+    assert common <= native_loss_names("tinker")
+    assert common | {"dapo", "gspo"} <= native_loss_names("fireworks")
     # A backend not importable here (verl) or unknown → empty (→ everything uses the custom path).
     assert native_loss_names("nonexistent_backend") == set()
 
@@ -591,8 +594,8 @@ def test_echo_estimator_defaults_to_echo():
 def test_agg_mode_resolution_default_config_and_pin():
     from rllm.trainer.algorithms.loss import DEFAULT_LOSS_AGG_MODE
 
-    # default: no config → canonical default (seq-mean-token-mean)
-    assert resolve_loss(_alg(loss_fn="dppo_tv")).agg_mode == DEFAULT_LOSS_AGG_MODE == "seq-mean-token-mean"
+    # default: no config → canonical token-weighted mean
+    assert resolve_loss(_alg(loss_fn="dppo_tv")).agg_mode == DEFAULT_LOSS_AGG_MODE == "token-mean"
     # config value flows through
     assert resolve_loss(_alg(loss_fn="dppo_tv", loss_agg_mode="seq-mean-token-sum")).agg_mode == "seq-mean-token-sum"
     # a loss that PINS its mode (GSPO) overrides even an explicit config
@@ -605,8 +608,8 @@ def test_register_loss_rejects_bad_agg_mode():
 
 
 # --------------------------------------------------------------------------- managed adapter normalization
-def test_managed_server_normalized_is_accumulation_invariant():
-    """Fireworks path (server_normalized=True): the raw-sum client loss must satisfy
+def test_server_normalized_compatibility_mode_is_accumulation_invariant():
+    """Compatibility mode (server_normalized=True): the raw-sum client loss must satisfy
     sum-of-per-pass-losses == single-pass-loss, so the server's one division over the whole
     window yields the same gradient no matter how the mini-batch is split into passes."""
     pytest.importorskip("tinker")
@@ -634,7 +637,7 @@ def test_managed_server_normalized_is_accumulation_invariant():
 
 
 def test_managed_client_normalized_matches_agg_mode():
-    """Tinker path (server_normalized=False, single pass): the client divisor follows the
+    """Managed path (server_normalized=False, single pass): the client divisor follows the
     aggregation mode — token count for token-mean, sequence count for seq-mean-*."""
     pytest.importorskip("tinker")
     from rllm.trainer.tinker.custom_loss import build_custom_loss

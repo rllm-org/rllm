@@ -9,16 +9,11 @@ This builds the ``loss_fn`` closure that evaluates a single rLLM loss
 (``rllm.trainer.algorithms.loss``) over a per-datum :class:`LossContext`, honoring the
 resolved ``loss_agg_mode``. ``ctx.aggregate`` does only the **within-sequence** reduction
 (token-mean for ``seq-mean-token-mean``; masked sum otherwise); the closure then sums those
-across datums. Where the final divisor is applied depends on the backend's accumulation model:
-
-* **Fireworks** (``server_normalized=True``): each grad-accumulation pass returns a **raw
-  sum**; the caller sets ``GradAccNormalization`` (NUM_LOSS_TOKENS for token-mean,
-  NUM_SEQUENCES for seq-mean-*) so the server divides once by the total counted across the
-  *whole* window. Invariant to how the mini-batch is split into passes.
-* **Tinker** (``server_normalized=False``, the default): no server-side normalization, so the
-  closure divides by this pass's global count. Correct when Tinker runs a single pass over the
-  whole mini-batch (``fwd_bwd_group_size == mini_batch_size``); under grad accumulation the
-  divisor is per-pass (a known limitation — keep the two equal, or use Fireworks).
+across datums. Both managed backends use ``server_normalized=False``: the closure divides by
+the custom-loss pass's global token or sequence count, and optimizer-side gradient
+normalization remains disabled. This is exact when one custom-loss pass spans the optimizer
+batch. ``server_normalized=True`` remains available for compatibility/testing and returns a
+composable raw sum, but the Fireworks and Tinker trainers do not select it.
 
 The rollout arrays (advantages, behavior log-probs μ, masks) are captured in the closure
 (the forward datums may only carry ``target_tokens``).
@@ -62,9 +57,9 @@ def build_custom_loss(
             defaults to each datum's sampling ``logprobs`` (inference μ — tmax default).
             ``ctx.logp_rollout`` always exposes the raw sampling ``logprobs`` regardless of this
             override, so a loss can reach the behavior policy even when μ is a proximal.
-        server_normalized: True on Fireworks — return a raw cross-sequence sum and let the
-            server divide (via GradAccNormalization) across the whole accumulation window.
-            False on Tinker — divide by this pass's global count client-side.
+        server_normalized: When true, return a raw cross-sequence sum for a caller that owns
+            normalization. The managed trainers pass false and divide by this pass's global
+            count client-side.
 
     Returns:
         ``(stripped_datums, loss_fn)`` — pass both to ``forward_backward_custom``.

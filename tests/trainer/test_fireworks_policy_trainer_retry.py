@@ -7,6 +7,7 @@ pytest-asyncio needed.
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -141,3 +142,32 @@ def test_reconnect_without_mgr_is_safe_noop():
 
     assert asyncio.run(t._run_training_op(fn, op_name="x", reconnect=True)) == "ok"
     assert t._reconnect_training_client() is False
+
+
+def test_optim_step_disables_server_normalization_and_emits_grad_norm_metrics():
+    from fireworks.training.sdk.client import GradAccNormalization
+
+    captured = {}
+
+    def optim_step(adam_params, *, grad_accumulation_normalization):
+        captured["adam_params"] = adam_params
+        captured["normalization"] = grad_accumulation_normalization
+        return SimpleNamespace(metrics={})
+
+    t = _trainer(max_retries=0, client=SimpleNamespace(optim_step=optim_step))
+    t.algorithm_config = SimpleNamespace(lr_schedule="constant", warmup_steps_ratio=0.0)
+    t._custom_loss_sum = 0.0
+    t._custom_loss_tokens = 0.0
+
+    scheduled_lr, metrics = asyncio.run(
+        t.optim_step(
+            step=1,
+            total_steps=10,
+            learning_rate=1e-6,
+        )
+    )
+
+    assert scheduled_lr == 1e-6
+    assert metrics == {}
+    assert captured["adam_params"].emit_grad_norm_metrics is True
+    assert captured["normalization"] == GradAccNormalization.NONE
