@@ -8,12 +8,13 @@
 # The debug phase uses the eight-task tb_v2_debug split, one optimizer batch,
 # and two Terminal-Bench 2.0 validation tasks. The train phase uses the full
 # tb-opus-pass training split and the complete Terminal-Bench 2.0 validation
-# split. The sanity and production phases train on all of tb-opus-pass/train,
-# validate a fixed eight-task Terminal-Bench 2.1 mid-test split, and benchmark
-# all 89 pinned Terminal-Bench 2.1 tasks at step 0 and final weights. Sanity is
-# LoRA + OpenCode with mid-test evaluation after every optimizer step (but no
-# redundant pre-training mid-test); production is full-parameter + OpenCode
-# with mid-test evaluation at step 0 and every ten optimizer steps.
+# split. The sanity and production phases train on tb-opus-pass/train and use
+# the pinned 89-task Terminal-Bench 2.1 boundary benchmark. Sanity is a one-step
+# LoRA + OpenCode smoke test: it evaluates the base checkpoint, skips the
+# 20-minute mid-test, and stops after one optimizer batch. Production is
+# full-parameter + OpenCode with the fixed eight-task mid-test at step 0 and
+# every ten optimizer steps, plus the boundary benchmark at step 0 and final
+# weights.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -118,11 +119,13 @@ case "$phase" in
         total_batches=-1
         total_epochs=1
         if [ "$phase" = "sanity" ]; then
-            test_freq=1
-            # Keep the sanity turnaround short: the boundary benchmark still
-            # runs at step 0, and the mid-test still runs after every optimizer
-            # step, so a second pre-training mid-test is redundant here.
+            # The step-0 boundary benchmark already exercises the evaluation
+            # stack. Keep this smoke test to one LoRA optimizer batch and avoid
+            # another ~20 minutes for the periodic mid-test.
+            test_freq=-1
             val_before_train=false
+            benchmark_after_train=false
+            total_batches="${TB_SANITY_TOTAL_BATCHES:-1}"
         else
             test_freq=10
             val_before_train=true

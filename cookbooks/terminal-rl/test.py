@@ -132,12 +132,14 @@ def test_glm5p2_production_profile_is_full_opencode_four_replica_boundary_eval()
     assert 'rollout_replicas="${TB_ROLLOUT_REPLICAS:-4}"' in script
 
 
-def test_glm5p2_sanity_profile_is_lora_opencode_every_step():
+def test_glm5p2_sanity_profile_is_one_step_lora_opencode_without_midtest():
     script = (_COOKBOOK_DIR / "train_fireworks_glm5p2.sh").read_text()
 
     assert "sanity phase requires: lora opencode sanity" in script
     assert 'if [ "$phase" = "sanity" ]; then' in script
-    assert "test_freq=1" in script
+    assert "test_freq=-1" in script
     assert "val_before_train=false" in script
+    assert "benchmark_after_train=false" in script
+    assert 'total_batches="${TB_SANITY_TOTAL_BATCHES:-1}"' in script
     assert 'trainer_replicas="${TB_TRAINER_REPLICAS:-4}"' in script
     assert 'rollout_replicas="${TB_ROLLOUT_REPLICAS:-4}"' in script

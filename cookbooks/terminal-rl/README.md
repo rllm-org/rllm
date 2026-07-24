@@ -284,10 +284,11 @@ full boundary suite logs under `benchmark/*`, so the two reward curves cannot
 be mistaken for the same task population.
 
 Before spending full-parameter capacity, run the matching LoRA sanity profile.
-It keeps the same datasets, boundary evaluations, and four-plus-four replica
-layout, but uses the rank-128 LoRA shape and evaluates the eight-task mid-test
-after every optimizer step. To keep a restart short, it skips the redundant
-pre-training mid-test; the 89-task boundary benchmark still runs at step 0:
+It keeps the same training data, step-0 boundary evaluation, and four-plus-four
+replica layout, but uses the rank-128 LoRA shape and stops after one optimizer
+batch by default. The step-0 89-task benchmark already exercises the evaluation
+stack, so this smoke test disables the roughly 20-minute periodic mid-test and
+does not repeat the boundary benchmark at the end:
 
 ```bash
 export TB_TRAINER_REGION=AP_MALAYSIA_2
