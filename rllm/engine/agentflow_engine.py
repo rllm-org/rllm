@@ -24,11 +24,12 @@ import logging
 import resource
 import time
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+import click
 from tqdm import tqdm
 
 from rllm.data.utils import task_from_row
@@ -357,6 +358,78 @@ def _format_timing_breakdown(metrics: dict[str, float]) -> str:
     return f" in {total:.0f}s{inner}"
 
 
+def _episode_primary_reward(episode: Episode) -> float | None:
+    """Scalar reward for one episode: first trajectory's reward, else its last step's."""
+    for traj in episode.trajectories:
+        if traj.reward is not None:
+            return float(traj.reward)
+        if traj.steps and traj.steps[-1].reward is not None:
+            return float(traj.steps[-1].reward)
+    return None
+
+
+def _mean(xs: list[float]) -> float:
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+def _pstd(xs: list[float]) -> float:
+    """Population standard deviation (0 for <2 samples)."""
+    if len(xs) < 2:
+        return 0.0
+    m = _mean(xs)
+    return (sum((x - m) ** 2 for x in xs) / len(xs)) ** 0.5
+
+
+def _format_group_finished(task_id: str, episodes: list[Episode]) -> str:
+    """One-line colorful summary of a finished task group (all rollouts sharing a task_id).
+
+    Surfaces the GRPO-relevant signal at a glance: solve rate, reward spread
+    (a *flat* group — all rewards equal — gives zero advantage and gets filtered),
+    straggler timing (the group only finishes when its slowest rollout does), and
+    the termination-reason breakdown. Segments are individually styled with
+    ``click.style`` and joined, so the line is multi-color.
+    """
+    n = len(episodes)
+    n_correct = sum(1 for e in episodes if e.is_correct)
+    rewards = [r for r in (_episode_primary_reward(e) for e in episodes) if r is not None]
+    rollout_s = [e.metrics["time/rollout_s"] for e in episodes if "time/rollout_s" in e.metrics]
+    llm_s = [e.metrics["time/agentflow_llm_wall_s"] for e in episodes if "time/agentflow_llm_wall_s" in e.metrics]
+    steps = [e.metrics["n_turns"] for e in episodes if "n_turns" in e.metrics]
+    terms = Counter(e.termination_reason.value if e.termination_reason is not None else "None" for e in episodes)
+
+    short_id = task_id.split("-")[0]  # first uuid segment — enough to eyeball
+    flat = len(rewards) >= 2 and _pstd(rewards) < 1e-9
+
+    seg = [click.style(f"█ group {short_id} ×{n}", fg="cyan", bold=True)]
+
+    # Solve rate — the headline. Red when the group is flat (no GRPO gradient,
+    # will be filtered), green when it carries a learning signal.
+    pct = 100.0 * n_correct / n if n else 0.0
+    solved = f"solved {n_correct}/{n} ({pct:.0f}%)" + (" ⚠ flat" if flat else "")
+    seg.append(click.style(solved, fg="red" if flat else "green", bold=True))
+
+    if rewards:
+        seg.append(click.style(f"reward μ{_mean(rewards):.2f} σ{_pstd(rewards):.2f} [{min(rewards):.1f}, {max(rewards):.1f}]", fg="white"))
+    else:
+        seg.append(click.style("reward N/A", fg="white"))
+
+    if rollout_s:
+        seg.append(click.style(f"rollout μ{_mean(rollout_s):.0f}s max{max(rollout_s):.0f}s", fg="blue"))
+    if llm_s:
+        seg.append(click.style(f"llm μ{_mean(llm_s):.0f}s", fg="blue"))
+    if steps:
+        seg.append(click.style(f"steps μ{_mean(steps):.0f}", fg="blue"))
+
+    # Termination — red if any rollout hit an infra/grading failure (a wasted,
+    # untrustworthy rollout that training filters), yellow otherwise. Normal
+    # agent outcomes (env_done, max_turns, timeout, length limits) stay yellow.
+    _infra = {r.value for r in INFRA_ERROR_REASONS}
+    any_infra = any(k in _infra for k in terms)
+    seg.append(click.style(" ".join(f"{k}×{v}" for k, v in terms.most_common()), fg="red" if any_infra else "yellow"))
+
+    return "  ".join(seg)
+
+
 def _raise_fd_limit(target: int = _MIN_FD_LIMIT) -> None:
     """Best-effort raise of the process soft file-descriptor limit.
 
@@ -487,6 +560,13 @@ class AgentFlowEngine:
             futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
 
         results: list[Episode | None] = [None] * len(tasks)
+        # Group-level accounting: a "task group" is all rollouts sharing a task_id
+        # (created by interleave_tasks for GRPO grouping). ``task_id_counter`` now
+        # holds each group's final size; accumulate finished episodes per group and
+        # print a summary once the last one lands. Singleton groups (n=1) are skipped
+        # as noise — the per-episode line already says everything.
+        group_sizes: dict[str, int] = dict(task_id_counter)
+        group_episodes: dict[str, list[Episode]] = defaultdict(list)
         # Running tallies for a live accuracy/reward readout on the progress bar.
         n_correct = 0
         reward_sum = 0.0
@@ -529,6 +609,15 @@ class AgentFlowEngine:
                 if n_scored:
                     postfix += f" reward={reward_sum / n_scored:.3f}"
                 pbar.set_postfix_str(postfix)
+
+                # Task-group summary: fires once the group's last rollout lands.
+                if episode is not None:
+                    group_episodes[task_id].append(episode)
+                    if len(group_episodes[task_id]) >= group_sizes.get(task_id, 1) and group_sizes.get(task_id, 1) > 1:
+                        try:
+                            print(_format_group_finished(task_id, group_episodes.pop(task_id)), flush=True)
+                        except Exception:
+                            logger.debug("group summary formatting error", exc_info=True)
 
         ordered_results: list[Episode] = results  # type: ignore[assignment]
 
