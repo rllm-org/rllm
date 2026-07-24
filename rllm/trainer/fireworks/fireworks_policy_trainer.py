@@ -561,8 +561,7 @@ class FireworksPolicyTrainer:
         if algorithm_config.loss_agg_mode not in (None, "token-sum") and not getattr(self, "_warned_builtin_agg", False):
             self._warned_builtin_agg = True  # log once, not every step
             logger.warning(
-                "loss_agg_mode=%r is not applied to the builtin loss kernel %r, which uses raw "
-                "token-sum. loss_agg_mode is honored only for rLLM custom losses.",
+                "loss_agg_mode=%r is not applied to the builtin loss kernel %r, which uses raw token-sum. loss_agg_mode is honored only for rLLM custom losses.",
                 algorithm_config.loss_agg_mode,
                 self._builtin_loss[0],
             )
