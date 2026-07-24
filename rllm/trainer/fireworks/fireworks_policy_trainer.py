@@ -108,11 +108,6 @@ class FireworksPolicyTrainer:
         # Transient-fault tolerance for training-client RPCs (see _run_training_op).
         self._step_max_retries = max(0, int(OmegaConf.select(config, "fireworks_infra.common.step_max_retries", default=2)))
         self._step_retry_backoff_s = float(OmegaConf.select(config, "fireworks_infra.common.step_retry_backoff_s", default=10.0))
-        # Trainer-side grad-norm telemetry: default ON so optim_step emits train/grad_norm*
-        # (parity with verl's grad_norm metric). Accepts a bool or "off"/"basic"/"detailed";
-        # set training.emit_grad_norm_metrics=false to disable. Threaded onto AdamParams in
-        # optim_step (ReconnectableClient.optim_step forwards AdamParams but not the kwarg).
-        self._emit_grad_norm_metrics = OmegaConf.select(config, "training.emit_grad_norm_metrics", default=True)
         self._resume_checkpoint_name = self.config.training.get("resume_from_dcp_checkpoint")
         self._resume_source_job_id = self.config.training.get("resume_from_fireworks_job_id") or policy_job_id
 
@@ -645,13 +640,8 @@ class FireworksPolicyTrainer:
             eps=eps,
             weight_decay=weight_decay,
             grad_clip_norm=grad_clip_norm,
+            emit_grad_norm_metrics=True,  # emit train/grad_norm* telemetry (parity with verl)
         )
-        # Enable trainer-side grad-norm telemetry (train/grad_norm*) by default. The SDK reads
-        # emit_grad_norm_metrics off AdamParams when the optim_step kwarg is None, and
-        # ReconnectableClient.optim_step forwards AdamParams but not that kwarg — so set it here.
-        # Guarded on the field the Fireworks grad-norm patch adds to AdamParams.
-        if self._emit_grad_norm_metrics is not None and "emit_grad_norm_metrics" in AdamParams.model_fields:
-            adam_params = adam_params.model_copy(update={"emit_grad_norm_metrics": self._emit_grad_norm_metrics})
         from fireworks.training.sdk.client import GradAccNormalization
 
         _LOSS_AGG_MAP = {
