@@ -76,6 +76,41 @@ def test_final_evaluation_schedule_runs_validation_when_boundary_benchmark_is_di
     )
 
 
+def test_final_evaluation_skips_policy_already_covered_by_periodic_validation():
+    trainer = object.__new__(UnifiedTrainer)
+    trainer.rllm_config = OmegaConf.create(
+        {
+            "trainer": {
+                "test_freq": 10,
+                "benchmark_after_train": False,
+            }
+        }
+    )
+    trainer._run_evaluation_suites_async = AsyncMock(return_value={})
+    state = TrainerState(
+        global_step=151,
+        policy_update_count=150,
+        last_validation_policy_update_count=150,
+    )
+
+    metrics = asyncio.run(trainer._run_final_evaluations_async(state))
+
+    assert metrics == {}
+    trainer._run_evaluation_suites_async.assert_not_awaited()
+
+
+def test_validation_records_the_policy_update_it_evaluated():
+    trainer = object.__new__(UnifiedTrainer)
+    trainer._val_dataloader = Mock()
+    trainer._evaluate_dataloader_async = AsyncMock(return_value={"val/reward/mean": 0.5})
+    state = TrainerState(global_step=10, policy_update_count=10)
+
+    metrics = asyncio.run(trainer._validate_async(state))
+
+    assert metrics == {"val/reward/mean": 0.5}
+    assert state.last_validation_policy_update_count == 10
+
+
 def test_async_periodic_validation_can_defer_logging_for_training_row():
     trainer = object.__new__(UnifiedTrainer)
     trainer._validate_async = AsyncMock(return_value={"val/reward/mean": 0.25})

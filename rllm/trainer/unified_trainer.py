@@ -94,6 +94,8 @@ class TrainerState:
     total_steps: int = 0
     is_training: bool = True
     weight_version: int = 0
+    policy_update_count: int = 0
+    last_validation_policy_update_count: int | None = None
     train_dataloader: StatefulTaskDataLoader | None = None
     # For timing and metrics
     timing_dict: dict = field(default_factory=dict)
@@ -622,6 +624,7 @@ class UnifiedTrainer:
 
         # stage 7: update policy (async)
         await self.backend.update_policy(trainer_state)
+        trainer_state.policy_update_count += 1
 
         # stage 8: cleanup, logging, visualization, etc. (sync)
         if self.tokenizer is not None:
@@ -849,6 +852,7 @@ class UnifiedTrainer:
             if trained_this_step:
                 logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: optimizer step")
                 await self.backend.update_policy(trainer_state)
+                trainer_state.policy_update_count += 1
             else:
                 logger.warning(f"[TrainingLoop] Step {trainer_state.global_step}: all {groups_consumed} groups dropped (no trainable sequences); skipping optimizer step + weight sync.")
             aggregator.record("async/trained_this_step", float(trained_this_step))
@@ -966,11 +970,18 @@ class UnifiedTrainer:
             coordinator.resume_generation()
 
     async def _run_final_evaluations_async(self, trainer_state: TrainerState) -> dict:
-        """Run the periodic validation suite and optional benchmark at final weights."""
+        """Run evaluation at final weights unless that exact policy was already validated."""
+        run_validation = (
+            self.rllm_config.trainer.test_freq > 0
+            and trainer_state.last_validation_policy_update_count != trainer_state.policy_update_count
+        )
+        run_benchmark = self.rllm_config.trainer.get("benchmark_after_train", False)
+        if not run_validation and not run_benchmark:
+            return {}
         return await self._run_evaluation_suites_async(
             trainer_state,
-            run_validation=self.rllm_config.trainer.test_freq > 0,
-            run_benchmark=self.rllm_config.trainer.get("benchmark_after_train", False),
+            run_validation=run_validation,
+            run_benchmark=run_benchmark,
         )
 
     async def _run_evaluation_suites_async(
@@ -998,13 +1009,15 @@ class UnifiedTrainer:
 
     async def _validate_async(self, trainer_state: TrainerState, *, log_metrics: bool = True) -> dict:
         """Evaluate the periodic validation dataset."""
-        return await self._evaluate_dataloader_async(
+        metrics = await self._evaluate_dataloader_async(
             trainer_state,
             dataloader=self._val_dataloader,
             metric_prefix="val",
             title="Validation",
             log_metrics=log_metrics,
         )
+        trainer_state.last_validation_policy_update_count = trainer_state.policy_update_count
+        return metrics
 
     async def _benchmark_async(self, trainer_state: TrainerState, *, log_metrics: bool = True) -> dict:
         """Evaluate the boundary-only benchmark dataset."""

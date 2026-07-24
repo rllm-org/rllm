@@ -280,7 +280,9 @@ The four-replica values are production defaults. To make the resource contract
 visible in an automation wrapper, set `TB_TRAINER_REPLICAS=4` and
 `TB_ROLLOUT_REPLICAS=4` explicitly. Every production evaluation logs under
 `val/*`, giving one directly comparable 89-task curve from step 0 through the
-final checkpoint.
+final checkpoint. If the last optimizer step is itself a multiple of 10, the
+trainer recognizes that the final policy was already validated and does not
+run the same 89 tasks a second time.
 
 Before spending full-parameter capacity, run the matching LoRA sanity profile.
 It keeps the same training data, step-0 boundary evaluation, and four-plus-four
