@@ -7,7 +7,6 @@ Each advantage estimator will return a tuple of (advantages, returns).
 import logging
 from collections import defaultdict
 from collections.abc import Callable
-from typing import Any
 
 import numpy as np
 
@@ -187,39 +186,6 @@ def _collect_precomputed_advantages(group: TrajectoryGroup, group_role: str) -> 
     return flattened_advantages
 
 
-def _dedup_rollout_rewards(group: "TrajectoryGroup") -> tuple[np.ndarray, list[int]]:
-    """Collapse a group's trajectories to one reward per rollout.
-
-    A rollout may contribute several trajectories to a group — the parent agent
-    plus each subagent lineage, all sharing the rollout's single reward. For an
-    unbiased GRPO baseline each rollout must count **once**, so this returns the
-    per-rollout reward array (first-appearance order) plus, for each trajectory,
-    the index of its rollout in that array — used to fan the per-rollout
-    advantage back to every lineage.
-
-    Rollout identity comes from ``group.metadata[i]["rollout_idx"]`` (the
-    per-trajectory parallel metadata set when groups are built). When that
-    metadata is absent or misaligned, each trajectory is treated as its own
-    rollout — i.e. no dedup, identical to the pre-subagent behavior (and a no-op
-    for standard single-trajectory rollouts, where each rollout already maps to
-    exactly one trajectory).
-    """
-    trajs = group.trajectories
-    meta = group.metadata if len(group.metadata) == len(trajs) else None
-    rollout_rewards: list[float] = []
-    pos_by_key: dict[Any, int] = {}
-    traj_to_pos: list[int] = []
-    for i, traj in enumerate(trajs):
-        key = meta[i].get("rollout_idx") if meta else i
-        if key is None:
-            key = ("__untagged__", i)  # no rollout id → own rollout (no dedup)
-        if key not in pos_by_key:
-            pos_by_key[key] = len(rollout_rewards)
-            rollout_rewards.append(traj.reward)
-        traj_to_pos.append(pos_by_key[key])
-    return np.array(rollout_rewards), traj_to_pos
-
-
 def collect_reward_and_advantage_from_trajectory_groups(
     groups: list[TrajectoryGroup],
     algorithm_config: AlgorithmConfig,
@@ -241,9 +207,8 @@ def collect_reward_and_advantage_from_trajectory_groups(
 
     advantages_by_role = defaultdict(list)
     rewards_by_role = defaultdict(list)
-    traj_rewards_by_role = defaultdict(list)  # one reward per rollout (deduped)
+    traj_rewards_by_role = defaultdict(list)
     traj_groups_by_role = defaultdict(list)
-    traj_pos_by_role = defaultdict(list)  # per group: trajectory -> its rollout's index in the deduped array
 
     for group in groups:
         group_role = group.group_role
@@ -260,16 +225,12 @@ def collect_reward_and_advantage_from_trajectory_groups(
                 logger.warning(f"[group={group_role}] Steps have pre-computed advantages but use_precomputed_advantage is False. Overwriting with {algorithm_config.estimator.value}.")
 
             assert all(traj.reward is not None for traj in group.trajectories), "Trajectory reward cannot be None in broadcast mode"
-            # Dedup by rollout: several lineage trajectories of one rollout
-            # (parent + subagents) share its reward and must count once in the
-            # baseline. No-op for standard single-trajectory rollouts.
-            rollout_rewards, traj_to_pos = _dedup_rollout_rewards(group)
-            rewards_by_role[group_role].extend(rollout_rewards)
+            traj_rewards = np.array([traj.reward for traj in group.trajectories])
+            rewards_by_role[group_role].extend(traj_rewards)
 
             if collect_advantage:
                 traj_groups_by_role[group_role].append(group)
-                traj_rewards_by_role[group_role].append(rollout_rewards)
-                traj_pos_by_role[group_role].append(traj_to_pos)
+                traj_rewards_by_role[group_role].append(traj_rewards)
 
     if collect_advantage:
         for group_role, traj_groups in traj_groups_by_role.items():
@@ -281,16 +242,12 @@ def collect_reward_and_advantage_from_trajectory_groups(
                 traj_groups=traj_groups,
             )
             assert len(advantages_by_group) == len(traj_groups), "length mismatch between advantages and trajectory groups"
-            pos_lists = traj_pos_by_role[group_role]
-            for traj_group, rollout_advantages, traj_to_pos in zip(traj_groups, advantages_by_group, pos_lists, strict=True):
-                rollout_advantages = np.asarray(rollout_advantages)
-                # Fan each rollout's advantage back to all its lineage trajectories.
-                per_traj_adv = [float(rollout_advantages[p]) for p in traj_to_pos]
-                assert len(per_traj_adv) == len(traj_group.trajectories), "length mismatch between trajectories and fanned advantages"
-                advantages_by_role[group_role].extend(per_traj_adv)  # for metrics calculation
-                for traj, advantage in zip(traj_group.trajectories, per_traj_adv, strict=True):
+            for traj_group, advantages_by_traj in zip(traj_groups, advantages_by_group, strict=True):
+                assert len(advantages_by_traj) == len(traj_group.trajectories), "length mismatch between trajectory rewards and computed advantages"
+                advantages_by_role[group_role].extend(np.asarray(advantages_by_traj).tolist())  # for metrics calculation
+                for traj, advantage in zip(traj_group.trajectories, advantages_by_traj, strict=True):
                     for step in traj.steps:
-                        step.advantage = advantage
+                        step.advantage = float(advantage)
 
     # reduce metrics by group
     final_metrics = {}

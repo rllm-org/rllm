@@ -121,26 +121,6 @@ class TaskHooks(Protocol):
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext: ...
 
 
-def _group_steps_by_lineage(steps: list[Step]) -> list[list[Step]]:
-    """Partition steps into conversation lineages by their gateway ``lineage_id``.
-
-    Steps of one lineage (e.g. the parent agent, or one subagent) are collected
-    together in first-appearance order, even when interleaved in time with other
-    lineages. Steps with no ``lineage_id`` (cumulative mode off, or eval against
-    an external provider) share the ``None`` key, so they collapse to a single
-    group — one trajectory, exactly as before this feature.
-    """
-    groups: dict[Any, list[Step]] = {}
-    order: list[Any] = []
-    for step in steps:
-        lid = (step.metadata or {}).get("lineage_id")
-        if lid not in groups:
-            groups[lid] = []
-            order.append(lid)
-        groups[lid].append(step)
-    return [groups[lid] for lid in order]
-
-
 def enrich_episode_with_traces(
     episode: Episode,
     traces: list[TraceRecord],
@@ -243,12 +223,13 @@ def enrich_episode_with_traces(
     enriched_trajectories: list[Trajectory] = []
     trace_idx = 0
 
-    for origin_idx, traj in enumerate(episode.trajectories):
+    for traj in episode.trajectories:
+        traj_steps: list[Step] = []
+
         if traj.steps:
             # Match agent steps to traces positionally. The validation above
             # guarantees trace_idx < len(training_steps) for every agent_step
             # when agent_populates_steps is True.
-            traj_steps: list[Step] = []
             for agent_step in traj.steps:
                 step = training_steps[trace_idx]
                 # Preserve agent-side fields (the trace doesn't carry these — it
@@ -258,43 +239,23 @@ def enrich_episode_with_traces(
                 step.done = agent_step.done
                 trace_idx += 1
                 traj_steps.append(step)
-            enriched_trajectories.append(
-                Trajectory(
-                    uid=traj.uid,
-                    name=traj.name,
-                    task=traj.task or task,
-                    steps=traj_steps,
-                    reward=traj.reward,
-                    metadata=traj.metadata,
-                )
-            )
         else:
-            # No agent steps — this trajectory absorbs all remaining traces.
-            # Split them into one trajectory per gateway-tagged conversation
-            # lineage (parent agent vs each subagent), so interleaved lineages
-            # each merge into their own training row instead of fragmenting the
-            # trajectory. All splits share the originating trajectory's name/role
-            # (via origin_traj_idx, honored by _impute_trajectory_names) and the
-            # trajectory-level reward; the advantage baseline dedups them by
-            # rollout. With no lineage tags (cumulative mode off / eval) every
-            # step falls into one group — a single trajectory, as before.
+            # No agent steps — assign all remaining traces to this trajectory
+            # (common for single-trajectory agents that don't populate steps)
             remaining = training_steps[trace_idx:]
             trace_idx += len(remaining)
-            for lineage_steps in _group_steps_by_lineage(remaining):
-                meta = dict(traj.metadata or {})
-                meta["origin_traj_idx"] = origin_idx
-                lid = (lineage_steps[0].metadata or {}).get("lineage_id")
-                if lid is not None:
-                    meta["lineage_id"] = lid
-                enriched_trajectories.append(
-                    Trajectory(
-                        name=traj.name,
-                        task=traj.task or task,
-                        steps=lineage_steps,
-                        reward=traj.reward,
-                        metadata=meta,
-                    )
-                )
+            traj_steps = remaining
+
+        enriched_trajectories.append(
+            Trajectory(
+                uid=traj.uid,
+                name=traj.name,
+                task=traj.task or task,
+                steps=traj_steps,
+                reward=traj.reward,
+                metadata=traj.metadata,
+            )
+        )
 
     # If there are unmatched traces and no trajectories existed, create one
     if not episode.trajectories and traces:

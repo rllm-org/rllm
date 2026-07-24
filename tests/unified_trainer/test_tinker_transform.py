@@ -325,6 +325,57 @@ class TestTrajectoryToDataPrefixMerging:
 # =============================================================================
 
 
+class TestLineagePartition:
+    """One trajectory whose steps carry gateway lineage ids is partitioned by
+    lineage before merging — interleaved parent/subagent turns each become their
+    own Datum, without splitting the trajectory or touching advantages."""
+
+    def _step(self, prompt_ids, response_tokens, lineage_id, advantage=1.0):
+        return Step(
+            prompt_ids=prompt_ids,
+            response_ids=response_tokens,
+            logprobs=[0.1] * len(response_tokens),
+            advantage=advantage,
+            metadata={"lineage_id": lineage_id} if lineage_id is not None else None,
+        )
+
+    def test_interleaved_lineages_become_separate_datums(self):
+        # parent (A) interleaved with a subagent (B); parent resumes and extends.
+        p1 = self._step([1, 2], [3, 4], "A")
+        sub = self._step([100, 101, 102], [103, 104], "B")
+        p2 = self._step([1, 2, 3, 4, 5], [6, 7], "A")  # extends A's full seq [1,2,3,4]
+        trajectory = Trajectory(steps=[p1, sub, p2])
+
+        datums = trajectory_to_datums(trajectory)
+
+        # A merges (p1+p2) into one Datum, B is its own → 2, not 3.
+        assert len(datums) == 2
+        for d in datums:
+            verify_datum_structure(d)
+        # The parent Datum merged both turns: mask [0,0,1,1,0,1,1] → after [1:] [0,1,1,0,1,1]
+        parent = max(datums, key=lambda d: len(d.loss_fn_inputs["mask"].data))
+        assert parent.loss_fn_inputs["mask"].data == [0.0, 1.0, 1.0, 0.0, 1.0, 1.0]
+
+    def test_two_subagents_between_parent_turns(self):
+        steps = [
+            self._step([1, 2], [3, 4], "A"),
+            self._step([100, 101], [102], "B"),
+            self._step([200, 201], [202], "C"),
+            self._step([1, 2, 3, 4, 5], [6, 7], "A"),  # parent resumes
+            self._step([100, 101, 102, 103], [104], "B"),  # subagent B resumes
+        ]
+        datums = trajectory_to_datums(Trajectory(steps=steps))
+        # lineages A {p1,p2}, B {b1,b2}, C {c1} → 3 Datums
+        assert len(datums) == 3
+
+    def test_untagged_steps_single_partition(self):
+        # No lineage ids → one partition → original behavior (2 independent steps → 2 Datums).
+        s1 = self._step([1, 2, 3], [4, 5], None)
+        s2 = self._step([10, 11, 12], [13, 14], None)
+        datums = trajectory_to_datums(Trajectory(steps=[s1, s2]))
+        assert len(datums) == 2
+
+
 class TestTrajectoryToDataNoPrefix:
     """Tests for trajectory_to_datums when steps don't share prefix relationship."""
 

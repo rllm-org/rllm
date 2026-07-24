@@ -192,6 +192,30 @@ class TestRolloutLogProbsPropagation:
         response_mask = batch.batch["response_mask"][0]
         assert response_mask[:6].tolist() == [1, 1, 0, 1, 1, 1]
 
+    def test_interleaved_lineages_partitioned_into_rows(self):
+        """One trajectory whose steps carry gateway lineage ids is partitioned by
+        lineage before merging: a parent turn, an interleaved subagent turn, then
+        the parent resuming → 2 rows (parent merged, subagent separate), NOT 3.
+        The trajectory stays one object (one GRPO sample); only row packing splits.
+        """
+        mo_p1 = ModelOutput(prompt_ids=[1, 2], completion_ids=[3, 4], logprobs=[-0.1, -0.2])
+        mo_sub = ModelOutput(prompt_ids=[100, 101, 102], completion_ids=[103, 104], logprobs=[-0.5, -0.6])
+        mo_p2 = ModelOutput(prompt_ids=[1, 2, 3, 4, 5], completion_ids=[6, 7], logprobs=[-0.3, -0.4])
+        steps = [
+            Step(prompt_ids=[1, 2], response_ids=[3, 4], model_output=mo_p1, reward=0.0, metadata={"lineage_id": "A"}),
+            Step(prompt_ids=[100, 101, 102], response_ids=[103, 104], model_output=mo_sub, reward=0.0, metadata={"lineage_id": "B"}),
+            Step(prompt_ids=[1, 2, 3, 4, 5], response_ids=[6, 7], model_output=mo_p2, reward=0.0, metadata={"lineage_id": "A"}),
+        ]
+        trajectory = Trajectory(steps=steps, reward=1.0)
+        episode = Episode(id="task_0:0", trajectories=[trajectory], is_correct=True)
+
+        engine = _make_mock_rollout_engine()
+        batch = transform_episodes_to_dataproto([episode], engine, max_prompt_length=8, max_response_length=8)
+
+        assert batch.batch["responses"].shape[0] == 2  # parent + subagent lineage
+        masks = [batch.batch["response_mask"][i][:5].tolist() for i in range(2)]
+        assert [1, 1, 0, 1, 1] in masks, masks  # parent row merged p1+p2
+
     def test_other_batch_fields_unchanged(self):
         """Adding logprobs should not affect existing batch fields."""
         episodes = [

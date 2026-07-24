@@ -58,6 +58,23 @@ def _trajectory_oov_token(traj: Trajectory, vocab_size: int) -> int | None:
     return None
 
 
+def _partition_steps_by_lineage(steps: list) -> list[list]:
+    """Group steps by gateway ``lineage_id`` (``step.metadata``), first-appearance
+    order. Steps of one lineage stay together even when interleaved in time with
+    other lineages. Untagged steps (no ``lineage_id`` — cumulative mode off, or
+    eval) share the ``None`` key → a single partition, i.e. the original behavior.
+    """
+    groups: dict = {}
+    order: list = []
+    for step in steps:
+        lid = (step.metadata or {}).get("lineage_id")
+        if lid not in groups:
+            groups[lid] = []
+            order.append(lid)
+        groups[lid].append(step)
+    return [groups[lid] for lid in order]
+
+
 def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[tinker.Datum]:
     """
     Return one or more Datum objects corresponding to the trajectory.
@@ -76,6 +93,13 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
 
     Then we will merge the first two observation-action pairs into a single Datum,
     and the last observation-action pair into a separate Datum.
+
+    Steps are first partitioned by gateway ``lineage_id`` (parent agent vs each
+    subagent — a subagent runs under the same session with its own system prompt,
+    so its turns are not prefix-extensions of the parent). Each lineage is merged
+    independently, so interleaved sub-conversations each become their own Datum
+    instead of fragmenting into one Datum per turn. Untagged steps (cumulative
+    mode off / eval) form a single partition — the original behavior.
     """
 
     class SequenceAccumulator:
@@ -115,42 +139,44 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
         )
 
     data: list[tinker.Datum] = []
-    for step in traj.steps:
-        token_input = cast(TinkerTokenInput, step.prompt_ids)
-        token_input_flat = _flatten_token_input(token_input)
+    for lineage_steps in _partition_steps_by_lineage(traj.steps):
+        SequenceAccumulator.clear()  # each lineage merges independently
+        for step in lineage_steps:
+            token_input = cast(TinkerTokenInput, step.prompt_ids)
+            token_input_flat = _flatten_token_input(token_input)
 
-        output_token_ids, output_logprobs = step.response_ids, step.logprobs
-        assert len(output_logprobs) > 0, "output_logprobs is empty. Cannot build Tinker Datum for training."
-        assert step.advantage is not None, "step.advantage is None. This indicates that advantage computation has not been performed yet."
+            output_token_ids, output_logprobs = step.response_ids, step.logprobs
+            assert len(output_logprobs) > 0, "output_logprobs is empty. Cannot build Tinker Datum for training."
+            assert step.advantage is not None, "step.advantage is None. This indicates that advantage computation has not been performed yet."
 
-        # build advantage list -- match length of token_output.tokens
-        if isinstance(step.advantage, list):
-            assert len(step.advantage) == len(output_token_ids), "length mismatch between step.advantage and token_output.tokens"
-            advantages = step.advantage
-        else:  # float
-            advantages = [step.advantage] * len(output_token_ids)
+            # build advantage list -- match length of token_output.tokens
+            if isinstance(step.advantage, list):
+                assert len(step.advantage) == len(output_token_ids), "length mismatch between step.advantage and token_output.tokens"
+                advantages = step.advantage
+            else:  # float
+                advantages = [step.advantage] * len(output_token_ids)
 
-        if len(SequenceAccumulator.full_sequence) == 0:
-            delta_token_input_flat = token_input_flat
-        elif _is_prefix(SequenceAccumulator.full_sequence, token_input_flat):
-            delta_token_input_flat = token_input_flat[len(SequenceAccumulator.full_sequence) :]
-        else:
+            if len(SequenceAccumulator.full_sequence) == 0:
+                delta_token_input_flat = token_input_flat
+            elif _is_prefix(SequenceAccumulator.full_sequence, token_input_flat):
+                delta_token_input_flat = token_input_flat[len(SequenceAccumulator.full_sequence) :]
+            else:
+                data.append(make_datum_from_state())
+                SequenceAccumulator.clear()
+                delta_token_input_flat = token_input_flat
+
+            delta_token_input_length = _flat_token_input_length(delta_token_input_flat)
+            SequenceAccumulator.full_sequence.extend(delta_token_input_flat)
+            SequenceAccumulator.full_sequence.extend(output_token_ids)
+            SequenceAccumulator.sampled_logprobs.extend([0.0] * delta_token_input_length + output_logprobs)
+            SequenceAccumulator.advantages.extend([0] * delta_token_input_length + advantages)
+            SequenceAccumulator.mask.extend([0.0] * delta_token_input_length + [1.0] * len(output_token_ids))
+            if router_replay:
+                step_rm = step.routing_matrices or []
+                SequenceAccumulator.routing_matrices.extend([""] * delta_token_input_length + (list(step_rm) if step_rm else [""] * len(output_token_ids)))
+
+        if SequenceAccumulator.full_sequence:
             data.append(make_datum_from_state())
-            SequenceAccumulator.clear()
-            delta_token_input_flat = token_input_flat
-
-        delta_token_input_length = _flat_token_input_length(delta_token_input_flat)
-        SequenceAccumulator.full_sequence.extend(delta_token_input_flat)
-        SequenceAccumulator.full_sequence.extend(output_token_ids)
-        SequenceAccumulator.sampled_logprobs.extend([0.0] * delta_token_input_length + output_logprobs)
-        SequenceAccumulator.advantages.extend([0] * delta_token_input_length + advantages)
-        SequenceAccumulator.mask.extend([0.0] * delta_token_input_length + [1.0] * len(output_token_ids))
-        if router_replay:
-            step_rm = step.routing_matrices or []
-            SequenceAccumulator.routing_matrices.extend([""] * delta_token_input_length + (list(step_rm) if step_rm else [""] * len(output_token_ids)))
-
-    if SequenceAccumulator.full_sequence:
-        data.append(make_datum_from_state())
 
     return data
 

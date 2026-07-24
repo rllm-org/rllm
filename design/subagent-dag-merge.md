@@ -1,7 +1,7 @@
-# Design: Subagent lineages as trajectories (gateway-tagged DAG)
+# Design: Subagent lineages as gateway-tagged partitions of one trajectory
 
-- **Status:** implemented. Supersedes the transform-side multi-slot merge (#773, closed). Gateway `SessionSlots` + `lineage_id` tag in #774; collection split + advantage dedup in #775.
-- **Related:** `rllm-model-gateway` (`token_accumulator.py` `SessionSlots`, `proxy.py`, `models.py`); `rllm/engine/agentflow_engine.py` (`enrich_episode_with_traces`), `rllm/engine/trace_converter.py`; `rllm/trainer/algorithms/{transform.py,advantage.py,rl_algo.py}`; the gateway-dag-token-storage RFC.
+- **Status:** implemented. Gateway `SessionSlots` + `lineage_id` tag in #774; trainer transform partition in #775. Supersedes the transform-side byte-prefix multi-slot merge (#773, closed) and the collection-split-into-multiple-trajectories variant (never merged).
+- **Related:** `rllm-model-gateway` (`token_accumulator.py` `SessionSlots`, `proxy.py`, `models.py`); `rllm/engine/trace_converter.py`; `rllm/trainer/verl/transform.py`, `rllm/trainer/tinker/transform.py`; the gateway-dag-token-storage RFC.
 
 ---
 
@@ -10,84 +10,68 @@
 Under the opencode/claude-code harness a subagent (`task` tool) runs under the **same** gateway session
 as the parent but with a **different system prompt/tool set**, so its turns are not prefix-extensions of
 the parent conversation. All of a rollout's turns land in **one** `Trajectory`, interleaved in time, and
-the trainer's linear prefix-merge can't merge the interleaved lineages → one training row per turn →
-`batch/merge_compression_ratio → 1`. Under `cumulative_token_mode` it is worse: the single accumulator
-`reset()`s on every parent↔subagent switch and re-tokenizes the parent's resumed turn (token drift).
+the trainer's linear prefix-merge (single running segment) can't merge the interleaved lineages: it
+reseeds on every parent↔subagent switch → one training row per turn → `batch/merge_compression_ratio → 1`.
+Under `cumulative_token_mode` it is worse: the single accumulator `reset()`s on every switch and
+re-tokenizes the parent's resumed turn (token drift).
 
-## Principles (the chosen model)
+## Model
 
-1. **A subagent is a fresh `Trajectory`.** The lineage/DAG structure lives on the **collection** side; the
-   trainer only ever linear-merges the steps *within* a `Trajectory`.
-2. **An episode may hold multiple same-named trajectories; the advantage baseline deduplicates them by
-   rollout.** So one rollout = one GRPO baseline sample regardless of how many lineages it spawned.
+A subagent-spawning rollout is **one attempt** that delegates — so it stays **one `Trajectory`** (one GRPO
+sample). The lineage/DAG structure is carried as a per-step **tag** and consumed only where training rows
+are packed:
 
-These two together let the trainer transform stay a plain linear per-`Trajectory` merge (revert #773) with
-**no** GRPO skew.
+- **The gateway** already distinguishes lineages (`SessionSlots`, #774); it assigns each a stable
+  `lineage_id` and stamps it on every trace.
+- **The trainer transform** partitions a trajectory's steps by `lineage_id` and linear-merges each
+  partition independently → one row per lineage. Parent turns merge among themselves; each subagent among
+  itself.
+- **Everything else is untouched**: enrichment still builds one trajectory, grouping/naming/imputation are
+  unchanged, and the GRPO advantage baseline stays per-trajectory (= per-rollout) — **no dedup needed**.
 
-## Architecture (four layers)
+This is why it beats the two alternatives considered: it needs no byte-prefix inference (#773 — the gateway
+tag is authoritative and drift-proof for *grouping*) and no per-rollout advantage dedup or group-size
+surgery (the "subagent = its own trajectory" variant, which broke "one rollout = one baseline sample").
 
-### 1. Gateway — tag each trace with a lineage id
-`SessionSlots` (PR #774) already opens one accumulator ("slot") per lineage: a request that continues a
-slot extends it; one that continues none opens a new slot. Assign each slot a stable `lineage_id`
-(`f"{session_id}#{n}"`, monotonic `n`) and stamp it on every `TraceRecord` (`TraceRecord.lineage_id`).
-This is the single source of truth for lineage boundaries — no prefix re-derivation in the trainer, and it
-stays correct under drift. (Non-cumulative mode: no slots ⇒ no tag ⇒ collection falls back to one
-trajectory, as today.)
+## Architecture
 
-### 2. Collection — split traces into one Trajectory per lineage
-`trace_converter.trace_record_to_step` carries `lineage_id` onto the `Step`. In
-`enrich_episode_with_traces`, the "agent produced no steps → absorb all traces" branch (the CLI-harness
-path) groups the session's traces by `lineage_id` and emits **one `Trajectory` per lineage**, in
-first-appearance order, each carrying the episode reward. Each lineage's steps are a linear prefix chain
-(time-ordered within the lineage), so the existing linear merge handles them.
-
-### 3. Naming — lineage splits share the originating role
-`_impute_trajectory_names` currently renames each *unnamed* trajectory to `f"{default}_{position}"`, which
-would scatter K lineage-splits into K roles. Fix: name by the **originating** trajectory, not post-split
-position — all lineage-splits of one original trajectory share one role name (single-agent → one role;
-genuine multi-agent → distinct roles, unchanged). Concretely, the split stamps each lineage trajectory with
-its originating trajectory index and imputation uses that; lineage-tagged trajectories are never
-position-split against each other.
-
-### 4. Advantage — dedup by rollout in the baseline
-In `collect_reward_and_advantage_from_trajectory_groups`, build the per-group reward array with **one entry
-per rollout** (dedup by `group.metadata[i]["rollout_idx"]`, which is already the per-trajectory parallel
-metadata), pass that to the estimator unchanged, then **fan the per-rollout advantage back to every
-trajectory of that rollout** (set `step.advantage` for all its steps). All estimators
-(`advantage.py`) take a per-group reward array and return same-shape output, so nothing in the estimator
-math changes. For today's single-trajectory runs each rollout already contributes exactly one trajectory,
-so dedup is a **no-op** — no regression. It only bites when a rollout has multiple same-named trajectories,
-i.e. the new subagent case.
-
-### Transform — revert #773
-Back to a single-segment linear per-`Trajectory` merge; each lineage-trajectory → one row. The forest /
-multi-slot logic is removed from `verl/transform.py` and `tinker/transform.py`.
+1. **Gateway (#774).** `SessionSlots` keeps one `TokenAccumulator` per lineage (drift-free generation under
+   cumulative mode) and assigns each a stable `lineage_id` (`f"{session}#{n}"`, monotonic). The proxy stamps
+   it on `TraceRecord.lineage_id` at build time (resolved from the active slot on the event loop, never from
+   the deferred store task).
+2. **Collection.** `trace_converter.trace_record_to_step` copies `lineage_id` onto `Step.metadata`.
+   `enrich_episode_with_traces` is **unchanged** — still one trajectory per session.
+3. **Transform (verl + tinker).** `_partition_steps_by_lineage(steps)` groups by `step.metadata["lineage_id"]`
+   (first-appearance order; untagged → one partition = today's behavior). The existing single-segment linear
+   merge runs **within** each partition. verl emits one masked row per partition (all keyed by
+   `trajectory.uid`, sharing the trajectory's broadcast advantage); tinker emits one Datum per partition.
+4. **Advantage / grouping / imputation.** Unchanged. One trajectory = one rollout = one baseline sample.
 
 ## Equivalence & correctness
 
-- Produces the **same rows/advantages** as #773 (K rows per rollout, all sharing the rollout's advantage),
-  but with the lineage concept owned by the gateway/collection and the trainer kept simple.
-- GRPO baseline is over **rollouts** (dedup), so it is unbiased regardless of per-rollout lineage count —
-  the exact defect that blocked moving the split above the advantage layer.
-- `merge_compression_ratio` = total turns / #lineages, same as #773.
+- Emits the **same rows and the same loss** as any split-based approach: a rollout with a parent + K
+  subagent lineages becomes K+1 rows (different-prefix lineages can't share one masked sequence).
+- Because the trajectory stays 1:1 with the rollout, the GRPO baseline is correct **by construction** and
+  the shared advantage/grouping code is not touched — a no-op for existing single-lineage runs.
+- Within a partition the linear merge is byte-exact (the gateway kept each lineage drift-free); a genuine
+  mid-lineage break (compaction) still splits into an extra row inside that partition, as before.
+- `merge_compression_ratio` = total turns / total rows recovers from ~1; `steps_per_traj` reads as the
+  number of lineage rows the trajectory produced.
 
-## Rollout / PRs
+## PRs
 - #774 (base `terminal-rl`): gateway `SessionSlots` multi-slot accumulator + `lineage_id` on
   `SessionSlots`/`TraceRecord` + proxy stamping.
-- #775 (stacked on #774): collection split + imputation fix + advantage dedup; the transform stays the plain
-  linear merge (#773's change not included). #773 closed as superseded.
+- #775 (stacked on #774): `trace_converter` tag pass-through + `_partition_steps_by_lineage` in the verl and
+  tinker transforms. #773 closed.
 
 ## Testing
-- Gateway: each lineage's traces carry a distinct stable `lineage_id`; parent-resume traces carry the
-  parent's id.
-- Collection: a parent→subagent→parent-resume session yields 2 trajectories (parent merged, subagent
-  separate); K subagents → K+1 trajectories.
-- Advantage: dedup is a no-op for single-trajectory groups (bit-identical advantages); for a group with a
-  multi-lineage rollout the baseline mean/std match the per-rollout values, and every lineage of a rollout
-  gets that rollout's advantage.
-- Transform: linear merge only; one row per (linear) trajectory.
+- Gateway (#774): distinct stable `lineage_id` per lineage; parent-resume reuses the parent's id.
+- Transform (#775): one trajectory with interleaved lineage-tagged steps →
+  parent-subagent-parent = 2 rows/Datums (parent merged, mask `[1,1,0,1,1]`); parent + 2 subagents = 3;
+  untagged steps → single partition = original behavior. verl module isn't importable in this env; the
+  partition+merge logic is additionally validated with a standalone replica.
 
 ## Out of scope
 - `parent_trace_id` delta-chain **storage** (O(N²) trace bytes) — composes with the gateway-dag-token-storage
   RFC; independent of this.
-- Non-cumulative-mode lineage splitting (no gateway tags there) — falls back to one trajectory as today.
+- Non-cumulative-mode lineage splitting: no gateway tags there → one partition (one trajectory), as today.
