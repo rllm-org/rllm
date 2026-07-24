@@ -81,7 +81,12 @@ rllm:
       top_k: 0 # -1 is not accepted
   algorithm:
     rollout_correction:
-      bypass_mode: false
+      # pi_old = rollout (sampler) logprobs => the PPO ratio is exp(current_trainer_logprob -
+      # sampler_logprob), i.e. the train-inference/staleness correction, computed for free from
+      # the stored rollout logprobs (no proximal forward). With one optim step per batch a
+      # recomputed proximal == the current policy, so bypass_mode=false only adds a wasted forward
+      # and an inert (~1) ratio. Set false only for multi-update-per-batch PPO. Matches Tinker.
+      bypass_mode: true
 
 
 # Fireworks Sampling concurrency control (cookbook ConcurrencyConfig)
