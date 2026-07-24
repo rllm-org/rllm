@@ -643,7 +643,9 @@ class ReverseProxy:
 
         # Persist trace
         if session_id and response_body:
-            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version, self._request_lineage_id(request), self._turn_trace_id(self._request_slot(request), replay=False))
+            await self._persist_trace(
+                session_id, request_body, response_body, latency_ms, request.state.weight_version, self._request_lineage_id(request), self._turn_trace_id(self._request_slot(request), replay=False)
+            )
 
             # Ingest turn-0 into the chain this request was bound to (never .active).
             if self.cumulative_token_mode and request.url.path.endswith("/chat/completions"):
@@ -896,7 +898,14 @@ class ReverseProxy:
         def _build_trace():
             latency_ms = (time.perf_counter() - t0) * 1000
             return build_trace_record_from_chunks(
-                session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, lineage_id=self._request_lineage_id(request), trace_id=stream_trace_id, capture_raw=self.capture_raw_payloads
+                session_id,
+                request_body,
+                chunks,
+                latency_ms,
+                weight_version=request.state.weight_version,
+                lineage_id=self._request_lineage_id(request),
+                trace_id=stream_trace_id,
+                capture_raw=self.capture_raw_payloads,
             )
 
         async def event_generator():
@@ -1071,7 +1080,14 @@ class ReverseProxy:
             if chat_body.get("choices"):
                 chat_body["choices"][0]["message"] = message
             trace = build_trace_record(
-                session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version, lineage_id=self._request_lineage_id(request), trace_id=self._turn_trace_id(acc, replay), capture_raw=self.capture_raw_payloads
+                session_id,
+                request_body,
+                chat_body,
+                latency_ms,
+                weight_version=request.state.weight_version,
+                lineage_id=self._request_lineage_id(request),
+                trace_id=self._turn_trace_id(acc, replay),
+                capture_raw=self.capture_raw_payloads,
             )
             await self._persist(trace)
 
@@ -1238,7 +1254,14 @@ class ReverseProxy:
                 # on real async I/O (e.g. aiosqlite) is not reliable.
                 if session_id and chunks:
                     trace = build_trace_record_from_chunks(
-                        session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, lineage_id=self._request_lineage_id(request), trace_id=self._turn_trace_id(self._request_slot(request), replay=False), capture_raw=self.capture_raw_payloads
+                        session_id,
+                        request_body,
+                        chunks,
+                        latency_ms,
+                        weight_version=request.state.weight_version,
+                        lineage_id=self._request_lineage_id(request),
+                        trace_id=self._turn_trace_id(self._request_slot(request), replay=False),
+                        capture_raw=self.capture_raw_payloads,
                     )
                     task = asyncio.create_task(
                         self._safe_store(
@@ -1282,7 +1305,14 @@ class ReverseProxy:
         # Persist trace from the full response
         if session_id and response_body:
             trace = build_trace_record(
-                session_id, request_body, response_body, latency_ms, weight_version=weight_version, lineage_id=self._slot_lineage_id(slot), trace_id=self._turn_trace_id(slot, replay=False), capture_raw=self.capture_raw_payloads
+                session_id,
+                request_body,
+                response_body,
+                latency_ms,
+                weight_version=weight_version,
+                lineage_id=self._slot_lineage_id(slot),
+                trace_id=self._turn_trace_id(slot, replay=False),
+                capture_raw=self.capture_raw_payloads,
             )
             await self._persist(trace)
 
