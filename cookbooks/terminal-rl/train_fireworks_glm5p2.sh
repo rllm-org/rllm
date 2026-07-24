@@ -8,11 +8,12 @@
 # The debug phase uses the eight-task tb_v2_debug split, one optimizer batch,
 # and two Terminal-Bench 2.0 validation tasks. The train phase uses the full
 # tb-opus-pass training split and the complete Terminal-Bench 2.0 validation
-# split. The sanity and production phases train on all of
-# tb-opus-pass/train, validate a fixed eight-task Terminal-Bench 2.1 mid-test
-# split, and benchmark all 89 pinned Terminal-Bench 2.1 tasks at step 0 and
-# final weights. Sanity is LoRA + OpenCode with evaluation every optimizer
-# step; production is full-parameter + OpenCode with evaluation every ten.
+# split. The sanity and production phases train on all of tb-opus-pass/train,
+# validate a fixed eight-task Terminal-Bench 2.1 mid-test split, and benchmark
+# all 89 pinned Terminal-Bench 2.1 tasks at step 0 and final weights. Sanity is
+# LoRA + OpenCode with mid-test evaluation after every optimizer step (but no
+# redundant pre-training mid-test); production is full-parameter + OpenCode
+# with mid-test evaluation at step 0 and every ten optimizer steps.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
