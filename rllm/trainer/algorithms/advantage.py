@@ -11,7 +11,7 @@ from collections.abc import Callable
 import numpy as np
 
 from rllm.trainer.algorithms.config import AlgorithmConfig, rLLMAdvantageEstimator
-from rllm.trainer.algorithms.rl_algo import calculate_grpo_advantages_per_group, calculate_rloo_advantages_per_group
+from rllm.trainer.algorithms.rl_algo import calculate_grpo_advantages_per_group, calculate_pkpo_advantages_per_group, calculate_rloo_advantages_per_group
 from rllm.types import TrajectoryGroup
 from rllm.utils.logging import DuplicateLoggingFilter
 
@@ -152,6 +152,17 @@ def calculate_echo_advantages(rewards: list[np.ndarray], algorithm_config: Algor
     GRPO so the policy-gradient term is unchanged.
     """
     return calculate_grpo_advantages(rewards, algorithm_config, **kwargs)
+
+
+@register_adv_estimator(rLLMAdvantageEstimator.PKPO)
+def calculate_pkpo_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """PKPO (arXiv:2505.15201): per-group pass@k reward transform. k = ``algorithm_config.pass_at_k``."""
+    k = algorithm_config.pass_at_k
+    advantages_by_group, returns_by_group = zip(
+        *[calculate_pkpo_advantages_per_group(group_rewards, k) for group_rewards in rewards],
+        strict=True,
+    )
+    return advantages_by_group, returns_by_group
 
 
 def _collect_precomputed_advantages(group: TrajectoryGroup, group_role: str) -> list[float]:

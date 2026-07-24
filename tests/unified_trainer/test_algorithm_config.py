@@ -102,3 +102,21 @@ def test_explicit_loss_fn_overrides_estimator_default():
     """An explicit loss_fn wins over the estimator's default (echo → dppo_tv here)."""
     algo_config = AlgorithmConfig.from_config(_echo_config(loss_fn="dppo_tv").rllm.algorithm)
     assert algo_config.loss_fn == "dppo_tv"
+
+
+# --- PKPO (arXiv:2505.15201) -------------------------------------------------
+
+
+def test_pkpo_estimator_resolves():
+    """adv_estimator=pkpo resolves to the PKPO enum (not OTHER)."""
+    config = OmegaConf.create({"rllm": {"algorithm": {"adv_estimator": "pkpo", "pass_at_k": 8}}})
+    algo_config = AlgorithmConfig.from_config(config.rllm.algorithm)
+    assert algo_config.estimator == rLLMAdvantageEstimator.PKPO
+    assert algo_config.pass_at_k == 8
+
+
+def test_pass_at_k_defaults_to_one():
+    """pass_at_k defaults to 1 when unset."""
+    config = OmegaConf.create({"rllm": {"algorithm": {"adv_estimator": "grpo"}}})
+    algo_config = AlgorithmConfig.from_config(config.rllm.algorithm)
+    assert algo_config.pass_at_k == 1

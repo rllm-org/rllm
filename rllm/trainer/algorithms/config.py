@@ -280,6 +280,9 @@ class rLLMAdvantageEstimator(str, Enum):
     # on environment-observation tokens. The advantage math is identical to GRPO;
     # selecting `echo` flips on the env-loss term (see `env_loss_coef`).
     ECHO = "echo"
+    # PKPO (arXiv:2505.15201): reward transform for unbiased pass@k optimization,
+    # targeting the k set by `pass_at_k`.
+    PKPO = "pkpo"
     OTHER = "other"
 
     @classmethod
@@ -316,6 +319,8 @@ class AlgorithmConfig:
     # TODO(listar2000): eventually we will remove the `per_step` mode all-together. Now we keep it for backward compatibility.
     stepwise_advantage_mode: Literal["broadcast", "per_step"] = "broadcast"
     norm_adv_by_std_in_grpo: bool = True
+    # k for the `pkpo` advantage estimator (arXiv:2505.15201); k=1 == standard pass@1.
+    pass_at_k: int = 1
     # When True, always use pre-computed step.advantage from the workflow and skip
     # advantage computation (GRPO/REINFORCE). Steps missing advantages default to 0.0.
     # When False (default), always compute advantages normally.
@@ -373,6 +378,7 @@ class AlgorithmConfig:
             estimator_map=estimator_map or {},
             stepwise_advantage_mode=stepwise_advantage_mode,
             norm_adv_by_std_in_grpo=algorithm_config.get("norm_adv_by_std_in_grpo", True),
+            pass_at_k=algorithm_config.get("pass_at_k", 1),
             use_precomputed_advantage=algorithm_config.get("use_precomputed_advantage", False),
             loss_fn=algorithm_config.get("loss_fn", None),
             loss_params=dict(algorithm_config.get("loss_params", None) or {}),
