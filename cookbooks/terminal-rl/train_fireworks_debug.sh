@@ -62,7 +62,10 @@ python -u train_debug.py \
     rllm.gateway.cumulative_token_mode=true \
     rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=1000 \
-    +rllm.trainer.dump_batch_dir=train_batches/qwen3p5-35b-a3b-tb-v2-debug \
+    rllm.episode_logging.log_episodes=true \
+    rllm.episode_logging.log_backend_batches=true \
+    rllm.episode_logging.episode_log_dir=train_batches/qwen3p5-35b-a3b-tb-v2-debug \
+    rllm.episode_logging.backend_batch_log_dir=train_batches/qwen3p5-35b-a3b-tb-v2-debug \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='terminal-rl' \
     rllm.trainer.experiment_name='qwen3p5-35b-a3b-tb-v2-debug' \

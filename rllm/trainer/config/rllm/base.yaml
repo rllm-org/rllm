@@ -202,3 +202,5 @@ async_training:
 episode_logging:
   log_episodes: false
   episode_log_dir: logs/${rllm.trainer.project_name}/${rllm.trainer.experiment_name}
+  log_backend_batches: false
+  backend_batch_log_dir: ${rllm.episode_logging.episode_log_dir}

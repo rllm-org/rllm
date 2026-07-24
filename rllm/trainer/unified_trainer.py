@@ -345,17 +345,29 @@ class UnifiedTrainer:
         return stamp
 
     def _setup_logging(self):
-        """Setup up both the tracking and episode logging."""
-        # create episode logger if enabled in config
+        """Set up tracking plus run-scoped episode and backend-batch artifacts."""
+        from rllm.utils.episode_logger import BackendBatchLogger
+
+        logging_config = self.rllm_config.episode_logging
+        log_episodes = logging_config.get("log_episodes", False)
+        log_backend_batches = logging_config.get("log_backend_batches", False)
         self.episode_logger = None
-        if self.rllm_config.episode_logging.get("log_episodes", False):
-            episode_log_dir = self.rllm_config.episode_logging.get(
+        self.backend_batch_logger = None
+        if log_episodes or log_backend_batches:
+            artifact_dir = logging_config.get(
                 "episode_log_dir",
                 f"logs/{self.rllm_config.trainer.project_name}/{self.rllm_config.trainer.experiment_name}",
             )
-            # <experiment dir>/<run stamp>/episodes — relaunches never clobber.
-            episode_log_dir = f"{episode_log_dir}/{self._run_stamp}"
-            self.episode_logger = EpisodeLogger(base_dir=episode_log_dir, subdirectory="episodes")
+            artifact_dir = f"{artifact_dir}/{self._run_stamp}"
+            if log_episodes:
+                self.episode_logger = EpisodeLogger(
+                    base_dir=artifact_dir,
+                    subdirectory="episodes",
+                    flat_layout=self.rllm_config.async_training.get("enable", False),
+                )
+            if log_backend_batches:
+                self.backend_batch_logger = BackendBatchLogger(base_dir=artifact_dir)
+        self.backend.backend_batch_logger = self.backend_batch_logger
 
         source_metadata = extract_source_metadata(
             workflow_class=self.workflow_class,

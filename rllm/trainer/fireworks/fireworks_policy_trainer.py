@@ -99,6 +99,7 @@ class FireworksPolicyTrainer:
         algorithm_config: AlgorithmConfig | None = None,
         rlor_mgr=None,
         policy_job_id: str | None = None,
+        backend_batch_logger=None,
     ):
         self.config = config
         self.training_client = training_client
@@ -114,7 +115,37 @@ class FireworksPolicyTrainer:
         self.cf_config = cf_config or CompactFilteringConfig.from_config(self.config.rllm.compact_filtering)
         self.transform_config = transform_config or TransformConfig()
         self.algorithm_config = algorithm_config or AlgorithmConfig.from_config(self.config.rllm.algorithm)
+        self._custom_loss_sum = 0.0
+        self._custom_loss_tokens = 0.0
+        self._backend_batch_logger = backend_batch_logger
+        self._batch_dump_step = 0
+        self._batch_dump_index = 0
         self.resolve_builtin_loss(self.algorithm_config)
+
+    def set_batch_dump_step(self, step: int) -> None:
+        if step != self._batch_dump_step:
+            self._batch_dump_step = step
+            self._batch_dump_index = 0
+
+    async def _dump_backend_batch(
+        self,
+        source_datums: list[tinker.Datum],
+        submitted_datums: list[tinker.Datum],
+        operation: str,
+    ) -> None:
+        if self._backend_batch_logger is None:
+            return
+        index = self._batch_dump_index
+        self._batch_dump_index += 1
+        path = await asyncio.to_thread(
+            self._backend_batch_logger.log_batch,
+            source_datums,
+            submitted_datums,
+            self._batch_dump_step,
+            index,
+            operation,
+        )
+        logger.info("Dumped pre-forward backend batch to %s", path)
 
     def _get_vocab_size(self) -> int | None:
         """Tokenizer vocab bound for the out-of-vocab trajectory filter (None = disabled).
@@ -532,6 +563,7 @@ class FireworksPolicyTrainer:
             # GradAccNormalization from resolved.agg_mode so the server normalizes once across all
             # grad-accum passes. A per-pass mean here + NONE would scale the grad by num passes.
             stripped, loss_fn = build_custom_loss(resolved, raw_datums, server_normalized=True)
+            await self._dump_backend_batch(raw_datums, stripped, "forward_backward_custom")
             fwd_bwd_result = await self._run_training_op(
                 self.training_client.forward_backward_custom,
                 stripped,
@@ -540,8 +572,14 @@ class FireworksPolicyTrainer:
                 reconnect=True,
             )
             if hasattr(fwd_bwd_result, "metrics") and fwd_bwd_result.metrics:
+                loss_sum = fwd_bwd_result.metrics.pop("custom_loss/loss_sum", 0.0)
+                loss_tokens = fwd_bwd_result.metrics.pop("custom_loss/loss_tokens", 0.0)
+                if resolved.agg_mode == "token-mean":
+                    self._custom_loss_sum += float(loss_sum)
+                    self._custom_loss_tokens += float(loss_tokens)
                 for k, v in fwd_bwd_result.metrics.items():
-                    if k in self._METRIC_SKIP_KEYS:
+                    # This is the custom backward surrogate, not the custom objective.
+                    if k in self._METRIC_SKIP_KEYS or k == "loss:sum":
                         continue
                     # keep the offpolicy/ namespace consistent with the builtin path
                     adv_metrics[k if k.startswith("offpolicy/") else f"train/{k}"] = v
@@ -592,6 +630,7 @@ class FireworksPolicyTrainer:
         )
 
         kernel_loss, kernel_config = self._builtin_loss
+        await self._dump_backend_batch(raw_datums, builtin_datums, "forward_backward")
         fwd_bwd_result = await self._run_training_op(
             self.training_client.forward_backward,
             builtin_datums,
@@ -640,6 +679,7 @@ class FireworksPolicyTrainer:
             eps=eps,
             weight_decay=weight_decay,
             grad_clip_norm=grad_clip_norm,
+            emit_grad_norm_metrics="basic",
         )
         from fireworks.training.sdk.client import GradAccNormalization
 
@@ -670,6 +710,21 @@ class FireworksPolicyTrainer:
             for k, v in optim_result.metrics.items():
                 if k not in self._METRIC_SKIP_KEYS:
                     metrics[f"train/{k}"] = v
+
+        if self._custom_loss_tokens > 0:
+            metrics["train/loss_sum"] = self._custom_loss_sum
+            metrics["train/loss_tokens"] = self._custom_loss_tokens
+            metrics["train/loss_mean"] = self._custom_loss_sum / self._custom_loss_tokens
+            grad_norm = float(metrics.get("train/grad_norm", 0.0))
+            grad_norm_pre_norm = float(metrics.get("train/grad_norm_pre_norm", 0.0))
+            if grad_norm > 0.0 and grad_norm_pre_norm > 0.0:
+                normalization_denominator = grad_norm_pre_norm / grad_norm
+                metrics["train/grad_normalization_denominator"] = normalization_denominator
+                metrics["train/grad_normalization_vs_loss_tokens"] = (
+                    normalization_denominator / self._custom_loss_tokens
+                )
+        self._custom_loss_sum = 0.0
+        self._custom_loss_tokens = 0.0
 
         return scheduled_lr, metrics
 

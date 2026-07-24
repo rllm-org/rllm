@@ -522,23 +522,16 @@ class AgentFlowEngine:
                     message = error.get("message", "")
                     traceback_text = error.get("traceback")
                     if traceback_text:
-                        logger.error(
-                            "[%s:%d] %s termination (%s): %s\n%s",
-                            task_id,
-                            rollout_idx,
-                            episode.termination_reason.value,
-                            error_type,
-                            message,
-                            traceback_text,
+                        colorful_print(
+                            f"[{task_id}:{rollout_idx}] {episode.termination_reason.value} termination "
+                            f"({error_type}): {message}\n{traceback_text}",
+                            fg="red",
                         )
                     else:
-                        logger.error(
-                            "[%s:%d] %s termination (%s): %s [no traceback captured]",
-                            task_id,
-                            rollout_idx,
-                            episode.termination_reason.value,
-                            error_type,
-                            message,
+                        colorful_print(
+                            f"[{task_id}:{rollout_idx}] {episode.termination_reason.value} termination "
+                            f"({error_type}): {message} [no traceback captured]",
+                            fg="red",
                         )
 
                 if episode is not None:
@@ -574,18 +567,22 @@ class AgentFlowEngine:
             except Exception:
                 logger.exception("Batch session delete failed; sessions may linger in the trace store")
 
-        if self.episode_logger is not None:
-            try:
-                self.episode_logger.log_episodes_batch(
-                    ordered_results,
-                    self.current_step,
-                    self.current_mode,
-                    self.current_epoch,
-                )
-            except Exception as e:
-                logger.error("Failed to log episodes: %s", e)
-
         return ordered_results
+
+    async def _log_episode(self, episode: Episode) -> None:
+        """Persist one terminal episode regardless of the caller execution mode."""
+        if self.episode_logger is None:
+            return
+        try:
+            await asyncio.to_thread(
+                self.episode_logger.log_episode,
+                episode,
+                self.current_step,
+                self.current_mode,
+                self.current_epoch,
+            )
+        except Exception:
+            logger.exception("Failed to log episode %s", episode.id)
 
     async def process_task_with_retry(
         self,
@@ -632,6 +629,7 @@ class AgentFlowEngine:
                         fg="green" if episode.is_correct else "yellow",
                     )
 
+                    await self._log_episode(episode)
                     return task_id, rollout_idx, result_idx, episode
 
                 except Exception as e:
@@ -645,24 +643,21 @@ class AgentFlowEngine:
                     # SANDBOX_ERROR) wins; otherwise map the exception class name
                     # (sandbox/harbor errors → their reason) and fall back to ERROR.
                     reason = getattr(e, "_rllm_termination_reason", None) or termination_reason_from_error(type(e).__name__, default=TerminationReason.ERROR)
-                    return (
-                        task_id,
-                        rollout_idx,
-                        result_idx,
-                        Episode(
-                            id=uid,
-                            task=task_for_episode,
-                            is_correct=False,
-                            termination_reason=reason,
-                            metadata={
-                                "error": {
-                                    "message": str(e),
-                                    "error_type": type(e).__name__,
-                                    "traceback": error_traceback,
-                                }
-                            },
-                        ),
+                    episode = Episode(
+                        id=uid,
+                        task=task_for_episode,
+                        is_correct=False,
+                        termination_reason=reason,
+                        metadata={
+                            "error": {
+                                "message": str(e),
+                                "error_type": type(e).__name__,
+                                "traceback": error_traceback,
+                            }
+                        },
                     )
+                    await self._log_episode(episode)
+                    return task_id, rollout_idx, result_idx, episode
 
             raise RuntimeError(f"[{task_id}:{rollout_idx}] Exhausted all retries")
 

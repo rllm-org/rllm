@@ -211,6 +211,7 @@ class FireworksBackend(TinkerBackend):
                 algorithm_config=kwargs.get("algorithm_config"),
                 rlor_mgr=self._rlor_mgr,
                 policy_job_id=self._policy_job_id,
+                backend_batch_logger=getattr(self, "backend_batch_logger", None),
             )
 
             cfg = self.full_config
@@ -306,6 +307,8 @@ class FireworksBackend(TinkerBackend):
         trainer_state: TrainerState,
         **kwargs,
     ) -> None:
+        assert self.policy_trainer is not None, "policy_trainer is not initialized"
+        self.policy_trainer.set_batch_dump_step(trainer_state.global_step)
         await super().process_backend_batch(trainer_state, **kwargs)
         trainer_state.extra_info.pop("training_logprobs", None)
 
@@ -418,7 +421,7 @@ class FireworksBackend(TinkerBackend):
 
         learning_rate = trainer_state.extra_info.get("scheduled_learning_rate", self.learning_rate)
         update_training_metrics(trainer_state, learning_rate, trainer_state.total_steps)
-        if trainer_state.backend_batch:
+        if trainer_state.backend_batch and "train/entropy" not in trainer_state.metrics:
             trainer_state.metrics.update(self.policy_trainer._compute_rollout_entropy_metrics(trainer_state.backend_batch))
 
     def shutdown(self) -> None:
