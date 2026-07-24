@@ -358,7 +358,7 @@ class TinkerPolicyTrainer:
         )
         # Retrieve the results together
         fwd_bwd_results = await asyncio.gather(*fwd_bwd_futures)
-        await optim_step_future.result_async()
+        optim_result = await optim_step_future.result_async()
 
         training_logprobs = []
         for fwd_bwd_result in fwd_bwd_results:
@@ -375,6 +375,13 @@ class TinkerPolicyTrainer:
                     if k.startswith("clock_cycle"):
                         continue
                     adv_metrics[f"train/{k.replace(':', '/')}"] = v
+
+        # Surface optimizer-step metrics (e.g. grad norm) emitted by the Tinker server.
+        if optim_result.metrics:
+            for k, v in optim_result.metrics.items():
+                if k.startswith("clock_cycle"):
+                    continue
+                adv_metrics[f"train/{k.replace(':', '/')}"] = v
 
         return training_datums, training_logprobs, adv_metrics, scheduled_learning_rate
 
