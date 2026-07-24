@@ -415,6 +415,28 @@ class BaseCliHarness(SandboxedAgentFlow):
             # liveness to tell them apart: a dead box is infra (SANDBOX_ERROR,
             # reward untrustworthy), a non-zero exit on a live box is ERROR.
             # Traces up to the failure still drive enrichment either way.
+            #
+            # Docker's synchronous ``exec_run`` cannot enforce the requested
+            # timeout itself. When an outer task deadline stops the sandbox
+            # process, Docker reports the resulting SIGTERM/SIGKILL as a generic
+            # non-zero exit (143/137) instead of ``SandboxCommandTimeout``.
+            # Recover the intended TIMEOUT classification only when both pieces
+            # of evidence agree: a signal-shaped exit and elapsed time at the
+            # configured wall. A fast exit 143 remains a genuine ERROR.
+            elapsed = time.monotonic() - start
+            message = str(e)
+            wall_signal_exit = any(f"exit {code}" in message for code in (124, 137, 143))
+            if budget > 0 and elapsed >= budget * 0.95 and wall_signal_exit:
+                logger.info(
+                    "%s was signal-terminated at its wall-clock budget "
+                    "(%.0fs/%.0fs; %s); marking TIMEOUT",
+                    type(self).__name__,
+                    elapsed,
+                    budget,
+                    message.splitlines()[0],
+                )
+                return self._outcome_episode(task, termination_reason=TerminationReason.TIMEOUT)
+
             reason = TerminationReason.ERROR
             alive = getattr(sandbox, "is_alive", None)
             if callable(alive):

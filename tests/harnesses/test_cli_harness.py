@@ -162,6 +162,51 @@ def test_run_marks_error_when_cli_failed_but_box_alive():
     assert result.termination_reason == TerminationReason.ERROR
 
 
+def test_run_signal_exit_at_wall_maps_to_timeout(monkeypatch):
+    """Docker reports an outer-deadline SIGTERM as generic exit 143 because its
+    synchronous exec API cannot raise SandboxCommandTimeout. Near the configured
+    wall this is a timeout; the same exit well before the wall stays ERROR."""
+    import rllm.harnesses.cli_harness as mod
+
+    class SignalExitSandbox(FakeSandbox):
+        def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:
+            if "opencode --model" in command:
+                raise RuntimeError("Command failed (exit 143) in container task-1")
+            return super().exec(command, timeout=timeout, user=user)
+
+    ticks = iter([0.0, 96.0])
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(ticks))
+    h = OpenCodeHarness()
+    task = Task(id="t-1", instruction="fix the bug", metadata={"agent_timeout": 100})
+
+    result = h.run(task, _make_config(), env=SignalExitSandbox())
+
+    assert result.termination_reason == TerminationReason.TIMEOUT
+    assert "error" not in result.metadata
+
+
+def test_run_fast_signal_exit_stays_error(monkeypatch):
+    """A signal-shaped exit is not enough by itself: before the wall it is a
+    CLI/process failure and must remain visible as ERROR."""
+    import rllm.harnesses.cli_harness as mod
+
+    class SignalExitSandbox(FakeSandbox):
+        def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:
+            if "opencode --model" in command:
+                raise RuntimeError("Command failed (exit 143) in container task-1")
+            return super().exec(command, timeout=timeout, user=user)
+
+    ticks = iter([0.0, 10.0])
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(ticks))
+    h = OpenCodeHarness()
+    task = Task(id="t-1", instruction="fix the bug", metadata={"agent_timeout": 100})
+
+    result = h.run(task, _make_config(), env=SignalExitSandbox())
+
+    assert result.termination_reason == TerminationReason.ERROR
+    assert result.metadata["error"]["error_type"] == "RuntimeError"
+
+
 def test_run_marks_timeout_on_budget_exhaustion():
     """Hitting the wall-clock budget (SandboxCommandTimeout) is expected, not a
     failure: the captured steps are still scored, and the run is marked TIMEOUT
