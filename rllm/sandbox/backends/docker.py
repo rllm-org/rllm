@@ -6,6 +6,9 @@ import io
 import logging
 import os
 import tarfile
+import time
+
+from rllm.sandbox.protocol import SandboxCommandTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +52,9 @@ class DockerSandbox:
 
         Args:
             command: Shell command to run.
-            timeout: Optional per-call timeout (currently unused by Docker SDK).
+            timeout: Optional per-call timeout in seconds. The Docker SDK's
+                synchronous exec API has no client-side timeout, so enforce it
+                inside the container with coreutils/BusyBox ``timeout``.
             user: Optional UID/username to run as (e.g., ``"agent"``, ``"1000"``).
                 Maps to ``docker exec --user``. If ``None``, runs as the
                 container's default user.
@@ -57,13 +62,38 @@ class DockerSandbox:
         kwargs: dict = {"demux": True}
         if user is not None:
             kwargs["user"] = user
+
+        exec_command = ["bash", "-c", command]
+        effective_timeout: float | None = None
+        if timeout is not None:
+            effective_timeout = max(float(timeout), 0.001)
+            # Both GNU coreutils and BusyBox support this form. Run the user's
+            # shell as timeout's child so the whole shell job is terminated at
+            # the requested wall; -k is a backstop for processes that ignore
+            # SIGTERM. BaseCliHarness adds its own small grace to the agent
+            # budget before passing this value.
+            duration = f"{effective_timeout:g}s"
+            exec_command = ["timeout", "-s", "TERM", "-k", "10s", duration, "bash", "-c", command]
+
+        start = time.monotonic()
         exit_code, output = self._container.exec_run(
-            ["bash", "-c", command],
+            exec_command,
             **kwargs,
         )
+        elapsed = time.monotonic() - start
         stdout = (output[0] or b"").decode("utf-8", errors="replace")
         stderr = (output[1] or b"").decode("utf-8", errors="replace")
         if exit_code != 0:
+            # GNU timeout returns 124 after its TERM path and 137 when the
+            # kill-after backstop fired. Require elapsed≈budget so a command
+            # that independently returns one of those codes is not mislabeled.
+            hit_wall = effective_timeout is not None and elapsed >= effective_timeout * 0.95
+            if hit_wall and exit_code in (124, 137):
+                raise SandboxCommandTimeout(
+                    f"Command timed out after {effective_timeout:g}s "
+                    f"in container {self.name}: {command}"
+                )
+
             # The raised message stays short — callers print it at WARNING
             # for *every* failed verifier, and dumping kilobytes of pytest
             # output for each agent that didn't solve a task spams the
