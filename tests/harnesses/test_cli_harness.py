@@ -329,7 +329,10 @@ def test_opencode_writes_config_with_custom_provider_to_bypass_models_dev():
 def test_opencode_invocation_uses_custom_provider_prefix_and_detaches_stdin():
     """--model must carry the custom provider id, not the inferred
     openai/anthropic. And opencode blocks on its initial stdin read on
-    Modal sandboxes — the invocation must redirect stdin from /dev/null."""
+    Modal sandboxes — the invocation must redirect stdin from /dev/null.
+
+    ``--title`` must also be present: it pins the session title so opencode
+    skips its separate title-generation LLM call during training."""
     h = OpenCodeHarness()
     cmd = h.build_invocation(
         instruction="hi",
@@ -337,6 +340,7 @@ def test_opencode_invocation_uses_custom_provider_prefix_and_detaches_stdin():
         config=_make_config(model="gpt-5.4-mini"),
     )
     assert "--model=rllm-gateway/gpt-5.4-mini" in cmd
+    assert "--title " in cmd
     assert "</dev/null" in cmd
 
 
