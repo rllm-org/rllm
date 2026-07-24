@@ -246,7 +246,7 @@ The production profile is a separate, guarded launch contract:
   rank `0`
 - OpenCode harness
 - all 1,200 `tb-opus-pass/train` tasks for training
-- all 89 `terminal-bench@2.1/default` tasks at step 0, every 10 optimizer
+- all 89 `terminal-bench@2.1/default` tasks at step 0, every 25 optimizer
   steps, and final weights
 - no separate boundary-benchmark invocation, so step 0 evaluates the full set
   exactly once
@@ -280,7 +280,7 @@ The 4+12 replica values are production defaults. To make the resource contract
 visible in an automation wrapper, set `TB_TRAINER_REPLICAS=4` and
 `TB_ROLLOUT_REPLICAS=12` explicitly. Every production evaluation logs under
 `val/*`, giving one directly comparable 89-task curve from step 0 through the
-final checkpoint. If the last optimizer step is itself a multiple of 10, the
+final checkpoint. If the last optimizer step is itself a multiple of 25, the
 trainer recognizes that the final policy was already validated and does not
 run the same 89 tasks a second time.
 

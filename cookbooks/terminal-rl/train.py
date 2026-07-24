@@ -49,7 +49,7 @@ TRAIN_SPLIT = os.environ.get("TB_TRAIN_SPLIT", "train")
 
 # The periodic validation suite and boundary-only benchmark are independent.
 # Production uses the full pinned Terminal-Bench 2.1 suite for validation at
-# step 0, every 10 optimizer steps, and final weights. The separate benchmark
+# step 0, every 25 optimizer steps, and final weights. The separate benchmark
 # path remains available to profiles such as the one-step LoRA sanity check.
 EVAL_VERSION = os.environ.get("TB_EVAL_VERSION", "2.0")
 VAL_DATASET = os.environ.get("TB_VAL_DATASET", f"terminal-bench@{EVAL_VERSION}")

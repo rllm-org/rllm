@@ -13,7 +13,7 @@
 # LoRA + OpenCode smoke test: it evaluates the base checkpoint, skips the
 # 20-minute mid-test, and stops after one optimizer batch. Production is
 # full-parameter + OpenCode with the complete 89-task suite at step 0, every
-# ten optimizer steps, and final weights. Production uses one validation suite
+# 25 optimizer steps, and final weights. Production uses one validation suite
 # instead of also scheduling the same tasks as a boundary benchmark.
 
 set -euo pipefail
@@ -131,7 +131,7 @@ case "$phase" in
             total_batches="${TB_SANITY_TOTAL_BATCHES:-1}"
             rollout_replicas="${TB_ROLLOUT_REPLICAS:-4}"
         else
-            # Use the full suite as validation so step 0 and every tenth step
+            # Use the full suite as validation so step 0 and every 25th step
             # share one metric namespace. Disable the separate benchmark path
             # to avoid evaluating the same tasks twice at step 0. The trainer's
             # final-validation hook still evaluates this suite at final weights.
@@ -141,7 +141,7 @@ case "$phase" in
             benchmark_expected_tasks=0
             benchmark_before_train=false
             benchmark_after_train=false
-            test_freq=10
+            test_freq=25
             val_before_train=true
             rollout_replicas="${TB_ROLLOUT_REPLICAS:-12}"
         fi
