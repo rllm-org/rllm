@@ -246,20 +246,19 @@ The production profile is a separate, guarded launch contract:
   rank `0`
 - OpenCode harness
 - all 1,200 `tb-opus-pass/train` tasks for training
-- fixed eight-task `terminal-bench@2.1/midtest` every 10 optimizer steps,
-  including step 0
-- all 89 `terminal-bench@2.1/default` tasks at step 0 and final weights only
+- all 89 `terminal-bench@2.1/default` tasks at step 0, every 10 optimizer
+  steps, and final weights
+- no separate boundary-benchmark invocation, so step 0 evaluates the full set
+  exactly once
 - four policy-trainer replicas and four rollout-deployment replicas
 - explicit `AP_MALAYSIA_2` trainer placement
 
-Prepare the full training archive and both evaluation versions:
+Prepare the full training archive and evaluation dataset:
 
 ```bash
 RLLM_HOME="${TB_STATE_ROOT}/state" \
 python cookbooks/terminal-rl/prepare_data.py \
-  --tarball /path/to/tb_v2_opus_pass.zip \
-  --midtest-size 8 \
-  --midtest-seed 20260723
+  --tarball /path/to/tb_v2_opus_pass.zip
 ```
 
 Then launch. The script rejects `production` with any mode/harness other than
@@ -279,9 +278,9 @@ bash cookbooks/terminal-rl/train_fireworks_glm5p2.sh \
 
 The four-replica values are production defaults. To make the resource contract
 visible in an automation wrapper, set `TB_TRAINER_REPLICAS=4` and
-`TB_ROLLOUT_REPLICAS=4` explicitly. The periodic suite logs under `val/*`; the
-full boundary suite logs under `benchmark/*`, so the two reward curves cannot
-be mistaken for the same task population.
+`TB_ROLLOUT_REPLICAS=4` explicitly. Every production evaluation logs under
+`val/*`, giving one directly comparable 89-task curve from step 0 through the
+final checkpoint.
 
 Before spending full-parameter capacity, run the matching LoRA sanity profile.
 It keeps the same training data, step-0 boundary evaluation, and four-plus-four

@@ -48,12 +48,13 @@ TRAIN_DATASET = os.environ.get("TB_TRAIN_DATASET", "tb-opus-pass")
 TRAIN_SPLIT = os.environ.get("TB_TRAIN_SPLIT", "train")
 
 # The periodic validation suite and boundary-only benchmark are independent.
-# Production uses a fixed eight-task Terminal-Bench 2.1 mid-test split every
-# 10 optimizer steps and the full pinned 89-task split only at step 0 and
-# final weights.
+# Production uses the full pinned Terminal-Bench 2.1 suite for validation at
+# step 0, every 10 optimizer steps, and final weights. The separate benchmark
+# path remains available to profiles such as the one-step LoRA sanity check.
 EVAL_VERSION = os.environ.get("TB_EVAL_VERSION", "2.0")
 VAL_DATASET = os.environ.get("TB_VAL_DATASET", f"terminal-bench@{EVAL_VERSION}")
 VAL_SPLIT = os.environ.get("TB_VAL_SPLIT", "default")
+VAL_EXPECTED_TASKS = int(os.environ.get("TB_VAL_EXPECTED_TASKS", "0"))
 BENCHMARK_DATASET = os.environ.get("TB_BENCHMARK_DATASET", "").strip()
 BENCHMARK_SPLIT = os.environ.get("TB_BENCHMARK_SPLIT", "default")
 BENCHMARK_EXPECTED_TASKS = int(os.environ.get("TB_BENCHMARK_EXPECTED_TASKS", "0"))
@@ -113,6 +114,8 @@ def main(config: DictConfig) -> None:
 
     if TB_VAL_MAX > 0 and TB_VAL_MAX < len(val_dataset):
         val_dataset = val_dataset.select(range(TB_VAL_MAX))
+    if VAL_EXPECTED_TASKS > 0 and len(val_dataset) != VAL_EXPECTED_TASKS:
+        raise RuntimeError(f"Validation '{VAL_DATASET}/{VAL_SPLIT}' has {len(val_dataset)} tasks; expected {VAL_EXPECTED_TASKS}")
 
     train_ids = {str(row.get("task_id")) for row in train_dataset.get_data()}
     val_ids = {str(row.get("task_id")) for row in val_dataset.get_data()}

@@ -13,6 +13,8 @@ Run::
 from __future__ import annotations
 
 import importlib
+import os
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -62,6 +64,7 @@ def test_train_module_imports():
     mod = _import_cookbook_module("train")
     assert mod.TRAIN_DATASET == "tb-opus-pass"
     assert mod.VAL_DATASET.startswith("terminal-bench@")
+    assert mod.VAL_EXPECTED_TASKS == 0
     assert mod.BENCHMARK_DATASET == ""
     assert callable(mod.main)
 
@@ -118,18 +121,42 @@ def test_prepare_data_rejects_zip_parent_traversal(tmp_path):
         mod._extract_archive(archive, tmp_path / "extracted")
 
 
-def test_glm5p2_production_profile_is_full_opencode_four_replica_boundary_eval():
+def test_glm5p2_production_profile_is_full_opencode_full_suite_every_ten_steps(tmp_path):
     script = (_COOKBOOK_DIR / "train_fireworks_glm5p2.sh").read_text()
 
     assert "production phase requires: full opencode production" in script
     assert 'val_dataset="terminal-bench@2.1"' in script
-    assert 'val_split="midtest"' in script
-    assert 'benchmark_dataset="terminal-bench@2.1"' in script
-    assert "benchmark_expected_tasks=89" in script
-    assert "test_freq=10" in script
-    assert "val_before_train=true" in script
-    assert 'trainer_replicas="${TB_TRAINER_REPLICAS:-4}"' in script
-    assert 'rollout_replicas="${TB_ROLLOUT_REPLICAS:-4}"' in script
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "FIREWORKS_API_KEY": "dry-run",
+            "WANDB_API_KEY": "dry-run",
+            "RLLM_PYTHON": "/bin/echo",
+            "TB_STATE_ROOT": str(tmp_path),
+            "TB_RUN_STAMP": "dryrun",
+            "TB_TRAINER_REGION": "AP_MALAYSIA_2",
+            "TB_TRAINER_REPLICAS": "4",
+            "TB_ROLLOUT_REPLICAS": "4",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(_COOKBOOK_DIR / "train_fireworks_glm5p2.sh"), "full", "opencode", "production"],
+        cwd=_COOKBOOK_DIR,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "val=terminal-bench@2.1/default benchmark=disabled" in result.stdout
+    assert "fireworks_config.policy_trainer_replica_count=4" in result.stdout
+    assert "fireworks_config.rollout_deployment_replica_count=4" in result.stdout
+    assert "fireworks_infra.trainers.policy.region=AP_MALAYSIA_2" in result.stdout
+    assert "rllm.trainer.val_before_train=true" in result.stdout
+    assert "rllm.trainer.benchmark_before_train=false" in result.stdout
+    assert "rllm.trainer.benchmark_after_train=false" in result.stdout
+    assert "rllm.trainer.test_freq=10" in result.stdout
 
 
 def test_glm5p2_sanity_profile_is_one_step_lora_opencode_without_midtest():

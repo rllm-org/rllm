@@ -12,9 +12,9 @@
 # the pinned 89-task Terminal-Bench 2.1 boundary benchmark. Sanity is a one-step
 # LoRA + OpenCode smoke test: it evaluates the base checkpoint, skips the
 # 20-minute mid-test, and stops after one optimizer batch. Production is
-# full-parameter + OpenCode with the fixed eight-task mid-test at step 0 and
-# every ten optimizer steps, plus the boundary benchmark at step 0 and final
-# weights.
+# full-parameter + OpenCode with the complete 89-task suite at step 0, every
+# ten optimizer steps, and final weights. Production uses one validation suite
+# instead of also scheduling the same tasks as a boundary benchmark.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -60,6 +60,7 @@ case "$phase" in
         benchmark_before_train=false
         benchmark_after_train=false
         val_max="${TB_DEBUG_VAL_MAX:-2}"
+        val_expected_tasks=0
         total_batches="${TB_DEBUG_TOTAL_BATCHES:-1}"
         total_epochs=1
         test_freq=1
@@ -80,6 +81,7 @@ case "$phase" in
         benchmark_before_train=false
         benchmark_after_train=false
         val_max=0
+        val_expected_tasks=0
         total_batches=-1
         total_epochs=1
         test_freq=50
@@ -109,16 +111,16 @@ case "$phase" in
         train_dataset="tb-opus-pass"
         train_split="train"
         val_dataset="terminal-bench@2.1"
-        val_split="midtest"
-        benchmark_dataset="terminal-bench@2.1"
         benchmark_split="default"
-        benchmark_expected_tasks=89
-        benchmark_before_train=true
-        benchmark_after_train=true
         val_max=0
         total_batches=-1
         total_epochs=1
         if [ "$phase" = "sanity" ]; then
+            val_split="midtest"
+            val_expected_tasks=0
+            benchmark_dataset="terminal-bench@2.1"
+            benchmark_expected_tasks=89
+            benchmark_before_train=true
             # The step-0 boundary benchmark already exercises the evaluation
             # stack. Keep this smoke test to one LoRA optimizer batch and avoid
             # another ~20 minutes for the periodic mid-test.
@@ -127,6 +129,16 @@ case "$phase" in
             benchmark_after_train=false
             total_batches="${TB_SANITY_TOTAL_BATCHES:-1}"
         else
+            # Use the full suite as validation so step 0 and every tenth step
+            # share one metric namespace. Disable the separate benchmark path
+            # to avoid evaluating the same tasks twice at step 0. The trainer's
+            # final-validation hook still evaluates this suite at final weights.
+            val_split="default"
+            val_expected_tasks=89
+            benchmark_dataset=""
+            benchmark_expected_tasks=0
+            benchmark_before_train=false
+            benchmark_after_train=false
             test_freq=10
             val_before_train=true
         fi
@@ -170,6 +182,7 @@ export TB_TRAIN_SPLIT="$train_split"
 export TB_VAL_DATASET="$val_dataset"
 export TB_VAL_SPLIT="$val_split"
 export TB_VAL_MAX="$val_max"
+export TB_VAL_EXPECTED_TASKS="$val_expected_tasks"
 export TB_BENCHMARK_DATASET="$benchmark_dataset"
 export TB_BENCHMARK_SPLIT="$benchmark_split"
 export TB_BENCHMARK_EXPECTED_TASKS="$benchmark_expected_tasks"
