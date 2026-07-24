@@ -1,8 +1,53 @@
 """In-memory trace store for testing and embedded usage."""
 
+import array
 import time
 from collections import defaultdict
 from typing import Any
+
+# Token-id / logprob lists dominate trace memory. As Python list[int]/list[float]
+# each element costs ~32-36 B (an 8 B pointer plus a boxed int/float object) since
+# vocab ids exceed CPython's small-int intern cap (256). Packed into array.array
+# they cost 4-8 B/element with no per-item object — ~9x smaller for ids, ~4x for
+# logprobs — and collapse N objects into 1, cutting GC pressure. We pack on store
+# and unpack on read so the external dict contract (plain lists) is unchanged.
+_INT_ARRAY_FIELDS = ("prompt_token_ids", "completion_token_ids")
+_FLOAT_ARRAY_FIELDS = ("logprobs",)
+
+
+def _pack(data: dict[str, Any]) -> dict[str, Any]:
+    """Return ``data`` with large id/logprob lists packed into ``array.array``.
+
+    The dict is copied lazily (only if something is packed) so the caller's
+    original lists can be released; any non-numeric/out-of-range content is left
+    untouched, so this never changes what a reader sees after :func:`_unpack`.
+    """
+    out: dict[str, Any] | None = None
+    for fields, typecode in ((_INT_ARRAY_FIELDS, "i"), (_FLOAT_ARRAY_FIELDS, "d")):
+        for name in fields:
+            value = data.get(name)
+            if type(value) is not list or not value:
+                continue
+            try:
+                packed = array.array(typecode, value)
+            except (TypeError, ValueError, OverflowError):
+                continue  # non-numeric / out-of-range: keep the original list
+            if out is None:
+                out = dict(data)
+            out[name] = packed
+    return out if out is not None else data
+
+
+def _unpack(data: dict[str, Any]) -> dict[str, Any]:
+    """Inverse of :func:`_pack` — restore packed arrays to plain lists."""
+    out: dict[str, Any] | None = None
+    for name in (*_INT_ARRAY_FIELDS, *_FLOAT_ARRAY_FIELDS):
+        value = data.get(name)
+        if isinstance(value, array.array):
+            if out is None:
+                out = dict(data)
+            out[name] = value.tolist()
+    return out if out is not None else data
 
 
 class MemoryTraceStore:
@@ -18,7 +63,7 @@ class MemoryTraceStore:
 
     async def store_trace(self, trace_id: str, session_id: str, data: dict[str, Any]) -> None:
         now = time.time()
-        self._traces[trace_id] = data
+        self._traces[trace_id] = _pack(data)
         if trace_id not in self._timestamps:
             self._timestamps[trace_id] = now
         idx = self._session_index[session_id]
@@ -26,7 +71,8 @@ class MemoryTraceStore:
             idx.append(trace_id)
 
     async def get_trace(self, trace_id: str) -> dict[str, Any] | None:
-        return self._traces.get(trace_id)
+        data = self._traces.get(trace_id)
+        return _unpack(data) if data is not None else None
 
     async def get_session_traces(
         self,
@@ -45,7 +91,7 @@ class MemoryTraceStore:
                 results.append(data)
         if limit is not None:
             results = results[:limit]
-        return results
+        return [_unpack(d) for d in results]
 
     async def delete_session(self, session_id: str) -> int:
         ids = self._session_index.pop(session_id, [])
