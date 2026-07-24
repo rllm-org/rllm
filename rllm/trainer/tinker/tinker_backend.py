@@ -358,8 +358,15 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
                 beta2=self.beta2,
                 eps=self.eps,
             )
-            await optim_step_future.result_async()
+            optim_result = await optim_step_future.result_async()
             trainer_state.extra_info["scheduled_learning_rate"] = scheduled_learning_rate
+
+        # Surface optimizer-step metrics (e.g. grad norm) emitted by the Tinker server.
+        if optim_result.metrics:
+            for k, v in optim_result.metrics.items():
+                if k.startswith("clock_cycle"):
+                    continue
+                trainer_state.metrics[f"train/{k.replace(':', '/')}"] = v
 
     # =========================================================================
     # Async hook methods
