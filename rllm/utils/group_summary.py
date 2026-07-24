@@ -65,6 +65,8 @@ def format_group_finished(
     *,
     status: str | None = None,
     reason: str | None = None,
+    n_steps: int | None = None,
+    n_datums: int | None = None,
 ) -> str:
     """One-line colorful summary of a finished task group (all rollouts sharing a task_id).
 
@@ -77,7 +79,8 @@ def format_group_finished(
 
     ``status`` / ``reason`` are optional and come from the async training buffer:
     ``queued`` (accepted into training, green) or ``filtered`` (dropped, with the
-    reason — e.g. ``uniform_reward`` — in yellow).
+    reason — e.g. ``uniform_reward`` — in yellow). ``n_steps`` / ``n_datums`` (also
+    buffer-only, queued groups) add the prefix-merge ratio ``rows N [X steps/row]``.
     """
     n = len(episodes)
     n_correct = sum(1 for e in episodes if e.is_correct)
@@ -116,6 +119,12 @@ def format_group_finished(
         seg.append(click.style(f"llm μ{_mean(llm_s):.0f}s", fg="blue"))
     if steps:
         seg.append(click.style(f"steps μ{_mean(steps):.0f}", fg="blue"))
+    # Prefix-merge ratio (buffer/queued path only): how many training rows the
+    # group's steps collapse into. rows == steps means no merge; rows << steps
+    # means heavy prefix sharing.
+    if n_datums:
+        ratio = (n_steps / n_datums) if n_steps else 0.0
+        seg.append(click.style(f"rows {n_datums} [{ratio:.1f} steps/row]", fg="blue"))
 
     # Termination — red if any rollout hit an infra/grading failure (a wasted,
     # untrustworthy rollout that training filters), yellow otherwise. Normal
