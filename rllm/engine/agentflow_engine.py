@@ -623,9 +623,14 @@ class AgentFlowEngine:
                 pbar.set_postfix_str(postfix)
 
                 # Task-group summary: fires once the group's last rollout lands.
-                if episode is not None:
-                    group_episodes[task_id].append(episode)
-                    if len(group_episodes[task_id]) >= group_sizes.get(task_id, 1) and group_sizes.get(task_id, 1) > 1:
+                # Only multi-rollout groups are tracked (singletons add nothing over
+                # the per-episode line); the accumulator holds references already kept
+                # alive by ``results`` and is popped on completion, so it adds no
+                # meaningful memory and is empty by the time this loop exits.
+                if episode is not None and group_sizes.get(task_id, 1) > 1:
+                    group = group_episodes[task_id]
+                    group.append(episode)
+                    if len(group) >= group_sizes[task_id]:
                         try:
                             print(_format_group_finished(task_id, group_episodes.pop(task_id)), flush=True)
                         except Exception:
