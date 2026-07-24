@@ -640,7 +640,7 @@ class FireworksPolicyTrainer:
             eps=eps,
             weight_decay=weight_decay,
             grad_clip_norm=grad_clip_norm,
-            emit_grad_norm_metrics=True,  # emit train/grad_norm* telemetry (parity with verl)
+            emit_grad_norm_metrics=True,
         )
         from fireworks.training.sdk.client import GradAccNormalization
 
