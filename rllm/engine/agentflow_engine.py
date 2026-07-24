@@ -358,14 +358,25 @@ def _format_timing_breakdown(metrics: dict[str, float]) -> str:
     return f" in {total:.0f}s{inner}"
 
 
-def _episode_primary_reward(episode: Episode) -> float | None:
-    """Scalar reward for one episode: first trajectory's reward, else its last step's."""
-    for traj in episode.trajectories:
-        if traj.reward is not None:
-            return float(traj.reward)
-        if traj.steps and traj.steps[-1].reward is not None:
-            return float(traj.steps[-1].reward)
-    return None
+def _rewards_by_trajectory_name(episodes: list[Episode]) -> dict[str, list[float]]:
+    """Per-trajectory-name reward lists across a task group.
+
+    GRPO groups trajectories by (task_id, trajectory name) and computes advantage
+    within each name-group, so reward stats are only meaningful *per name* — not
+    collapsed to one scalar per episode. Falls back to a trajectory's last step
+    reward when ``traj.reward`` is unset (mirrors the per-episode log line). Name
+    order is first-seen, for a stable readout.
+    """
+    by_name: dict[str, list[float]] = {}
+    for ep in episodes:
+        for traj in ep.trajectories:
+            reward = traj.reward
+            if reward is None and traj.steps and traj.steps[-1].reward is not None:
+                reward = traj.steps[-1].reward
+            if reward is None:
+                continue
+            by_name.setdefault(traj.name, []).append(float(reward))
+    return by_name
 
 
 def _mean(xs: list[float]) -> float:
@@ -384,32 +395,33 @@ def _format_group_finished(task_id: str, episodes: list[Episode]) -> str:
     """One-line colorful summary of a finished task group (all rollouts sharing a task_id).
 
     Surfaces the GRPO-relevant signal at a glance: solve rate, reward spread
-    (a *flat* group — all rewards equal — gives zero advantage and gets filtered),
-    straggler timing (the group only finishes when its slowest rollout does), and
-    the termination-reason breakdown. Segments are individually styled with
+    **per trajectory name** (GRPO forms one advantage group per name — a *flat*
+    name, all rewards equal, gives zero advantage and gets filtered), straggler
+    timing (the group only finishes when its slowest rollout does), and the
+    termination-reason breakdown. Segments are individually styled with
     ``click.style`` and joined, so the line is multi-color.
     """
     n = len(episodes)
     n_correct = sum(1 for e in episodes if e.is_correct)
-    rewards = [r for r in (_episode_primary_reward(e) for e in episodes) if r is not None]
+    rewards_by_name = _rewards_by_trajectory_name(episodes)
     rollout_s = [e.metrics["time/rollout_s"] for e in episodes if "time/rollout_s" in e.metrics]
     llm_s = [e.metrics["time/agentflow_llm_wall_s"] for e in episodes if "time/agentflow_llm_wall_s" in e.metrics]
     steps = [e.metrics["n_turns"] for e in episodes if "n_turns" in e.metrics]
     terms = Counter(e.termination_reason.value if e.termination_reason is not None else "None" for e in episodes)
 
     short_id = task_id.split("-")[0]  # first uuid segment — enough to eyeball
-    flat = len(rewards) >= 2 and _pstd(rewards) < 1e-9
 
     seg = [click.style(f"█ group {short_id} ×{n}", fg="cyan", bold=True)]
+    seg.append(click.style(f"solved {n_correct}/{n} ({100.0 * n_correct / n if n else 0.0:.0f}%)", fg="bright_white", bold=True))
 
-    # Solve rate — the headline. Red when the group is flat (no GRPO gradient,
-    # will be filtered), green when it carries a learning signal.
-    pct = 100.0 * n_correct / n if n else 0.0
-    solved = f"solved {n_correct}/{n} ({pct:.0f}%)" + (" ⚠ flat" if flat else "")
-    seg.append(click.style(solved, fg="red" if flat else "green", bold=True))
-
-    if rewards:
-        seg.append(click.style(f"reward μ{_mean(rewards):.2f} σ{_pstd(rewards):.2f} [{min(rewards):.1f}, {max(rewards):.1f}]", fg="white"))
+    # Reward per trajectory name — this is the GRPO advantage group. A name whose
+    # rewards are all equal (flat) yields zero advantage and gets filtered, so mark
+    # it red; a name with spread carries a learning signal, so green.
+    if rewards_by_name:
+        for name, rs in rewards_by_name.items():
+            flat = len(rs) >= 2 and _pstd(rs) < 1e-9
+            txt = f"{name} μ{_mean(rs):.2f} σ{_pstd(rs):.2f} [{min(rs):.1f}, {max(rs):.1f}]" + (" ⚠ flat" if flat else "")
+            seg.append(click.style(txt, fg="red" if flat else "green"))
     else:
         seg.append(click.style("reward N/A", fg="white"))
 
