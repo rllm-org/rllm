@@ -29,6 +29,7 @@ from rllm.trainer.algorithms.transform import transform_episodes_to_trajectory_g
 from rllm.trainer.metrics_aggregator import MetricsAggregator
 from rllm.trainer.sync_coordinator import SyncCoordinator
 from rllm.types import INFRA_ERROR_REASONS, Episode, TerminationReason, TrajectoryGroup
+from rllm.utils.group_summary import format_group_finished
 
 logger = logging.getLogger(__name__)
 
@@ -467,6 +468,15 @@ class TrajectoryGroupBuffer:
             groups_after_min_trajs,
             groups_after_reward_filter,
         )
+
+        # Colorful per-group readout (the async training path's counterpart to the
+        # engine's execute_tasks summary). Carries the buffer verdict — queued vs.
+        # filtered:<reason> — that only this path knows. Best-effort: never let a
+        # formatting error interfere with buffering.
+        try:
+            print(format_group_finished(task_id, episodes, status=status, reason=reason), flush=True)
+        except Exception:
+            logger.debug("group summary formatting error", exc_info=True)
 
     @staticmethod
     def _min_weight_version(episodes: list[Episode]) -> int:
