@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train an SWE agent on R2E-Gym with the tinker backend in SYNCHRONOUS mode.
+# Train an SWE agent on Scale-SWE with the tinker backend in SYNCHRONOUS mode.
 #
 # This is the simpler, on-policy variant of train_tinker.sh (which uses
 # fully-async GRPO). Each step generates a full batch of rollouts, then takes
@@ -21,6 +21,8 @@
 set -euo pipefail
 
 export SWE_SANDBOX_BACKEND="${SWE_SANDBOX_BACKEND:-modal}"
+# Agent harness by registry name (terminus2 | mini-swe-agent | react | oracle | ...).
+export SWE_HARNESS="${SWE_HARNESS:-terminus2}"
 export SWE_VAL_MAX="${SWE_VAL_MAX:-16}"
 # Per-rollout turn cap for terminus2 (read by train.py). Empty = uncapped.
 export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
@@ -52,7 +54,7 @@ python -u train.py \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='swe-rl' \
-    rllm.trainer.experiment_name='r2egym-terminus2-qwen3.5-4b-sync' \
+    rllm.trainer.experiment_name='scaleswe-terminus2-qwen3.5-4b-sync' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=10 \
     rllm.trainer.save_freq=10 \

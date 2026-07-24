@@ -1,8 +1,8 @@
 # SWE-RL
 
-End-to-end agentic-RL recipe for software engineering: train on [R2E-Gym](https://huggingface.co/datasets/R2E-Gym/R2E-Gym-Subset) (R2E-Gym Subset, 4,578 bug-fix tasks across 12 Python repos), validate on [SWE-bench Verified](https://www.swebench.com/) (500 real GitHub issues). The agent harness is [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent); the base model is `Qwen/Qwen3.5-9B`.
+End-to-end agentic-RL recipe for software engineering: train on [Scale-SWE](https://huggingface.co/datasets/AweAI-Team/Scale-SWE) (~20K real-world Python bug-fix tasks; [arXiv:2602.09892](https://arxiv.org/abs/2602.09892)), validate on [SWE-bench Verified](https://www.swebench.com/) (500 real GitHub issues). The agent harness is [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent); the base model is `Qwen/Qwen3.5-9B`.
 
-This cookbook deliberately ships **no custom AgentFlow and no custom evaluator** — it's a thin wrapper around primitives that already live in `rllm/`. The flow is `mini-swe-agent` running as a CLI inside per-task sandboxes, and the evaluator is each task's own `tests/test.sh`. Both `r2egym` and `harbor:swebench-verified` ship that verifier with the dataset.
+This cookbook deliberately ships **no custom AgentFlow and no custom evaluator** — it's a thin wrapper around primitives that already live in `rllm/`. The flow is `mini-swe-agent` running as a CLI inside per-task sandboxes, and the evaluator is each task's own `tests/test.sh`. Both `scaleswe` and `harbor:swebench-verified` ship that verifier with the dataset.
 
 ## Architecture
 
@@ -19,7 +19,7 @@ AgentTrainer.train()
   │                  tokens + sampling params per turn).
   │
   └── verifier: tests/test.sh inside the sandbox
-        │   run_tests.sh for r2egym;  SWE-bench harness for verified.
+        │   pytest F2P/P2P for scaleswe;  SWE-bench harness for verified.
         │
         └── writes /logs/verifier/reward.txt  →  RL reward signal
 ```
@@ -47,7 +47,7 @@ This pulls:
 
 | Dataset | Role | Source | Verifier |
 |---|---|---|---|
-| `r2egym` | train (4,578) | `R2E-Gym/R2E-Gym-Subset` | in-sandbox `run_tests.sh`, pytest-output equality (`tests/test.sh`) |
+| `scaleswe` | train (~20K) | `AweAI-Team/Scale-SWE` | in-sandbox pytest over `FAIL_TO_PASS` ∪ `PASS_TO_PASS` (`tests/test.sh`) |
 | `harbor:swebench-verified` | eval (500) | `princeton-nlp/SWE-bench_Verified` | official SWE-bench harness (F2P / P2P) |
 
 Both materialize as Harbor-format task directories (`task.toml`, `instruction.md`, `environment/Dockerfile`, `tests/test.sh`).
@@ -67,6 +67,14 @@ SWE_SANDBOX_BACKEND=docker bash cookbooks/swe-rl/train_tinker.sh \
     model.name=Qwen/Qwen3-8B \
     rllm.workflow.n_parallel_tasks=32
 ```
+
+**Agent harness** — the harness is selectable by registry name via `SWE_HARNESS` (default `terminus2`); any agent in `rllm/registry/agents.json` works (`mini-swe-agent`, `react`, `oracle`, …):
+
+```bash
+SWE_HARNESS=mini-swe-agent bash cookbooks/swe-rl/train_tinker.sh
+```
+
+> Note: `mini-swe-agent` uses litellm's native tool-calling and needs the serving backend to return structured `tool_calls`; raw open-weights samplers (e.g. Tinker) return the tool call as text, so `terminus2` (which parses actions from text) is the reliable default there.
 
 For a simpler on-policy loop (generate a full batch, then one optimizer step — easier to debug), use the synchronous variant:
 
@@ -163,7 +171,7 @@ by `SandboxTaskHooks`. Pick a backend via the `SWE_SANDBOX_BACKEND` env var:
 
 | File | Description |
 |------|-------------|
-| `prepare_data.py` | Pulls `r2egym` (train) and `harbor:swebench-verified` (eval) |
+| `prepare_data.py` | Pulls `scaleswe` (train) and `harbor:swebench-verified` (eval) |
 | `train.py` | Loads the two datasets, hands them to `AgentTrainer` |
 | `train_tinker.sh` | Tinker backend — Qwen3.5-9B LoRA, GRPO + async, Modal sandboxes |
 | `train_tinker_sync.sh` | Tinker backend — synchronous (on-policy) variant, simpler for testing |
@@ -178,6 +186,6 @@ by `SandboxTaskHooks`. Pick a backend via the `SWE_SANDBOX_BACKEND` env var:
 Other cookbooks in this repo (`finqa`, `math`, `deepcoder`, …) ship a custom AgentFlow because their workloads either fit in a single LLM turn or need bespoke tool wiring. SWE doesn't — the existing in-tree primitives already cover it:
 
 - **`rllm.harnesses.mini_swe_agent`** is the agent. It exposes the `mini-swe-agent` CLI as an rLLM harness (installs in-sandbox on first run; reads the gateway URL from the env; logs to `/tmp/mini-swe-agent.log`).
-- **Per-task `tests/test.sh`** is the evaluator. The sandbox-shell verifier kind (`rllm.eval.script_evaluator`) reads `/logs/verifier/reward.txt` and returns it as the RL reward. For `harbor:swebench-verified`, that script invokes the official SWE-bench harness; for `r2egym`, it runs the image's own `/testbed/run_tests.sh` and scores 1.0 iff the pytest output matches the row's expected output.
+- **Per-task `tests/test.sh`** is the evaluator. The sandbox-shell verifier kind (`rllm.eval.script_evaluator`) reads the reward the script writes and returns it as the RL reward. For `harbor:swebench-verified`, that script invokes the official SWE-bench harness; for `scaleswe`, it writes the row's synthetic `test_fail_to_pass.py` (+ applies `f2p_patch`), runs pytest over `FAIL_TO_PASS` ∪ `PASS_TO_PASS`, and scores 1.0 iff every required test passes.
 
 The only thing this cookbook adds on top is the recipe: dataset pairing, sampling/optimizer hyperparams, and the `mini-swe-agent` harness selection. Forking `train_tinker.sh` is the place to start customizing.

@@ -87,7 +87,15 @@ if ! command -v mini-swe-agent >/dev/null 2>&1; then
     # ``TypeError: unsupported operand type(s) for |`` and exits before any
     # LLM call (zero traces, score 0). uv fetches a managed CPython 3.12 if
     # one isn't present; this venv is independent of the task's own python.
-    uv tool install --python 3.12 mini-swe-agent
+    #
+    # ``--with 'litellm[proxy]'``: mini-swe-agent depends on *base* litellm, but
+    # this litellm's completion path imports proxy-only modules at runtime
+    # (``fastapi``, ``orjson``, ...). Without them every LLM call raises
+    # ``ModuleNotFoundError`` and litellm retries with exponential backoff (~256s)
+    # before giving up — zero captured traces, EmptyCompletion, score 0. harbor
+    # (Terminus-2) ships litellm's proxy extras so it never hits this; the
+    # mini-swe-agent tool venv must pull them in via the ``proxy`` extra.
+    uv tool install --python 3.12 --with 'litellm[proxy]' mini-swe-agent
 fi
 """
 
@@ -101,6 +109,20 @@ class MiniSweAgentHarness(BaseCliHarness):
 
     def install_script(self) -> str:
         return _INSTALL_SCRIPT
+
+    @staticmethod
+    def _gateway_model(model: str) -> str:
+        """Model id to hand mini-swe-agent so litellm routes to the gateway.
+
+        Prepend ``openai/`` UNCONDITIONALLY (mirroring Terminus2Harness): the
+        gateway/proxy routes on exactly ``config.model``, and litellm strips one
+        ``openai/`` prefix and forwards the remainder verbatim — so the forwarded
+        id equals ``config.model`` including any HF org (``Qwen/Qwen3.6-35B-A3B``).
+        ``ensure_provider_prefix`` must NOT be used here: for HF-style names it
+        drops the org (→ ``openai/Qwen3.6-35B-A3B``), so litellm forwards
+        ``Qwen3.6-35B-A3B``, which misses the gateway route → 0 captured traces.
+        """
+        return f"openai/{model}"
 
     def build_env(self, task: Task, config: AgentConfig) -> dict[str, str]:
         gateway_url = config.base_url
@@ -137,7 +159,7 @@ class MiniSweAgentHarness(BaseCliHarness):
         with the model + provider key is the only reliable bypass
         observed across versions ≥ 2.2.
         """
-        _, _, qualified = self.ensure_provider_prefix(config.model)
+        qualified = self._gateway_model(config.model)
         api_var = _provider_key_var(config.model)
         api_key = env.get(api_var, self.gateway_api_key(config, api_var))
 
@@ -172,9 +194,9 @@ class MiniSweAgentHarness(BaseCliHarness):
         task: Task,
         config: AgentConfig,
     ) -> str:
-        # mini-swe-agent insists on ``provider/model``; infer the prefix
-        # when the user passed a bare name from rllm setup.
-        _, _, qualified = self.ensure_provider_prefix(config.model)
+        # mini-swe-agent insists on ``provider/model``; force the openai
+        # provider so litellm posts to the gateway (see _gateway_model).
+        qualified = self._gateway_model(config.model)
 
         # NOTE: gateway routing relies on ``OPENAI_API_BASE`` in the
         # process environment. ``-c key=value`` overrides on the CLI

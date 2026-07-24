@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train an SWE agent on R2E-Gym, eval on SWE-bench Verified.
+# Train an SWE agent on Scale-SWE, eval on SWE-bench Verified.
 #
 # Prerequisites:
 #   1. Install rllm with tinker extras:   uv pip install -e ".[tinker]"
@@ -26,6 +26,8 @@
 set -euo pipefail
 
 export SWE_SANDBOX_BACKEND="${SWE_SANDBOX_BACKEND:-modal}"
+# Agent harness by registry name (terminus2 | mini-swe-agent | react | oracle | ...).
+export SWE_HARNESS="${SWE_HARNESS:-terminus2}"
 # Per-rollout turn cap for terminus2 (read by train.py). Empty = uncapped.
 export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
@@ -62,7 +64,7 @@ python -u train.py \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='swe-rl' \
-    rllm.trainer.experiment_name='r2egym-terminus2-qwen3.5-4b' \
+    rllm.trainer.experiment_name='scaleswe-terminus2-qwen3.5-4b' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=10 \
     rllm.trainer.save_freq=10 \

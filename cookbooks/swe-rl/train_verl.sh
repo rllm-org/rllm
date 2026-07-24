@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train an SWE agent on R2E-Gym with the verl (distributed) backend.
+# Train an SWE agent on Scale-SWE with the verl (distributed) backend.
 #
 # Prerequisites:
 #   1. Install rllm with verl extras:     uv pip install -e ".[verl]"
@@ -22,6 +22,8 @@ set -euo pipefail
 unset ROCR_VISIBLE_DEVICES 2>/dev/null || true
 
 export SWE_SANDBOX_BACKEND="${SWE_SANDBOX_BACKEND:-modal}"
+# Agent harness by registry name (terminus2 | mini-swe-agent | react | oracle | ...).
+export SWE_HARNESS="${SWE_HARNESS:-terminus2}"
 # Per-rollout turn cap for terminus2 (read by train.py). Empty = uncapped.
 export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
@@ -71,7 +73,7 @@ python -u train.py \
     rllm.gateway.port=9090 \
     trainer.logger="['console','wandb']" \
     trainer.project_name=swe-rl \
-    trainer.experiment_name=r2egym-terminus2-qwen3.5-4b-verl \
+    trainer.experiment_name=scaleswe-terminus2-qwen3.5-4b-verl \
     trainer.val_before_train=true \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
