@@ -198,6 +198,14 @@ class TrajectoryGroupBuffer:
         )
         self._aggregator.record_dict(transform_metrics)
 
+        # reward/{role}/all: reward per role over EVERY trajectory that ran,
+        # before min-trajs / uniform-reward filtering -- and including
+        # compact-filtered trajectories (they still carry a real reward). The
+        # transform above imputed trajectory names, so traj.name is the resolved
+        # role. This is the pre-filter `all` half of the {all, effective} matrix;
+        # the `effective` half is recorded on the queued path below.
+        self._record_reward_by_role("all", [traj for ep in episodes for traj in ep.trajectories], with_difficulty=True)
+
         # 3. Drop groups with too few trajectories
         before_min_traj = len(traj_groups)
         traj_groups = [g for g in traj_groups if len(g.trajectories) >= self._rs_config.min_trajs_per_group]
@@ -253,6 +261,13 @@ class TrajectoryGroupBuffer:
             self._filtered_count += 1
             self._record_classified_prompt_group()
             return True
+
+        # reward/{role}/effective: reward per role over only the trajectories
+        # that survived every filter (compact-filtering, min-trajs, uniform-
+        # reward) and will enter the loss. Pairs with reward/{role}/all (pre-
+        # filter): effective = "what we trained on", all = "what actually ran";
+        # their per-role gap is the filtered mass.
+        self._record_reward_by_role("effective", [traj for g in traj_groups for traj in g.trajectories])
 
         # 6. Set weight version and queue
         for g in traj_groups:
@@ -373,6 +388,51 @@ class TrajectoryGroupBuffer:
             self._aggregator.record("episode/prompt_tokens", total_prompt_tokens)
             self._aggregator.record("episode/response_tokens", total_response_tokens)
             self._aggregator.record("episode/correct", 1.0 if ep.is_correct else 0.0)
+
+    def _record_reward_by_role(self, subset: str, trajectories: list, *, with_difficulty: bool = False) -> None:
+        """Record reward/{role}/{subset}/{mean,std,max,min}, grouped by trajectory
+        role (``traj.name``) -- so multi-agent runs (e.g. solver/judge) report
+        each role separately, matching the existing reward/{role}/* convention.
+
+        ``subset`` is "all" (every trajectory that ran, pre-filter) or
+        "effective" (survived every filter, enters the loss). With
+        ``with_difficulty`` also record reward/{role}/solved_{none,all,some}:
+        the fraction of prompt groups (per role) that are all-failed / all-solved
+        / mixed -- the interpretable, filter-independent replacement for
+        advantage/*/fraction_zero (binary-reward oriented, cf. prime-rl's
+        solve_rates). Fully-errored episodes carry no trajectory (hence no role);
+        they are captured by episode/correct and episode/infra_error, not here."""
+        rewards_by_role: dict[str, list[float]] = {}
+        for traj in trajectories:
+            reward = traj.reward if traj.reward is not None else (traj.steps[-1].reward if traj.steps else None)
+            if reward is not None:
+                rewards_by_role.setdefault(traj.name, []).append(float(reward))
+        for role, rewards in rewards_by_role.items():
+            self._record_reward_stats(f"reward/{role}/{subset}", rewards)
+            if with_difficulty:
+                n = len(rewards)
+                n_solved = sum(1 for r in rewards if r > 0.0)
+                self._aggregator.record(f"reward/{role}/solved_none", 1.0 if n_solved == 0 else 0.0)
+                self._aggregator.record(f"reward/{role}/solved_all", 1.0 if n_solved == n else 0.0)
+                self._aggregator.record(f"reward/{role}/solved_some", 1.0 if 0 < n_solved < n else 0.0)
+
+    def _record_reward_stats(self, prefix: str, rewards: list[float]) -> None:
+        """Record mean/std/max/min of a reward distribution under ``prefix``.
+
+        No-op on an empty list (e.g. a fully-filtered task contributes no
+        effective rewards, so it drops out of reward/effective/* -- exactly the
+        asymmetry the {all, effective} split is meant to surface). The
+        aggregator reduces /mean and /std across tasks by mean and /max,/min by
+        max,min (see ``metrics_aggregator._infer_rule``)."""
+        if not rewards:
+            return
+        n = len(rewards)
+        mean = sum(rewards) / n
+        std = (sum((r - mean) ** 2 for r in rewards) / n) ** 0.5
+        self._aggregator.record(f"{prefix}/mean", mean)
+        self._aggregator.record(f"{prefix}/std", std)
+        self._aggregator.record(f"{prefix}/max", max(rewards))
+        self._aggregator.record(f"{prefix}/min", min(rewards))
 
     def _all_episodes_compact_filtered(self, episodes: list[Episode]) -> bool:
         return all(self._cf_config.should_mask(ep.termination_reason or TerminationReason.UNKNOWN) for ep in episodes)
