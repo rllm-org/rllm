@@ -97,7 +97,7 @@ class FireworksBackend(TinkerBackend):
         self.beta2 = config.training.get("beta2", 0.95)
         self.eps = config.training.get("eps", 1e-8)
         self.weight_decay = config.training.get("weight_decay", 0.01)
-        self.grad_clip_norm = config.training.get("grad_clip_norm", 1.0)
+        self.grad_clip_norm = config.training.get("grad_clip_norm", 0.0)  # 0.0 = disabled; opt in explicitly (1.0 is too aggressive for token-sum loss)
 
         # Fireworks-specific handles (populated in _init_fireworks_infra)
         self.weight_syncer: WeightSyncer | None = None
