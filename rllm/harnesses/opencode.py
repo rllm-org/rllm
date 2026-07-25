@@ -79,10 +79,6 @@ class OpenCodeHarness(BaseCliHarness):
     # bypasses that validation.
     _RLLM_PROVIDER_ID = "rllm-gateway"
 
-    # Fixed session title passed via ``opencode run --title`` so opencode
-    # skips its separate title-generation LLM call (see ``build_invocation``).
-    _SESSION_TITLE = "rllm-training"
-
     def install_script(self) -> str:
         return _INSTALL_SCRIPT
 
@@ -163,11 +159,6 @@ class OpenCodeHarness(BaseCliHarness):
         # ``--model`` flag carries.
         _, model_id, _ = self._split_provider(config.model)
         qualified = f"{self._RLLM_PROVIDER_ID}/{model_id}"
-        # ``--title`` pins the session title to a fixed string so opencode
-        # skips its separate async title-generation LLM call. That call is
-        # wasted work during training (titles live only in the sandbox's
-        # local DB; trajectories come from gateway traces), and it forces the
-        # gateway to fork an extra lineage slot for its divergent prefix.
         # ``</dev/null`` is required: Modal's ``sandbox.exec`` leaves
         # stdin connected to a live socket that never receives EOF, and
         # opencode blocks on its initial stdin read forever — the run
@@ -176,7 +167,6 @@ class OpenCodeHarness(BaseCliHarness):
             f"{self._cd_prefix(task)}"
             f". $HOME/.nvm/nvm.sh 2>/dev/null; "
             f"opencode --model={shlex.quote(qualified)} run "
-            f"--title {shlex.quote(self._SESSION_TITLE)} "
             f"--dangerously-skip-permissions "
             f"-- {shlex.quote(instruction)} "
             f"</dev/null 2>&1 | tee {shlex.quote(self.stdout_log_path)}"
