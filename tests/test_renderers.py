@@ -18,6 +18,7 @@ from rllm.renderers import BridgingRendererMixin, get_renderer, resolve  # noqa:
 from rllm.renderers.adapters import ChatTemplateAdapter  # noqa: E402
 
 QWEN = "Qwen/Qwen3-0.6B"
+QWEN35 = "Qwen/Qwen3.5-35B-A3B"
 
 # Toy template token ids.
 BOS = {"user": 1, "assistant": 2, "system": 3, "tool": 4}
@@ -105,6 +106,15 @@ def qwen_tokenizer():
         pytest.skip(f"Qwen3-0.6B tokenizer unavailable: {e}")
 
 
+@pytest.fixture(scope="module")
+def qwen35_tokenizer():
+    transformers = pytest.importorskip("transformers")
+    try:
+        return transformers.AutoTokenizer.from_pretrained(QWEN35, local_files_only=True)
+    except Exception as e:  # not cached / offline
+        pytest.skip(f"Qwen3.5-35B-A3B tokenizer unavailable: {e}")
+
+
 def _tinker_qwen3(tokenizer):
     from tinker_cookbook import renderers as tk
 
@@ -181,6 +191,57 @@ def test_unified_renderer_matches_chat_template_for_qwen(qwen_tokenizer):
     text = qwen_tokenizer.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
     baseline = qwen_tokenizer.encode(text, add_special_tokens=False)
     assert unified == baseline
+
+
+def test_qwen35_vmvm_observation_preserves_interleaved_thinking_and_bridge_tokens(qwen35_tokenizer):
+    """native_react's turn-2 prompt is token-identical to a VMVM-v2 full render."""
+    from renderers import create_renderer
+
+    from rllm.harnesses.native_react import NATIVE_TOOL_SCHEMAS, initial_messages, tool_observation
+
+    renderer = create_renderer(qwen35_tokenizer, renderer="qwen3.5")
+    messages = initial_messages("inspect the directory", "/app\nfile.txt")
+    canary = "INTERLEAVED_THINKING_CANARY_7f21"
+    assistant = {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": f"I will remember {canary} before inspecting.",
+        "tool_calls": [
+            {
+                "id": "call_0",
+                "type": "function",
+                "function": {"name": "bash", "arguments": '{"command":"pwd"}'},
+            }
+        ],
+    }
+    observation = tool_observation("Current terminal state:\n/app")
+
+    turn_one_prompt = renderer.render_ids(messages, tools=NATIVE_TOOL_SCHEMAS, add_generation_prompt=True)
+    closed_turn_one = renderer.render_ids(messages + [assistant], tools=NATIVE_TOOL_SCHEMAS)
+    sampled_completion = closed_turn_one[len(turn_one_prompt) :]
+    bridged = renderer.bridge_to_next_turn(
+        turn_one_prompt,
+        sampled_completion,
+        [observation],
+        tools=NATIVE_TOOL_SCHEMAS,
+    )
+    vmvm_full_render = renderer.render_ids(
+        messages + [assistant, observation],
+        tools=NATIVE_TOOL_SCHEMAS,
+        add_generation_prompt=True,
+    )
+
+    assert bridged is not None
+    assert bridged.token_ids == vmvm_full_render
+    assert canary in qwen35_tokenizer.decode(vmvm_full_render)
+
+    ordinary_user_observation = {"role": "user", "content": "Current terminal state:\n/app"}
+    ordinary_render = renderer.render_ids(
+        messages + [assistant, ordinary_user_observation],
+        tools=NATIVE_TOOL_SCHEMAS,
+        add_generation_prompt=True,
+    )
+    assert canary not in qwen35_tokenizer.decode(ordinary_render)
 
 
 # ── TokenAccumulator integration (gateway consumer) ──────────────────────────

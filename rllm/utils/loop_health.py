@@ -8,6 +8,7 @@ event loop is observable too. It periodically logs:
 - ``thread_cpu`` — this thread's own CPU utilisation over the window, which
   disambiguates *why*: high lag + high thread_cpu = self-CPU bound (do less /
   offload); high lag + low thread_cpu = the thread is starved (GIL contention).
+- ``rss_mib`` — the process's current resident memory.
 - optional caller-supplied gauges (e.g. in-flight rollouts).
 
 Diagnostic only — no behavioural effect. Run it as a background task on the loop
@@ -31,7 +32,7 @@ async def run_loop_health_monitor(
     label: str,
     *,
     sample_s: float = 0.5,
-    report_s: float = 20.0,
+    report_s: float = 120.0,
     gauges: Callable[[], str] | None = None,
 ) -> None:
     """Log ``label`` loop health every ``report_s`` until cancelled.
@@ -67,12 +68,13 @@ async def run_loop_health_monitor(
                 except Exception:  # noqa: BLE001 - a gauge must never break the monitor
                     pass
             logger.info(
-                "%s loop health: lag_ms p50=%.0f p99=%.0f max=%.0f | thread_cpu=%.0f%% | window=%.0fs%s",
+                "%s loop health: lag_ms p50=%.0f p99=%.0f max=%.0f | thread_cpu=%.0f%% | rss_mib=%.0f | window=%.0fs%s",
                 label,
                 p50,
                 p99,
                 ordered[-1],
                 util,
+                _current_rss_mib(),
                 window,
                 extra,
             )
@@ -80,3 +82,15 @@ async def run_loop_health_monitor(
             last_cpu = cpu
             window_start = now
             next_report = now + report_s
+
+
+def _current_rss_mib() -> float:
+    """Return this process's current resident memory on Linux."""
+    try:
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0
+    except OSError:
+        pass
+    return 0.0

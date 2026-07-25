@@ -80,6 +80,36 @@ def test_chat_path_unchanged_by_token_branch():
     assert resp["prompt_token_ids"] == [1, 2, 3, 4]
 
 
+def test_chat_and_token_paths_preserve_native_reasoning_and_tool_calls():
+    class _StructuredOutput(_ModelOutput):
+        content = ""
+        reasoning = "reasoning survives"
+        tool_calls = [SimpleNamespace(name="bash", arguments={"command": "pwd"})]
+
+    class _StructuredEngine(_FakeEngine):
+        def assemble_model_output(self, token_input, token_output):
+            return _StructuredOutput()
+
+        async def get_model_response(self, messages, **kwargs):
+            self.messages = messages
+            return _StructuredOutput()
+
+    engine = _StructuredEngine()
+    handler = create_tinker_handler(engine)
+
+    chat = asyncio.run(handler({"messages": [{"role": "user", "content": "hi"}]}))
+    token = asyncio.run(handler({"prompt": [1, 2, 3, 4]}))
+
+    for choice in (chat["choices"][0], token["choices"][0]):
+        message = choice.get("message") or choice["response_message"]
+        assert choice["finish_reason"] == "tool_calls"
+        assert message["reasoning_content"] == "reasoning survives"
+        assert message["tool_calls"][0]["function"] == {
+            "name": "bash",
+            "arguments": '{"command": "pwd"}',
+        }
+
+
 def test_non_int_prompt_falls_through_to_chat():
     """A string ``prompt`` (or none) must not trigger the token path."""
     engine = _FakeEngine()

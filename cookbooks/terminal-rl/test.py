@@ -1,7 +1,7 @@
 """Smoke tests for the terminal-rl cookbook.
 
 These tests don't boot sandboxes, run agents, or train. They only verify the
-wiring: the terminus2 harness is importable, the Harbor task loader is
+wiring: the terminal harnesses are importable, the Harbor task loader is
 reachable, and ``train.py`` / ``prepare_data.py`` import without side effects
 and expose the expected dataset names.
 
@@ -29,10 +29,16 @@ def _import_cookbook_module(name: str):
 
 
 def test_terminus2_harness_importable():
-    """``terminus2`` is the harness this cookbook drives; it must import."""
+    """The backward-compatible Terminus-2 option remains importable."""
     mod = importlib.import_module("rllm.harnesses.terminus2")
     assert hasattr(mod, "Terminus2Harness")
     assert mod.Terminus2Harness.name == "terminus2"
+
+
+def test_native_react_harness_importable():
+    mod = importlib.import_module("rllm.harnesses.native_react")
+    assert hasattr(mod, "NativeReactHarness")
+    assert mod.NativeReactHarness.name == "native_react"
 
 
 def test_harbor_loader_importable():

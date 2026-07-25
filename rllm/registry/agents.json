@@ -16,6 +16,11 @@
       "function": "BashHarness",
       "description": "Multi-turn ReAct bash loop inside a sandbox."
     },
+    "native_react": {
+      "module": "rllm.harnesses.native_react",
+      "function": "NativeReactHarness",
+      "description": "Minimal renderer-native ReAct loop matching VMVM TB-v2 prompts and observations."
+    },
     "claude-code": {
       "module": "rllm.harnesses.claude_code",
       "function": "ClaudeCodeHarness",
