@@ -52,11 +52,7 @@ TINKER_KNOWN_LOSSES = {"importance_sampling", "ppo", "cispo", "dro", "cross_entr
 
 def format_optimizer_metrics(result: tinker.types.OptimStepResponse) -> dict[str, float]:
     """Format Tinker optimizer metrics for trainer logging."""
-    return {
-        f"train/{key.replace(':', '/')}": value
-        for key, value in (result.metrics or {}).items()
-        if not key.startswith("clock_cycle")
-    }
+    return {f"train/{key.replace(':', '/')}": value for key, value in (result.metrics or {}).items() if not key.startswith("clock_cycle")}
 
 
 # helper decorator for any function requiring a training client to be initialized
