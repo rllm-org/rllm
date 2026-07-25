@@ -246,6 +246,11 @@ The production profile is a separate, guarded launch contract:
   rank `0`
 - OpenCode harness
 - all 1,200 `tb-opus-pass/train` tasks for training
+- one training epoch
+- trainer sequence length resolved from the selected shape (`204736` for the
+  current GLM-5.2 200k full-parameter and LoRA shapes)
+- compact filtering enabled for invalid or infrastructure-failed trajectories;
+  an agent wall-clock timeout remains a valid, partially graded RL outcome
 - all 89 `terminal-bench@2.1/default` tasks at step 0, every 25 optimizer
   steps, and final weights
 - no separate boundary-benchmark invocation, so step 0 evaluates the full set
@@ -283,6 +288,12 @@ visible in an automation wrapper, set `TB_TRAINER_REPLICAS=4` and
 final checkpoint. If the last optimizer step is itself a multiple of 25, the
 trainer recognizes that the final policy was already validated and does not
 run the same 89 tasks a second time.
+
+The production profile also drops uniform-reward GRPO groups. For a prompt with
+16 rollouts, if all 16 receive the same reward, every centered GRPO advantage
+is zero and the group has no policy-gradient signal. Dropping that group avoids
+an otherwise useless trainer batch. This is separate from compact filtering:
+it does not remove mixed groups or identify infrastructure failures.
 
 Before spending full-parameter capacity, run the matching LoRA sanity profile.
 It keeps the same training data, step-0 boundary evaluation, and four-plus-four

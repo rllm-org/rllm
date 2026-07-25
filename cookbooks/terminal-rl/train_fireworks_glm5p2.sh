@@ -214,6 +214,11 @@ if [ -n "$trainer_region" ]; then
     region_override+=("fireworks_infra.trainers.policy.region=$trainer_region")
 fi
 
+# Leave training.max_length unset so the Fireworks provisioner resolves the
+# selected training shape's max context (204736 for both GLM-5.2 200k shapes).
+# The prompt/response caps sum to that current shape limit.
+# Compact filtering drops invalid/truncated and infrastructure outcomes, while
+# agent wall-clock exhaustion remains a real, partially graded RL outcome.
 exec "$python_bin" -u train.py \
     rllm/backend=fireworks \
     model.name=accounts/fireworks/models/glm-5p2-fp8 \
@@ -227,16 +232,24 @@ exec "$python_bin" -u train.py \
     training.group_size=16 \
     training.learning_rate="$learning_rate" \
     training.beta2=0.999 \
-    training.max_length=67584 \
+    training.max_length=null \
     rllm.rollout.train.temperature=1.0 \
     rllm.rollout.train.top_p=1.0 \
     rllm.rollout.val.temperature=1.0 \
     rllm.rollout.val.top_p=1.0 \
-    rllm.data.max_prompt_length=51200 \
+    rllm.data.max_prompt_length=188352 \
     rllm.data.max_response_length=16384 \
     rllm.data.train_batch_size=1 \
     rllm.data.val_batch_size=-1 \
-    rllm.compact_filtering.enable=false \
+    rllm.compact_filtering.enable=true \
+    rllm.compact_filtering.mask_timeout=false \
+    rllm.compact_filtering.mask_error=true \
+    rllm.compact_filtering.mask_verifier_timeout=true \
+    rllm.compact_filtering.mask_grading_error=true \
+    rllm.compact_filtering.mask_sandbox_error=true \
+    rllm.compact_filtering.mask_agent_setup_timeout=true \
+    rllm.compact_filtering.mask_env_start_timeout=true \
+    rllm.compact_filtering.mask_model_error=true \
     rllm.algorithm.adv_estimator=grpo \
     rllm.algorithm.norm_adv_by_std_in_grpo=false \
     rllm.algorithm.router_replay=R3 \
