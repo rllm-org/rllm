@@ -1,6 +1,9 @@
 <div align="center">
 
-# rLLM
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/logo/rllm-github-logo-dark.png">
+  <img src="docs/logo/rllm-github-logo-light.png" alt="rLLM" width="360">
+</picture>
 
 **Agentic RL on any harness, with any backend, on any benchmark.**
 
@@ -153,6 +156,7 @@ Under the hood:
 - [TherapyGym](https://therapygym.stanford.edu/) - Evaluating and Aligning Clinical Fidelity and Safety in Therapy Chatbots
 - [SandMLE](https://arxiv.org/pdf/2604.04872) - Synthetic Sandbox for Training MLE Agents
 - [AxPO](https://byungkwanlee.github.io/AXPO-page/) - Agent Explorative Policy Optimization for Multimodal Agentic Reasoning
+- [Remember When It Matters](https://arxiv.org/abs/2607.08716) — Proactive Memory Agent for Long-Horizon Agents
   
 ## Articles & Blog Posts
 
