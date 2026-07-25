@@ -39,7 +39,7 @@ from rllm.trainer.algorithms.transform import (
 )
 from rllm.trainer.algorithms.visualization import print_config_table, print_metrics_table, visualize_trajectory_last_steps
 from rllm.trainer.backend_protocol import BackendProtocol
-from rllm.trainer.buffer import TrajectoryGroupBuffer
+from rllm.trainer.buffer import TaskBatch, TrajectoryGroupBuffer
 from rllm.trainer.metrics_aggregator import MetricsAggregator
 from rllm.trainer.sync_coordinator import SyncCoordinator, SyncCoordinatorConfig
 from rllm.types import INFRA_ERROR_REASONS, Episode, TerminationReason, TrajectoryGroup
@@ -311,6 +311,17 @@ class UnifiedTrainer:
         if hasattr(self.backend, "tokenizer"):
             self.tokenizer = self.backend.tokenizer
 
+    def _uses_strict_sync_group_accumulation(self) -> bool:
+        """Whether sync training must backfill filtered prompt groups.
+
+        Uniform-group filtering is defined over one complete rollout group.  A
+        normal synchronous dataloader batch cannot know how many prompt groups
+        will survive that filter, so this mode consumes one prompt at a time
+        and accumulates exactly ``data.train_batch_size`` accepted groups before
+        taking an optimizer step.
+        """
+        return not self.async_config.enable and self.rs_config.filter_uniform_groups
+
     def _init_dataloaders(self) -> None:
         """Build train, periodic-validation, and boundary-benchmark loaders."""
         self._train_dataloader: StatefulTaskDataLoader | None = None
@@ -319,7 +330,12 @@ class UnifiedTrainer:
         self._total_training_steps: int | None = None
 
         if self.train_dataset is not None:
-            batch_size = 1 if self.async_config.enable else int(self.rllm_config.data.train_batch_size * self.rllm_config.rejection_sample.multiplier)
+            strict_sync_accumulation = self._uses_strict_sync_group_accumulation()
+            batch_size = (
+                1
+                if self.async_config.enable or strict_sync_accumulation
+                else int(self.rllm_config.data.train_batch_size * self.rllm_config.rejection_sample.multiplier)
+            )
             self._train_dataloader = StatefulTaskDataLoader(
                 self.train_dataset,
                 batch_size=batch_size,
@@ -333,7 +349,12 @@ class UnifiedTrainer:
                 self._total_training_steps = total_batches
             else:
                 total_task_batches = len(self._train_dataloader) * self.rllm_config.trainer.total_epochs
-                self._total_training_steps = total_task_batches // self.async_config.mini_batch_size if self.async_config.enable else total_task_batches
+                if self.async_config.enable:
+                    self._total_training_steps = total_task_batches // self.async_config.mini_batch_size
+                elif strict_sync_accumulation:
+                    self._total_training_steps = total_task_batches // self.rllm_config.data.train_batch_size
+                else:
+                    self._total_training_steps = total_task_batches
 
         if self.val_dataset is not None:
             val_batch_size = self.rllm_config.data.val_batch_size
@@ -481,7 +502,11 @@ class UnifiedTrainer:
             await self._fit_on_policy(trainer_state)
 
     async def _fit_on_policy(self, trainer_state: TrainerState) -> None:
-        """Synchronous training loop (the most vanilla, standalone case that does not support minibatching or off-policy training)."""
+        """Synchronous training loop with no rollout/training overlap."""
+        if self._uses_strict_sync_group_accumulation():
+            await self._fit_strict_sync_on_policy(trainer_state)
+            return
+
         train_dataloader = self._train_dataloader
         assert train_dataloader is not None, "train_dataset is required for training"
         total_epochs = self.rllm_config.trainer.total_epochs
@@ -542,6 +567,312 @@ class UnifiedTrainer:
         # queue is already shut down, so evaluation creates its own sandboxes.
         await self._run_final_evaluations_async(trainer_state)
 
+    async def _fit_strict_sync_on_policy(self, trainer_state: TrainerState) -> None:
+        """Strict on-policy loop with accepted-group gradient accumulation.
+
+        Each optimizer step has a hard policy-version boundary:
+
+        1. Generate prompt groups from the currently hot-loaded policy until
+           exactly ``data.train_batch_size`` groups survive compact and
+           uniform-reward filtering.
+        2. Run one forward/backward pass per accepted prompt group, accumulating
+           gradients without changing the policy.
+        3. Take one optimizer step, hot-load the new weights, and await rollout
+           readiness before collecting the next prompt group.
+
+        Generation and training never overlap in this path.  Rejected prompt
+        groups are backfilled while the same policy remains frozen.
+        """
+        train_dataloader = self._train_dataloader
+        assert train_dataloader is not None, "train_dataset is required for training"
+        assert not getattr(self.agent_workflow_engine, "raise_on_error", False), (
+            "Strict synchronous group accumulation requires raise_on_error=False "
+            "so every attempted rollout group can be classified or filtered."
+        )
+
+        accepted_groups_per_step = int(self.rllm_config.data.train_batch_size)
+        if accepted_groups_per_step < 1:
+            raise ValueError(f"data.train_batch_size must be positive, got {accepted_groups_per_step}")
+
+        total_epochs = self.rllm_config.trainer.total_epochs
+        use_total_batches = self.rllm_config.trainer.get("total_batches") is not None and self.rllm_config.trainer.total_batches > 0
+        trainer_state.total_steps = self._total_training_steps
+        rollout_engine = getattr(self.agent_workflow_engine, "rollout_engine", None)
+        break_via_total_batches = False
+        coordinator = SyncCoordinator(
+            SyncCoordinatorConfig(
+                mini_batch_size=accepted_groups_per_step,
+                group_size=self.rllm_config.rollout.n,
+                staleness_threshold=0.0,
+                trigger_parameter_sync_step=1,
+                max_concurrent_rollouts=self.agent_workflow_engine.n_parallel_tasks,
+            )
+        )
+
+        hooks = getattr(self.agent_workflow_engine, "hooks", None)
+        warm_queue = self._start_train_warm_queue(
+            train_dataloader,
+            trainer_state,
+            total_epochs,
+            use_total_batches,
+            hooks,
+        )
+        try:
+            for epoch in range(train_dataloader.epoch, total_epochs):
+                if break_via_total_batches:
+                    break
+
+                trainer_state.epoch = epoch
+                pprint(f"epoch {epoch}, step {trainer_state.global_step} started")
+                await self.backend.on_epoch_start(trainer_state)
+
+                aggregator = MetricsAggregator()
+                buffer = TrajectoryGroupBuffer(
+                    group_size=self.rllm_config.rollout.n,
+                    coordinator=coordinator,
+                    aggregator=aggregator,
+                    algorithm_config=self.algorithm_config,
+                    transform_config=self.transform_config,
+                    cf_config=self.cf_config,
+                    rs_config=self.rs_config,
+                    episode_offload_dir=self.async_config.episode_offload_dir,
+                    trajectory_group_offload_dir=self.async_config.trajectory_group_offload_dir,
+                )
+                task_iterator = iter(train_dataloader)
+
+                try:
+                    while True:
+                        trainer_state.reset_batch()
+                        buffer.set_training_step(trainer_state.global_step)
+
+                        with simple_timer("step", trainer_state.timing_dict):
+                            task_batches, exhausted, candidate_count = await self._collect_strict_sync_task_batches(
+                                task_iterator=task_iterator,
+                                trainer_state=trainer_state,
+                                buffer=buffer,
+                                coordinator=coordinator,
+                                target_count=accepted_groups_per_step,
+                            )
+
+                            if len(task_batches) < accepted_groups_per_step:
+                                logger.info(
+                                    "[StrictSync] Epoch %d exhausted with %d/%d accepted prompt groups; "
+                                    "discarding the incomplete optimizer batch.",
+                                    epoch,
+                                    len(task_batches),
+                                    accepted_groups_per_step,
+                                )
+                                break
+
+                            trained_this_step = await self._train_strict_sync_task_batches(
+                                task_batches=task_batches,
+                                trainer_state=trainer_state,
+                                aggregator=aggregator,
+                                candidate_count=candidate_count,
+                            )
+
+                        if trained_this_step:
+                            # _perform_weight_sync awaits backend.on_policy_updated().
+                            # On Fireworks that awaits save_and_hotload(), including
+                            # deployment readiness and warmup, before the gateway
+                            # version is advanced and the next rollout can start.
+                            coordinator.on_training_step_complete()
+                            with simple_timer("weight_sync", trainer_state.timing_dict):
+                                await self._perform_weight_sync(
+                                    trainer_state,
+                                    coordinator,
+                                    rollout_engine,
+                                )
+                            await self.backend.on_batch_end(trainer_state)
+                        else:
+                            logger.warning(
+                                "[StrictSync] Step %d produced no trainable sequences; "
+                                "skipping optimizer step and weight hot-load.",
+                                trainer_state.global_step,
+                            )
+
+                        # W&B discards a second committed write at the same
+                        # explicit step, so fold periodic validation into the
+                        # training row after the new weights are hot-loaded.
+                        if (
+                            trained_this_step
+                            and self.rllm_config.trainer.test_freq > 0
+                            and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0
+                        ):
+                            with _detached_warm_queue(hooks):
+                                trainer_state.metrics.update(
+                                    await self._validate_async(
+                                        trainer_state,
+                                        log_metrics=False,
+                                    )
+                                )
+
+                        print_metrics_table(trainer_state.metrics, trainer_state.global_step)
+                        self.logger.log(
+                            data=trainer_state.metrics,
+                            step=trainer_state.global_step,
+                            episodes=trainer_state.episodes,
+                            trajectory_groups=trainer_state.trajectory_groups,
+                        )
+
+                        if use_total_batches and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
+                            break_via_total_batches = True
+                            break
+
+                        trainer_state.global_step += 1
+                        if exhausted:
+                            break
+                finally:
+                    buffer.mark_generation_complete()
+
+                await self.backend.on_epoch_end(trainer_state)
+        finally:
+            if warm_queue is not None:
+                warm_queue.shutdown()
+                hooks.warm_queue = None
+
+        await self._run_final_evaluations_async(trainer_state)
+
+    async def _collect_strict_sync_task_batches(
+        self,
+        *,
+        task_iterator,
+        trainer_state: TrainerState,
+        buffer: TrajectoryGroupBuffer,
+        coordinator: SyncCoordinator,
+        target_count: int,
+    ) -> tuple[list[TaskBatch], bool, int]:
+        """Collect exactly ``target_count`` accepted groups under one policy."""
+        accepted: list[TaskBatch] = []
+        exhausted = False
+        candidate_count = 0
+
+        while len(accepted) < target_count:
+            # Generate only as many candidate prompt groups as are still
+            # required.  Since one prompt yields at most one TaskBatch, this
+            # cannot overshoot and leave old-policy work for the next step.
+            candidate_batch = []
+            for _ in range(target_count - len(accepted)):
+                try:
+                    loader_batch = next(task_iterator)
+                except StopIteration:
+                    exhausted = True
+                    break
+                if len(loader_batch) != 1:
+                    raise RuntimeError(
+                        "Strict synchronous accumulation requires a task-wise "
+                        f"dataloader, got a loader batch of {len(loader_batch)}."
+                    )
+                candidate_batch.extend(loader_batch)
+
+            if not candidate_batch:
+                break
+
+            candidate_count += len(candidate_batch)
+            for _ in candidate_batch:
+                coordinator.on_group_dispatched()
+
+            self.agent_workflow_engine.set_training_step(
+                trainer_state.global_step,
+                mode="train",
+                epoch=trainer_state.epoch,
+            )
+            episodes = await self.backend.generate_episodes(
+                candidate_batch,
+                agent_workflow_engine=self.agent_workflow_engine,
+                is_validation=False,
+            )
+            for episode in episodes:
+                if episode is not None:
+                    await buffer.add_episode(episode.task_id, episode)
+
+            ready = min(buffer.ready_count, target_count - len(accepted))
+            for _ in range(ready):
+                task_batch = await buffer.get()
+                if task_batch is None:
+                    exhausted = True
+                    break
+                coordinator.on_group_consumed()
+                accepted.append(task_batch)
+
+            if exhausted:
+                break
+
+        return accepted, exhausted, candidate_count
+
+    async def _train_strict_sync_task_batches(
+        self,
+        *,
+        task_batches: list[TaskBatch],
+        trainer_state: TrainerState,
+        aggregator: MetricsAggregator,
+        candidate_count: int,
+    ) -> bool:
+        """Accumulate one forward/backward pass per group, then optimize once."""
+        all_trajectory_groups: list[TrajectoryGroup] = []
+        all_episodes: list[Episode] = []
+        trainable_sequences = 0
+
+        for pass_idx, task_batch in enumerate(task_batches):
+            trainer_state.trajectory_groups = task_batch.groups
+            trainer_state.backend_batch = None
+            all_trajectory_groups.extend(task_batch.groups)
+            all_episodes.extend(task_batch.episodes)
+
+            logger.info(
+                "[StrictSync] Step %d: fwd-bwd pass %d/%d (%d trajectory groups)",
+                trainer_state.global_step,
+                pass_idx + 1,
+                len(task_batches),
+                len(task_batch.groups),
+            )
+            await self.backend.on_batch_start(trainer_state)
+            trainer_state.backend_batch = self.backend.transform_to_backend_batch(trainer_state)
+            await self.backend.process_backend_batch(trainer_state)
+
+            backend_batch = trainer_state.backend_batch
+            if isinstance(backend_batch, dict):
+                trainable_sequences += sum(len(value) for value in backend_batch.values())
+            elif backend_batch is not None:
+                trainable_sequences += len(backend_batch)
+
+            aggregator.record_dict(trainer_state.metrics)
+            trainer_state.metrics = {}
+
+        trained_this_step = trainable_sequences > 0
+        if trained_this_step:
+            logger.info(
+                "[StrictSync] Step %d: optimizer step over %d accepted prompt groups",
+                trainer_state.global_step,
+                len(task_batches),
+            )
+            await self.backend.update_policy(trainer_state)
+            trainer_state.policy_update_count += 1
+
+        optimizer_metrics = trainer_state.metrics
+        trainer_state.metrics = aggregator.flush()
+        trainer_state.metrics.update(optimizer_metrics)
+        trainer_state.metrics.update(
+            {
+                "sync/trained_this_step": float(trained_this_step),
+                "sync/candidate_prompt_groups": candidate_count,
+                "sync/accepted_prompt_groups": len(task_batches),
+                "sync/trainable_sequences": trainable_sequences,
+            }
+        )
+        trainer_state.trajectory_groups = all_trajectory_groups
+        trainer_state.episodes = all_episodes
+
+        if self.tokenizer is not None and trainer_state.has_trajectory_groups:
+            visualize_trajectory_last_steps(
+                trainer_state.trajectory_groups,
+                tokenizer=self.tokenizer,
+                max_steps_to_visualize=2,
+                show_workflow_metadata=True,
+            )
+
+        return trained_this_step
+
     def _start_train_warm_queue(self, train_dataloader, trainer_state, total_epochs, use_total_batches, hooks):
         """Prefetch upcoming sandboxes ahead of rollout, mirroring eval's warm pool.
 
@@ -564,7 +895,17 @@ class UnifiedTrainer:
         remaining = self._total_training_steps - consumed
         if use_total_batches:
             remaining = min(remaining, self.rllm_config.trainer.total_batches - consumed)
-        schedule = build_train_schedule(train_dataloader, group_size=self.rllm_config.rollout.n, total_epochs=total_epochs, remaining_batches=remaining)
+        # A strict filtered step may consume more raw prompts than its accepted
+        # group target, so optimizer-step counts cannot safely cap this
+        # task-wise schedule.  Walk the remaining epoch(s); WarmQueue still only
+        # materializes ``size`` sandboxes ahead.
+        remaining_loader_batches = -1 if self._uses_strict_sync_group_accumulation() else remaining
+        schedule = build_train_schedule(
+            train_dataloader,
+            group_size=self.rllm_config.rollout.n,
+            total_epochs=total_epochs,
+            remaining_batches=remaining_loader_batches,
+        )
         warm_queue = WarmQueue(schedule, hooks.sandbox_backend, hooks.registry, size, install_script=install_script_for(flow))
         hooks.warm_queue = warm_queue
         warm_queue.start()

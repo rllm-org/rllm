@@ -259,6 +259,12 @@ class FireworksPolicyTrainer:
 
         if start_step == 0:
             logger.info("Starting training from scratch with model: %s", self.config.model.name)
+            # Provisioning creates the deployment from the configured base
+            # model, but the trainer is the source of truth for the exact
+            # step-0 policy (including a newly initialized LoRA adapter).
+            # Await the initial save + hot-load before val_before_train or any
+            # training rollout can query the deployment.
+            await self._initial_weight_sync()
 
         return start_step
 

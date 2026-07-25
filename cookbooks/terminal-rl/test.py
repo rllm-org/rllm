@@ -154,6 +154,7 @@ def test_glm5p2_production_profile_is_full_opencode_4x12_full_suite_every_twenty
     assert "training.max_length=null" in result.stdout
     assert "rllm.data.max_prompt_length=188352" in result.stdout
     assert "rllm.data.max_response_length=16384" in result.stdout
+    assert "rllm.data.train_batch_size=8" in result.stdout
     assert "rllm.compact_filtering.enable=true" in result.stdout
     assert "rllm.compact_filtering.mask_timeout=false" in result.stdout
     assert "rllm.compact_filtering.mask_error=true" in result.stdout
@@ -164,6 +165,12 @@ def test_glm5p2_production_profile_is_full_opencode_4x12_full_suite_every_twenty
     assert "rllm.compact_filtering.mask_env_start_timeout=true" in result.stdout
     assert "rllm.compact_filtering.mask_model_error=true" in result.stdout
     assert "rllm.rejection_sample.filter_uniform_groups=true" in result.stdout
+    assert "rllm.async_training.enable=false" in result.stdout
+    assert "rllm.async_training.staleness_threshold=0.0" in result.stdout
+    assert "rllm.async_training.trigger_parameter_sync_step=1" in result.stdout
+    assert "rllm.async_training.partial_rollout=false" in result.stdout
+    assert "rllm.async_training.mini_batch_size=" not in result.stdout
+    assert "rllm.async_training.fwd_bwd_group_size=" not in result.stdout
     assert "rllm.trainer.total_epochs=1" in result.stdout
     assert "rllm.trainer.total_batches=-1" in result.stdout
     assert "rllm.trainer.val_before_train=true" in result.stdout

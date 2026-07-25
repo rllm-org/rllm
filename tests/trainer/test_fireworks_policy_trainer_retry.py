@@ -8,6 +8,7 @@ pytest-asyncio needed.
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -142,6 +143,43 @@ def test_reconnect_without_mgr_is_safe_noop():
 
     assert asyncio.run(t._run_training_op(fn, op_name="x", reconnect=True)) == "ok"
     assert t._reconnect_training_client() is False
+
+
+def test_initialize_from_scratch_awaits_initial_weight_hotload():
+    t = _trainer()
+    t.config = SimpleNamespace(model=SimpleNamespace(name="base-model"))
+    t._try_resume = AsyncMock(return_value=0)
+    t._initial_weight_sync = AsyncMock()
+
+    start_step = asyncio.run(t.initialize_async(resume_from_checkpoint=True))
+
+    assert start_step == 0
+    t._try_resume.assert_awaited_once_with()
+    t._initial_weight_sync.assert_awaited_once_with()
+
+
+def test_initialize_after_resume_does_not_repeat_initial_weight_hotload():
+    t = _trainer()
+    t.config = SimpleNamespace(model=SimpleNamespace(name="base-model"))
+    t._try_resume = AsyncMock(return_value=7)
+    t._initial_weight_sync = AsyncMock()
+
+    start_step = asyncio.run(t.initialize_async(resume_from_checkpoint=True))
+
+    assert start_step == 7
+    t._initial_weight_sync.assert_not_awaited()
+
+
+def test_initial_weight_sync_uses_base_snapshot_and_is_awaited():
+    t = _trainer()
+    t._sync_weights = AsyncMock(return_value="snapshot")
+
+    asyncio.run(t._initial_weight_sync())
+
+    t._sync_weights.assert_awaited_once_with(
+        "step-0-base",
+        checkpoint_type="base",
+    )
 
 
 def test_optim_step_disables_server_normalization_and_emits_grad_norm_metrics():

@@ -15,6 +15,11 @@
 # full-parameter + OpenCode with the complete 89-task suite at step 0, every
 # 25 optimizer steps, and final weights. Production uses one validation suite
 # instead of also scheduling the same tasks as a boundary benchmark.
+#
+# Training is strictly synchronous and on-policy: collect eight accepted
+# prompt groups from one frozen policy, accumulate one forward/backward pass
+# per group, take one optimizer step, then await the Fireworks hot-load before
+# the next rollout. Uniform groups are replaced under the same policy.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -68,7 +73,7 @@ case "$phase" in
         trainer_replicas="${TB_TRAINER_REPLICAS:-1}"
         rollout_replicas="${TB_ROLLOUT_REPLICAS:-1}"
         n_parallel_tasks="${TB_DEBUG_N_PARALLEL_TASKS:-16}"
-        async_mini_batch_size="${TB_DEBUG_ASYNC_MINI_BATCH_SIZE:-1}"
+        optimizer_groups_per_step="${TB_DEBUG_GROUPS_PER_STEP:-${TB_DEBUG_ASYNC_MINI_BATCH_SIZE:-1}}"
         ;;
     train)
         train_dataset="tb-opus-pass"
@@ -93,7 +98,7 @@ case "$phase" in
         # containers and can overload a shared Docker host when four matrix
         # runs launch together.
         n_parallel_tasks="${TB_TRAIN_N_PARALLEL_TASKS:-64}"
-        async_mini_batch_size="${TB_TRAIN_ASYNC_MINI_BATCH_SIZE:-8}"
+        optimizer_groups_per_step="${TB_TRAIN_GROUPS_PER_STEP:-${TB_TRAIN_ASYNC_MINI_BATCH_SIZE:-8}}"
         ;;
     sanity|production)
         if [ "$harness" != "opencode" ]; then
@@ -146,7 +151,7 @@ case "$phase" in
             rollout_replicas="${TB_ROLLOUT_REPLICAS:-12}"
         fi
         n_parallel_tasks="${TB_TRAIN_N_PARALLEL_TASKS:-64}"
-        async_mini_batch_size="${TB_TRAIN_ASYNC_MINI_BATCH_SIZE:-8}"
+        optimizer_groups_per_step="${TB_TRAIN_GROUPS_PER_STEP:-${TB_TRAIN_ASYNC_MINI_BATCH_SIZE:-8}}"
         ;;
     *)
         echo "unsupported phase '$phase' (expected debug, train, sanity, or production)" >&2
@@ -204,10 +209,10 @@ export WANDB_TAGS="terminal-bench,glm-5.2,${mode},${harness},${phase},${trainer_
 
 mkdir -p "$RLLM_HOME" "$WANDB_DIR" "${state_root}/logs"
 
-printf 'run=%s mode=%s harness=%s phase=%s train=%s/%s val=%s/%s benchmark=%s region=%s trainer_replicas=%s rollout_replicas=%s gateway_port=%s deployment=%s async_mini_batch_size=%s\n' \
+printf 'run=%s mode=%s harness=%s phase=%s train=%s/%s val=%s/%s benchmark=%s region=%s trainer_replicas=%s rollout_replicas=%s gateway_port=%s deployment=%s optimizer_groups_per_step=%s\n' \
     "$run_name" "$mode" "$harness" "$phase" "$train_dataset" "$train_split" \
     "$val_dataset" "$val_split" "${benchmark_dataset:-disabled}" "${trainer_region:-control-plane-selected}" \
-    "$trainer_replicas" "$rollout_replicas" "$gateway_port" "$deployment_id" "$async_mini_batch_size"
+    "$trainer_replicas" "$rollout_replicas" "$gateway_port" "$deployment_id" "$optimizer_groups_per_step"
 
 region_override=()
 if [ -n "$trainer_region" ]; then
@@ -239,7 +244,7 @@ exec "$python_bin" -u train.py \
     rllm.rollout.val.top_p=1.0 \
     rllm.data.max_prompt_length=188352 \
     rllm.data.max_response_length=16384 \
-    rllm.data.train_batch_size=1 \
+    rllm.data.train_batch_size="$optimizer_groups_per_step" \
     rllm.data.val_batch_size=-1 \
     rllm.compact_filtering.enable=true \
     rllm.compact_filtering.mask_timeout=false \
@@ -257,12 +262,10 @@ exec "$python_bin" -u train.py \
     +rllm.algorithm.loss_params='{delta: 0.1}' \
     rllm.algorithm.loss_agg_mode=token-mean \
     rllm.algorithm.rollout_correction.bypass_mode=true \
-    rllm.async_training.enable=true \
-    rllm.async_training.mini_batch_size="$async_mini_batch_size" \
-    rllm.async_training.fwd_bwd_group_size=1 \
-    rllm.async_training.staleness_threshold=3.0 \
+    rllm.async_training.enable=false \
+    rllm.async_training.staleness_threshold=0.0 \
     rllm.async_training.trigger_parameter_sync_step=1 \
-    rllm.async_training.partial_rollout=true \
+    rllm.async_training.partial_rollout=false \
     rllm.workflow.n_parallel_tasks="$n_parallel_tasks" \
     rllm.workflow.raise_on_error=false \
     rllm.rejection_sample.filter_uniform_groups=true \

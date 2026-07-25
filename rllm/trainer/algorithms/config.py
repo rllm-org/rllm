@@ -227,8 +227,11 @@ class RejectionSamplingConfig:
     # For "episode" mode (verl compatibility): minimum number of tasks with partial solves before proceeding
     min_partial_solve_tasks: int = 1
 
-    # Filter out episode groups where all rollouts have the same is_correct (no gradient signal).
-    # Applied at the accumulator level in async training, before groups enter the buffer.
+    # Filter out episode groups whose rollouts produce all-zero advantages
+    # (for GRPO, typically identical rewards and therefore no gradient signal).
+    # Applied at the accumulator level before groups enter training. Async mode
+    # filters in its streaming buffer; strict sync mode backfills rejected
+    # groups under the same frozen policy.
     filter_uniform_groups: bool = False
 
     # Only when filter_uniform_groups is True. True (default): refill a dropped uniform group
