@@ -22,6 +22,12 @@
 # Checkpoints: /local-ssd/mmcodex-8gpu-full/exp/  → S3 sync every 60s in background
 set -euo pipefail
 
+: "${ROLLOUT_N:=5}"
+: "${MAX_PROMPT_LEN:=2048}"
+: "${MAX_RESPONSE_LEN:=1024}"
+: "${MAX_MODEL_LEN:=32768}"
+: "${GPU_MEM_UTIL:=0.6}"
+: "${EXPERIMENT_NAME:=qwen3.5-9b-grpo-r${ROLLOUT_N}-p${MAX_PROMPT_LEN}-r${MAX_RESPONSE_LEN}}"
 : "${PROJECT_DIR:=/data/work/rllm}"
 : "${MODEL:=Qwen/Qwen3.5-9B}"
 : "${VLLM_PORT:=4000}"
@@ -80,6 +86,37 @@ export RLLM_API_FORMAT=responses  # Codex CLI speaks Responses API — needed fo
 _VENV_SITE=$(ls -d /tmp/uv-venv/lib/python*/site-packages 2>/dev/null | head -1)
 if [[ -n "$_VENV_SITE" && -d "$_VENV_SITE/nvidia/cu13/lib" ]]; then
     export LD_LIBRARY_PATH="$_VENV_SITE/nvidia/cu13/lib:${LD_LIBRARY_PATH:-}"
+fi
+
+# --------- 5b. (Opt-in) install rotary-shape DIAG patch as sitecustomize ---------
+# Set RLLM_ROTARY_DIAG=1 in the submit -c "..." to enable. Copies the patch to
+# sitecustomize.py so ALL python processes (main + Ray workers) pick it up.
+if [[ -n "${RLLM_ROTARY_DIAG:-}" && -n "$_VENV_SITE" ]]; then
+    _PATCH_SRC="$PROJECT_DIR/cookbooks/multimodal_codex/rotary_diag_patch.py"
+    if [[ -f "$_PATCH_SRC" ]]; then
+        echo "[full] installing rotary_diag_patch as sitecustomize.py"
+        cp "$_PATCH_SRC" "$_VENV_SITE/sitecustomize.py"
+    else
+        echo "[full] WARN: RLLM_ROTARY_DIAG set but $_PATCH_SRC missing"
+    fi
+    # Also apply in-place patch to modeling_qwen3_5.py — guaranteed to fire even if
+    # sitecustomize.py isn't loaded (uv venv sometimes skips it).
+    _INPLACE="$PROJECT_DIR/cookbooks/multimodal_codex/install_rotary_diag_inplace.py"
+    if [[ -f "$_INPLACE" ]]; then
+        echo "[full] applying in-place DIAG patch to modeling_qwen3_5.py"
+        /tmp/uv-venv/bin/python "$_INPLACE" || echo "[full] WARN: in-place patch failed"
+    fi
+fi
+
+# --------- 5c. (Opt-in) install verl-side DIAG for packing/log_prob path ---------
+# Set VERL_DIAG=1 in the submit -c "..." to enable. Patches verl vendored code
+# in-place. At training time also set VERL_DIAG=1 so the prints actually fire.
+if [[ -n "${VERL_DIAG:-}" ]]; then
+    _VERL_INPLACE="$PROJECT_DIR/cookbooks/multimodal_codex/install_verl_diag_inplace.py"
+    if [[ -f "$_VERL_INPLACE" ]]; then
+        echo "[full] applying in-place VERL_DIAG patch"
+        /tmp/uv-venv/bin/python "$_VERL_INPLACE" || echo "[full] WARN: VERL DIAG patch failed"
+    fi
 fi
 
 VENV_PY=/tmp/uv-venv/bin/python
@@ -185,8 +222,8 @@ CUDA_VISIBLE_DEVICES=2,3,4,5,6,7 "$VENV_PY" cookbooks/multimodal_codex/train.py 
     rllm.algorithm.use_rllm=true \
     data.train_batch_size=6 \
     data.val_batch_size=8 \
-    data.max_prompt_length=2048 \
-    data.max_response_length=1024 \
+    data.max_prompt_length=${MAX_PROMPT_LEN} \
+    data.max_response_length=${MAX_RESPONSE_LEN} \
     +model.name="$MODEL" \
     actor_rollout_ref.model.path="$MODEL" \
     actor_rollout_ref.hybrid_engine=True \
@@ -204,20 +241,20 @@ CUDA_VISIBLE_DEVICES=2,3,4,5,6,7 "$VENV_PY" cookbooks/multimodal_codex/train.py 
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.enforce_eager=False \
-    actor_rollout_ref.rollout.max_model_len=32768 \
+    actor_rollout_ref.rollout.max_model_len=${MAX_MODEL_LEN} \
     actor_rollout_ref.rollout.temperature=1.0 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=${GPU_MEM_UTIL} \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=5120 \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_auto_tool_choice=true \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.tool_call_parser=qwen3_coder \
-    actor_rollout_ref.rollout.n=5 \
+    actor_rollout_ref.rollout.n=${ROLLOUT_N} \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     trainer.logger="['console']" \
     trainer.project_name=mmcodex-prod \
-    trainer.experiment_name=qwen3.5-9b-grpo-r5-v1 \
+    trainer.experiment_name=${EXPERIMENT_NAME} \
     trainer.val_before_train=false \
     trainer.n_gpus_per_node=6 \
     trainer.nnodes=1 \
