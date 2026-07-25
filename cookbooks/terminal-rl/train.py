@@ -123,9 +123,7 @@ def main(config: DictConfig) -> None:
     validation_enabled = bool(config.rllm.trainer.get("val_before_train", False)) or config.rllm.trainer.get("test_freq", 0) > 0
     if val_dataset is None and validation_enabled:
         raise RuntimeError(
-            f"Dataset '{VAL_DATASET}' not found. Run: rllm dataset pull harbor:{VAL_DATASET} "
-            "(or: python cookbooks/terminal-rl/prepare_data.py) — or disable validation "
-            "(rllm.trainer.test_freq=-1)."
+            f"Dataset '{VAL_DATASET}' not found. Run: rllm dataset pull harbor:{VAL_DATASET} (or: python cookbooks/terminal-rl/prepare_data.py) — or disable validation (rllm.trainer.test_freq=-1)."
         )
 
     if val_dataset is not None and TB_VAL_MAX > 0 and TB_VAL_MAX < len(val_dataset):

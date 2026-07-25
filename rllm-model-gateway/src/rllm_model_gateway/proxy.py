@@ -46,6 +46,7 @@ def _current_rss_mib() -> float:
         pass
     return 0.0
 
+
 # Headers that should not be forwarded verbatim
 _HOP_BY_HOP = frozenset(
     {
