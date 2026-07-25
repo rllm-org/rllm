@@ -7,10 +7,39 @@ pytest-asyncio needed.
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
+from omegaconf import OmegaConf
 
-from rllm.trainer.fireworks.fireworks_policy_trainer import FireworksPolicyTrainer
+from rllm.trainer.algorithms.config import AlgorithmConfig
+from rllm.trainer.fireworks.fireworks_policy_trainer import (
+    FireworksPolicyTrainer,
+    builtin_loss_args,
+)
+
+
+def test_grpo_resolves_to_clipped_ppo_kernel():
+    from training.utils.rl.losses import get_builtin_loss_config, validate_loss_path
+
+    algorithm = AlgorithmConfig.from_config(
+        OmegaConf.create(
+            {
+                "adv_estimator": "grpo",
+                "loss_fn": "grpo",
+                "eps_clip": 0.2,
+                "kl_beta": 0.0,
+            }
+        )
+    )
+    args = builtin_loss_args(algorithm)
+    validate_loss_path(args)
+
+    assert args.policy_loss == "grpo"
+    assert get_builtin_loss_config(args) == (
+        "ppo",
+        {"clip_low_threshold": 0.8, "clip_high_threshold": 1.2},
+    )
 
 
 class _FakeClient:
@@ -141,3 +170,35 @@ def test_reconnect_without_mgr_is_safe_noop():
 
     assert asyncio.run(t._run_training_op(fn, op_name="x", reconnect=True)) == "ok"
     assert t._reconnect_training_client() is False
+
+
+def test_optim_step_disables_server_gradient_normalization():
+    from fireworks.training.sdk.client import GradAccNormalization
+
+    t = FireworksPolicyTrainer.__new__(FireworksPolicyTrainer)
+    t.training_client = SimpleNamespace(optim_step=lambda *args, **kwargs: None)
+    t.algorithm_config = AlgorithmConfig.from_config(
+        OmegaConf.create(
+            {
+                "adv_estimator": "grpo",
+                "loss_fn": "grpo",
+                "loss_agg_mode": "token-mean",
+            }
+        )
+    )
+    captured = {}
+
+    async def fake_run(fn, *args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(metrics={})
+
+    t._run_training_op = fake_run
+    asyncio.run(
+        t.optim_step(
+            step=0,
+            total_steps=1,
+            learning_rate=2e-5,
+        )
+    )
+
+    assert captured["grad_accumulation_normalization"] is GradAccNormalization.NONE

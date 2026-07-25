@@ -26,7 +26,7 @@ from rllm.trainer.backend_protocol import BackendProtocol
 from rllm.trainer.tinker.tinker_metrics_utils import (
     update_training_metrics,
 )
-from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
+from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer, format_optimizer_metrics
 from rllm.types import Episode
 
 if TYPE_CHECKING:
@@ -91,6 +91,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         self.beta1 = self.full_config.training.get("beta1", 0.9)
         self.beta2 = self.full_config.training.get("beta2", 0.95)
         self.eps = self.full_config.training.get("eps", 1e-8)
+        self.weight_decay = self.full_config.training.get("weight_decay", 0.0)
+        self.grad_clip_norm = self.full_config.training.get("grad_clip_norm", 0.0)
 
     # =========================================================================
     # BackendProtocol interface methods
@@ -305,6 +307,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
                     beta1=self.beta1,
                     beta2=self.beta2,
                     eps=self.eps,
+                    weight_decay=self.weight_decay,
+                    grad_clip_norm=self.grad_clip_norm,
                 )
 
         # Store datums as backend batch, flatten if `training_datums` is a dict
@@ -367,16 +371,12 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
                 beta1=self.beta1,
                 beta2=self.beta2,
                 eps=self.eps,
+                weight_decay=self.weight_decay,
+                grad_clip_norm=self.grad_clip_norm,
             )
-            optim_result = await optim_step_future.result_async()
+            optim_step_result = await optim_step_future.result_async()
             trainer_state.extra_info["scheduled_learning_rate"] = scheduled_learning_rate
-
-        # Surface optimizer-step metrics (e.g. grad norm) emitted by the Tinker server.
-        if optim_result.metrics:
-            for k, v in optim_result.metrics.items():
-                if k.startswith("clock_cycle"):
-                    continue
-                trainer_state.metrics[f"train/{k.replace(':', '/')}"] = v
+            trainer_state.metrics.update(format_optimizer_metrics(optim_step_result))
 
     # =========================================================================
     # Async hook methods

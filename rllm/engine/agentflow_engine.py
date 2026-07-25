@@ -35,7 +35,20 @@ from rllm.data.utils import task_from_row
 from rllm.engine.trace_converter import compute_step_metrics, filter_empty_response_traces, trace_record_to_step
 from rllm.eval.types import EvalOutput
 from rllm.gateway.manager import container_reachable_url
-from rllm.types import INFRA_ERROR_REASONS, AgentConfig, Episode, Step, Task, TerminationReason, Trajectory, flow_accepts_env, run_agent_flow, termination_reason_from_error
+from rllm.types import (
+    INFRA_ERROR_REASONS,
+    AgentConfig,
+    Episode,
+    ErrorRetryScope,
+    Step,
+    Task,
+    TerminationReason,
+    Trajectory,
+    error_retry_scope,
+    flow_accepts_env,
+    run_agent_flow,
+    termination_reason_from_error,
+)
 from rllm.utils import colorful_print
 from rllm.utils.group_summary import format_group_finished
 from rllm.utils.priority_semaphore import EVAL_PRIORITY, TRAIN_PRIORITY, PrioritySemaphore
@@ -82,6 +95,29 @@ class EnrichMismatchError(RuntimeError):
     response, etc.). process_task_with_retry treats it like any other failure
     and reissues the rollout.
     """
+
+
+def _exception_error_info(error: BaseException) -> dict[str, Any]:
+    """Serialize an exception without discarding its actionable cause chain."""
+
+    def describe(item: BaseException) -> dict[str, str]:
+        return {
+            "message": str(item),
+            "error_type": type(item).__name__,
+            "module": type(item).__module__,
+        }
+
+    info: dict[str, Any] = describe(error)
+    causes: list[dict[str, str]] = []
+    current = error.__cause__ or error.__context__
+    seen = {id(error)}
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        causes.append(describe(current))
+        current = current.__cause__ or current.__context__
+    if causes:
+        info["cause_chain"] = causes
+    return info
 
 
 @dataclass
@@ -588,15 +624,18 @@ class AgentFlowEngine:
     ) -> tuple[str, int, int, Episode]:
         """Run the full per-task pipeline with retry.
 
-        Each attempt runs flow + trace fetch + enrich + evaluate. On
-        retry, stale traces from the prior attempt are cleared first so
-        the new attempt's enrich doesn't see a mix of trace records.
+        Each attempt runs flow + trace fetch + enrich + evaluate. Untagged
+        exceptions retry the whole trajectory; typed failures may opt out via
+        :func:`rllm.types.error_retry_scope` after exhausting a safer local
+        retry. Before a trajectory retry, stale traces are cleared so the new
+        attempt's enrichment cannot see mixed records.
         """
         task_for_episode = task.metadata if isinstance(task, Task) else task
         task_obj = task if isinstance(task, Task) else task_from_row(task, task_id)
 
         priority = EVAL_PRIORITY if is_validation else TRAIN_PRIORITY
         async with self._semaphore.slot(priority):
+            retry_errors: list[dict[str, Any]] = []
             for retry_attempt in range(1, self.retry_limit + 1):
                 uid = f"{task_id}:{rollout_idx}"
                 if retry_attempt > 1:
@@ -619,6 +658,10 @@ class AgentFlowEngine:
                         reward_strs.append(f"{traj.name}: {reward}")
 
                     timing_str = _format_timing_breakdown(episode.metrics)
+                    episode.metrics["retry/count"] = retry_attempt - 1
+                    episode.metrics["retry/recovered"] = int(bool(retry_errors))
+                    if retry_errors:
+                        episode.metadata["retry_errors"] = retry_errors
                     colorful_print(
                         f"[{uid}] Rewards: [{', '.join(reward_strs)}]{timing_str}, Termination: {episode.termination_reason}",
                         fg="green" if episode.is_correct else "yellow",
@@ -628,7 +671,9 @@ class AgentFlowEngine:
 
                 except Exception as e:
                     logger.error("[%s] Attempt %d/%d failed: %r (type=%s)", uid, retry_attempt, self.retry_limit, e, type(e).__name__)
-                    if retry_attempt < self.retry_limit:
+                    retry_scope = error_retry_scope(e)
+                    if retry_scope is ErrorRetryScope.TRAJECTORY and retry_attempt < self.retry_limit:
+                        retry_errors.append(_exception_error_info(e))
                         continue
                     if self.raise_on_error:
                         raise
@@ -636,6 +681,41 @@ class AgentFlowEngine:
                     # SANDBOX_ERROR) wins; otherwise map the exception class name
                     # (sandbox/harbor errors → their reason) and fall back to ERROR.
                     reason = getattr(e, "_rllm_termination_reason", None) or termination_reason_from_error(type(e).__name__, default=TerminationReason.ERROR)
+                    # The flow may fail after many successful model turns (for
+                    # example, an agent command kills its own sandbox control
+                    # process). Those turns already live in the gateway and are
+                    # essential for diagnosing the failure. Preserve them even
+                    # though there is no raw Episode to enrich or evaluate.
+                    traces: list[TraceRecord] = []
+                    try:
+                        traces = await self.gateway.aget_traces(uid)
+                    except Exception:
+                        logger.exception("[%s] failed to recover traces after rollout error", uid)
+
+                    steps: list[Step] = []
+                    try:
+                        steps = [trace_record_to_step(trace) for trace in traces]
+                    except Exception:
+                        logger.exception("[%s] failed to convert recovered traces after rollout error", uid)
+
+                    trajectories = []
+                    if steps:
+                        trajectories.append(
+                            Trajectory(
+                                uid=uid,
+                                name=getattr(self.agent_flow, "name", type(self.agent_flow).__name__),
+                                task=task_for_episode,
+                                steps=steps,
+                            )
+                        )
+                    metrics = compute_step_metrics(trajectories)
+                    metrics["empty"] = int(not steps)
+                    metrics["steps_collected"] = len(steps)
+                    metrics["retry/count"] = retry_attempt - 1
+                    metrics["retry/recovered"] = 0
+                    metadata = {"error": _exception_error_info(e)}
+                    if retry_errors:
+                        metadata["retry_errors"] = retry_errors
                     return (
                         task_id,
                         rollout_idx,
@@ -645,7 +725,9 @@ class AgentFlowEngine:
                             task=task_for_episode,
                             is_correct=False,
                             termination_reason=reason,
-                            metadata={"error": {"message": str(e), "error_type": type(e).__name__}},
+                            trajectories=trajectories,
+                            metrics=metrics,
+                            metadata=metadata,
                         ),
                     )
 
@@ -841,13 +923,14 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
-        if _no_usable_model_output(enriched) and not enriched.is_correct and enriched.termination_reason not in INFRA_ERROR_REASONS:
+        if _no_usable_model_output(enriched) and not enriched.is_correct and enriched.termination_reason in {None, TerminationReason.UNKNOWN, TerminationReason.ENV_DONE}:
             # The agent produced nothing usable — no LLM calls at all, or every
             # call came back empty: a downed/erroring upstream (proxy died, auth or
             # tunnel failure), NOT a clean rollout. The reward (0) is meaningless;
             # this is the root cause, so it beats a downstream grading_error and the
-            # ENV_DONE default. (A harness-set infra reason already wins, above; a
-            # *correct* rollout is never reclassified.)
+            # ENV_DONE default. Any explicit harness verdict (including prompt,
+            # response, turn, protocol, and timeout limits) is authoritative; a
+            # *correct* rollout is never reclassified.
             enriched.termination_reason = TerminationReason.MODEL_ERROR
             enriched.metadata.setdefault("error", {"error_type": "EmptyCompletion", "message": "no usable model output — no LLM calls or all completions empty (upstream/proxy/gateway failure)"})
         elif eval_output.error:

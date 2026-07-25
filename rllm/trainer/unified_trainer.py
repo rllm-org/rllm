@@ -571,6 +571,78 @@ class UnifiedTrainer:
                 max_steps_to_visualize=2,
                 show_workflow_metadata=True,
             )
+        self._dump_train_batch(trainer_state)
+
+    def _dump_train_batch(self, trainer_state: TrainerState) -> None:
+        """Dump the step's consumed batch when ``trainer.dump_batch_dir`` is set.
+
+        Reuses eval's :class:`EvalEpisodeStore` layout — one run dir per
+        optimizer step (``step_<N>/episodes/episode_*.json`` + ``meta.json``),
+        so ``rllm view <dump_batch_dir>`` browses training steps exactly like
+        eval runs. Episodes already carry the training view of each step
+        (token ids, logprobs, advantages, weight_version), so no separate
+        trajectory-group dump is written — a prior ``trajectory_groups.json``
+        byte-duplicated the episodes at ~1GB/step and nothing consumed it.
+
+        The multi-GB JSON serialization runs on a background thread so the
+        event loop (and every in-flight rollout coroutine) never stalls;
+        episode references are snapshotted synchronously here because
+        ``reset_batch()`` reassigns the state fields right after this step.
+        At most one dump is in flight: if the previous step's dump is still
+        writing, this step's is skipped — dumps are diagnostics, never
+        training data.
+        """
+        dump_dir = self.rllm_config.trainer.get("dump_batch_dir")
+        if not dump_dir:
+            return
+        from pathlib import Path
+
+        # One timestamped root per training run (eval's convention for
+        # eval_results dirs) so re-runs never overwrite earlier dumps. A
+        # relative dump_batch_dir resolves under the rLLM home, beside
+        # eval_results, so the dumps live with the rest of the tooling.
+        run_root = getattr(self, "_dump_batch_run_root", None)
+        if run_root is None:
+            from rllm import paths
+
+            base = Path(dump_dir).expanduser()
+            if not base.is_absolute():
+                base = Path(paths.rllm_path(str(base)))
+            run_root = base / self._run_stamp
+            self._dump_batch_run_root = run_root
+
+        global_step = trainer_state.global_step
+        prev = getattr(self, "_dump_batch_task", None)
+        if prev is not None and not prev.done():
+            logger.warning("[TrainingLoop] Step %d: previous batch dump still writing; skipping this step's dump", global_step)
+            return
+        # Snapshot before the state is reset; Episode objects are not mutated
+        # after the step, so a shallow copy of the list is sufficient.
+        episodes = list(trainer_state.episodes or [])
+        n_groups = len(trainer_state.trajectory_groups or [])
+        run_dir = run_root / f"step_{global_step:05d}"
+        self._dump_batch_task = asyncio.create_task(asyncio.to_thread(self._write_batch_dump, run_dir, global_step, episodes, n_groups))
+
+    def _write_batch_dump(self, run_dir, global_step: int, episodes: list, n_groups: int) -> None:
+        """Blocking dump writer — runs in a worker thread via ``asyncio.to_thread``."""
+        from rllm.eval.episode_store import EvalEpisodeStore
+
+        try:
+            store = EvalEpisodeStore(run_dir)
+            store.write_meta(
+                {
+                    "global_step": global_step,
+                    "n_groups": n_groups,
+                    "n_episodes": len(episodes),
+                }
+            )
+            for idx, episode in enumerate(episodes):
+                store.write(idx, episode)
+            logger.info("[TrainingLoop] Step %d: dumped batch (%d groups, %d episodes) to %s", global_step, n_groups, len(episodes), run_dir)
+        except Exception:
+            # Diagnostics must never kill a training step (an unserializable
+            # field or full disk is a tooling problem, not a training failure).
+            logger.warning("[TrainingLoop] Step %d: batch dump to %s failed", global_step, run_dir, exc_info=True)
 
     # =========================================================================
     # Fully-asynchronous training pipeline
@@ -622,6 +694,16 @@ class UnifiedTrainer:
                 v = getattr(eng, name, None)
                 if isinstance(v, int) and v >= 0:
                     parts.append(f"{name}={v}")
+            # Dispatch-gate state. The engine gauges above only count rollout
+            # coroutines holding concurrency slots; the actual dispatch gate is
+            # the staleness window (groups dispatched-but-unconsumed) — without
+            # it, a run throttled at the group cap reads as mysteriously idle
+            # (engine inflight decays to stragglers while dispatch is frozen).
+            parts.append(f"groups={coordinator._in_flight}/{coordinator.config.max_in_flight_groups}")
+            parts.append(f"qsize={buffer._training_queue_size} partial={len(buffer._pending)} filtered={buffer._filtered_count} consumed={buffer._consumed_count}")
+            if not coordinator.has_capacity():
+                blocked = "staleness" if coordinator._in_flight >= coordinator.config.max_in_flight_groups else "concurrency"
+                parts.append(f"dispatch_blocked={blocked}")
             return " ".join(parts)
 
         monitor_task = asyncio.create_task(run_loop_health_monitor("trainer", gauges=_trainer_gauges))
@@ -819,6 +901,7 @@ class UnifiedTrainer:
                     max_steps_to_visualize=2,
                     show_workflow_metadata=True,
                 )
+            self._dump_train_batch(trainer_state)
 
             # 5. Flush aggregator and merge pre-sync snapshots into trainer_state.metrics
             trainer_state.metrics.update(aggregator.flush())

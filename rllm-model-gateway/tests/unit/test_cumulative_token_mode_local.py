@@ -102,6 +102,67 @@ def test_cumulative_local_non_streaming_ingests_and_translates():
     assert acc.cumulative_ids[: len([1, 2, 3, 4, 5])] == [1, 2, 3, 4, 5]
 
 
+def test_cumulative_local_preserves_reasoning_tool_calls_and_carried_fields():
+    from types import SimpleNamespace
+
+    class _StructuredRenderer:
+        def parse_response(self, token_ids):
+            assert token_ids == [91, 92]
+            return SimpleNamespace(
+                content="",
+                reasoning_content="thinking survives",
+                tool_calls=[SimpleNamespace(name="bash", arguments={"command": "pwd"})],
+            )
+
+    async def handler(body):
+        return {
+            "id": "cmpl-structured",
+            "object": "text_completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "text": "raw fallback",
+                    "response_message": {
+                        "role": "assistant",
+                        "content": "",
+                        "provider_extension": {"keep": True},
+                    },
+                    "token_ids": [91, 92],
+                    "finish_reason": "stop",
+                    "logprobs": {"token_logprobs": [-0.1, -0.2]},
+                }
+            ],
+            "prompt_token_ids": body["prompt"],
+            "usage": {"prompt_tokens": len(body["prompt"]), "completion_tokens": 2},
+        }
+
+    proxy = _make_proxy(handler)
+    acc = TokenAccumulator(renderer=_StructuredRenderer())
+    acc.ingest_turn([1, 2, 3], [4, 5])
+    bridged = [1, 2, 3, 4, 5, 6, 7]
+
+    resp = asyncio.run(
+        proxy._handle_cumulative_non_streaming(
+            _Request(),
+            {"messages": [{"role": "user", "content": "x"}]},
+            {"prompt": bridged, "add_special_tokens": False, "model": "q"},
+            "structured-session",
+            acc,
+            bridged,
+        )
+    )
+
+    choice = json.loads(resp.body)["choices"][0]
+    message = choice["message"]
+    assert choice["finish_reason"] == "tool_calls"
+    assert message["reasoning_content"] == "thinking survives"
+    assert message["tool_calls"][0]["function"] == {
+        "name": "bash",
+        "arguments": '{"command": "pwd"}',
+    }
+    assert message["provider_extension"] == {"keep": True}
+
+
 def test_cumulative_local_streaming_emits_sse_and_ingests():
     record = []
     proxy = _make_proxy(_completion_handler(record))

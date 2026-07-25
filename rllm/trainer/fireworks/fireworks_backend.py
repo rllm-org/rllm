@@ -18,7 +18,10 @@ from fireworks.training.sdk import (
     WeightSyncer,
 )
 from omegaconf import DictConfig, OmegaConf
-from training.provision import FireworksProvisionInfra, init_fireworks_infra
+
+# The pinned cookbook (see pyproject) does not re-export these from the
+# package __init__; import straight from the submodule.
+from training.provision.provision import FireworksProvisionInfra, init_fireworks_infra
 from training.utils import ReconnectableClient, load_deployment_tokenizer
 
 from rllm.engine.rollout import FireworksEngine, RolloutEngine
@@ -122,7 +125,7 @@ class FireworksBackend(TinkerBackend):
         from pathlib import Path
 
         import yaml
-        from training.provision import load_yaml_provision
+        from training.provision.provision import load_yaml_provision
 
         cfg = self.full_config
         doc = OmegaConf.to_container(cfg.fireworks_infra, resolve=True)
@@ -369,7 +372,11 @@ class FireworksBackend(TinkerBackend):
                     await self.policy_trainer.save_dcp_checkpoint(global_step)
                 if snapshot_name:
                     experiment = self.full_config.rllm.trainer.get("experiment_name", "default")
-                    output_model_id = f"{experiment}-step-{global_step}"
+                    # Embed the snapshot name (step-N-<job suffix>) rather than the bare
+                    # step number: model ids are account-global, and a relaunch with the
+                    # same experiment_name would otherwise collide with the previous
+                    # run's promotions at every matching step (ALREADY_EXISTS).
+                    output_model_id = f"{experiment}-{snapshot_name}"
                     try:
                         await self.policy_trainer.promote_checkpoint(
                             snapshot_name,

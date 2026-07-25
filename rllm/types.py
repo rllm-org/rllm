@@ -39,6 +39,10 @@ class TerminationReason(Enum):
     MAX_RESPONSE_LENGTH_EXCEEDED = "max_response_length_exceeded"
     ENV_DONE = "env_done"
     MAX_TURNS_EXCEEDED = "max_turns_exceeded"
+    # The model repeatedly failed a required agent/tool protocol. Unlike an
+    # upstream MODEL_ERROR, this is policy behavior with a trustworthy verifier
+    # reward, so it deliberately remains outside INFRA_ERROR_REASONS.
+    TOOL_PROTOCOL_ERROR = "tool_protocol_error"
     TIMEOUT = "timeout"  # agent execution wall-clock budget — reward is still graded on partial state
     UNKNOWN = "unknown"
     ERROR = "error"
@@ -50,7 +54,38 @@ class TerminationReason(Enum):
     VERIFIER_TIMEOUT = "verifier_timeout"
     GRADING_ERROR = "grading_error"
     SANDBOX_ERROR = "sandbox_error"
-    MODEL_ERROR = "model_error"  # upstream/API/proxy failure — every model completion came back empty
+    MODEL_ERROR = "model_error"  # upstream/API/proxy failure or malformed completion envelope
+
+
+class ErrorRetryScope(Enum):
+    """Where an escaping failure may be retried.
+
+    Agent flows normally raise infrastructure failures to request a fresh
+    trajectory (new sandbox + new gateway session). A harness that already
+    exhausted a narrower, safe retry loop can mark the final exception
+    ``NONE`` so the engine preserves and classifies that trajectory instead of
+    silently starting it over from turn zero.
+    """
+
+    NONE = "none"
+    TRAJECTORY = "trajectory"
+
+
+def error_retry_scope(error: BaseException) -> ErrorRetryScope:
+    """Return an exception's trajectory retry contract.
+
+    Untagged exceptions retain the historical behavior: retry the complete
+    trajectory. Typed harness errors opt out with ``_rllm_retry_scope`` after
+    performing any safe, local retry themselves.
+    """
+
+    value = getattr(error, "_rllm_retry_scope", ErrorRetryScope.TRAJECTORY)
+    if isinstance(value, ErrorRetryScope):
+        return value
+    try:
+        return ErrorRetryScope(value)
+    except (TypeError, ValueError):
+        return ErrorRetryScope.TRAJECTORY
 
 
 # Reasons whose reward is NOT a trustworthy training signal: an infra or grading

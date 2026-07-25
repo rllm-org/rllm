@@ -6,10 +6,20 @@
       "function": "ReActHarness",
       "description": "One-shot LLM call. Default for data tasks (math, MCQ, QA)."
     },
+    "native-react": {
+      "module": "rllm.harnesses.native_react",
+      "function": "NativeReactHarness",
+      "description": "Run a multi-turn native tool-calling ReAct loop against a sandbox."
+    },
     "bash": {
       "module": "rllm.harnesses.bash",
       "function": "BashHarness",
       "description": "Multi-turn ReAct bash loop inside a sandbox."
+    },
+    "native_react": {
+      "module": "rllm.harnesses.native_react",
+      "function": "NativeReactHarness",
+      "description": "Minimal renderer-native ReAct loop matching VMVM TB-v2 prompts and observations."
     },
     "claude-code": {
       "module": "rllm.harnesses.claude_code",

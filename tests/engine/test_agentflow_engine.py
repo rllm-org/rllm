@@ -27,6 +27,14 @@ class _Evaluator:
         return EvalOutput(reward=0.0, is_correct=False)
 
 
+class _ExplodingAgent:
+    async def arun(self, task, config):
+        try:
+            raise ValueError("sandbox transport vanished")
+        except ValueError as error:
+            raise RuntimeError("agent flow failed") from error
+
+
 class _Gateway:
     """Minimal gateway double; stocked traces are returned for every session."""
 
@@ -73,6 +81,42 @@ def test_run_single_passes_validation_flag_and_preserves_termination_reason():
     assert agent.config.is_validation is True
     assert agent.config.session_uid == "task:0"
     assert episode.termination_reason == TerminationReason.ERROR
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,
+        TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED,
+        TerminationReason.MAX_TURNS_EXCEEDED,
+        TerminationReason.TOOL_PROTOCOL_ERROR,
+        TerminationReason.TIMEOUT,
+    ],
+)
+def test_empty_trace_heuristic_preserves_explicit_harness_termination(reason):
+    class _TypedAgent:
+        async def arun(self, task, config):
+            return Episode(
+                id=task.id,
+                termination_reason=reason,
+                trajectories=[Trajectory(name="solver")],
+            )
+
+    engine = AgentFlowEngine(
+        agent_flow=_TypedAgent(),
+        evaluator=_Evaluator(),
+        gateway=_Gateway(),
+        model="test-model",
+        n_parallel_tasks=1,
+    )
+    task = task_from_row({"question": "q"}, "task")
+
+    try:
+        episode = asyncio.run(engine._run_single(task, "task:0", is_validation=True))
+    finally:
+        engine.shutdown()
+
+    assert episode.termination_reason is reason
 
 
 def _empty_token_trace(session_id: str):
@@ -183,6 +227,124 @@ def test_strict_enrichment_follows_is_validation(is_validation):
                 asyncio.run(engine._run_single(task, "task:0", is_validation=False))
     finally:
         engine.shutdown()
+
+
+def test_final_rollout_error_preserves_gateway_traces_and_exception_chain():
+    """A terminal/sandbox exception must not erase model turns already traced."""
+    gateway = _Gateway(traces=[_empty_token_trace("task:0")])
+    engine = AgentFlowEngine(
+        agent_flow=_ExplodingAgent(),
+        evaluator=_Evaluator(),
+        gateway=gateway,
+        model="test-model",
+        n_parallel_tasks=1,
+        retry_limit=1,
+        raise_on_error=False,
+    )
+    task = task_from_row({"question": "q"}, "task")
+
+    try:
+        _, _, _, episode = asyncio.run(
+            engine.process_task_with_retry(
+                task,
+                "task",
+                0,
+                0,
+                is_validation=True,
+            )
+        )
+    finally:
+        engine.shutdown()
+
+    assert episode.termination_reason == TerminationReason.ERROR
+    assert len(episode.trajectories) == 1
+    assert len(episode.trajectories[0].steps) == 1
+    assert episode.trajectories[0].steps[0].model_response == "A"
+    assert episode.metrics["steps_collected"] == 1
+    assert episode.metadata["error"] == {
+        "message": "agent flow failed",
+        "error_type": "RuntimeError",
+        "module": "builtins",
+        "cause_chain": [
+            {
+                "message": "sandbox transport vanished",
+                "error_type": "ValueError",
+                "module": "builtins",
+            }
+        ],
+    }
+
+
+def test_recovered_trajectory_retry_is_preserved_in_episode_metrics_and_metadata():
+    from rllm.harnesses.native_react import PersistentShellError
+
+    engine = AgentFlowEngine(
+        agent_flow=_Agent(),
+        evaluator=_Evaluator(),
+        gateway=_Gateway(),
+        model="test-model",
+        n_parallel_tasks=1,
+        retry_limit=2,
+    )
+    attempts = 0
+
+    async def flaky_run(task_obj, uid, is_validation=False):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PersistentShellError("sandbox control plane disappeared")
+        return Episode(
+            id=uid,
+            termination_reason=TerminationReason.ENV_DONE,
+            trajectories=[Trajectory(name="solver")],
+        )
+
+    engine._run_single = flaky_run
+    task = task_from_row({"question": "q"}, "task")
+    try:
+        _, _, _, episode = asyncio.run(engine.process_task_with_retry(task, "task", 0, 0, is_validation=True))
+    finally:
+        engine.shutdown()
+
+    assert episode.termination_reason is TerminationReason.ENV_DONE
+    assert episode.metrics["retry/count"] == 1
+    assert episode.metrics["retry/recovered"] == 1
+    assert episode.metadata["retry_errors"][0]["error_type"] == "PersistentShellError"
+
+
+def test_model_response_error_does_not_retry_the_entire_trajectory():
+    from rllm.harnesses.native_react import NativeModelResponseError
+
+    engine = AgentFlowEngine(
+        agent_flow=_Agent(),
+        evaluator=_Evaluator(),
+        gateway=_Gateway(),
+        model="test-model",
+        n_parallel_tasks=1,
+        retry_limit=2,
+        raise_on_error=False,
+    )
+
+    attempts = 0
+
+    async def failing_run(task_obj, uid, is_validation=False):
+        nonlocal attempts
+        attempts += 1
+        raise NativeModelResponseError("gateway upstream failure", body={"error": {"code": 502}})
+
+    engine._run_single = failing_run
+    task = task_from_row({"question": "q"}, "task")
+    try:
+        _, _, _, episode = asyncio.run(engine.process_task_with_retry(task, "task", 0, 0, is_validation=True))
+    finally:
+        engine.shutdown()
+
+    assert episode.termination_reason is TerminationReason.MODEL_ERROR
+    assert attempts == 1
+    assert episode.metrics["retry/count"] == 0
+    assert episode.metrics["retry/recovered"] == 0
+    assert episode.metadata["error"]["error_type"] == "NativeModelResponseError"
+    assert "retry_errors" not in episode.metadata
 
 
 def test_needs_env_flow_must_declare_env_param():

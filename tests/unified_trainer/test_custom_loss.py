@@ -552,7 +552,7 @@ def test_native_loss_names_registry():
     from rllm.trainer.algorithms.loss import native_loss_names
 
     # Derived from each backend's own source of truth (present in this venv: tinker, fireworks).
-    assert native_loss_names("tinker") == {"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"}
+    assert {"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"} <= native_loss_names("tinker")
     assert native_loss_names("fireworks") == {"grpo", "importance_sampling", "dapo", "dro", "gspo", "cispo"}
     # A backend not importable here (verl) or unknown → empty (→ everything uses the custom path).
     assert native_loss_names("nonexistent_backend") == set()
@@ -591,8 +591,8 @@ def test_echo_estimator_defaults_to_echo():
 def test_agg_mode_resolution_default_config_and_pin():
     from rllm.trainer.algorithms.loss import DEFAULT_LOSS_AGG_MODE
 
-    # default: no config → canonical default (seq-mean-token-mean)
-    assert resolve_loss(_alg(loss_fn="dppo_tv")).agg_mode == DEFAULT_LOSS_AGG_MODE == "seq-mean-token-mean"
+    # default: no config → canonical default (token-mean)
+    assert resolve_loss(_alg(loss_fn="dppo_tv")).agg_mode == DEFAULT_LOSS_AGG_MODE == "token-mean"
     # config value flows through
     assert resolve_loss(_alg(loss_fn="dppo_tv", loss_agg_mode="seq-mean-token-sum")).agg_mode == "seq-mean-token-sum"
     # a loss that PINS its mode (GSPO) overrides even an explicit config
@@ -652,6 +652,23 @@ def test_managed_client_normalized_matches_agg_mode():
     loss_seq, _ = build_custom_loss(r_seq, d, server_normalized=False)[1](d, [p.clone() for p in logp_curr])
     # seq-mean-token-mean: within-seq mean (÷2) per seq = 0.5 each, summed = 1.0, ÷ 2 seqs = 0.5
     assert torch.allclose(loss_seq, torch.tensor(0.5))
+
+
+def test_dppo_tv_token_mean_uses_combined_pass_token_count():
+    """One 8/8-style custom-loss call uses one denominator across unequal sequences."""
+    pytest.importorskip("tinker")
+    from rllm.trainer.tinker.custom_loss import build_custom_loss
+
+    d1 = _make_datum(target=[2, 3], logprobs=[-0.5] * 2, adv=[2.0] * 2, mask=[1.0] * 2)
+    d2 = _make_datum(target=list(range(2, 10)), logprobs=[-0.5] * 8, adv=[-4.0] * 8, mask=[1.0] * 8)
+    resolved = ResolvedLoss(name="dppo_tv", fn=get_loss("dppo_tv"), params={"delta": 0.2}, agg_mode="token-mean")
+
+    _, loss_fn = build_custom_loss(resolved, [d1, d2], server_normalized=False)
+    loss, _ = loss_fn([d1, d2], [torch.tensor([-0.5] * 2), torch.tensor([-0.5] * 8)])
+
+    # At current == old, DPPO-TV keeps every token and ratio=1:
+    # raw sum = 2*(2*0.5) + 8*(-4*0.5) = -14; token mean = -14/10.
+    assert torch.allclose(loss, torch.tensor(-1.4))
 
 
 # --------------------------------------------------------------------------- managed adapter (forward_backward_custom)

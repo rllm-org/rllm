@@ -102,5 +102,8 @@ class EvalEpisodeStore:
         # (e.g. the visualizer) can cross-reference EvalResult.items.
         data["eval_idx"] = idx
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, default=_json_default)
+            # Compact separators: episodes are token-array heavy, and indent=2
+            # puts every token id on its own line — a measured ~3x file-size
+            # inflation. Consumers (rllm view, json.load) are whitespace-agnostic.
+            json.dump(data, f, separators=(",", ":"), default=_json_default)
         return path

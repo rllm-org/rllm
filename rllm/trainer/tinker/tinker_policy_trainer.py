@@ -50,6 +50,11 @@ DEFAULT_LOSS_FN = "importance_sampling"
 TINKER_KNOWN_LOSSES = {"importance_sampling", "ppo", "cispo", "dro", "cross_entropy"}
 
 
+def format_optimizer_metrics(result: tinker.types.OptimStepResponse) -> dict[str, float]:
+    """Format Tinker optimizer metrics for trainer logging."""
+    return {f"train/{key.replace(':', '/')}": value for key, value in (result.metrics or {}).items() if not key.startswith("clock_cycle")}
+
+
 # helper decorator for any function requiring a training client to be initialized
 def require_training_client(func):
     def _check_training_client(self):
@@ -131,7 +136,7 @@ class TinkerPolicyTrainer:
                     resume_info = json.load(f)
 
         if resume_info:
-            self.training_client = await self.service_client.create_training_client_from_state_async(resume_info["state_path"])
+            self.training_client = await self.service_client.create_training_client_from_state_with_optimizer_async(resume_info["state_path"])
             sampler_path = resume_info.get("sampler_path") or resume_info["state_path"].replace("/weights/", "/sampler_weights/")
             sampling_client = self.create_sampling_client(sampler_path)
             try:
@@ -301,6 +306,8 @@ class TinkerPolicyTrainer:
         beta1: float = 0.9,
         beta2: float = 0.95,
         eps: float = 1e-8,
+        weight_decay: float = 0.0,
+        grad_clip_norm: float = 0.0,
     ) -> tuple[tinker.APIFuture[tinker.types.OptimStepResponse], float]:
         scheduled_learning_rate = learning_rate * compute_schedule_lr_multiplier(
             lr_schedule=self.algorithm_config.lr_schedule,
@@ -315,6 +322,8 @@ class TinkerPolicyTrainer:
             beta1=beta1,
             beta2=beta2,
             eps=eps,
+            weight_decay=weight_decay,
+            grad_clip_norm=grad_clip_norm,
         )
         optim_step_future = await self.training_client.optim_step_async(adam_params)  # type: ignore[attr-defined]
         return optim_step_future, scheduled_learning_rate
@@ -329,6 +338,8 @@ class TinkerPolicyTrainer:
         beta1: float = 0.9,
         beta2: float = 0.95,
         eps: float = 1e-8,
+        weight_decay: float = 0.0,
+        grad_clip_norm: float = 0.0,
     ) -> tuple[list[tinker.Datum] | dict[str, list[tinker.Datum]], list[torch.Tensor], dict, float]:
         """Run forward-backward pass and optimizer step from trajectory groups -- at the same time.
 
@@ -355,10 +366,13 @@ class TinkerPolicyTrainer:
             beta1=beta1,
             beta2=beta2,
             eps=eps,
+            weight_decay=weight_decay,
+            grad_clip_norm=grad_clip_norm,
         )
         # Retrieve the results together
         fwd_bwd_results = await asyncio.gather(*fwd_bwd_futures)
-        optim_result = await optim_step_future.result_async()
+        optim_step_result = await optim_step_future.result_async()
+        adv_metrics.update(format_optimizer_metrics(optim_step_result))
 
         training_logprobs = []
         for fwd_bwd_result in fwd_bwd_results:
@@ -375,13 +389,6 @@ class TinkerPolicyTrainer:
                     if k.startswith("clock_cycle"):
                         continue
                     adv_metrics[f"train/{k.replace(':', '/')}"] = v
-
-        # Surface optimizer-step metrics (e.g. grad norm) emitted by the Tinker server.
-        if optim_result.metrics:
-            for k, v in optim_result.metrics.items():
-                if k.startswith("clock_cycle"):
-                    continue
-                adv_metrics[f"train/{k.replace(':', '/')}"] = v
 
         return training_datums, training_logprobs, adv_metrics, scheduled_learning_rate
 

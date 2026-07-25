@@ -172,6 +172,28 @@ class TestTraceRecordToStep:
         assert step.thought == "Let me think..."
         assert step.model_output.reasoning == "Let me think..."
 
+    def test_step_with_openai_reasoning_content(self):
+        trace = self._make_trace(
+            response_message={
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "I should inspect the repository first.",
+                "tool_calls": [
+                    {
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command":"ls"}'},
+                    }
+                ],
+            },
+        )
+
+        step = trace_record_to_step(trace)
+
+        assert step.thought == "I should inspect the repository first."
+        assert step.model_output.reasoning == "I should inspect the repository first."
+        assert step.chat_completions[-1]["reasoning_content"] == "I should inspect the repository first."
+
     def test_chat_completions_includes_response(self):
         trace = self._make_trace()
         step = trace_record_to_step(trace)

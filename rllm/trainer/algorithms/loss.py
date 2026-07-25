@@ -296,8 +296,8 @@ def native_loss_names(backend: str) -> set[str]:
       (vanilla, dppo_tv, dppo_kl, gspo, sapo, gpg, clip_cov, kl_cov, geo_mean, cispo, …)
     * ``tinker``   → ``tinker.types.LossFnType``
       (cross_entropy, importance_sampling, ppo, cispo, dro)
-    * ``fireworks``→ ``tinker.types.LossFnType`` + the SDK-patched ``dapo``/``gspo``
-      (cross_entropy, importance_sampling, ppo, cispo, dro, dapo, gspo)
+    * ``fireworks``→ ``training.utils.rl.builtin_losses.BUILTIN_LOSSES``
+      (grpo, importance_sampling, dapo, dro, gspo, cispo)
 
     Returns an empty set if the backend isn't importable in this process (→ everything falls
     back to the rLLM custom path)."""
@@ -313,12 +313,9 @@ def native_loss_names(backend: str) -> set[str]:
 
             return set(get_args(LossFnType))
         if backend == "fireworks":
-            # fireworks-ai >=1.2.1 dropped builtin_losses; use LossFnType + patched dapo/gspo.
-            from typing import get_args
+            from training.utils.rl.builtin_losses import BUILTIN_LOSSES
 
-            from tinker.types import LossFnType
-
-            return set(get_args(LossFnType)) | {"dapo", "gspo"}
+            return set(BUILTIN_LOSSES)
     except Exception as e:  # backend not installed here → treat as "no native kernels"
         logger.debug("native_loss_names(%r): backend not available (%s)", backend, e)
     return set()

@@ -34,6 +34,19 @@ from rllm_model_gateway.token_accumulator import (
 
 logger = logging.getLogger(__name__)
 
+
+def _current_rss_mib() -> float:
+    """Return this process's current resident memory on Linux."""
+    try:
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0
+    except OSError:
+        pass
+    return 0.0
+
+
 # Headers that should not be forwarded verbatim
 _HOP_BY_HOP = frozenset(
     {
@@ -67,28 +80,40 @@ def _strip_logprobs(response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _to_openai_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _to_openai_tool_calls(tool_calls: list[Any]) -> list[dict[str, Any]]:
     """Renderer ``parse_response`` tool_calls -> OpenAI chat ``tool_calls`` shape.
 
     The renderer emits ``{"function": {"name", "arguments": <dict|str>}}``; the OpenAI
     wire shape a client (e.g. opencode's OpenAI-compatible provider) expects is
     ``{"id", "type": "function", "index", "function": {"name", "arguments": <json str>}}``.
     """
-    out: list[dict[str, Any]] = []
-    for i, tc in enumerate(tool_calls):
-        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-        args = fn.get("arguments", {})
-        if not isinstance(args, str):
-            args = json.dumps(args)
-        out.append(
+    result: list[dict[str, Any]] = []
+    for index, tool_call in enumerate(tool_calls):
+        if isinstance(tool_call, dict):
+            function = tool_call.get("function") or tool_call
+            name = function.get("name", "") if isinstance(function, dict) else getattr(function, "name", "")
+            arguments = function.get("arguments", {}) if isinstance(function, dict) else getattr(function, "arguments", {})
+            call_id = tool_call.get("id") or f"call_{index}"
+        else:
+            function = getattr(tool_call, "function", None)
+            name = getattr(function, "name", None) or getattr(tool_call, "name", "")
+            arguments = getattr(function, "arguments", None)
+            if arguments is None:
+                arguments = getattr(tool_call, "arguments", {})
+            call_id = getattr(tool_call, "id", None) or f"call_{index}"
+        if isinstance(arguments, dict):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        elif not isinstance(arguments, str):
+            arguments = str(arguments)
+        result.append(
             {
-                "id": tc.get("id") or f"call_{i}",
+                "id": call_id,
                 "type": "function",
-                "index": i,
-                "function": {"name": fn.get("name", ""), "arguments": args},
+                "index": index,
+                "function": {"name": name, "arguments": arguments},
             }
         )
-    return out
+    return result
 
 
 def _assistant_message_from_completion(
@@ -116,19 +141,23 @@ def _assistant_message_from_completion(
     ``completion_token_ids`` and is untouched.
     """
     text = choice.get("text", "") if isinstance(choice, dict) else ""
+    carried = choice.get("response_message") if isinstance(choice, dict) else None
+    message: dict[str, Any] = dict(carried) if isinstance(carried, dict) else {}
+    message.setdefault("role", "assistant")
+    message.setdefault("content", text)
 
     # (a) Handler already produced structured fields — pass through.
-    if isinstance(choice, dict) and (choice.get("tool_calls") or choice.get("reasoning")):
-        message: dict[str, Any] = {"role": "assistant", "content": text}
-        if choice.get("reasoning"):
-            message["reasoning"] = choice["reasoning"]
-        if choice.get("tool_calls"):
-            message["tool_calls"] = choice["tool_calls"]
+    for key in ("reasoning", "reasoning_content", "tool_calls"):
+        if isinstance(choice, dict) and key in choice and choice[key] is not None:
+            message[key] = choice[key]
+    if any(message.get(key) for key in ("reasoning", "reasoning_content", "tool_calls")):
         return message
 
-    # (b) Raw completion (HTTP worker): parse tokens when the client wants tool calls.
-    message = {"role": "assistant", "content": text}
-    if not request_body.get("tools"):
+    # (b) Parse raw completion tokens when the client wants tool calls, or when a
+    # local handler supplied a structured response shell that still needs filling.
+    # The latter keeps provider extension fields without reformatting text-protocol
+    # HTTP-worker responses that did not request tools.
+    if not request_body.get("tools") and not isinstance(carried, dict):
         return message
     parse = getattr(renderer, "parse_response", None)
     if not callable(parse) or not completion_token_ids:
@@ -138,12 +167,14 @@ def _assistant_message_from_completion(
     except Exception:
         logger.warning("cumulative-turn tool-call parse failed; returning raw content", exc_info=True)
         return message
-    tool_calls = _to_openai_tool_calls(parsed.tool_calls) if getattr(parsed, "tool_calls", None) else None
+    tool_calls = _to_openai_tool_calls(list(parsed.tool_calls)) if getattr(parsed, "tool_calls", None) else None
     reasoning = getattr(parsed, "reasoning_content", None)
     if not tool_calls and not reasoning:
         return message  # nothing structured recovered -> keep raw text (defensive)
-    message["content"] = parsed.content or ""
-    if reasoning:
+    content = getattr(parsed, "content", None)
+    if content is not None:
+        message["content"] = content
+    if reasoning is not None:
         message["reasoning_content"] = reasoning
     if tool_calls:
         message["tool_calls"] = tool_calls
@@ -262,7 +293,7 @@ class ReverseProxy:
 
         task.add_done_callback(_done)
 
-    async def _loop_health_monitor(self, sample_s: float = 0.5, report_s: float = 20.0) -> None:
+    async def _loop_health_monitor(self, sample_s: float = 0.5, report_s: float = 120.0) -> None:
         """Log event-loop health so the single-loop gateway's headroom is
         observable under load. Diagnostic only — no behavioural effect.
 
@@ -272,7 +303,8 @@ class ReverseProxy:
         loop thread's own CPU utilisation over the window, which disambiguates
         the two: high lag + high thread_cpu = self-CPU bound (offload / do less);
         high lag + low thread_cpu = the loop thread is starved (a separate gateway
-        process would help). ``inflight`` is concurrent generations.
+        process would help). ``rss_mib`` is current process resident memory;
+        ``inflight`` is concurrent generations.
         """
         lags: list[float] = []
         window_start = time.monotonic()
@@ -296,12 +328,13 @@ class ReverseProxy:
                 p50 = ordered[len(ordered) // 2]
                 p99 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.99))]
                 logger.info(
-                    "%sgateway loop health: lag_ms p50=%.0f p99=%.0f max=%.0f | thread_cpu=%.0f%% | inflight cur=%d max=%d | window=%.0fs",
+                    "%sgateway loop health: lag_ms p50=%.0f p99=%.0f max=%.0f | thread_cpu=%.0f%% | rss_mib=%.0f | inflight cur=%d max=%d | window=%.0fs",
                     self.worker_label,
                     p50,
                     p99,
                     ordered[-1],
                     util,
+                    _current_rss_mib(),
                     self._inflight,
                     self._inflight_max,
                     window,
@@ -727,7 +760,9 @@ class ReverseProxy:
         if choices:
             first_choice = choices[0]
             message = _assistant_message_from_completion(first_choice, completion_token_ids, request_body, acc.renderer)
-            for k in ("text", "tool_calls", "reasoning"):
+            if message.get("tool_calls") and first_choice.get("finish_reason") == "stop":
+                first_choice["finish_reason"] = "tool_calls"
+            for k in ("text", "response_message", "tool_calls", "reasoning", "reasoning_content"):
                 first_choice.pop(k, None)  # completions-level fields now live in message
             first_choice["message"] = message
         response_body["object"] = "chat.completion"
@@ -898,9 +933,11 @@ class ReverseProxy:
                     model = chunks[0].get("model", "")
                     usage = next((c["usage"] for c in reversed(chunks) if c.get("usage")), {})
                     finish_reason = next((fr for c in reversed(chunks) for ch in (c.get("choices") or []) if (fr := ch.get("finish_reason"))), "stop")
+                    if message.get("tool_calls") and finish_reason == "stop":
+                        finish_reason = "tool_calls"
                     base = {"id": cid, "object": "chat.completion.chunk", "created": created, "model": model}
                     delta = {"content": message["content"]}
-                    for k in ("reasoning_content", "tool_calls"):
+                    for k in ("reasoning", "reasoning_content", "tool_calls"):
                         if k in message:
                             delta[k] = message[k]
                     role_chunk = {**base, "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]}
@@ -980,7 +1017,10 @@ class ReverseProxy:
         # else raw content. extra_delta carries the structured fields into the streamed
         # content chunk. See _assistant_message_from_completion.
         message = _assistant_message_from_completion(choice0, completion_token_ids, request_body, acc.renderer)
-        for k in ("text", "tool_calls", "reasoning"):
+        if message.get("tool_calls") and finish_reason == "stop":
+            finish_reason = "tool_calls"
+            choice0["finish_reason"] = finish_reason
+        for k in ("text", "response_message", "tool_calls", "reasoning", "reasoning_content"):
             choice0.pop(k, None)  # completions-level fields now live in message
         content = message["content"]
         extra_delta = {k: message[k] for k in ("reasoning", "reasoning_content", "tool_calls") if k in message}

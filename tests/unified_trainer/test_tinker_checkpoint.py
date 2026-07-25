@@ -1,5 +1,6 @@
 """Tests for tinker checkpoint resume resolution (``_resume_step_dir``)."""
 
+import asyncio
 import json
 import os
 
@@ -69,3 +70,27 @@ def test_resume_path_missing_checkpoint_raises(tmp_path):
 def test_resume_path_requires_global_step_token(tmp_path):
     with pytest.raises(AssertionError):
         _trainer(tmp_path, "resume_path", resume_from_path=str(tmp_path / "bogus"))._resume_step_dir()
+
+
+def test_resume_restores_optimizer_state(tmp_path):
+    step_dir = _write_checkpoint(str(tmp_path), 40)
+    trainer = _trainer(tmp_path, "resume_path", resume_from_path=step_dir)
+
+    class _ServiceClient:
+        async def create_training_client_from_state_with_optimizer_async(self, path):
+            self.resumed_path = path
+            return object()
+
+        async def create_training_client_from_state_async(self, _path):
+            raise AssertionError("weights-only resume must not be used")
+
+    trainer.service_client = _ServiceClient()
+    sampling_client = object()
+    trainer.create_sampling_client = lambda _path: sampling_client
+
+    start_step, resumed_sampling_client, dataloader_state = asyncio.run(trainer.initialize_async())
+
+    assert trainer.service_client.resumed_path == "tinker://u:train:0/weights/000040"
+    assert start_step == 40
+    assert resumed_sampling_client is sampling_client
+    assert dataloader_state == {"epoch": 0, "cursor": 40, "seed": 0}
