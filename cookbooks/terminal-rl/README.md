@@ -177,9 +177,34 @@ python cookbooks/terminal-rl/prepare_data.py \
 
 Export credentials without putting their values in source files or command
 arguments. For the internal four-run comparison, `FIREWORKS_API_KEY` must
-belong to the `training` account. Account selection comes from the key; this
-launcher does not require a `firectl` profile flag. In particular, do not add
-`-p fw-prod`; it is not a valid option for this launch path.
+belong to the intended human creator in the `training` account. The key selects
+both the account and the audit identity recorded in each resource's
+`Created By` field; merely selecting account `training` does not make the
+signed-in human the creator. The launcher does not require a `firectl` profile
+flag. In particular, do not add `-p fw-prod`; it is not a valid option for this
+launch path.
+
+For an internal admin launch, fail closed by matching the actual exported key
+against server-side key metadata before starting a detached process. Do not use
+`firectl whoami --api-key ...` for this check: current `firectl` reads the local
+ID token for `whoami`, so that output does not identify the supplied API key.
+
+```bash
+expected_creator="your-email@fireworks.ai"
+actual_creator="$(
+  firectl-admin -a training api-key list --all-users -o json |
+    jq -r '
+      [.[] |
+       .prefix as $prefix |
+       select(env.FIREWORKS_API_KEY | startswith($prefix)) |
+       .email][0] // empty
+    '
+)"
+test "$actual_creator" = "$expected_creator" || {
+  echo "FIREWORKS_API_KEY belongs to '$actual_creator', expected '$expected_creator'" >&2
+  exit 1
+}
+```
 
 ```bash
 export FIREWORKS_API_KEY=...
