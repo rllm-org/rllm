@@ -300,19 +300,21 @@ export WANDB_API_KEY=...
 export WANDB_ENTITY=...
 export TB_STATE_ROOT="/shared/${USER}/rllm-terminal-rl-glm5p2"
 export TB_TRAINER_REGION=AP_MALAYSIA_2
+export TB_TRAINER_REPLICAS=4
+export TB_ROLLOUT_REPLICAS=12
 export TB_RUN_NAME="glm5p2-full-opencode-tb21-production"
 
 bash cookbooks/terminal-rl/train_fireworks_glm5p2.sh \
   full opencode production
 ```
 
-The 4+12 replica values are production defaults. To make the resource contract
-visible in an automation wrapper, set `TB_TRAINER_REPLICAS=4` and
-`TB_ROLLOUT_REPLICAS=12` explicitly. Every production evaluation logs under
-`val/*`, giving one directly comparable 89-task curve from step 0 through the
-final checkpoint. If the last optimizer step is itself a multiple of 25, the
-trainer recognizes that the final policy was already validated and does not
-run the same 89 tasks a second time.
+The 4+12 replica values are also production defaults. The full-parameter
+training shape uses two physical nodes per logical trainer replica, while each
+rollout replica uses one node, so this requests `4 × 2 + 12 × 1 = 20` nodes.
+Every production evaluation logs under `val/*`, giving one directly comparable
+89-task curve from step 0 through the final checkpoint. If the last optimizer
+step is itself a multiple of 25, the trainer recognizes that the final policy
+was already validated and does not run the same 89 tasks a second time.
 
 The production profile also drops uniform-reward GRPO groups. For a prompt with
 16 rollouts, if all 16 receive the same reward, every centered GRPO advantage
