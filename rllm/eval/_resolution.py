@@ -249,9 +249,13 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
 
 
 def _dockerfile_run_commands(task: Task) -> list[str]:
-    """Return a task's ``environment/Dockerfile`` ``RUN`` shell steps (joining
-    ``\\``-continuations). Non-``RUN`` directives — ``COPY``/``ADD`` etc. — are
-    skipped; only ``RUN`` is replayable on a live sandbox.
+    """Return a task's ``environment/Dockerfile`` ``RUN`` shell steps.
+
+    ``\\``-continuations are joined into a single logical command with a space
+    (matching shell line-continuation semantics) so multi-line ``RUN`` steps
+    stay valid when re-executed via ``bash -c``. Non-``RUN`` directives —
+    ``COPY``/``ADD`` etc. — are skipped; only ``RUN`` is replayable on a live
+    sandbox.
     """
     dockerfile = task.task_dir / "environment" / "Dockerfile"
     if not dockerfile.exists():
@@ -275,7 +279,7 @@ def _dockerfile_run_commands(task: Task) -> list[str]:
                 if i >= len(lines):
                     break
                 parts.append(lines[i])
-            cmd = "\n".join(parts).strip()
+            cmd = " ".join(part.strip() for part in parts).strip()
             if cmd:
                 commands.append(cmd)
         i += 1
