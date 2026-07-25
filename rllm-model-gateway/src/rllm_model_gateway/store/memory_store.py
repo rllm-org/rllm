@@ -53,33 +53,36 @@ def _unpack(data: dict[str, Any]) -> dict[str, Any]:
 class MemoryTraceStore:
     """Ephemeral in-memory store.  Useful for tests and short-lived processes."""
 
-    #: A session deleted within this many seconds is "tombstoned": a late
-    #: ``store_trace`` for it is dropped instead of resurrecting the session.
-    #: Traces persist fire-and-forget, so a completion still in flight when the
-    #: rollout ended can land *after* the trainer's ``delete_session``; without a
-    #: tombstone ``store_trace`` re-creates a ``defaultdict`` entry that nothing
-    #: ever deletes again, leaking the session for the process lifetime. Must
-    #: exceed the longest possible in-flight request. Set to 0 to disable.
-    _DEFAULT_TOMBSTONE_TTL_S = 1800.0
+    #: Cap on remembered tombstones. A deleted session is tombstoned
+    #: *permanently* — session ids are unique uuids that are never legitimately
+    #: reused, so any later write is a straggler that must never resurrect the
+    #: session. Traces persist fire-and-forget, so a completion still in flight
+    #: when the rollout ended can land *after* the trainer's ``delete_session``;
+    #: without a tombstone ``store_trace`` re-creates a ``defaultdict`` entry that
+    #: nothing ever deletes again, leaking the session for the process lifetime.
+    #: The cap is only a memory backstop for long-lived multi-run gateways: it is
+    #: far larger than the number of sessions deletable while any request is still
+    #: in flight, so FIFO eviction never exposes a live straggler. 0 disables.
+    _DEFAULT_MAX_TOMBSTONES = 1_000_000
 
-    def __init__(self, tombstone_ttl_s: float = _DEFAULT_TOMBSTONE_TTL_S) -> None:
+    def __init__(self, max_tombstones: int = _DEFAULT_MAX_TOMBSTONES) -> None:
         # trace_id -> data dict
         self._traces: dict[str, dict[str, Any]] = {}
         # trace_id -> created_at
         self._timestamps: dict[str, float] = {}
         # session_id -> list[trace_id]  (insertion order)
         self._session_index: dict[str, list[str]] = defaultdict(list)
-        # session_id -> deletion time; blocks post-delete resurrection
-        self._tombstones: dict[str, float] = {}
-        self._tombstone_ttl_s = tombstone_ttl_s
+        # deleted session ids (insertion-ordered, FIFO-evicted at the cap);
+        # blocks post-delete resurrection by a straggler trace
+        self._tombstones: dict[str, None] = {}
+        self._max_tombstones = max_tombstones
 
     async def store_trace(self, trace_id: str, session_id: str, data: dict[str, Any]) -> None:
-        now = time.time()
-        # Drop a straggler write that lands after the session was deleted; letting
-        # it through would resurrect a session no reader will ever delete again.
-        deleted_at = self._tombstones.get(session_id)
-        if deleted_at is not None and (now - deleted_at) <= self._tombstone_ttl_s:
+        # A session id is deleted at most once and never reused, so any write to
+        # a tombstoned session is a straggler that must not resurrect it.
+        if session_id in self._tombstones:
             return
+        now = time.time()
         self._traces[trace_id] = _pack(data)
         if trace_id not in self._timestamps:
             self._timestamps[trace_id] = now
@@ -111,14 +114,12 @@ class MemoryTraceStore:
         return [_unpack(d) for d in results]
 
     async def delete_session(self, session_id: str) -> int:
-        if self._tombstone_ttl_s > 0:
-            now = time.time()
-            self._tombstones[session_id] = now
-            # Purge expired tombstones on this cold path so the map stays bounded
-            # to roughly one TTL window of recently-deleted sessions.
-            cutoff = now - self._tombstone_ttl_s
-            for sid in [s for s, t in self._tombstones.items() if t < cutoff]:
-                del self._tombstones[sid]
+        if self._max_tombstones != 0:
+            # Tombstone permanently; evict oldest (FIFO) only to honour the cap.
+            self._tombstones.pop(session_id, None)
+            self._tombstones[session_id] = None
+            while len(self._tombstones) > self._max_tombstones:
+                self._tombstones.pop(next(iter(self._tombstones)))
         ids = self._session_index.pop(session_id, [])
         # Collect trace_ids referenced by other sessions
         referenced: set[str] = set()

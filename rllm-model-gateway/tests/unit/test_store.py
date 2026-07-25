@@ -3,7 +3,6 @@
 import array
 import os
 import tempfile
-import time
 
 import pytest
 from rllm_model_gateway.store.memory_store import MemoryTraceStore
@@ -187,7 +186,8 @@ class TestTokenArrayPacking:
 
 class TestTombstone:
     """A trace that lands after its session was deleted must NOT resurrect the
-    session (the fire-and-forget persist race that leaked orphaned sessions)."""
+    session (the fire-and-forget persist race that leaked orphaned sessions).
+    Session ids are unique and never reused, so the block is permanent."""
 
     @pytest.mark.asyncio
     async def test_straggler_write_after_delete_is_dropped(self):
@@ -201,43 +201,40 @@ class TestTombstone:
         assert all(s["session_id"] != "s1" for s in await mem.list_sessions())
 
     @pytest.mark.asyncio
+    async def test_block_is_permanent(self):
+        mem = MemoryTraceStore()
+        await mem.delete_session("s1")
+        for tid in ("t1", "t2", "t3"):                            # repeated late writes
+            await mem.store_trace(tid, "s1", {})
+        assert await mem.get_session_traces("s1") == []
+
+    @pytest.mark.asyncio
     async def test_delete_does_not_block_other_sessions(self):
         mem = MemoryTraceStore()
         await mem.store_trace("t1", "s1", {})
         await mem.delete_session("s1")
         await mem.store_trace("t2", "s2", {})                     # unrelated session
-        traces = await mem.get_session_traces("s2")
-        assert len(traces) == 1
+        assert len(await mem.get_session_traces("s2")) == 1
 
     @pytest.mark.asyncio
-    async def test_tombstone_expiry_allows_reuse(self):
-        mem = MemoryTraceStore(tombstone_ttl_s=1000.0)
-        await mem.store_trace("t1", "s1", {})
-        await mem.delete_session("s1")
-        # simulate the tombstone aging past the TTL
-        mem._tombstones["s1"] = time.time() - 2000.0
-        await mem.store_trace("t2", "s1", {})                     # now allowed again
+    async def test_cap_evicts_oldest_tombstone(self):
+        mem = MemoryTraceStore(max_tombstones=2)
+        for sid in ("s1", "s2", "s3"):                            # s1 evicted (FIFO)
+            await mem.delete_session(sid)
+        assert list(mem._tombstones) == ["s2", "s3"]
+        await mem.store_trace("t2", "s2", {})                     # still blocked
+        assert await mem.get_session_traces("s2") == []
+        await mem.store_trace("t1", "s1", {})                     # evicted past cap -> allowed
         assert len(await mem.get_session_traces("s1")) == 1
 
     @pytest.mark.asyncio
-    async def test_ttl_zero_disables_tombstone(self):
-        mem = MemoryTraceStore(tombstone_ttl_s=0.0)
+    async def test_zero_cap_disables_tombstone(self):
+        mem = MemoryTraceStore(max_tombstones=0)
         await mem.store_trace("t1", "s1", {})
         await mem.delete_session("s1")
-        assert mem._tombstones == {}                             # no tombstone recorded
+        assert mem._tombstones == {}                             # nothing remembered
         await mem.store_trace("t2", "s1", {})                     # legacy resurrection behaviour
         assert len(await mem.get_session_traces("s1")) == 1
-
-    @pytest.mark.asyncio
-    async def test_expired_tombstones_are_purged(self):
-        mem = MemoryTraceStore(tombstone_ttl_s=1000.0)
-        await mem.store_trace("t1", "s1", {})
-        await mem.delete_session("s1")
-        mem._tombstones["s1"] = time.time() - 2000.0             # stale entry
-        await mem.store_trace("t2", "s2", {})
-        await mem.delete_session("s2")                            # cold-path purge runs here
-        assert "s1" not in mem._tombstones                        # stale entry reaped
-        assert "s2" in mem._tombstones
 
 
 class TestSqliteStoreSpecific:
