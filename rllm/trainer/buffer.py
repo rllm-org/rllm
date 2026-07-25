@@ -254,6 +254,14 @@ class TrajectoryGroupBuffer:
             self._record_classified_prompt_group()
             return True
 
+        # reward/effective: the `effective` half of the {all, effective} matrix
+        # -- reward over only the trajectories that survived every filter
+        # (compact-filtering, min-trajs, uniform-reward) and will enter the
+        # loss. Read alongside reward/all/* (recorded pre-filter in
+        # _record_episode_metrics): effective = "what we trained on", all =
+        # "what actually happened" (errors incl.); their gap is the filtered mass.
+        self._record_reward_stats("reward/effective", [t.reward for g in traj_groups for t in g.trajectories if t.reward is not None])
+
         # 6. Set weight version and queue
         for g in traj_groups:
             g.weight_version = weight_version
@@ -373,6 +381,62 @@ class TrajectoryGroupBuffer:
             self._aggregator.record("episode/prompt_tokens", total_prompt_tokens)
             self._aggregator.record("episode/response_tokens", total_response_tokens)
             self._aggregator.record("episode/correct", 1.0 if ep.is_correct else 0.0)
+
+        # --- reward/all: the honest, pre-filter performance view -------------
+        # Every rollout that came back, INCLUDING those dropped downstream by
+        # compact-filtering / min-trajs / uniform-reward. Errored/unscored
+        # episodes count as reward 0 (a failed attempt), so this is a true
+        # reflection of performance -- unlike reward/{role}/* (post compact-
+        # filter, pre uniform-filter) and reward/effective/* (post every
+        # filter), which only ever see surviving trajectories. This is the
+        # `all` half of the {all, effective} matrix (cf. prime-rl); the
+        # `effective` half is recorded on the queued path in add_episode.
+        self._record_reward_stats("reward/all", [self._episode_scalar_reward(ep) for ep in episodes])
+        # Group-difficulty decomposition over this prompt group's rollouts:
+        # too-hard (none solved) vs too-easy (all solved) vs the mixed groups
+        # that actually carry GRPO signal. Averaged across tasks by the
+        # aggregator -> the fraction of prompt groups in each bucket. This is
+        # the interpretable replacement for advantage/*/fraction_zero (which
+        # can't say *why* a group is wasted).
+        if episodes:
+            n = len(episodes)
+            n_correct = sum(1 for ep in episodes if ep.is_correct)
+            self._aggregator.record("reward/all/solved_none", 1.0 if n_correct == 0 else 0.0)
+            self._aggregator.record("reward/all/solved_all", 1.0 if n_correct == n else 0.0)
+            self._aggregator.record("reward/all/solved_some", 1.0 if 0 < n_correct < n else 0.0)
+
+    @staticmethod
+    def _episode_scalar_reward(ep: Episode) -> float:
+        """Scalar reward for one rollout in the reward/all view: the last scored
+        trajectory's reward (falling back to its last step's), or 0.0 when the
+        episode carried no scored trajectory (errored / infra-failed). Scoring
+        failures as 0 -- rather than dropping them, as compact-filtering does
+        before reward/* is computed -- is what makes reward/all honest."""
+        reward = 0.0
+        for traj in ep.trajectories:
+            if traj.reward is not None:
+                reward = traj.reward
+            elif traj.steps:
+                reward = traj.steps[-1].reward
+        return float(reward)
+
+    def _record_reward_stats(self, prefix: str, rewards: list[float]) -> None:
+        """Record mean/std/max/min of a reward distribution under ``prefix``.
+
+        No-op on an empty list (e.g. a fully-filtered task contributes no
+        effective rewards, so it drops out of reward/effective/* -- exactly the
+        asymmetry the {all, effective} split is meant to surface). The
+        aggregator reduces /mean and /std across tasks by mean and /max,/min by
+        max,min (see ``metrics_aggregator._infer_rule``)."""
+        if not rewards:
+            return
+        n = len(rewards)
+        mean = sum(rewards) / n
+        std = (sum((r - mean) ** 2 for r in rewards) / n) ** 0.5
+        self._aggregator.record(f"{prefix}/mean", mean)
+        self._aggregator.record(f"{prefix}/std", std)
+        self._aggregator.record(f"{prefix}/max", max(rewards))
+        self._aggregator.record(f"{prefix}/min", min(rewards))
 
     def _all_episodes_compact_filtered(self, episodes: list[Episode]) -> bool:
         return all(self._cf_config.should_mask(ep.termination_reason or TerminationReason.UNKNOWN) for ep in episodes)
