@@ -199,6 +199,10 @@ def _build_episode(
     metrics["steps_collected"] = len(training_steps)
     metrics["empty_response_traces_dropped"] = empty_response_traces_dropped
 
+    remote_metrics = (result.raw_result or {}).get("metrics") or {}
+    scalar_remote = {k: int(v) if isinstance(v, bool) else v for k, v in remote_metrics.items() if isinstance(v, (bool | int | float))}
+    metrics = {**scalar_remote, **metrics}
+
     is_correct = bool(result.reward and result.reward >= 1.0)
 
     return Episode(

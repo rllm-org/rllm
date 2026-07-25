@@ -50,6 +50,8 @@ from rllm.types import (
     termination_reason_from_error,
 )
 from rllm.utils import colorful_print
+from rllm.utils.group_summary import format_group_finished
+from rllm.utils.priority_semaphore import EVAL_PRIORITY, TRAIN_PRIORITY, PrioritySemaphore
 
 if TYPE_CHECKING:
     from rllm_model_gateway.models import TraceRecord
@@ -450,7 +452,9 @@ class AgentFlowEngine:
 
         self.n_parallel_tasks = n_parallel_tasks
         self.executor = ThreadPoolExecutor(max_workers=n_parallel_tasks)
-        self._semaphore = asyncio.Semaphore(n_parallel_tasks)
+        # Priority-aware so eval rollouts (is_validation=True) preempt training
+        # rollouts for slots on this shared pool. See process_task_with_retry.
+        self._semaphore = PrioritySemaphore(n_parallel_tasks)
 
         # Raise the file descriptor limit to avoid "Too many open files" when
         # running many parallel agent flows with individual HTTP clients.
@@ -474,7 +478,7 @@ class AgentFlowEngine:
         the internal state can't be read.
         """
         try:
-            return max(0, self.n_parallel_tasks - self._semaphore._value)  # type: ignore[attr-defined]
+            return max(0, self.n_parallel_tasks - self._semaphore.available)
         except Exception:
             return -1
 
@@ -482,8 +486,7 @@ class AgentFlowEngine:
     def pending(self) -> int:
         """Best-effort count of rollout tasks queued waiting for a slot."""
         try:
-            waiters = self._semaphore._waiters  # type: ignore[attr-defined]
-            return len(waiters) if waiters else 0
+            return self._semaphore.waiting
         except Exception:
             return -1
 
@@ -523,6 +526,13 @@ class AgentFlowEngine:
             futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
 
         results: list[Episode | None] = [None] * len(tasks)
+        # Group-level accounting: a "task group" is all rollouts sharing a task_id
+        # (created by interleave_tasks for GRPO grouping). ``task_id_counter`` now
+        # holds each group's final size; accumulate finished episodes per group and
+        # print a summary once the last one lands. Singleton groups (n=1) are skipped
+        # as noise — the per-episode line already says everything.
+        group_sizes: dict[str, int] = dict(task_id_counter)
+        group_episodes: dict[str, list[Episode]] = defaultdict(list)
         # Running tallies for a live accuracy/reward readout on the progress bar.
         n_correct = 0
         reward_sum = 0.0
@@ -565,6 +575,20 @@ class AgentFlowEngine:
                 if n_scored:
                     postfix += f" reward={reward_sum / n_scored:.3f}"
                 pbar.set_postfix_str(postfix)
+
+                # Task-group summary: fires once the group's last rollout lands.
+                # Only multi-rollout groups are tracked (singletons add nothing over
+                # the per-episode line); the accumulator holds references already kept
+                # alive by ``results`` and is popped on completion, so it adds no
+                # meaningful memory and is empty by the time this loop exits.
+                if episode is not None and group_sizes.get(task_id, 1) > 1:
+                    group = group_episodes[task_id]
+                    group.append(episode)
+                    if len(group) >= group_sizes[task_id]:
+                        try:
+                            print(format_group_finished(task_id, group_episodes.pop(task_id)), flush=True)
+                        except Exception:
+                            logger.debug("group summary formatting error", exc_info=True)
 
         ordered_results: list[Episode] = results  # type: ignore[assignment]
 
@@ -609,7 +633,8 @@ class AgentFlowEngine:
         task_for_episode = task.metadata if isinstance(task, Task) else task
         task_obj = task if isinstance(task, Task) else task_from_row(task, task_id)
 
-        async with self._semaphore:
+        priority = EVAL_PRIORITY if is_validation else TRAIN_PRIORITY
+        async with self._semaphore.slot(priority):
             retry_errors: list[dict[str, Any]] = []
             for retry_attempt in range(1, self.retry_limit + 1):
                 uid = f"{task_id}:{rollout_idx}"

@@ -506,3 +506,45 @@ def test_hook_install_honors_baked_script(monkeypatch, baked_install, expected_c
     ctx = _hook_setup(monkeypatch, sandbox, _install_flow())
     assert sandbox.calls == expected_calls
     assert ctx.env is sandbox
+
+
+class TestSnapshotRegistryPickle:
+    """SnapshotRegistry travels through cloudpickle/pickle when SandboxTaskHooks
+    (which holds a ``_registry: SnapshotRegistry``) is sent to a Ray actor
+    (e.g. verl ``VerlTaskRunner``). Without ``__getstate__`` / ``__setstate__``
+    the built-in ``threading.Lock`` fails with
+    ``TypeError: cannot pickle '_thread.lock' object`` and every rollout crashes
+    before it starts.
+    """
+
+    def test_registry_survives_pickle_roundtrip(self, tmp_path):
+        import pickle
+
+        original = SnapshotRegistry(
+            path=str(tmp_path / "registry.json"),
+            envs={"env-1": {"image": "foo:1"}},
+            groups={"group-a": {"envs": ["env-1"]}},
+        )
+        restored = pickle.loads(pickle.dumps(original))
+        # State survives the roundtrip.
+        assert restored.path == original.path
+        assert restored._envs == original._envs
+        assert restored._groups == original._groups
+        # Lock is recreated fresh on unpickle (was stripped on pickle).
+        assert restored._lock is not original._lock
+        # Restored lock is a fully functional threading.Lock.
+        assert restored._lock.acquire(blocking=False)
+        restored._lock.release()
+
+    def test_registry_pickles_via_cloudpickle(self, tmp_path):
+        """Ray uses cloudpickle under the hood; ensure that path also works."""
+        try:
+            import cloudpickle
+        except ImportError:
+            pytest.skip("cloudpickle not installed")
+
+        original = SnapshotRegistry(path=str(tmp_path / "registry.json"))
+        restored = cloudpickle.loads(cloudpickle.dumps(original))
+        assert restored.path == original.path
+        assert restored._lock.acquire(blocking=False)
+        restored._lock.release()

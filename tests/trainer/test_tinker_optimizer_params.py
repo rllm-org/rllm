@@ -63,8 +63,8 @@ def test_non_fused_backend_passes_configured_optimizer_params_to_adam(monkeypatc
 
     assert backend.policy_trainer.training_client.adam_params.weight_decay == 0.123
     assert backend.policy_trainer.training_client.adam_params.grad_clip_norm == 4.5
-    assert trainer_state.metrics["train/optimizer/grad_norm"] == 3.2
-    assert trainer_state.metrics["train/optimizer/adam/step"] == 7.0
+    assert trainer_state.metrics["train/grad_norm"] == 3.2
+    assert trainer_state.metrics["train/adam/step"] == 7.0
 
 
 def test_fused_backend_passes_configured_optimizer_params_to_adam(monkeypatch):
@@ -91,5 +91,5 @@ def test_fused_backend_passes_configured_optimizer_params_to_adam(monkeypatch):
 
     assert backend.policy_trainer.training_client.adam_params.weight_decay == 0.123
     assert backend.policy_trainer.training_client.adam_params.grad_clip_norm == 4.5
-    assert trainer_state.metrics["train/optimizer/grad_norm"] == 3.2
-    assert trainer_state.metrics["train/optimizer/adam/step"] == 7.0
+    assert trainer_state.metrics["train/grad_norm"] == 3.2
+    assert trainer_state.metrics["train/adam/step"] == 7.0

@@ -1,5 +1,6 @@
 """Tests for MemoryTraceStore and SqliteTraceStore."""
 
+import array
 import copy
 import os
 import tempfile
@@ -164,6 +165,72 @@ class TestMemoryStoreSpecific:
         assert traces[1]["messages"][0] is traces[0]["messages"][0]
         assert traces[1]["messages"][1] is not traces[0]["messages"][1]
         assert traces[1]["messages"][2] is not traces[0]["messages"][2]
+
+
+class TestTokenArrayPacking:
+    """The memory store packs token-id/logprob lists into array.array to save
+    RAM, but the packing must be invisible to readers (plain lists back out)."""
+
+    # Ids above CPython's small-int intern cap and a realistic vocab range.
+    _TRACE = {
+        "prompt_token_ids": [1000, 200000, 42, 1000, 151000],
+        "completion_token_ids": [12, 99999],
+        "logprobs": [-0.5, -12.3456, -0.0001],
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+
+    @pytest.mark.asyncio
+    async def test_roundtrip_transparent(self, store):
+        """Both backends return plain lists with identical values."""
+        await store.store_trace("t1", "s1", dict(self._TRACE))
+        for getter in (
+            await store.get_trace("t1"),
+            (await store.get_session_traces("s1"))[0],
+        ):
+            for field in ("prompt_token_ids", "completion_token_ids", "logprobs"):
+                assert isinstance(getter[field], list)
+                assert getter[field] == self._TRACE[field]
+            assert getter["messages"] == self._TRACE["messages"]
+
+    @pytest.mark.asyncio
+    async def test_memory_store_packs_internally(self):
+        mem = MemoryTraceStore()
+        await mem.store_trace("t1", "s1", dict(self._TRACE))
+        stored = mem._traces["t1"]
+        assert isinstance(stored["prompt_token_ids"], array.array)
+        assert isinstance(stored["completion_token_ids"], array.array)
+        assert isinstance(stored["logprobs"], array.array)
+        assert stored["prompt_token_ids"].typecode == "i"
+        assert stored["logprobs"].typecode == "d"
+        # messages and other fields are untouched
+        assert stored["messages"] == self._TRACE["messages"]
+
+    @pytest.mark.asyncio
+    async def test_pack_does_not_mutate_caller_dict(self):
+        mem = MemoryTraceStore()
+        data = dict(self._TRACE)
+        await mem.store_trace("t1", "s1", data)
+        assert isinstance(data["prompt_token_ids"], list)  # caller's copy intact
+
+    @pytest.mark.asyncio
+    async def test_non_numeric_fields_fall_back(self):
+        mem = MemoryTraceStore()
+        # None logprobs, empty ids, and a None element must not raise or corrupt.
+        data = {
+            "prompt_token_ids": [],
+            "completion_token_ids": [1, 2, 3],
+            "logprobs": None,
+        }
+        await mem.store_trace("t1", "s1", data)
+        got = await mem.get_trace("t1")
+        assert got["prompt_token_ids"] == []
+        assert got["completion_token_ids"] == [1, 2, 3]
+        assert got["logprobs"] is None
+
+        data2 = {"logprobs": [-0.1, None, -0.3]}  # ragged -> keep as list
+        await mem.store_trace("t2", "s1", data2)
+        assert isinstance(mem._traces["t2"]["logprobs"], list)
+        assert (await mem.get_trace("t2"))["logprobs"] == [-0.1, None, -0.3]
 
 
 class TestSqliteStoreSpecific:
