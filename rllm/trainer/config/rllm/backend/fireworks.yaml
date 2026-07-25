@@ -28,7 +28,7 @@ training:
   beta2: 0.95
   eps: 1e-8
   weight_decay: 0.01
-  grad_clip_norm: 1.0
+  grad_clip_norm: 0.0  # 0.0 = disabled (opt-in). Set >0 to clip global grad norm; avoid low values (e.g. 1.0) with token-sum loss.
   max_length: null  # Auto-derived from training shape if null
   resume_from_fireworks_job_id: null  # Source trainer job id for loading a DCP checkpoint
   resume_from_dcp_checkpoint: null  # Explicit DCP name to load; null uses latest on the source/current job

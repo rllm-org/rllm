@@ -631,7 +631,7 @@ class FireworksPolicyTrainer:
         beta2: float = 0.999,
         eps: float = 1e-8,
         weight_decay: float = 0.01,
-        grad_clip_norm: float = 1.0,
+        grad_clip_norm: float = 0.0,  # 0.0 = no clipping (opt-in); see AdamParams grad_clip_norm semantics
     ) -> tuple[float, dict]:
         """Run optimizer step. Returns (scheduled_lr, metrics)."""
         scheduled_lr = learning_rate * compute_schedule_lr_multiplier(
