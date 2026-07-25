@@ -1,14 +1,15 @@
-"""Tests for the {all, effective} reward matrix in TrajectoryGroupBuffer.
+"""Tests for the per-role {all, effective} reward matrix in TrajectoryGroupBuffer.
 
-`reward/all/*` (recorded over every rollout, errors counted as 0) is a true
-reflection of performance; `reward/effective/*` (post every filter) is what
-actually trains. See buffer._record_episode_metrics / _record_reward_stats.
+`reward/{role}/all/*` (every trajectory that ran, pre-filter) is the honest
+per-role performance view; `reward/{role}/effective/*` (post every filter) is
+what actually trains. Grouping by trajectory role means multi-agent runs
+(e.g. solver/judge) report each role separately, matching reward/{role}/*.
+See buffer._record_reward_by_role / _record_reward_stats.
 """
 
-from rllm.agents.agent import Episode, Step, Trajectory
+from rllm.agents.agent import Step, Trajectory
 from rllm.trainer.buffer import TrajectoryGroupBuffer
 from rllm.trainer.metrics_aggregator import MetricsAggregator
-from rllm.workflows.workflow import TerminationReason
 
 
 def _buffer_with_aggregator() -> TrajectoryGroupBuffer:
@@ -20,74 +21,78 @@ def _buffer_with_aggregator() -> TrajectoryGroupBuffer:
     return buf
 
 
-def test_episode_scalar_reward_uses_trajectory_reward():
-    ep = Episode(id="t:0", trajectories=[Trajectory(steps=[], reward=0.7)], is_correct=True)
-    assert TrajectoryGroupBuffer._episode_scalar_reward(ep) == 0.7
-
-
-def test_episode_scalar_reward_errored_episode_is_zero():
-    # No scored trajectory (the shape agentflow_engine emits on ERROR) -> 0.0,
-    # NOT dropped. This is the crux: compact-filtering removes these before
-    # reward/* is computed, inflating it; reward/all keeps them as failures.
-    ep = Episode(id="t:1", trajectories=[], termination_reason=TerminationReason.ERROR, is_correct=False)
-    assert TrajectoryGroupBuffer._episode_scalar_reward(ep) == 0.0
-
-
-def test_episode_scalar_reward_falls_back_to_last_step():
-    ep = Episode(id="t:2", trajectories=[Trajectory(steps=[Step(reward=0.4)], reward=None)])
-    assert TrajectoryGroupBuffer._episode_scalar_reward(ep) == 0.4
-
-
 def test_record_reward_stats_empty_is_noop():
     # A fully-filtered task contributes no effective rewards -> it drops out of
-    # reward/effective/* entirely (the intended {all, effective} asymmetry).
+    # reward/{role}/effective/* (the intended {all, effective} asymmetry).
     buf = _buffer_with_aggregator()
-    buf._record_reward_stats("reward/effective", [])
+    buf._record_reward_stats("reward/opencode/effective", [])
     assert buf._aggregator.flush() == {}
 
 
 def test_record_reward_stats_values():
     buf = _buffer_with_aggregator()
-    buf._record_reward_stats("reward/all", [0.0, 1.0, 1.0])
+    buf._record_reward_stats("reward/opencode/all", [0.0, 1.0, 1.0])
     m = buf._aggregator.flush()
-    assert m["reward/all/mean"] == 2.0 / 3.0
-    assert m["reward/all/max"] == 1.0
-    assert m["reward/all/min"] == 0.0
-    assert m["reward/all/std"] > 0.0
+    assert m["reward/opencode/all/mean"] == 2.0 / 3.0
+    assert m["reward/opencode/all/max"] == 1.0
+    assert m["reward/opencode/all/min"] == 0.0
+    assert m["reward/opencode/all/std"] > 0.0
 
 
-def test_all_view_counts_errored_as_zero_and_decomposes_difficulty():
-    # 4 rollouts of one prompt group: 1 solved, 2 genuinely failed, 1 errored.
-    episodes = [
-        Episode(id="t:0", trajectories=[Trajectory(steps=[], reward=1.0)], is_correct=True),
-        Episode(id="t:1", trajectories=[Trajectory(steps=[], reward=0.0)], is_correct=False),
-        Episode(id="t:2", trajectories=[Trajectory(steps=[], reward=0.0)], is_correct=False),
-        Episode(id="t:3", trajectories=[], termination_reason=TerminationReason.ERROR, is_correct=False),
-    ]
+def test_reward_by_role_reports_each_role_separately():
+    # Multi-agent: solver + judge each get their own reward/<role>/all/*.
     buf = _buffer_with_aggregator()
-    buf._record_episode_metrics(episodes)
-    m = buf._aggregator.flush()
-
-    # Errored rollout scored 0 (kept, not dropped): mean = (1+0+0+0)/4 = 0.25.
-    assert m["reward/all/mean"] == 0.25
-    assert m["reward/all/max"] == 1.0
-    assert m["reward/all/min"] == 0.0
-    # Mixed group -> carries GRPO signal.
-    assert m["reward/all/solved_some"] == 1.0
-    assert m["reward/all/solved_none"] == 0.0
-    assert m["reward/all/solved_all"] == 0.0
-    # Sanity: the pre-existing all-episodes accuracy agrees (1 of 4 correct).
-    assert m["episode/correct"] == 0.25
-
-
-def test_all_view_solved_none_when_every_rollout_fails():
-    episodes = [
-        Episode(id="t:0", trajectories=[Trajectory(steps=[], reward=0.0)], is_correct=False),
-        Episode(id="t:1", trajectories=[], termination_reason=TerminationReason.ERROR, is_correct=False),
+    trajs = [
+        Trajectory(name="solver", steps=[], reward=1.0),
+        Trajectory(name="solver", steps=[], reward=0.0),
+        Trajectory(name="judge", steps=[], reward=0.5),
+        Trajectory(name="judge", steps=[], reward=0.5),
     ]
-    buf = _buffer_with_aggregator()
-    buf._record_episode_metrics(episodes)
+    buf._record_reward_by_role("all", trajs, with_difficulty=True)
     m = buf._aggregator.flush()
-    assert m["reward/all/solved_none"] == 1.0
-    assert m["reward/all/solved_some"] == 0.0
-    assert m["reward/all/solved_all"] == 0.0
+
+    assert m["reward/solver/all/mean"] == 0.5
+    assert m["reward/solver/all/max"] == 1.0
+    assert m["reward/judge/all/mean"] == 0.5
+    # solver: 1 solved / 1 failed -> mixed (carries GRPO signal)
+    assert m["reward/solver/solved_some"] == 1.0
+    assert m["reward/solver/solved_none"] == 0.0
+    assert m["reward/solver/solved_all"] == 0.0
+    # judge: both > 0 -> uniform "all solved"
+    assert m["reward/judge/solved_all"] == 1.0
+    assert m["reward/judge/solved_some"] == 0.0
+
+
+def test_reward_by_role_effective_has_no_difficulty():
+    # Difficulty (solved_*) is only meaningful pre-filter, so it's recorded on
+    # the `all` subset; effective is post-filter (uniform groups already gone).
+    buf = _buffer_with_aggregator()
+    trajs = [Trajectory(name="opencode", steps=[], reward=1.0), Trajectory(name="opencode", steps=[], reward=0.0)]
+    buf._record_reward_by_role("effective", trajs)
+    m = buf._aggregator.flush()
+    assert m["reward/opencode/effective/mean"] == 0.5
+    assert not any(k.startswith("reward/opencode/solved_") for k in m)
+
+
+def test_reward_by_role_solved_none_when_role_all_fail():
+    buf = _buffer_with_aggregator()
+    trajs = [Trajectory(name="opencode", steps=[], reward=0.0) for _ in range(3)]
+    buf._record_reward_by_role("all", trajs, with_difficulty=True)
+    m = buf._aggregator.flush()
+    assert m["reward/opencode/solved_none"] == 1.0
+    assert m["reward/opencode/solved_some"] == 0.0
+    assert m["reward/opencode/solved_all"] == 0.0
+
+
+def test_reward_by_role_falls_back_to_last_step_reward():
+    buf = _buffer_with_aggregator()
+    trajs = [Trajectory(name="opencode", steps=[Step(reward=0.4)], reward=None)]
+    buf._record_reward_by_role("all", trajs)
+    m = buf._aggregator.flush()
+    assert m["reward/opencode/all/mean"] == 0.4
+
+
+def test_reward_by_role_empty_is_noop():
+    buf = _buffer_with_aggregator()
+    buf._record_reward_by_role("effective", [])
+    assert buf._aggregator.flush() == {}
