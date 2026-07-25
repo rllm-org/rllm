@@ -31,6 +31,8 @@ training:
   beta1: 0.9
   beta2: 0.95
   eps: 1e-8
+  weight_decay: 0.0
+  grad_clip_norm: 0.0
   max_length: 32768
   num_minibatches: 1
   default_local_dir: 'checkpoints/${rllm.trainer.project_name}/${rllm.trainer.experiment_name}'
