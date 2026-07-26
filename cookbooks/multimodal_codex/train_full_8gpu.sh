@@ -27,7 +27,13 @@ set -euo pipefail
 : "${MAX_RESPONSE_LEN:=1024}"
 : "${MAX_MODEL_LEN:=32768}"
 : "${GPU_MEM_UTIL:=0.6}"
+: "${LR:=2e-5}"
+: "${TOTAL_EPOCHS:=3}"
+: "${SAVE_FREQ:=10}"
+: "${MM_CODEX_TRAIN_SIZE:=32}"
+: "${WANDB_PROJECT:=mmcodex-prod}"
 : "${EXPERIMENT_NAME:=qwen3.5-9b-grpo-r${ROLLOUT_N}-p${MAX_PROMPT_LEN}-r${MAX_RESPONSE_LEN}}"
+export MM_CODEX_TRAIN_SIZE
 : "${PROJECT_DIR:=/data/work/rllm}"
 : "${MODEL:=Qwen/Qwen3.5-9B}"
 : "${VLLM_PORT:=4000}"
@@ -88,23 +94,17 @@ if [[ -n "$_VENV_SITE" && -d "$_VENV_SITE/nvidia/cu13/lib" ]]; then
     export LD_LIBRARY_PATH="$_VENV_SITE/nvidia/cu13/lib:${LD_LIBRARY_PATH:-}"
 fi
 
-# --------- 5b. (Opt-in) install rotary-shape DIAG patch as sitecustomize ---------
-# Set RLLM_ROTARY_DIAG=1 in the submit -c "..." to enable. Copies the patch to
-# sitecustomize.py so ALL python processes (main + Ray workers) pick it up.
-if [[ -n "${RLLM_ROTARY_DIAG:-}" && -n "$_VENV_SITE" ]]; then
-    _PATCH_SRC="$PROJECT_DIR/cookbooks/multimodal_codex/rotary_diag_patch.py"
-    if [[ -f "$_PATCH_SRC" ]]; then
-        echo "[full] installing rotary_diag_patch as sitecustomize.py"
-        cp "$_PATCH_SRC" "$_VENV_SITE/sitecustomize.py"
-    else
-        echo "[full] WARN: RLLM_ROTARY_DIAG set but $_PATCH_SRC missing"
-    fi
-    # Also apply in-place patch to modeling_qwen3_5.py — guaranteed to fire even if
-    # sitecustomize.py isn't loaded (uv venv sometimes skips it).
+# --------- 5b. (Opt-in) install rotary-shape DIAG via in-place patch ---------
+# Set RLLM_ROTARY_DIAG=1 in the submit -c "..." to enable. In-place patches
+# modeling_qwen3_5.py::apply_rotary_pos_emb to log q/k/cos/sin shapes on mismatch.
+# (Note: sitecustomize.py approach was tried and DOES NOT WORK in uv venv.)
+if [[ -n "${RLLM_ROTARY_DIAG:-}" ]]; then
     _INPLACE="$PROJECT_DIR/cookbooks/multimodal_codex/install_rotary_diag_inplace.py"
     if [[ -f "$_INPLACE" ]]; then
         echo "[full] applying in-place DIAG patch to modeling_qwen3_5.py"
         /tmp/uv-venv/bin/python "$_INPLACE" || echo "[full] WARN: in-place patch failed"
+    else
+        echo "[full] WARN: RLLM_ROTARY_DIAG set but $_INPLACE missing"
     fi
 fi
 
@@ -227,7 +227,7 @@ CUDA_VISIBLE_DEVICES=2,3,4,5,6,7 "$VENV_PY" cookbooks/multimodal_codex/train.py 
     +model.name="$MODEL" \
     actor_rollout_ref.model.path="$MODEL" \
     actor_rollout_ref.hybrid_engine=True \
-    actor_rollout_ref.actor.optim.lr=2e-5 \
+    actor_rollout_ref.actor.optim.lr=${LR} \
     actor_rollout_ref.actor.ppo_mini_batch_size=6 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_dynamic_bsz=False \
@@ -252,15 +252,15 @@ CUDA_VISIBLE_DEVICES=2,3,4,5,6,7 "$VENV_PY" cookbooks/multimodal_codex/train.py 
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
-    trainer.logger="['console']" \
-    trainer.project_name=mmcodex-prod \
+    trainer.logger="['console','wandb']" \
+    trainer.project_name=${WANDB_PROJECT} \
     trainer.experiment_name=${EXPERIMENT_NAME} \
     trainer.val_before_train=false \
     trainer.n_gpus_per_node=6 \
     trainer.nnodes=1 \
-    trainer.save_freq=10 \
+    trainer.save_freq=${SAVE_FREQ} \
     trainer.test_freq=999 \
-    trainer.total_epochs=3 \
+    trainer.total_epochs=${TOTAL_EPOCHS} \
     trainer.default_local_dir="$LOG_ROOT/exp" \
     trainer.default_hdfs_dir=null \
     trainer.resume_mode=auto \

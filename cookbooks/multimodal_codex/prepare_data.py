@@ -16,8 +16,10 @@ from rllm.data.dataset import DatasetRegistry
 from cookbooks.multimodal_codex.renderer import _render_image_from_params
 from cookbooks.multimodal_codex.tasks import GENERATORS
 
-TRAIN_SIZE = 32
-TEST_SIZE = 8
+import os as _os
+
+TRAIN_SIZE = int(_os.environ.get("MM_CODEX_TRAIN_SIZE", "256"))
+TEST_SIZE = int(_os.environ.get("MM_CODEX_TEST_SIZE", "8"))
 SEED = 42
 
 # Absolute path inside sandbox — Codex CLI --image accepts absolute paths
