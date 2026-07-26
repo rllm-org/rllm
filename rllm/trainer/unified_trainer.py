@@ -37,7 +37,7 @@ from rllm.trainer.algorithms.transform import (
     _default_traj_grouping_hook,
     transform_episodes_to_trajectory_groups,
 )
-from rllm.trainer.algorithms.visualization import print_metrics_table, visualize_trajectory_last_steps
+from rllm.trainer.algorithms.visualization import print_config_table, print_metrics_table, visualize_trajectory_last_steps
 from rllm.trainer.backend_protocol import BackendProtocol
 from rllm.trainer.buffer import TrajectoryGroupBuffer
 from rllm.trainer.metrics_aggregator import MetricsAggregator
@@ -358,6 +358,10 @@ class UnifiedTrainer:
 
     async def fit_async(self) -> None:
         """Public async entry point for the full training process."""
+        # Print the resolved (post config-sync) config once at startup, so
+        # mirrored data.* / rllm.data.* values are easy to eyeball.
+        print_config_table(self.config, title=f"Training Config ({self.backend.__class__.__name__})")
+
         # Initialize remote runtime (if enabled) before the workflow pool
         if self._remote_runtime is not None:
             self._remote_runtime.initialize()

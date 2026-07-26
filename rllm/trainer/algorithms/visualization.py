@@ -58,6 +58,58 @@ def print_metrics_table(metrics: dict, step: int, title: str | None = None) -> N
         print("=" * 60)
 
 
+def _flatten_config(config: dict, parent_key: str = "") -> dict:
+    """Flatten a nested config dict into dotted-path keys (``a.b.c`` -> value)."""
+    items: dict = {}
+    for key, value in config.items():
+        full_key = f"{parent_key}.{key}" if parent_key else str(key)
+        if isinstance(value, dict) and value:
+            items.update(_flatten_config(value, full_key))
+        else:
+            items[full_key] = value
+    return items
+
+
+def print_config_table(config: Any, title: str = "Training Config") -> None:
+    """Print a (possibly nested) training config as a formatted Rich table.
+
+    Mirrors ``print_metrics_table`` styling with a plain-text fallback. Accepts
+    an OmegaConf ``DictConfig`` or a plain dict; nested keys are flattened to
+    dotted paths and sorted (so mirrored namespaces like ``data.*`` and
+    ``rllm.data.*`` land next to each other for an at-a-glance sanity check).
+    """
+    try:
+        from omegaconf import OmegaConf
+
+        if OmegaConf.is_config(config):
+            try:
+                config = OmegaConf.to_container(config, resolve=True)
+            except Exception:
+                # Unresolvable/missing interpolations — show the raw values.
+                config = OmegaConf.to_container(config, resolve=False)
+    except ImportError:
+        pass
+
+    flat = _flatten_config(config) if isinstance(config, dict) else {"config": config}
+
+    try:
+        from rich.console import Console
+        from rich.table import Table
+
+        table = Table(title=title, show_header=True, header_style="bold magenta")
+        table.add_column("Config", style="cyan", no_wrap=False)
+        table.add_column("Value", justify="right", style="green")
+        for key, value in sorted(flat.items()):
+            table.add_row(key, str(value))
+        Console().print(table)
+    except ImportError:
+        print(f"\n{title}")
+        print("=" * 60)
+        for key, value in sorted(flat.items()):
+            print(f"{key:45s} {value}")
+        print("=" * 60)
+
+
 def colorful_print(string: str, *args, **kwargs) -> None:
     end = kwargs.pop("end", "\n")
     print(click.style(string, *args, **kwargs), end=end, flush=True)
