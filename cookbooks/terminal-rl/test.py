@@ -121,7 +121,7 @@ def test_prepare_data_rejects_zip_parent_traversal(tmp_path):
         mod._extract_archive(archive, tmp_path / "extracted")
 
 
-def test_glm5p2_production_profile_is_full_opencode_4x12_full_suite_every_twenty_five_steps(tmp_path):
+def test_glm5p2_production_profile_is_full_opencode_4x12_full_suite_every_ten_steps(tmp_path):
     script = (_COOKBOOK_DIR / "train_fireworks_glm5p2.sh").read_text()
 
     assert "production phase requires: full opencode production" in script
@@ -164,7 +164,12 @@ def test_glm5p2_production_profile_is_full_opencode_4x12_full_suite_every_twenty
     assert "rllm.compact_filtering.mask_agent_setup_timeout=true" in result.stdout
     assert "rllm.compact_filtering.mask_env_start_timeout=true" in result.stdout
     assert "rllm.compact_filtering.mask_model_error=true" in result.stdout
-    assert "rllm.rejection_sample.filter_uniform_groups=true" in result.stdout
+    assert "rllm.rejection_sample.filter_uniform_groups=false" in result.stdout
+    assert "rllm.algorithm.norm_adv_by_std_in_grpo=true" in result.stdout
+    assert "rllm.algorithm.loss_fn=ppo_clip" in result.stdout
+    assert "rllm.algorithm.eps_clip=0.2" in result.stdout
+    assert "rllm.algorithm.loss_fn=dppo_tv" not in result.stdout
+    assert "rllm.algorithm.loss_params=" not in result.stdout
     assert "rllm.async_training.enable=false" in result.stdout
     assert "rllm.async_training.staleness_threshold=0.0" in result.stdout
     assert "rllm.async_training.trigger_parameter_sync_step=1" in result.stdout
@@ -176,7 +181,7 @@ def test_glm5p2_production_profile_is_full_opencode_4x12_full_suite_every_twenty
     assert "rllm.trainer.val_before_train=true" in result.stdout
     assert "rllm.trainer.benchmark_before_train=false" in result.stdout
     assert "rllm.trainer.benchmark_after_train=false" in result.stdout
-    assert "rllm.trainer.test_freq=25" in result.stdout
+    assert "rllm.trainer.test_freq=10" in result.stdout
 
 
 def test_glm5p2_sanity_profile_is_one_step_lora_opencode_without_midtest():

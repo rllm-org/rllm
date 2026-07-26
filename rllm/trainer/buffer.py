@@ -322,11 +322,6 @@ class TrajectoryGroupBuffer:
         self._refresh_pbar_counters()
         return await self._load_task_batch(item)
 
-    @property
-    def ready_count(self) -> int:
-        """Number of fully processed task batches ready for training."""
-        return self._training_queue_size
-
     async def get_many(self, count: int) -> list[TaskBatch] | None:
         """Get a full forward/backward chunk, or None if generation ended first."""
         while self._training_queue_size < count:

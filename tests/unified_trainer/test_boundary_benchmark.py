@@ -2,10 +2,14 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
 from omegaconf import OmegaConf
 
 from rllm.data import Dataset
+from rllm.trainer.algorithms.config import AlgorithmConfig, CompactFilteringConfig, TransformConfig
+from rllm.trainer.algorithms.transform import _default_traj_grouping_hook
 from rllm.trainer.unified_trainer import TrainerState, UnifiedTrainer
+from rllm.types import Episode, Step, TerminationReason, Trajectory
 
 
 def test_boundary_suites_commit_one_combined_metrics_row():
@@ -149,3 +153,77 @@ def test_init_dataloaders_builds_separate_validation_and_benchmark_loaders():
     assert len(trainer._benchmark_dataloader) == 1
     assert len(next(iter(trainer._val_dataloader))) == 2
     assert len(next(iter(trainer._benchmark_dataloader))) == 89
+
+
+def test_eval_reward_mean_keeps_every_attempt_in_the_denominator():
+    episodes = [
+        Episode(
+            id="task-1:0",
+            is_correct=True,
+            termination_reason=TerminationReason.ENV_DONE,
+            trajectories=[
+                Trajectory(
+                    name="opencode",
+                    reward=1.0,
+                    steps=[Step(reward=1.0)],
+                )
+            ],
+            metadata={"data_source": "tb21"},
+        ),
+        Episode(
+            id="task-2:0",
+            is_correct=False,
+            termination_reason=TerminationReason.ERROR,
+            trajectories=[
+                Trajectory(
+                    name="opencode",
+                    reward=0.0,
+                    steps=[Step(reward=0.0)],
+                )
+            ],
+            metadata={"data_source": "tb21"},
+        ),
+        Episode(
+            id="task-3:0",
+            is_correct=False,
+            termination_reason=TerminationReason.MODEL_ERROR,
+            trajectories=[],
+            metadata={"data_source": "tb21"},
+        ),
+    ]
+
+    trainer = object.__new__(UnifiedTrainer)
+    trainer.rllm_config = SimpleNamespace(rollout=SimpleNamespace(n_val=1))
+    trainer.algorithm_config = AlgorithmConfig()
+    trainer.transform_config = TransformConfig()
+    trainer.cf_config = CompactFilteringConfig(
+        enable=True,
+        mask_error=True,
+        mask_model_error=True,
+    )
+    trainer.traj_grouping_hook = _default_traj_grouping_hook
+    trainer.agent_workflow_engine = SimpleNamespace(set_training_step=Mock())
+    trainer.backend = SimpleNamespace(
+        on_validation_start=AsyncMock(return_value=True),
+        generate_episodes=AsyncMock(return_value=episodes),
+        on_validation_end=AsyncMock(),
+    )
+    trainer.logger = Mock()
+
+    metrics = asyncio.run(
+        trainer._evaluate_dataloader_async(
+            TrainerState(global_step=0),
+            dataloader=[[{"id": "unused"}]],
+            metric_prefix="val",
+            title="Validation",
+            log_metrics=False,
+        )
+    )
+
+    assert metrics["val/reward/mean"] == pytest.approx(1.0 / 3.0)
+    assert metrics["val/reward/num_episodes"] == 3
+    assert metrics["val/reward/num_correct"] == 1
+    assert metrics["val/tb21/pass@1"] == pytest.approx(1.0 / 3.0)
+    # The role-specific metric is intentionally a scorable-trajectory
+    # diagnostic. Compact filtering removes the two invalid attempts from it.
+    assert metrics["val/reward/opencode/mean"] == 1.0

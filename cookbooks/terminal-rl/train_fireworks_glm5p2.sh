@@ -13,13 +13,14 @@
 # LoRA + OpenCode smoke test: it evaluates the base checkpoint, skips the
 # 20-minute mid-test, and stops after one optimizer batch. Production is
 # full-parameter + OpenCode with the complete 89-task suite at step 0, every
-# 25 optimizer steps, and final weights. Production uses one validation suite
+# 10 optimizer steps, and final weights. Production uses one validation suite
 # instead of also scheduling the same tasks as a boundary benchmark.
 #
-# Training is strictly synchronous and on-policy: collect eight accepted
-# prompt groups from one frozen policy, accumulate one forward/backward pass
-# per group, take one optimizer step, then await the Fireworks hot-load before
-# the next rollout. Uniform groups are replaced under the same policy.
+# Training is strictly synchronous and on-policy: collect one fixed batch of
+# eight prompt groups from one frozen policy, run one forward/backward pass and
+# one optimizer step over the complete batch, then await the Fireworks hot-load
+# before the next rollout. Uniform groups remain in the fixed batch and receive
+# zero group-relative advantage.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -136,7 +137,7 @@ case "$phase" in
             total_batches="${TB_SANITY_TOTAL_BATCHES:-1}"
             rollout_replicas="${TB_ROLLOUT_REPLICAS:-4}"
         else
-            # Use the full suite as validation so step 0 and every 25th step
+            # Use the full suite as validation so step 0 and every 10th step
             # share one metric namespace. Disable the separate benchmark path
             # to avoid evaluating the same tasks twice at step 0. The trainer's
             # final-validation hook still evaluates this suite at final weights.
@@ -146,7 +147,7 @@ case "$phase" in
             benchmark_expected_tasks=0
             benchmark_before_train=false
             benchmark_after_train=false
-            test_freq=25
+            test_freq=10
             val_before_train=true
             rollout_replicas="${TB_ROLLOUT_REPLICAS:-12}"
         fi
@@ -256,10 +257,10 @@ exec "$python_bin" -u train.py \
     rllm.compact_filtering.mask_env_start_timeout=true \
     rllm.compact_filtering.mask_model_error=true \
     rllm.algorithm.adv_estimator=grpo \
-    rllm.algorithm.norm_adv_by_std_in_grpo=false \
+    rllm.algorithm.norm_adv_by_std_in_grpo=true \
     rllm.algorithm.router_replay=R3 \
-    rllm.algorithm.loss_fn=dppo_tv \
-    +rllm.algorithm.loss_params='{delta: 0.1}' \
+    rllm.algorithm.loss_fn=ppo_clip \
+    rllm.algorithm.eps_clip=0.2 \
     rllm.algorithm.loss_agg_mode=token-mean \
     rllm.algorithm.rollout_correction.bypass_mode=true \
     rllm.async_training.enable=false \
@@ -268,7 +269,7 @@ exec "$python_bin" -u train.py \
     rllm.async_training.partial_rollout=false \
     rllm.workflow.n_parallel_tasks="$n_parallel_tasks" \
     rllm.workflow.raise_on_error=false \
-    rllm.rejection_sample.filter_uniform_groups=true \
+    rllm.rejection_sample.filter_uniform_groups=false \
     rllm.gateway.port="$gateway_port" \
     rllm.gateway.num_workers=4 \
     rllm.gateway.cumulative_token_mode=true \
