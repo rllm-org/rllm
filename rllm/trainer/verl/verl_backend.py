@@ -968,13 +968,14 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             with simple_timer("stop_profile", trainer_state.timing_dict):
                 stop_profiling(self.actor_rollout_wg, self.ref_policy_wg, self.use_reference_policy)
 
-        # Save checkpoint if configured
-        if self.config.trainer.save_freq > 0 and trainer_state.global_step % self.config.trainer.save_freq == 0:
+        # A skipped zero-signal batch changed no weights, so it must not save
+        # or synchronize a phantom policy update.
+        if trainer_state.policy_updated_this_batch and self.config.trainer.save_freq > 0 and trainer_state.global_step % self.config.trainer.save_freq == 0:
             with simple_timer("save_checkpoint", trainer_state.timing_dict):
                 save_checkpoint(self.config, self.global_steps, self.actor_rollout_wg, train_dataloader=trainer_state.train_dataloader)
 
         # Weight synchronization (colocated only — separated mode syncs in on_policy_updated)
-        if not self.is_separated:
+        if trainer_state.policy_updated_this_batch and not self.is_separated:
             with simple_timer("update_weights", trainer_state.timing_dict):
                 await self.checkpoint_manager.update_weights(trainer_state.global_step)
 

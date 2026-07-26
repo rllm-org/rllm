@@ -279,6 +279,7 @@ exec "$python_bin" -u train.py \
     rllm.trainer.logger='[console,wandb]' \
     rllm.trainer.project_name=terminal-rl \
     rllm.trainer.experiment_name="$run_name" \
+    rllm.trainer.skip_zero_advantage_batches=true \
     rllm.trainer.val_before_train="$val_before_train" \
     rllm.trainer.benchmark_before_train="$benchmark_before_train" \
     rllm.trainer.benchmark_after_train="$benchmark_after_train" \

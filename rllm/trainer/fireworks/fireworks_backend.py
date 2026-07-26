@@ -403,8 +403,10 @@ class FireworksBackend(TinkerBackend):
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
-        # In async mode, on_policy_updated already handled save/sync
-        if not self._policy_updated_this_step:
+        # In async mode, on_policy_updated already handled save/sync. A batch
+        # explicitly skipped by the trainer changed no weights and must not
+        # trigger a checkpoint or deployment hot-load.
+        if trainer_state.policy_updated_this_batch and not self._policy_updated_this_step:
             step = trainer_state.global_step
             save_freq = self.full_config.rllm.trainer.save_freq
             await self._save_and_sync(

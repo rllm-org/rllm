@@ -70,6 +70,11 @@ trainer:
   save_freq: 20
   val_before_train: false
   val_only: false
+  # Skip forward/backward, optimizer, and weight sync when every trajectory in
+  # a synchronous batch has zero advantage. Enable only for objectives whose
+  # complete loss is advantage-weighted (for example plain GRPO + PPO clip);
+  # leave disabled for auxiliary losses that can learn from zero-advantage data.
+  skip_zero_advantage_batches: false
   # Optional second evaluation suite. Unlike val_dataset/test_freq, this
   # benchmark runs only at explicitly enabled training boundaries.
   benchmark_before_train: false

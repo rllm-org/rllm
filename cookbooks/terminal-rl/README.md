@@ -334,8 +334,11 @@ The production profile keeps uniform-reward GRPO groups in the fixed optimizer
 batch. For a prompt with 16 identical rewards, group-relative standardization
 gives every trajectory zero advantage, so it contributes no policy-gradient
 numerator without changing the sampled task distribution or the batch
-denominator. Compact filtering remains separate and removes only trajectories
-whose reward is not a trustworthy training signal.
+denominator. If all eight groups in a batch have zero advantage, the production
+recipe skips forward/backward, the optimizer step, and the deployment hot-load
+entirely; this prevents AdamW weight decay or momentum from changing the model
+without fresh RL signal. Compact filtering remains separate and removes only
+trajectories whose reward is not a trustworthy training signal.
 
 Before step-0 evaluation, the trainer saves and hot-loads its initial policy
 (including a newly initialized LoRA adapter) and waits for deployment warmup.

@@ -50,6 +50,35 @@ from rllm.workflows.workflow import Workflow
 logger = logging.getLogger(__name__)
 
 
+def _trajectory_groups_have_nonzero_advantage(
+    trajectory_groups: list[TrajectoryGroup],
+    atol: float = 1e-8,
+) -> bool:
+    """Return whether a batch contains any usable policy-gradient signal.
+
+    Advantages must already have been computed. A non-finite advantage is an
+    error rather than a reason to silently skip an optimizer step.
+    """
+    saw_advantage = False
+    for group in trajectory_groups:
+        for trajectory in group.trajectories:
+            for step in trajectory.steps:
+                if step.advantage is None:
+                    continue
+                values = np.asarray(step.advantage, dtype=np.float64).reshape(-1)
+                if values.size == 0:
+                    continue
+                if not np.all(np.isfinite(values)):
+                    raise ValueError(f"Non-finite advantage in trajectory group {group.group_id!r}")
+                saw_advantage = True
+                if np.any(np.abs(values) >= atol):
+                    return True
+
+    if not saw_advantage:
+        raise RuntimeError("Advantage computation produced no per-step advantages")
+    return False
+
+
 @contextmanager
 def _detached_warm_queue(hooks):
     """Temporarily detach a training warm queue so the enclosed work (validation,
@@ -95,6 +124,7 @@ class TrainerState:
     is_training: bool = True
     weight_version: int = 0
     policy_update_count: int = 0
+    policy_updated_this_batch: bool = False
     last_validation_policy_update_count: int | None = None
     train_dataloader: StatefulTaskDataLoader | None = None
     # For timing and metrics
@@ -112,6 +142,7 @@ class TrainerState:
         self.episodes = None
         self.trajectory_groups = None
         self.backend_batch = None
+        self.policy_updated_this_batch = False
 
         self.timing_dict = {}
         self.metrics = {}
@@ -610,6 +641,29 @@ class UnifiedTrainer:
         if not trainer_state.has_trajectory_groups:
             return
 
+        # For a purely advantage-weighted objective, an all-zero-advantage
+        # batch cannot produce a policy-gradient update. Stepping AdamW anyway
+        # can still move parameters through weight decay or optimizer momentum.
+        # This is opt-in because auxiliary objectives (for example ECHO) may
+        # intentionally learn even when the policy-gradient advantage is zero.
+        if self.rllm_config.trainer.get("skip_zero_advantage_batches", False):
+            advantage_metrics = collect_reward_and_advantage_from_trajectory_groups(
+                trainer_state.trajectory_groups,
+                self.algorithm_config,
+            )
+            trainer_state.metrics.update(advantage_metrics)
+            has_learning_signal = _trajectory_groups_have_nonzero_advantage(
+                trainer_state.trajectory_groups,
+            )
+            trainer_state.metrics["batch/skipped_zero_advantage"] = float(not has_learning_signal)
+            if not has_learning_signal:
+                logger.warning(
+                    "Step %d has no nonzero advantage across %d trajectory groups; skipping forward/backward, optimizer, and weight sync.",
+                    trainer_state.global_step,
+                    len(trainer_state.trajectory_groups),
+                )
+                return
+
         # stage 4: transform rllm-native data structures to backend-specific format (sync)
         backend_batch = self.backend.transform_to_backend_batch(trainer_state)
         trainer_state.backend_batch = backend_batch
@@ -625,6 +679,7 @@ class UnifiedTrainer:
         # stage 7: update policy (async)
         await self.backend.update_policy(trainer_state)
         trainer_state.policy_update_count += 1
+        trainer_state.policy_updated_this_batch = True
 
         # stage 8: cleanup, logging, visualization, etc. (sync)
         if self.tokenizer is not None:
@@ -849,6 +904,7 @@ class UnifiedTrainer:
             #    undefined/zero-gradient update (and bump the LR schedule + trigger a weight
             #    sync) for nothing. Skip optim + sync and ride out the bad batch.
             trained_this_step = sequences_this_step > 0
+            trainer_state.policy_updated_this_batch = trained_this_step
             if trained_this_step:
                 logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: optimizer step")
                 await self.backend.update_policy(trainer_state)
@@ -971,10 +1027,7 @@ class UnifiedTrainer:
 
     async def _run_final_evaluations_async(self, trainer_state: TrainerState) -> dict:
         """Run evaluation at final weights unless that exact policy was already validated."""
-        run_validation = (
-            self.rllm_config.trainer.test_freq > 0
-            and trainer_state.last_validation_policy_update_count != trainer_state.policy_update_count
-        )
+        run_validation = self.rllm_config.trainer.test_freq > 0 and trainer_state.last_validation_policy_update_count != trainer_state.policy_update_count
         run_benchmark = self.rllm_config.trainer.get("benchmark_after_train", False)
         if not run_validation and not run_benchmark:
             return {}
