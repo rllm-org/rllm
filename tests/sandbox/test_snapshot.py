@@ -506,3 +506,22 @@ def test_hook_install_honors_baked_script(monkeypatch, baked_install, expected_c
     ctx = _hook_setup(monkeypatch, sandbox, _install_flow())
     assert sandbox.calls == expected_calls
     assert ctx.env is sandbox
+
+
+def test_registry_survives_cloudpickle(tmp_path):
+    """A registry (and anything holding one) must cross a Ray actor boundary.
+
+    ``SandboxTaskHooks`` carries the registry and is passed to VerlTaskRunner as a
+    task argument, so a ``threading.Lock`` field is fatal there: cloudpickle raises
+    ``cannot pickle '_thread.lock' object`` before the run starts.
+    """
+    cloudpickle = pytest.importorskip("ray.cloudpickle")
+
+    registry = SnapshotRegistry(str(tmp_path / "s.json"))
+    registry._envs["k"] = {"backend": "modal", "ref": "im-abc", "expires_at": _future()}
+
+    restored = cloudpickle.loads(cloudpickle.dumps(registry))
+
+    assert restored.lookup_env("k", "modal") == "im-abc"
+    restored.discard("k")  # exercises the re-created lock
+    assert restored.lookup_env("k", "modal") is None

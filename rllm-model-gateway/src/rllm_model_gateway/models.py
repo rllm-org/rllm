@@ -124,6 +124,10 @@ class GatewayConfig(BaseModel):
     sync_traces: bool = False
     model: str | None = None  # When set, overrides ``body.model``
     cumulative_token_mode: bool = False
+    # Upstream context window. When set, per-turn ``max_tokens`` is clamped to
+    # the prompt's remaining headroom so a long cumulative turn can't overflow
+    # it (vLLM rejects prompt_tokens + max_tokens > max_model_len with a 400).
+    max_model_len: int | None = None
     # prime-rl family for the cumulative-mode bridge (e.g. "qwen3", "deepseek-v3"); "auto"
     # resolves from the model id. See rllm.renderers.get_renderer.
     renderer_family: str = "auto"

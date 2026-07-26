@@ -21,6 +21,7 @@ from rllm_model_gateway.data_process import (
     build_trace_record,
     build_trace_record_from_chunks,
     extract_completion_token_ids,
+    extract_logprobs,
     extract_prompt_token_ids,
     strip_vllm_fields,
 )
@@ -49,6 +50,11 @@ _HOP_BY_HOP = frozenset(
     }
 )
 
+# A generation interrupted by a weight sync comes back as finish_reason="abort"
+# and is resumed from its partial token IDs. Cap the resumes so a worker that
+# keeps aborting (or returns no new tokens) fails the turn instead of looping.
+_MAX_ABORT_RESUMES = 3
+
 
 def _strip_logprobs(response: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of *response* with ``logprobs`` removed from each choice.
@@ -67,25 +73,97 @@ def _strip_logprobs(response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _to_openai_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Renderer ``parse_response`` tool_calls -> OpenAI chat ``tool_calls`` shape.
+def _finish_reason(response: dict[str, Any]) -> str | None:
+    choices = response.get("choices") or []
+    return choices[0].get("finish_reason") if choices else None
 
-    The renderer emits ``{"function": {"name", "arguments": <dict|str>}}``; the OpenAI
-    wire shape a client (e.g. opencode's OpenAI-compatible provider) expects is
-    ``{"id", "type": "function", "index", "function": {"name", "arguments": <json str>}}``.
+
+def _merge_resumed_response(
+    response: dict[str, Any],
+    resumed: dict[str, Any],
+    *,
+    chat_response: bool,
+    prompt_token_ids: list[int],
+) -> dict[str, Any]:
+    """Append one completions response to an aborted response."""
+    choices = response.get("choices") or []
+    resumed_choices = resumed.get("choices") or []
+    if not choices or not resumed_choices:
+        return response
+
+    choice = choices[0]
+    resumed_choice = resumed_choices[0]
+    prior_ids = extract_completion_token_ids(response)
+    resumed_ids = extract_completion_token_ids(resumed)
+    prior_logprobs = extract_logprobs(response)
+    resumed_logprobs = extract_logprobs(resumed)
+
+    if chat_response:
+        message = choice.setdefault("message", {"role": "assistant", "content": ""})
+        message["content"] = (message.get("content") or "") + (resumed_choice.get("text") or "")
+        if prior_logprobs or resumed_logprobs:
+            choice["logprobs"] = {"content": [{"logprob": value} for value in prior_logprobs + resumed_logprobs]}
+    else:
+        choice["text"] = (choice.get("text") or "") + (resumed_choice.get("text") or "")
+        if prior_logprobs or resumed_logprobs:
+            choice["logprobs"] = {"token_logprobs": prior_logprobs + resumed_logprobs}
+
+    choice["token_ids"] = prior_ids + resumed_ids
+    choice["finish_reason"] = resumed_choice.get("finish_reason")
+    if "stop_reason" in resumed_choice:
+        choice["stop_reason"] = resumed_choice["stop_reason"]
+    response["prompt_token_ids"] = prompt_token_ids
+
+    usage = response.setdefault("usage", {})
+    completion_tokens = len(choice["token_ids"])
+    usage["prompt_tokens"] = len(prompt_token_ids)
+    usage["completion_tokens"] = completion_tokens
+    usage["total_tokens"] = len(prompt_token_ids) + completion_tokens
+    return response
+
+
+def _to_openai_tool_calls(tool_calls: list[Any]) -> list[dict[str, Any]]:
+    """Parsed tool calls -> OpenAI chat ``tool_calls`` shape.
+
+    Three producer shapes reach here, and reading the wrong level yields a
+    structurally-present but empty tool call (name="") that OpenAI
+    function-calling clients silently ignore:
+
+    * ``renderers.ParsedToolCall`` dataclass, from ``parse_response``: flat
+      ``.name`` / ``.arguments`` / ``.id`` attributes.
+    * nested dict ``{"function": {"name", "arguments"}}``.
+    * flat dict ``{"name", "arguments"}``.
+
+    A call without a name is dropped: OpenAI's shape has no way to express
+    "the model tried to call something and we couldn't tell what", and a
+    ``name=""`` entry makes clients silently take no action. ``ParsedToolCall.status``
+    is deliberately NOT used for that decision — Qwen3.5 emits XML call bodies
+    (``<function=bash><parameter=command>``), which the renderer flags
+    ``INVALID_JSON`` even though it recovered name and arguments cleanly.
+
+    The OpenAI wire shape a client (e.g. opencode's OpenAI-compatible provider)
+    expects is ``{"id", "type": "function", "index", "function": {"name",
+    "arguments": <json str>}}``.
     """
     out: list[dict[str, Any]] = []
     for i, tc in enumerate(tool_calls):
-        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-        args = fn.get("arguments", {})
+        fn = tc.get("function") if isinstance(tc, dict) else None
+        if isinstance(fn, dict):
+            name, args, call_id = fn.get("name", ""), fn.get("arguments", {}), tc.get("id")
+        elif isinstance(tc, dict):
+            name, args, call_id = tc.get("name", ""), tc.get("arguments", {}), tc.get("id")
+        else:
+            name, args, call_id = getattr(tc, "name", ""), getattr(tc, "arguments", {}), getattr(tc, "id", None)
+            if not name:
+                continue
         if not isinstance(args, str):
-            args = json.dumps(args)
+            args = json.dumps(args if args is not None else {})
         out.append(
             {
-                "id": tc.get("id") or f"call_{i}",
+                "id": call_id or f"call_{i}",
                 "type": "function",
                 "index": i,
-                "function": {"name": fn.get("name", ""), "arguments": args},
+                "function": {"name": name or "", "arguments": args},
             }
         )
     return out
@@ -198,6 +276,7 @@ class ReverseProxy:
         local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
         cumulative_token_mode: bool = False,
         renderer: Any = None,
+        max_model_len: int | None = None,
         heartbeat_initial_delay_s: float = 50.0,
         heartbeat_interval_s: float = 25.0,
         heartbeat_budget_s: float = 3600.0,
@@ -216,6 +295,7 @@ class ReverseProxy:
         self.local_handler = local_handler
         self.cumulative_token_mode = cumulative_token_mode
         self.renderer = renderer
+        self.max_model_len = max_model_len
         # Retain full raw request/response on each trace. Off by default: training
         # reads only token-id/logprob/message fields, and serializing the raw
         # dicts (≤120K-token prompt + full response) is the dominant per-request
@@ -367,7 +447,7 @@ class ReverseProxy:
                 messages = request_body.get("messages", [])
                 # Classify the incoming request against the accumulated snapshot.
                 # plan.action is "extend" (build a /v1/completions bridge) or
-                # "reset" (fall through to the chat path as a fresh turn-0). Every
+                # "reset" (fall through and re-render as a fresh turn-0). Every
                 # reset is logged with its classified ResetReason + diagnostics so
                 # the *why* is recoverable from the gateway log.
                 plan = acc.plan_turn(messages)
@@ -436,6 +516,38 @@ class ReverseProxy:
                     )
                 else:
                     acc.reset(plan.reason, diagnostics=plan.diagnostics)
+
+            # Opening turn (or the turn right after a reset): nothing to bridge
+            # from, so render the messages from scratch and take the same
+            # /v1/completions path. That keeps BOTH the rendering and the
+            # tool-call / reasoning extraction on the renderer for every turn of
+            # a session — a raw chat response from an HTTP worker carries neither
+            # unless the serving stack happens to run its own parsers. An
+            # in-process handler already parses what it returns, so it stays on
+            # the chat path.
+            if self.local_handler is None and acc.turn_count == 0:
+                loop = asyncio.get_running_loop()
+                try:
+                    token_ids = await loop.run_in_executor(
+                        None,
+                        functools.partial(
+                            acc.build_initial_prompt,
+                            request_body.get("messages", []),
+                            tools=request_body.get("tools"),
+                        ),
+                    )
+                except Exception:
+                    logger.warning("%sfirst-turn render failed; using the chat path", self.worker_label, exc_info=True)
+                    token_ids = None
+                if token_ids:
+                    return await self._handle_cumulative_turn(
+                        request,
+                        request_body,
+                        session_id,
+                        acc,
+                        token_ids,
+                        originally_requested_logprobs,
+                    )
 
         if is_stream:
             return await self._handle_streaming(request, body, request_body, session_id, originally_requested_logprobs)
@@ -547,22 +659,17 @@ class ReverseProxy:
             url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
             headers = self._forward_headers(request, session_id)
             try:
-                resp = await self._send_with_retry(
+                response_body, status_code = await self._send_with_abort_resume(
                     method=request.method,
                     url=url,
                     content=raw_body,
                     headers=headers,
+                    request_body=request_body,
+                    worker_url=worker.api_url,
+                    chat_response=request.url.path.endswith("/chat/completions"),
                 )
-                content = resp.content
-                status_code = resp.status_code
             finally:
                 self.router.release(worker.url)
-
-            # Parse response for trace extraction
-            try:
-                response_body = json.loads(content)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                response_body = {}
 
         latency_ms = (time.perf_counter() - t0) * 1000
 
@@ -597,6 +704,33 @@ class ReverseProxy:
     # Cumulative token mode
     # ------------------------------------------------------------------
 
+    def _clamp_max_tokens(self, body: dict[str, Any], prompt_len: int) -> None:
+        """Shrink ``max_tokens`` to the prompt's remaining context headroom.
+
+        vLLM's OpenAI server rejects ``prompt_tokens + max_tokens >
+        max_model_len`` with a 400 rather than truncating the request, so a
+        cumulative prompt within the window still fails once the per-turn cap
+        pushes it over. VERL's own token-in-token-out path clamps identically
+        (``vllm_async_server.generate``: ``max(1, min(max_tokens,
+        max_model_len - len(prompt_ids)))``); the floor of 1 exists because
+        vLLM ≥0.20 raises on ``max_tokens < 1``. A prompt at or past the window
+        still 400s, which is the same outcome VERL produces.
+        """
+        requested = body.get("max_tokens")
+        if not self.max_model_len or not isinstance(requested, int):
+            return
+        clamped = max(1, min(requested, self.max_model_len - prompt_len))
+        if clamped != requested:
+            body["max_tokens"] = clamped
+            logger.debug(
+                "%sclamped max_tokens %d -> %d (prompt=%d, max_model_len=%d)",
+                self.worker_label,
+                requested,
+                clamped,
+                prompt_len,
+                self.max_model_len,
+            )
+
     async def _handle_cumulative_turn(
         self,
         request: Request,
@@ -610,9 +744,10 @@ class ReverseProxy:
     ) -> Response:
         """Rewrite chat/completions to /v1/completions with pre-tokenized prompt.
 
-        ``token_ids`` is the full bridge-extended prompt for this turn, built by
-        ``acc.build_next_prompt`` in ``handle()`` — or, when ``replay`` is set,
-        the prior turn's prompt being regenerated after a duplicate resend.
+        ``token_ids`` is the full prompt for this turn, built in ``handle()`` by
+        ``acc.build_next_prompt`` (bridge-extended) or ``acc.build_initial_prompt``
+        (opening turn) — or, when ``replay`` is set, the prior turn's prompt being
+        regenerated after a duplicate resend.
         ``replay`` overwrites the current turn in place (``advance=False``)
         instead of recording a new one.
 
@@ -626,6 +761,7 @@ class ReverseProxy:
         completions_body = {k: v for k, v in request_body.items() if k not in ("messages", "stream", "stream_options", "tools", "tool_choice")}
         completions_body["prompt"] = token_ids
         completions_body["add_special_tokens"] = False
+        self._clamp_max_tokens(completions_body, len(token_ids))
 
         if is_stream:
             return await self._handle_cumulative_streaming(request, request_body, completions_body, session_id, acc, token_ids, replay=replay)
@@ -698,21 +834,17 @@ class ReverseProxy:
             headers = self._forward_headers(request, session_id)
             raw_body = json.dumps(completions_body).encode()
             try:
-                resp = await self._send_with_retry(
+                response_body, status_code = await self._send_with_abort_resume(
                     method="POST",
                     url=url,
                     content=raw_body,
                     headers=headers,
+                    request_body=completions_body,
+                    worker_url=worker.api_url,
+                    chat_response=False,
                 )
-                content = resp.content
-                status_code = resp.status_code
             finally:
                 self.router.release(worker.url)
-
-            try:
-                response_body = json.loads(content)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                response_body = {}
 
         latency_ms = (time.perf_counter() - t0) * 1000
 
@@ -1289,6 +1421,107 @@ class ReverseProxy:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    async def _send_with_abort_resume(
+        self,
+        *,
+        method: str,
+        url: str,
+        content: bytes,
+        headers: dict[str, str],
+        request_body: dict[str, Any],
+        worker_url: str,
+        chat_response: bool,
+    ) -> tuple[dict[str, Any], int]:
+        """Resume structured vLLM aborts with the returned partial token IDs."""
+        resp = await self._send_with_retry(method=method, url=url, content=content, headers=headers)
+        status_code = resp.status_code
+        try:
+            response_body = json.loads(resp.content)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {}, status_code
+
+        if not self.cumulative_token_mode or status_code != 200 or _finish_reason(response_body) != "abort":
+            return response_body, status_code
+
+        prompt_token_ids = extract_prompt_token_ids(response_body)
+        completion_token_ids = extract_completion_token_ids(response_body)
+        if not prompt_token_ids:
+            logger.warning(
+                "%svLLM returned finish_reason=abort without prompt token IDs",
+                self.worker_label,
+            )
+            return response_body, status_code
+
+        resume_body = {
+            key: value
+            for key, value in request_body.items()
+            if key
+            not in {
+                "messages",
+                "tools",
+                "tool_choice",
+                "stream_options",
+                "chat_template",
+                "add_generation_prompt",
+                "continue_final_message",
+            }
+        }
+        resume_body["stream"] = False
+        resume_body["add_special_tokens"] = False
+        requested_max_tokens = request_body.get("max_tokens")
+        completions_url = self._build_url(worker_url, "/v1/completions", "")
+
+        attempt = 0
+        while _finish_reason(response_body) == "abort" and attempt < _MAX_ABORT_RESUMES:
+            attempt += 1
+            resume_body["prompt"] = prompt_token_ids + completion_token_ids
+            if isinstance(requested_max_tokens, int):
+                remaining = requested_max_tokens - len(completion_token_ids)
+                if remaining <= 0:
+                    response_body["choices"][0]["finish_reason"] = "length"
+                    break
+                resume_body["max_tokens"] = remaining
+                self._clamp_max_tokens(resume_body, len(resume_body["prompt"]))
+
+            logger.info(
+                "%sresuming aborted vLLM generation (attempt %d, partial_tokens=%d)",
+                self.worker_label,
+                attempt,
+                len(completion_token_ids),
+            )
+            await asyncio.sleep(1)
+            resumed_resp = await self._send_with_retry(
+                method="POST",
+                url=completions_url,
+                content=fastjson.dumps(resume_body),
+                headers=headers,
+            )
+            status_code = resumed_resp.status_code
+            try:
+                resumed_body = json.loads(resumed_resp.content)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return {}, status_code
+            if status_code != 200:
+                return resumed_body, status_code
+
+            response_body = _merge_resumed_response(
+                response_body,
+                resumed_body,
+                chat_response=chat_response,
+                prompt_token_ids=prompt_token_ids,
+            )
+            completion_token_ids = extract_completion_token_ids(response_body)
+
+        if _finish_reason(response_body) == "abort":
+            logger.warning(
+                "%sgeneration still aborted after %d resumes (partial_tokens=%d); returning partial turn",
+                self.worker_label,
+                attempt,
+                len(completion_token_ids),
+            )
+
+        return response_body, status_code
 
     async def _send_with_retry(
         self,

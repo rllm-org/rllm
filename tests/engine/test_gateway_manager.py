@@ -98,3 +98,38 @@ class TestPreflightGatewayPort:
             monkeypatch.setattr(tunnel_mod, "live_tunnel", lambda: {"backend": "ngrok", "url": "https://x.ngrok-free.app", "pid": 1, "upstream": f"http://127.0.0.1:{port}"})
             with pytest.raises(GatewayPortInUseError, match="rllm tunnel up"):
                 preflight_gateway_port(port)
+
+
+class TestVerlGatewayWorkers:
+    def test_gateway_command_registers_upstream_workers(self):
+        gateway = GatewayManager(_make_config(port=9200), mode="process")
+        command = gateway._gateway_cmd(
+            9201,
+            worker_urls=["http://vllm-0:8000", "http://vllm-1:8000"],
+        )
+        assert command.count("--worker") == 2
+        assert "http://vllm-0:8000" in command
+        assert "http://vllm-1:8000" in command
+
+    def test_multiworker_preflights_and_starts_front(self, monkeypatch):
+        gateway = GatewayManager(_make_config(port=9200, num_workers=4), mode="process")
+        checked_ports = []
+        commands = []
+
+        monkeypatch.setattr(
+            "rllm.gateway.manager.preflight_gateway_port",
+            lambda port: checked_ports.append(port),
+        )
+        monkeypatch.setattr(
+            "rllm.gateway.manager.subprocess.Popen",
+            lambda command: commands.append(command) or object(),
+        )
+        monkeypatch.setattr(gateway, "_poll_health", lambda *args, **kwargs: None)
+
+        gateway._start_verl_gateway_subprocesses(["http://vllm-0:8000"])
+
+        assert checked_ports == [9200, 9201, 9202, 9203, 9204]
+        assert len(commands) == 5
+        assert all("--worker" in command for command in commands[:4])
+        assert "--front" in commands[-1]
+        assert commands[-1].count("--worker") == 4

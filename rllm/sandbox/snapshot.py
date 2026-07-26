@@ -195,6 +195,18 @@ class SnapshotRegistry:
         data = cls._read(path)
         return cls(path, envs=data.get("envs", {}), groups=data.get("groups", {}))
 
+    def __getstate__(self) -> dict:
+        # The lock serialises this process's on-disk merges, so it is per-copy
+        # state, not shared state. Dropping it keeps the registry (and anything
+        # holding one, e.g. SandboxTaskHooks passed to a Ray actor) picklable.
+        state = self.__dict__.copy()
+        state.pop("_lock", None)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._lock = threading.Lock()
+
     # -- hot path (read-only, no live calls) ------------------------------
 
     def lookup_env(self, key: str, backend: str) -> str | None:

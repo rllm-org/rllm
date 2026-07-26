@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -267,4 +268,18 @@ class BackendBatchLogger:
         with self._lock, open(path, "wb") as raw:
             with zstandard.ZstdCompressor(level=3).stream_writer(raw) as compressed:
                 compressed.write(json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8"))
+        return path
+
+    def log_dataproto(
+        self,
+        batch: Any,
+        step: int,
+        forward_backward_index: int = 0,
+    ) -> Path:
+        """Persist the exact VERL DataProto submitted to an actor update."""
+        path = self.log_dir / f"step_{step:06d}_forward_backward_{forward_backward_index:03d}.pkl"
+        temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+        with self._lock:
+            batch.save_to_disk(temporary_path)
+            os.replace(temporary_path, path)
         return path

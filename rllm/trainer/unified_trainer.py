@@ -354,19 +354,24 @@ class UnifiedTrainer:
         self.episode_logger = None
         self.backend_batch_logger = None
         if log_episodes or log_backend_batches:
-            artifact_dir = logging_config.get(
+            episode_artifact_dir = logging_config.get(
                 "episode_log_dir",
                 f"logs/{self.rllm_config.trainer.project_name}/{self.rllm_config.trainer.experiment_name}",
             )
-            artifact_dir = f"{artifact_dir}/{self._run_stamp}"
             if log_episodes:
                 self.episode_logger = EpisodeLogger(
-                    base_dir=artifact_dir,
+                    base_dir=f"{episode_artifact_dir}/{self._run_stamp}",
                     subdirectory="episodes",
                     flat_layout=self.rllm_config.async_training.get("enable", False),
                 )
             if log_backend_batches:
-                self.backend_batch_logger = BackendBatchLogger(base_dir=artifact_dir)
+                backend_artifact_dir = logging_config.get(
+                    "backend_batch_log_dir",
+                    episode_artifact_dir,
+                )
+                self.backend_batch_logger = BackendBatchLogger(
+                    base_dir=f"{backend_artifact_dir}/{self._run_stamp}"
+                )
         self.backend.backend_batch_logger = self.backend_batch_logger
 
         source_metadata = extract_source_metadata(
@@ -767,7 +772,7 @@ class UnifiedTrainer:
                 if trainer_state.has_trajectory_groups:
                     logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: fwd-bwd pass {pass_idx + 1}/{num_fwd_bwd_passes} ({len(chunk_groups)} groups)")
                     await self.backend.on_batch_start(trainer_state)
-                    trainer_state.backend_batch = self.backend.transform_to_backend_batch(trainer_state)
+                    trainer_state.backend_batch = await asyncio.to_thread(self.backend.transform_to_backend_batch, trainer_state)
                     await self.backend.process_backend_batch(trainer_state)
 
                     # Count trainable sequences this pass. A pass can yield zero when every

@@ -17,7 +17,7 @@ import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
 from rllm.sandbox.protocol import Sandbox
-from rllm.types import AgentConfig, Episode, Task, TerminationReason
+from rllm.types import AgentConfig, Episode, Task, TerminationReason, termination_reason_from_error
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,60 @@ _PROVIDER_KEYS = (
     ("deepseek/", "DEEPSEEK_API_KEY"),
     ("groq/", "GROQ_API_KEY"),
 )
+
+
+# Read back inside the sandbox: trajectories carry every message and reach tens
+# of megabytes, while sandbox backends cap the output of a single command, so
+# reading the file whole yields a silently truncated prefix that will not parse.
+_TRAJECTORY_SUMMARY_SCRIPT = r"""
+import json, sys
+
+with open(sys.argv[1]) as handle:
+    data = json.load(handle)
+info = data.get("info") if isinstance(data.get("info"), dict) else {}
+messages = data.get("messages") if isinstance(data.get("messages"), list) else []
+stats = info.get("model_stats") if isinstance(info.get("model_stats"), dict) else {}
+last = messages[-1] if messages and isinstance(messages[-1], dict) else {}
+summary = {
+    "exit_status": info.get("exit_status"),
+    "finish_reason": None,
+    "error": None,
+    "messages": len(messages),
+    "last_message_role": last.get("role"),
+    "api_calls": stats.get("api_calls"),
+}
+if info.get("exception_str") or info.get("traceback"):
+    summary["error"] = {
+        "exit_status": info.get("exit_status"),
+        "exception_str": info.get("exception_str"),
+        "traceback": info.get("traceback"),
+    }
+for message in reversed(messages):
+    if not isinstance(message, dict):
+        continue
+    extra = message.get("extra")
+    if not isinstance(extra, dict):
+        continue
+    if not summary["exit_status"] and extra.get("exit_status"):
+        summary["exit_status"] = extra["exit_status"]
+    if summary["error"] is None and (extra.get("exception_str") or extra.get("traceback")):
+        summary["error"] = {
+            "exit_status": extra.get("exit_status"),
+            "exception_str": extra.get("exception_str"),
+            "traceback": extra.get("traceback"),
+        }
+    if summary["finish_reason"] is None and extra.get("interrupt_type") == "FormatError":
+        response = extra.get("response")
+        choices = response.get("choices") if isinstance(response, dict) else None
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            summary["finish_reason"] = choices[0].get("finish_reason")
+if summary["error"]:
+    for key in ("exception_str", "traceback"):
+        value = summary["error"].get(key)
+        if isinstance(value, str):
+            summary["error"][key] = value[-4000:]
+print(json.dumps(summary))
+"""
 
 
 def _provider_key_var(model: str) -> str:
@@ -61,6 +115,16 @@ if ! command -v mini-swe-agent >/dev/null 2>&1; then
             apk add --no-cache curl bash ca-certificates git
         fi
     fi
+    export PATH="$HOME/.local/bin:$PATH"
+    if ! command -v uv >/dev/null 2>&1; then
+        # Prefer a package index: PIP_INDEX_URL points at an internal mirror on
+        # fabrics whose only egress is a proxy that 504s on astral.sh, and even
+        # where astral.sh works this is the faster path. --break-system-packages
+        # is the PEP 668 retry for images with an externally-managed python.
+        python3 -m pip install --user -q uv 2>/dev/null \
+            || python3 -m pip install --user -q --break-system-packages uv 2>/dev/null \
+            || true
+    fi
     if ! command -v uv >/dev/null 2>&1; then
         # Sandbox->GitHub egress (astral.sh redirects to
         # release-assets.githubusercontent.com) intermittently resets the
@@ -82,16 +146,16 @@ if ! command -v mini-swe-agent >/dev/null 2>&1; then
             exit 1
         fi
     fi
-    export PATH="$HOME/.local/bin:$PATH"
-    # Pin a modern interpreter for the tool's ISOLATED venv. mini-swe-agent
-    # uses PEP 604 ``X | Y`` type syntax (requires Python >=3.10), but
-    # ``uv tool install`` otherwise builds the venv with whatever python it
-    # discovers — which on many task images (e.g. R2E-Gym's Python 3.9
-    # testbeds) is too old, so the CLI crashes on import with
-    # ``TypeError: unsupported operand type(s) for |`` and exits before any
-    # LLM call (zero traces, score 0). uv fetches a managed CPython 3.12 if
-    # one isn't present; this venv is independent of the task's own python.
-    uv tool install --python 3.12 mini-swe-agent
+    # Pin a modern interpreter for the tool's ISOLATED venv: mini-swe-agent
+    # needs Python >=3.10 (PEP 604 syntax), but ``uv tool install`` otherwise
+    # builds the venv with whatever python it discovers. Prefer the image's own
+    # python when it is new enough so uv doesn't download a managed CPython
+    # 3.12 on every sandbox; fall back to the managed build otherwise.
+    tool_python=3.12
+    if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))'; then
+        tool_python="$(command -v python3)"
+    fi
+    uv tool install --python "$tool_python" mini-swe-agent
 fi
 """
 
@@ -110,6 +174,7 @@ class MiniSweAgentHarness(BaseCliHarness):
     skipped_verifier_reward: float = 0.0
     cost_limit: float | None = None
     trajectory_output_path: str = "/tmp/rllm-mini-swe-trajectory.json"
+    exit_code_path: str = "/tmp/rllm-mini-swe-exit-code"
 
     def install_script(self) -> str:
         return _INSTALL_SCRIPT
@@ -127,7 +192,6 @@ class MiniSweAgentHarness(BaseCliHarness):
             "OPENAI_BASE_URL": gateway_url,
             "ANTHROPIC_BASE_URL": gateway_url.rstrip("/").removesuffix("/v1") or gateway_url,
         }
-
         # Forward the provider key litellm will look up. When the
         # gateway requires inbound auth, this becomes the bearer token
         # (gateway re-stamps with the real upstream key).
@@ -178,58 +242,83 @@ class MiniSweAgentHarness(BaseCliHarness):
             env=env,
         )
 
+    def _failure_diagnostics(self, sandbox: Sandbox, diagnostics: dict[str, str]) -> dict[str, str]:
+        """Add mini-SWE's own exit code and stdout tail to ``diagnostics``.
+
+        Reached only when no exit status could be determined, which is otherwise
+        indistinguishable from the agent being killed mid-loop: the invocation
+        pipes through ``tee``, so the exec's status is ``tee``'s and is always 0.
+        The recorded code is mini-swe's (128+N when a signal killed it, e.g. 137
+        for an OOM kill). Each probe is independent so one failing doesn't hide
+        the other.
+        """
+        try:
+            code = sandbox.exec(f"cat {shlex.quote(self.exit_code_path)}", timeout=10, user=self.agent_user)
+            diagnostics["exit_code"] = code.strip() or "empty"
+        except Exception as e:
+            diagnostics["exit_code"] = f"unreadable: {type(e).__name__}: {e}"
+        try:
+            tail = sandbox.exec(f"tail -c 2000 {shlex.quote(self.stdout_log_path)}", timeout=20, user=self.agent_user)
+            diagnostics["stdout_tail"] = tail.strip() or "empty"
+        except Exception as e:
+            diagnostics["stdout_tail"] = f"unreadable: {type(e).__name__}: {e}"
+        logger.warning("mini-SWE finished without an exit status; diagnostics: %s", diagnostics)
+        return diagnostics
+
     def _read_exit_outcome(
         self, sandbox: Sandbox
-    ) -> tuple[str | None, str | None, dict[str, str] | None]:
+    ) -> tuple[str | None, str | None, dict[str, str] | None, dict[str, str]]:
+        diagnostics: dict[str, str] = {}
+        # Any interpreter will do; mini-swe-agent's own is guaranteed to exist
+        # here even in images without a system python, since it just ran.
+        command = (
+            'export PATH="$HOME/.local/bin:$PATH"; '
+            'PY="$(command -v python3 || true)"; '
+            '[ -n "$PY" ] || PY="$(head -1 "$(command -v mini-swe-agent)" | sed "s/^#!//")"; '
+            f"\"$PY\" -c {shlex.quote(_TRAJECTORY_SUMMARY_SCRIPT)} {shlex.quote(self.trajectory_output_path)}"
+        )
         try:
-            raw = sandbox.exec(
-                f"cat {shlex.quote(self.trajectory_output_path)}",
-                timeout=10,
-                user=self.agent_user,
-            )
-            data = json.loads(raw)
+            raw = sandbox.exec(command, timeout=120, user=self.agent_user)
         except Exception as e:
-            logger.debug("Could not read mini-SWE trajectory outcome: %s", e)
-            return None, None, None
+            logger.warning("Could not read the mini-SWE trajectory at %s: %s", self.trajectory_output_path, e)
+            diagnostics["trajectory"] = f"unreadable: {type(e).__name__}: {e}"
+            return None, None, None, self._failure_diagnostics(sandbox, diagnostics)
+        try:
+            summary = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            logger.warning("mini-SWE trajectory summary at %s is not valid JSON (%d bytes): %s", self.trajectory_output_path, len(raw), e)
+            diagnostics["trajectory"] = f"unparsable ({len(raw)} bytes): {type(e).__name__}: {e}"
+            return None, None, None, self._failure_diagnostics(sandbox, diagnostics)
 
-        info = data.get("info", {}) if isinstance(data, dict) else {}
-        status = info.get("exit_status") if isinstance(info, dict) else None
+        status = summary.get("exit_status")
         status = str(status).strip() if status else None
-
-        finish_reason = None
-        error_extra = info if isinstance(info, dict) and (info.get("exception_str") or info.get("traceback")) else None
-        messages = data.get("messages", []) if isinstance(data, dict) else []
-        if isinstance(messages, list):
-            for message in reversed(messages):
-                if not isinstance(message, dict):
-                    continue
-                extra = message.get("extra")
-                if not isinstance(extra, dict):
-                    continue
-                if status is None and extra.get("exit_status"):
-                    status = str(extra["exit_status"]).strip()
-                if error_extra is None and (extra.get("exception_str") or extra.get("traceback")):
-                    error_extra = extra
-                if finish_reason is None and extra.get("interrupt_type") == "FormatError":
-                    response = extra.get("response")
-                    choices = response.get("choices") if isinstance(response, dict) else None
-                    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-                        raw_finish_reason = choices[0].get("finish_reason")
-                        finish_reason = str(raw_finish_reason).strip() if raw_finish_reason else None
+        finish_reason = summary.get("finish_reason")
+        finish_reason = str(finish_reason).strip() if finish_reason else None
 
         error = None
-        if error_extra is not None:
-            error_type = error_extra.get("exit_status") or status or "MiniSweAgentError"
-            message = error_extra.get("exception_str") or ""
-            traceback_text = error_extra.get("traceback") or ""
+        error_source = summary.get("error")
+        if isinstance(error_source, dict):
+            error_type = error_source.get("exit_status") or status or "MiniSweAgentError"
             error = {
                 "error_type": str(error_type),
-                "message": str(message),
+                "message": str(error_source.get("exception_str") or ""),
             }
+            traceback_text = error_source.get("traceback")
             if traceback_text:
                 error["traceback"] = str(traceback_text)
 
-        return status, finish_reason, error
+        if status is None:
+            # mini-swe saves the trajectory in a ``finally`` on every iteration
+            # but only writes ``info.exit_status`` once its loop appends an
+            # ``exit`` message, so an empty status means it stopped mid-loop.
+            # Record how far it got alongside the process-level diagnostics.
+            diagnostics["trajectory"] = "present, no exit status"
+            diagnostics["last_message_role"] = str(summary.get("last_message_role"))
+            diagnostics["messages"] = str(summary.get("messages"))
+            diagnostics["api_calls"] = str(summary.get("api_calls"))
+            diagnostics = self._failure_diagnostics(sandbox, diagnostics)
+
+        return status, finish_reason, error, diagnostics
 
     @staticmethod
     def _map_exit_status(status: str | None, finish_reason: str | None = None) -> TerminationReason:
@@ -245,15 +334,20 @@ class MiniSweAgentHarness(BaseCliHarness):
             return TerminationReason.FORMAT_ERROR
         if status in (None, "", "UserInterruption"):
             return TerminationReason.UNKNOWN
-        return TerminationReason.ERROR
+        # Any other status is mini-swe reporting an uncaught exception by class
+        # name, so the shared taxonomy classifies it (context-window rejections
+        # become MAX_PROMPT_LENGTH_EXCEEDED); unknown names stay ERROR.
+        return termination_reason_from_error(status, default=TerminationReason.ERROR)
 
     def run(self, task: Task, config: AgentConfig, *, env: Sandbox) -> Episode:
         episode = super().run(task, config, env=env)
         if not self.capture_exit_status:
             return episode
 
-        status, finish_reason, error = self._read_exit_outcome(env)
+        status, finish_reason, error, diagnostics = self._read_exit_outcome(env)
         episode.metadata["miniswe_exit_status"] = status or "missing"
+        if diagnostics:
+            episode.metadata["miniswe_diagnostics"] = diagnostics
         if error is not None:
             episode.metadata["error"] = error
         if status is not None:
@@ -315,19 +409,28 @@ class MiniSweAgentHarness(BaseCliHarness):
 
         outcome_prefix = ""
         outcome_arg = ""
+        # ``tee`` owns the pipeline's exit status, so record mini-swe's own before
+        # it is masked. It is the only evidence that separates a signal kill
+        # (128+N) from a non-zero exit or a clean one when no exit status lands
+        # in the trajectory. The redirect below belongs to the group, and this
+        # write goes to a file, so the log stays free of it.
+        exit_code_capture = ""
         if self.capture_exit_status:
             output_path = shlex.quote(self.trajectory_output_path)
-            outcome_prefix = f"rm -f {output_path}; "
+            code_path = shlex.quote(self.exit_code_path)
+            outcome_prefix = f"rm -f {output_path} {code_path}; "
             outcome_arg = f"--output={output_path} "
+            exit_code_capture = f"; echo $? > {code_path}"
         return (
             f"{self._cd_prefix(task)}"
             f'export PATH="$HOME/.local/bin:$PATH"; '
             f"{outcome_prefix}"
-            f"mini-swe-agent --yolo "
+            f"{{ mini-swe-agent --yolo "
             f"{config_args}"
             f"--model={shlex.quote(qualified)} "
             f"--task={shlex.quote(instruction)} "
             f"{outcome_arg}"
-            f"--exit-immediately "
+            f"--exit-immediately"
+            f"{exit_code_capture}; }} "
             f"2>&1 | tee {shlex.quote(self.stdout_log_path)}"
         )

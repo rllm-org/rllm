@@ -4,6 +4,7 @@ import logging
 import pytest
 
 import rllm
+from rllm.utils.episode_logger import BackendBatchLogger
 from rllm.utils.logging import configure_logging_from_env, get_log_level_from_env
 
 
@@ -72,3 +73,15 @@ def test_import_configures_rllm_logger_from_env(monkeypatch):
     importlib.reload(rllm)
 
     assert logger.level == logging.CRITICAL
+
+
+def test_backend_batch_logger_persists_dataproto(tmp_path):
+    class FakeDataProto:
+        def save_to_disk(self, path):
+            path.write_bytes(b"dataproto")
+
+    logger = BackendBatchLogger(str(tmp_path))
+    path = logger.log_dataproto(FakeDataProto(), step=7)
+
+    assert path.name == "step_000007_forward_backward_000.pkl"
+    assert path.read_bytes() == b"dataproto"

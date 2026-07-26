@@ -85,6 +85,9 @@ _ERROR_TYPE_TO_REASON: dict[str, TerminationReason] = {
     "VerifierTimeoutError": TerminationReason.VERIFIER_TIMEOUT,
     # Model/context (harbor.llms.base)
     "ContextLengthExceededError": TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,
+    # litellm's name for the same condition, raised in-sandbox by CLI agents
+    # whose provider rejected the prompt for exceeding the context window.
+    "ContextWindowExceededError": TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,
     "OutputLengthExceededError": TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED,
     # Agent process (harbor.agents.installed.base)
     "NonZeroAgentExitCodeError": TerminationReason.ERROR,

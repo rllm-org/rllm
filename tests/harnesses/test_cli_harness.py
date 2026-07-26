@@ -14,6 +14,11 @@ engine to classify. The tests assert on that reason plus the usual side-effects
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass, field
 
 import pytest
@@ -22,7 +27,7 @@ from rllm.harnesses.aider import AiderHarness
 from rllm.harnesses.claude_code import ClaudeCodeHarness
 from rllm.harnesses.codex import CodexHarness
 from rllm.harnesses.kimi_cli import KimiCliHarness
-from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
+from rllm.harnesses.mini_swe_agent import _TRAJECTORY_SUMMARY_SCRIPT, MiniSweAgentHarness
 from rllm.harnesses.opencode import OpenCodeHarness
 from rllm.harnesses.qwen_code import QwenCodeHarness
 from rllm.sandbox.protocol import SandboxCommandTimeout
@@ -37,6 +42,27 @@ ALL_HARNESSES = [
     OpenCodeHarness,
     QwenCodeHarness,
 ]
+
+
+def _summarize_trajectory(trajectory: dict) -> str:
+    """What the sandbox would return: the real summariser, run for real.
+
+    The harness reads a summary produced inside the sandbox rather than the
+    trajectory itself, so the fakes have to answer with the script's output for
+    these tests to say anything about the parsing the harness actually does.
+    """
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+        json.dump(trajectory, handle)
+        path = handle.name
+    try:
+        return subprocess.run(
+            [sys.executable, "-c", _TRAJECTORY_SUMMARY_SCRIPT, path],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    finally:
+        os.unlink(path)
 
 
 @dataclass
@@ -430,6 +456,83 @@ def test_mini_swe_agent_invocation_uses_qualified_model():
     assert "--model=openai/gpt-4o" in cmd
     assert "--yolo" in cmd
     assert "--exit-immediately" in cmd
+
+
+# ---------------------------------------------------------------------------
+# MiniSweAgentHarness — outcome diagnostics
+#
+# ``tee`` owns the pipeline's exit status, so a mini-swe-agent that is killed
+# mid-loop looks like a clean exit to the harness and lands on the same
+# "missing" label as a sandbox whose trajectory file can't be read at all.
+# These cover the evidence that tells those apart.
+# ---------------------------------------------------------------------------
+
+
+def test_mini_swe_agent_records_its_own_exit_code_before_tee_masks_it():
+    h = MiniSweAgentHarness()
+    h.capture_exit_status = True
+
+    cmd = h.build_invocation("hi", _make_task(), _make_config(model="gpt-4o"))
+
+    assert f"echo $? > {h.exit_code_path}; }}" in cmd  # inside the group, before the pipe
+    assert cmd.index("echo $? >") < cmd.index("| tee")
+    assert f"rm -f {h.trajectory_output_path} {h.exit_code_path}" in cmd  # no stale code from a prior run
+
+
+def test_mini_swe_agent_diagnoses_an_unreadable_trajectory():
+    h = MiniSweAgentHarness()
+    # A dead sandbox fails every probe, not just the trajectory read.
+    sandbox = FakeSandbox(fail_on_substring="/tmp/")
+
+    status, _, _, diagnostics = h._read_exit_outcome(sandbox)
+
+    assert status is None
+    assert diagnostics["trajectory"].startswith("unreadable: RuntimeError")
+    # The process-level probes still run, so a dead box and a killed agent differ.
+    assert diagnostics["exit_code"].startswith("unreadable: RuntimeError")
+    assert diagnostics["stdout_tail"].startswith("unreadable: RuntimeError")
+
+
+def test_mini_swe_agent_diagnoses_a_trajectory_without_an_exit_status():
+    # mini-swe saves in a ``finally`` every iteration but only writes
+    # info.exit_status once its loop appends an ``exit`` message.
+    trajectory = {
+        "info": {"exit_status": "", "model_stats": {"api_calls": 15}},
+        "messages": [{"role": "user"}, {"role": "assistant"}, {"role": "tool"}],
+    }
+
+    class _Sandbox(FakeSandbox):
+        def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:
+            self.calls.append(_ExecCall(command=command, user=user, timeout=timeout))
+            if h.trajectory_output_path in command:
+                return _summarize_trajectory(trajectory)
+            if h.exit_code_path in command:
+                return "137\n"
+            return "Killed\n"
+
+    h = MiniSweAgentHarness()
+    sandbox = _Sandbox()
+
+    status, _, _, diagnostics = h._read_exit_outcome(sandbox)
+
+    assert status is None
+    assert diagnostics["trajectory"] == "present, no exit status"
+    assert diagnostics["last_message_role"] == "tool"
+    assert diagnostics["messages"] == "3"
+    assert diagnostics["api_calls"] == "15"
+    assert diagnostics["exit_code"] == "137"  # signal kill, invisible through tee
+    assert diagnostics["stdout_tail"] == "Killed"
+
+
+def test_mini_swe_agent_leaves_no_diagnostics_on_a_clean_finish():
+    h = MiniSweAgentHarness()
+    sandbox = FakeSandbox(stdout=_summarize_trajectory({"info": {"exit_status": "Submitted"}, "messages": []}))
+
+    status, _, _, diagnostics = h._read_exit_outcome(sandbox)
+
+    assert status == "Submitted"
+    assert diagnostics == {}
+    assert len(sandbox.calls) == 1  # no extra probes on the happy path
 
 
 # ---------------------------------------------------------------------------
