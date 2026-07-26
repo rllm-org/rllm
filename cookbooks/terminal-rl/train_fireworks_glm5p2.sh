@@ -12,15 +12,16 @@
 # the pinned 89-task Terminal-Bench 2.1 boundary benchmark. Sanity is a one-step
 # LoRA + OpenCode smoke test: it evaluates the base checkpoint, skips the
 # 20-minute mid-test, and stops after one optimizer batch. Production is
-# full-parameter + OpenCode with the complete 89-task suite at step 0, every
-# 10 optimizer steps, and final weights. Production uses one validation suite
-# instead of also scheduling the same tasks as a boundary benchmark.
+# full-parameter with either OpenCode or Terminus-2 and the complete 89-task
+# suite at step 0, every 10 optimizer steps, and final weights. Production uses
+# one validation suite instead of also scheduling the same tasks as a boundary
+# benchmark.
 #
 # Training is strictly synchronous and on-policy: collect one fixed batch of
-# eight prompt groups from one frozen policy, run one forward/backward pass and
-# one optimizer step over the complete batch, then await the Fireworks hot-load
-# before the next rollout. Uniform groups remain in the fixed batch and receive
-# zero group-relative advantage.
+# 16 prompt groups with eight rollouts each from one frozen policy, run one
+# forward/backward pass and one optimizer step over the complete 128-trajectory
+# batch, then await the Fireworks hot-load before the next rollout. Uniform
+# groups remain in the fixed batch and receive zero group-relative advantage.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -74,6 +75,7 @@ case "$phase" in
         trainer_replicas="${TB_TRAINER_REPLICAS:-1}"
         rollout_replicas="${TB_ROLLOUT_REPLICAS:-1}"
         n_parallel_tasks="${TB_DEBUG_N_PARALLEL_TASKS:-16}"
+        group_size="${TB_GROUP_SIZE:-16}"
         optimizer_groups_per_step="${TB_DEBUG_GROUPS_PER_STEP:-${TB_DEBUG_ASYNC_MINI_BATCH_SIZE:-1}}"
         ;;
     train)
@@ -99,11 +101,12 @@ case "$phase" in
         # containers and can overload a shared Docker host when four matrix
         # runs launch together.
         n_parallel_tasks="${TB_TRAIN_N_PARALLEL_TASKS:-64}"
+        group_size="${TB_GROUP_SIZE:-16}"
         optimizer_groups_per_step="${TB_TRAIN_GROUPS_PER_STEP:-${TB_TRAIN_ASYNC_MINI_BATCH_SIZE:-8}}"
         ;;
     sanity|production)
-        if [ "$harness" != "opencode" ]; then
-            echo "$phase phase requires the OpenCode harness" >&2
+        if [ "$phase" = "sanity" ] && [ "$harness" != "opencode" ]; then
+            echo "sanity phase requires the OpenCode harness" >&2
             exit 2
         fi
         if [ "$phase" = "sanity" ] && [ "$mode" != "lora" ]; then
@@ -111,7 +114,7 @@ case "$phase" in
             exit 2
         fi
         if [ "$phase" = "production" ] && [ "$mode" != "full" ]; then
-            echo "production phase requires: full opencode production" >&2
+            echo "production phase requires full-parameter mode" >&2
             exit 2
         fi
         train_dataset="tb-opus-pass"
@@ -121,7 +124,6 @@ case "$phase" in
         val_max=0
         total_batches=-1
         total_epochs=1
-        trainer_replicas="${TB_TRAINER_REPLICAS:-4}"
         if [ "$phase" = "sanity" ]; then
             val_split="midtest"
             val_expected_tasks=0
@@ -135,7 +137,10 @@ case "$phase" in
             val_before_train=false
             benchmark_after_train=false
             total_batches="${TB_SANITY_TOTAL_BATCHES:-1}"
+            trainer_replicas="${TB_TRAINER_REPLICAS:-4}"
             rollout_replicas="${TB_ROLLOUT_REPLICAS:-4}"
+            group_size="${TB_GROUP_SIZE:-16}"
+            optimizer_groups_per_step="${TB_TRAIN_GROUPS_PER_STEP:-${TB_TRAIN_ASYNC_MINI_BATCH_SIZE:-8}}"
         else
             # Use the full suite as validation so step 0 and every 10th step
             # share one metric namespace. Disable the separate benchmark path
@@ -149,10 +154,15 @@ case "$phase" in
             benchmark_after_train=false
             test_freq=10
             val_before_train=true
-            rollout_replicas="${TB_ROLLOUT_REPLICAS:-12}"
+            # One full-parameter trainer replica occupies two physical nodes;
+            # one rollout replica occupies one. The 2+6 defaults therefore
+            # give each harness-comparison run an exact 10-node allocation.
+            trainer_replicas="${TB_TRAINER_REPLICAS:-2}"
+            rollout_replicas="${TB_ROLLOUT_REPLICAS:-6}"
+            group_size="${TB_GROUP_SIZE:-8}"
+            optimizer_groups_per_step="${TB_TRAIN_GROUPS_PER_STEP:-${TB_TRAIN_ASYNC_MINI_BATCH_SIZE:-16}}"
         fi
         n_parallel_tasks="${TB_TRAIN_N_PARALLEL_TASKS:-64}"
-        optimizer_groups_per_step="${TB_TRAIN_GROUPS_PER_STEP:-${TB_TRAIN_ASYNC_MINI_BATCH_SIZE:-8}}"
         ;;
     *)
         echo "unsupported phase '$phase' (expected debug, train, sanity, or production)" >&2
@@ -196,7 +206,7 @@ export TB_BENCHMARK_EXPECTED_TASKS="$benchmark_expected_tasks"
 export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
 export TERMINUS_ENABLE_SUMMARIZE="${TERMINUS_ENABLE_SUMMARIZE:-0}"
 export RLLM_HARNESS_INSTALL_TIMEOUT_S="${RLLM_HARNESS_INSTALL_TIMEOUT_S:-900}"
-export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-2400}"
+export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
 export RLLM_HARNESS_VERIFIER_TIMEOUT_S="${RLLM_HARNESS_VERIFIER_TIMEOUT_S:-300}"
 export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-3000}"
 export RLLM_HOME="${RLLM_HOME:-${state_root}/state}"
@@ -210,10 +220,12 @@ export WANDB_TAGS="terminal-bench,glm-5.2,${mode},${harness},${phase},${trainer_
 
 mkdir -p "$RLLM_HOME" "$WANDB_DIR" "${state_root}/logs"
 
-printf 'run=%s mode=%s harness=%s phase=%s train=%s/%s val=%s/%s benchmark=%s region=%s trainer_replicas=%s rollout_replicas=%s gateway_port=%s deployment=%s optimizer_groups_per_step=%s\n' \
+global_trajectories_per_step=$((group_size * optimizer_groups_per_step))
+printf 'run=%s mode=%s harness=%s phase=%s train=%s/%s val=%s/%s benchmark=%s region=%s trainer_replicas=%s rollout_replicas=%s gateway_port=%s deployment=%s group_size=%s optimizer_groups_per_step=%s global_trajectories_per_step=%s run_timeout_s=%s\n' \
     "$run_name" "$mode" "$harness" "$phase" "$train_dataset" "$train_split" \
     "$val_dataset" "$val_split" "${benchmark_dataset:-disabled}" "${trainer_region:-control-plane-selected}" \
-    "$trainer_replicas" "$rollout_replicas" "$gateway_port" "$deployment_id" "$optimizer_groups_per_step"
+    "$trainer_replicas" "$rollout_replicas" "$gateway_port" "$deployment_id" "$group_size" \
+    "$optimizer_groups_per_step" "$global_trajectories_per_step" "$RLLM_HARNESS_RUN_TIMEOUT_S"
 
 region_override=()
 if [ -n "$trainer_region" ]; then
@@ -235,7 +247,7 @@ exec "$python_bin" -u train.py \
     fireworks_config.rollout_deployment_replica_count="$rollout_replicas" \
     fireworks_infra.deployments.rollout.deployment_id="$deployment_id" \
     "${region_override[@]}" \
-    training.group_size=16 \
+    training.group_size="$group_size" \
     training.learning_rate="$learning_rate" \
     training.beta2=0.999 \
     training.max_length=null \

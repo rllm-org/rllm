@@ -266,20 +266,21 @@ phase evaluates every 50 optimizer steps and once more at the end of the epoch.
 Inspect the printed trainer job and deployment IDs plus the four log files
 before detaching from the host.
 
-### Full-parameter GLM-5.2 OpenCode production run
+### Full-parameter GLM-5.2 harness production comparison
 
-The production profile is a separate, guarded launch contract:
+The production profile is a separate, guarded launch contract for an OpenCode
+versus Terminus-2 comparison:
 
 - full-parameter `accounts/fireworks/trainingShapes/glm-5p2-200k` with LoRA
   rank `0`
-- OpenCode harness
+- one OpenCode run and one Terminus-2 run
 - all 1,200 `tb-opus-pass/train` tasks for training
 - one training epoch
 - trainer sequence length resolved from the selected shape (`204736` for the
   current GLM-5.2 200k full-parameter and LoRA shapes)
 - compact filtering enabled for invalid or infrastructure-failed trajectories;
   an agent wall-clock timeout remains a valid, partially graded RL outcome
-- strict synchronous on-policy GRPO with a fixed eight prompt groups × 16
+- strict synchronous on-policy GRPO with a fixed 16 prompt groups × eight
   rollouts (128 trajectories) per optimizer step
 - original group-standardized GRPO advantages and a PPO-clipped policy loss
 - one forward/backward pass over the complete optimizer batch, followed by one
@@ -288,7 +289,9 @@ The production profile is a separate, guarded launch contract:
   steps, and final weights
 - no separate boundary-benchmark invocation, so step 0 evaluates the full set
   exactly once
-- four policy-trainer replicas and twelve rollout-deployment replicas
+- two policy-trainer replicas and six rollout-deployment replicas per run
+  (10 physical nodes per harness, 20 nodes total)
+- a 30-minute per-agent ceiling for both training and validation trajectories
 - explicit `AP_MALAYSIA_2` trainer placement
 
 Prepare the full training archive and evaluation dataset:
@@ -299,8 +302,10 @@ python cookbooks/terminal-rl/prepare_data.py \
   --tarball /path/to/tb_v2_opus_pass.zip
 ```
 
-Then launch. The script rejects `production` with any mode/harness other than
-`full opencode`. It does not use or accept a `firectl -p fw-prod` profile.
+Then launch both harnesses with a shared comparison ID and distinct run names
+and local gateway ports. The script rejects non-full-parameter `production`
+runs but accepts either supported harness. It does not use or accept a
+`firectl -p fw-prod` profile.
 
 ```bash
 export FIREWORKS_API_KEY=...  # key for the training account
@@ -308,18 +313,45 @@ export WANDB_API_KEY=...
 export WANDB_ENTITY=...
 export TB_STATE_ROOT="/shared/${USER}/rllm-terminal-rl-glm5p2"
 export TB_TRAINER_REGION=AP_MALAYSIA_2
-export TB_TRAINER_REPLICAS=4
-export TB_ROLLOUT_REPLICAS=12
-export TB_TRAIN_GROUPS_PER_STEP=8
-export TB_RUN_NAME="glm5p2-full-opencode-tb21-production"
+export TB_TRAINER_REPLICAS=2
+export TB_ROLLOUT_REPLICAS=6
+export TB_GROUP_SIZE=8
+export TB_TRAIN_GROUPS_PER_STEP=16
+export RLLM_HARNESS_RUN_TIMEOUT_S=1800
 
-bash cookbooks/terminal-rl/train_fireworks_glm5p2.sh \
-  full opencode production
+run_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+comparison="glm5p2-full-harness-comparison-${run_stamp}"
+mkdir -p "${TB_STATE_ROOT}/logs"
+
+launch_production_run() {
+  harness="$1"
+  port="$2"
+  run_name="${comparison}-${harness}"
+  log_path="${TB_STATE_ROOT}/logs/${run_name}.log"
+
+  nohup env \
+    TB_RUN_STAMP="${run_stamp}" \
+    TB_COMPARISON_ID="${comparison}" \
+    TB_RUN_NAME="${run_name}" \
+    RLLM_GATEWAY_PORT="${port}" \
+    bash cookbooks/terminal-rl/train_fireworks_glm5p2.sh \
+      full "${harness}" production \
+      >"${log_path}" 2>&1 &
+  echo "$! ${run_name} ${log_path}"
+}
+
+launch_production_run opencode 9400
+launch_production_run terminus-2 9410
 ```
 
-The 4+12 replica values are also production defaults. The full-parameter
+The 2+6 replica values are also production defaults. The full-parameter
 training shape uses two physical nodes per logical trainer replica, while each
-rollout replica uses one node, so this requests `4 × 2 + 12 × 1 = 20` nodes.
+rollout replica uses one node, so each run requests
+`2 × 2 + 6 × 1 = 10` nodes and the pair requests 20 nodes. The eight-rollout
+group size and 16 prompt groups preserve 128 global trajectories per optimizer
+step while doubling task diversity within each update. Since one epoch still
+contains the same 1,200 prompt groups, this changes the expected optimizer-step
+count from 150 to 75.
 Every production evaluation logs under `val/*`, giving one directly comparable
 89-task curve from step 0 through the final checkpoint. If the last optimizer
 step is itself a multiple of 10, the trainer recognizes that the final policy
@@ -331,10 +363,10 @@ attempts in the denominator and is accompanied by
 after compact filtering and are diagnostic rather than the benchmark score.
 
 The production profile keeps uniform-reward GRPO groups in the fixed optimizer
-batch. For a prompt with 16 identical rewards, group-relative standardization
+batch. For a prompt with eight identical rewards, group-relative standardization
 gives every trajectory zero advantage, so it contributes no policy-gradient
 numerator without changing the sampled task distribution or the batch
-denominator. If all eight groups in a batch have zero advantage, the production
+denominator. If all 16 groups in a batch have zero advantage, the production
 recipe skips forward/backward, the optimizer step, and the deployment hot-load
 entirely; this prevents AdamW weight decay or momentum from changing the model
 without fresh RL signal. Compact filtering remains separate and removes only
