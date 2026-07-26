@@ -53,9 +53,9 @@ class TrajectoryGroupBuffer:
     5. If rejection sampling enabled: drop groups with all-zero advantage
     6. Queue the task batch for training
 
-    Filtered groups are reported directly to the coordinator (which tracks
-    throttle slots and filter counts). Only non-empty task batches are queued.
-    All metrics flow through the shared MetricsAggregator.
+    A dropped group frees its slot for backfill. Exception: a uniform (zero-advantage)
+    group with refill_filtered_uniform_groups False is queued as an empty placeholder
+    that counts toward the step but trains nothing. Metrics flow through the aggregator.
 
     Optionally offloads pending episodes and/or queued task batches to
     disk to reduce memory pressure (disabled by default).
@@ -227,6 +227,7 @@ class TrajectoryGroupBuffer:
                 groups_after_min_trajs=0,
                 groups_after_reward_filter=0,
             )
+            # Missing/broken data (min-trajs / compact-filtered / empty) always refills.
             self._coordinator.on_group_filtered()
             self._filtered_count += 1
             self._record_classified_prompt_group()
@@ -257,8 +258,16 @@ class TrajectoryGroupBuffer:
                 groups_after_min_trajs=before_adv,
                 groups_after_reward_filter=0,
             )
-            self._coordinator.on_group_filtered()
             self._filtered_count += 1
+            if self._rs_config.refill_filtered_uniform_groups:
+                self._coordinator.on_group_filtered()  # default: free slot, backfill a replacement
+            else:
+                # Count toward the step: queue an empty placeholder (one slot, trains nothing).
+                # Survivors renormalize over their own tokens; effective batch shrinks. `all`
+                # already counted these trajectories; `effective` excludes them.
+                self._queue.put_nowait(TaskBatch(groups=[], episodes=[]))
+                self._training_queue_size += 1
+                self._queue_update_event.set()
             self._record_classified_prompt_group()
             return True
 

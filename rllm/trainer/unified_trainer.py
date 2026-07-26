@@ -774,10 +774,12 @@ class UnifiedTrainer:
                     all_trajectory_groups.extend(task_batch.groups)
                     all_episodes.extend(task_batch.episodes)
 
-                if not chunk_groups or done:
+                if done:
                     break
 
-                # Forward-backward on this chunk
+                # chunk_groups empty = this pass was all uniform-group placeholders
+                # (refill_filtered_uniform_groups=false): counts toward the step, trains nothing
+                # (has_trajectory_groups guard below skips fwd-bwd).
                 trainer_state.trajectory_groups = chunk_groups
 
                 if trainer_state.has_trajectory_groups:
@@ -814,11 +816,13 @@ class UnifiedTrainer:
                 logger.warning(f"[TrainingLoop] Step {trainer_state.global_step}: all {groups_consumed} groups dropped (no trainable sequences); skipping optimizer step + weight sync.")
             aggregator.record("async/trained_this_step", float(trained_this_step))
 
-            # 3. Capture pre-sync metrics (before weight sync resets coordinator state)
-            staleness_values = [coordinator.weight_version - v for v in weight_versions]
-            aggregator.record("async/staleness_mean", float(np.mean(staleness_values)))
-            aggregator.record("async/staleness_min", float(np.min(staleness_values)))
-            aggregator.record("async/staleness_max", float(np.max(staleness_values)))
+            # 3. Capture pre-sync metrics (before weight sync resets coordinator state).
+            #    weight_versions is empty if the whole step was uniform-group placeholders -- np.min([]) raises.
+            if weight_versions:
+                staleness_values = [coordinator.weight_version - v for v in weight_versions]
+                aggregator.record("async/staleness_mean", float(np.mean(staleness_values)))
+                aggregator.record("async/staleness_min", float(np.min(staleness_values)))
+                aggregator.record("async/staleness_max", float(np.max(staleness_values)))
             aggregator.record("async/groups_consumed", groups_consumed)
             aggregator.record("time/buffer_wait", buffer_wait_time)
             pre_sync_coordinator_stats = coordinator.stats()

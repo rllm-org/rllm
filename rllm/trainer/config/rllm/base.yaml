@@ -138,6 +138,7 @@ rejection_sample:
   min_partial_solve_tasks: 1
   min_trajs_per_group: 2
   filter_uniform_groups: false
+  refill_filtered_uniform_groups: true
 
 # Remote Runtime Configuration (for agent-in-container runtimes like AgentCore, Harbor)
 remote_runtime:

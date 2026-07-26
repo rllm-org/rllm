@@ -231,6 +231,13 @@ class RejectionSamplingConfig:
     # Applied at the accumulator level in async training, before groups enter the buffer.
     filter_uniform_groups: bool = False
 
+    # Only when filter_uniform_groups is True. True (default): refill a dropped uniform group
+    # -- backfill a fresh one so the step keeps mini_batch_size signal groups (DAPO). False:
+    # count it toward mini_batch_size without refilling, so the effective batch shrinks
+    # (survivors renormalize over their own tokens; prime-rl default). Uniform drops only --
+    # min-trajs / compact-filtering / empty-group drops always refill.
+    refill_filtered_uniform_groups: bool = True
+
     @classmethod
     def from_config(cls, config: DictConfig) -> "RejectionSamplingConfig":
         mode = config.get("mode", None)
@@ -241,6 +248,7 @@ class RejectionSamplingConfig:
             min_trajs_per_group=config.get("min_trajs_per_group", 2),
             min_partial_solve_tasks=config.get("min_partial_solve_tasks", 1),
             filter_uniform_groups=config.get("filter_uniform_groups", False),
+            refill_filtered_uniform_groups=config.get("refill_filtered_uniform_groups", True),
         )
 
 
