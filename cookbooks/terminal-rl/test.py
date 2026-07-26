@@ -172,6 +172,9 @@ def test_glm5p2_production_profile_is_full_2x6_8x16_full_suite_every_ten_steps(
     assert "rllm.data.max_response_length=16384" in result.stdout
     assert "rllm.data.train_batch_size=16" in result.stdout
     assert "rllm.compact_filtering.enable=true" in result.stdout
+    assert "rllm.compact_filtering.mask_max_prompt_length_exceeded=false" in result.stdout
+    assert "rllm.compact_filtering.mask_max_response_length_exceeded=false" in result.stdout
+    assert "rllm.compact_filtering.mask_max_turns_exceeded=false" in result.stdout
     assert "rllm.compact_filtering.mask_timeout=false" in result.stdout
     assert "rllm.compact_filtering.mask_error=true" in result.stdout
     assert "rllm.compact_filtering.mask_verifier_timeout=true" in result.stdout

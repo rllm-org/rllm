@@ -251,8 +251,9 @@ fi
 # Leave training.max_length unset so the Fireworks provisioner resolves the
 # selected training shape's max context (204736 for both GLM-5.2 200k shapes).
 # The prompt/response caps sum to that current shape limit.
-# Compact filtering drops invalid/truncated and infrastructure outcomes, while
-# agent wall-clock exhaustion remains a real, partially graded RL outcome.
+# Compact filtering drops infrastructure/grading failures whose rewards are not
+# trustworthy. Policy-limit outcomes (context, response, turns, and wall clock)
+# retain their verifier score and remain valid RL samples.
 exec "$python_bin" -u train.py \
     rllm/backend=fireworks \
     model.name=accounts/fireworks/models/glm-5p2-fp8 \
@@ -276,6 +277,9 @@ exec "$python_bin" -u train.py \
     rllm.data.train_batch_size="$optimizer_groups_per_step" \
     rllm.data.val_batch_size=-1 \
     rllm.compact_filtering.enable=true \
+    rllm.compact_filtering.mask_max_prompt_length_exceeded=false \
+    rllm.compact_filtering.mask_max_response_length_exceeded=false \
+    rllm.compact_filtering.mask_max_turns_exceeded=false \
     rllm.compact_filtering.mask_timeout=false \
     rllm.compact_filtering.mask_error=true \
     rllm.compact_filtering.mask_verifier_timeout=true \
