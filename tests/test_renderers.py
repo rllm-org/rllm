@@ -227,6 +227,62 @@ def test_tinker_adapter_bridge_matches_prime(qwen_tokenizer):
 # ── registry resolution ──────────────────────────────────────────────────────
 
 
+def test_try_prime_uses_typed_renderer_config(monkeypatch):
+    """The prime renderer API takes a typed config, not ``renderer=<name>``."""
+    import sys
+    from types import ModuleType
+
+    from rllm.renderers.registry import _try_prime
+
+    tokenizer = object()
+    typed_config = object()
+    native_renderer = object()
+    calls = []
+    fake_renderers = ModuleType("renderers")
+
+    def config_from_name(name):
+        calls.append(("config", name))
+        return typed_config
+
+    def create_renderer(received_tokenizer, config):
+        calls.append(("create", received_tokenizer, config))
+        return native_renderer
+
+    fake_renderers.config_from_name = config_from_name
+    fake_renderers.create_renderer = create_renderer
+    monkeypatch.setitem(sys.modules, "renderers", fake_renderers)
+
+    assert _try_prime(tokenizer, "qwen3") is native_renderer
+    assert calls == [
+        ("config", "qwen3"),
+        ("create", tokenizer, typed_config),
+    ]
+
+
+def test_try_prime_auto_passes_none_config(monkeypatch):
+    """Auto resolution uses the typed API's ``None`` sentinel."""
+    import sys
+    from types import ModuleType
+
+    from rllm.renderers.registry import _try_prime
+
+    tokenizer = object()
+    native_renderer = object()
+    calls = []
+    fake_renderers = ModuleType("renderers")
+
+    def create_renderer(received_tokenizer, config):
+        calls.append((received_tokenizer, config))
+        return native_renderer
+
+    fake_renderers.config_from_name = lambda _name: pytest.fail("auto must not look up a named config")
+    fake_renderers.create_renderer = create_renderer
+    monkeypatch.setitem(sys.modules, "renderers", fake_renderers)
+
+    assert _try_prime(tokenizer, "auto") is native_renderer
+    assert calls == [(tokenizer, None)]
+
+
 def test_resolve_prime_native_for_qwen(qwen_tokenizer):
     res = resolve(QWEN, qwen_tokenizer)
     assert res.source == "prime"

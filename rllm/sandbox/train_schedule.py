@@ -19,10 +19,10 @@ if TYPE_CHECKING:
     from rllm.data.dataloader import StatefulTaskDataLoader
 
 
-def _as_task(item: dict | Task) -> Task:
+def _as_task(item: dict | Task, task_id: str) -> Task:
     """A schedule entry as a Task. Harbor rows are already Tasks; dict rows use the
     same conversion the engine applies at rollout, so the ``env_key`` matches."""
-    return item if isinstance(item, Task) else task_from_row(item, str(item.get("id", "")))
+    return item if isinstance(item, Task) else task_from_row(item, task_id)
 
 
 def build_train_schedule(
@@ -44,8 +44,8 @@ def build_train_schedule(
     emitted = 0
     for _epoch in range(clone.epoch, total_epochs):
         for batch in clone:
-            interleaved, _ids = interleave_tasks(batch, group_size)
-            schedule.extend(_as_task(item) for item in interleaved)
+            interleaved, task_ids = interleave_tasks(batch, group_size)
+            schedule.extend(_as_task(item, task_id) for item, task_id in zip(interleaved, task_ids, strict=True))
             emitted += 1
             if 0 < remaining_batches <= emitted:
                 return schedule

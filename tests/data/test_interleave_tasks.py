@@ -24,6 +24,13 @@ def test_falsy_id_falls_back_to_shared_uuid():
     assert ids[0] == ids[1]
 
 
+def test_task_id_is_used_as_stable_group_uid():
+    """Harbor training rows expose ``task_id`` rather than ``id``."""
+    row = {"task_id": "harbor-task", "instruction": "y"}
+    _, ids = interleave_tasks([row], 3)
+    assert ids == ["harbor-task", "harbor-task", "harbor-task"]
+
+
 def test_each_group_gets_distinct_uid():
     a = Task(id="a", instruction="", metadata={}, dataset_dir=Path("."))
     b = Task(id="b", instruction="", metadata={}, dataset_dir=Path("."))

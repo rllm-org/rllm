@@ -83,10 +83,25 @@ def _infer_model_name(model: str | None, tokenizer: Any) -> str:
 def _try_prime(tokenizer: Any, family: str) -> Any | None:
     """prime-rl native renderer, or None if it falls back to DefaultRenderer."""
     try:
-        from renderers import create_renderer  # type: ignore
+        from renderers import config_from_name, create_renderer  # type: ignore
     except ImportError:
         return None
-    renderer = create_renderer(tokenizer, renderer=family)
+
+    # ``renderers.create_renderer`` accepts a typed RendererConfig as its
+    # second positional argument.  Older call sites passed ``renderer=...``,
+    # which was removed when the package switched to typed configs.  ``None``
+    # is the typed API's auto-detection mode.
+    if family == "auto":
+        config = None
+    else:
+        try:
+            config = config_from_name(family)
+        except (KeyError, ValueError):
+            return None
+        if config is None:
+            return None
+
+    renderer = create_renderer(tokenizer, config)
     if type(renderer).__name__ == "DefaultRenderer":
         return None
     return renderer

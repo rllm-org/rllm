@@ -37,9 +37,9 @@ def _live_env_keys(loader, *, group_size, total_epochs, backend, remaining_batch
     keys, emitted = [], 0
     for _epoch in range(walker.epoch, total_epochs):
         for batch in walker:
-            interleaved, _ = interleave_tasks(batch, group_size)
-            for item in interleaved:
-                task = item if isinstance(item, Task) else task_from_row(item, str(item.get("id", "")))
+            interleaved, task_ids = interleave_tasks(batch, group_size)
+            for item, task_id in zip(interleaved, task_ids, strict=True):
+                task = item if isinstance(item, Task) else task_from_row(item, task_id)
                 keys.append(env_key_for(task, backend))
             emitted += 1
             if 0 < remaining_batches <= emitted:
@@ -88,9 +88,31 @@ def test_resume_starts_at_live_cursor():
     # First scheduled task == first task the resumed live loop trains.
     clone = loader.clone()
     next_batch = next(iter(clone))
-    first_live, _ = interleave_tasks(next_batch, 2)
-    expected_first = env_key_for(task_from_row(first_live[0], ""), BACKEND)
+    first_live, first_ids = interleave_tasks(next_batch, 2)
+    expected_first = env_key_for(task_from_row(first_live[0], first_ids[0]), BACKEND)
     assert env_key_for(schedule[0], BACKEND) == expected_first
+
+
+def test_harbor_task_id_is_preserved_in_schedule():
+    """Rows in imported Harbor parquet files use ``task_id`` and must never
+    become an empty Docker image tag in the warm queue."""
+    rows = [
+        {
+            "task_id": "harbor-a",
+            "question": "a",
+            "environment": {"docker_image": "img-a"},
+        },
+        {
+            "task_id": "harbor-b",
+            "question": "b",
+            "environment": {"docker_image": "img-b"},
+        },
+    ]
+    loader = StatefulTaskDataLoader(Dataset(data=rows, name="harbor", split="train"), 1, shuffle=False)
+
+    schedule = build_train_schedule(loader, group_size=2, total_epochs=1)
+
+    assert [task.id for task in schedule] == ["harbor-a", "harbor-a", "harbor-b", "harbor-b"]
 
 
 def test_remaining_batches_truncation():

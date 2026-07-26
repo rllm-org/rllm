@@ -43,12 +43,23 @@ def task_from_row(row: dict[str, Any], task_id: str) -> Task:
 
 def interleave_tasks(batch: list[dict | Task], group_size: int) -> tuple[list[dict | Task], list[str]]:
     """Interleave each task ``group_size`` times; return ``(tasks, task_ids)`` with one shared
-    id per group for GRPO grouping — the task's own ``id`` when truthy, else a uuid."""
+    id per group for GRPO grouping.
+
+    Dict-backed training datasets use both ``id`` and ``task_id`` in practice
+    (Harbor datasets use the latter). Prefer either stable identifier before
+    falling back to a UUID so the live rollout path and the sandbox warm-queue
+    schedule derive the same :class:`Task` and environment key.
+    """
     tasks: list[dict | Task] = []
     task_ids: list[str] = []
     for item in batch:
-        item_id = item.id if isinstance(item, Task) else item.get("id")
-        uid = str(item_id) if item_id else str(uuid.uuid4())
+        if isinstance(item, Task):
+            item_id = item.id
+        else:
+            item_id = item.get("id")
+            if item_id is None or item_id == "":
+                item_id = item.get("task_id")
+        uid = str(item_id) if item_id is not None and item_id != "" else str(uuid.uuid4())
         for _ in range(group_size):
             tasks.append(item)
             task_ids.append(uid)
