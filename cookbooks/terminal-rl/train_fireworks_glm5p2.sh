@@ -220,7 +220,11 @@ export TB_BENCHMARK_DATASET="$benchmark_dataset"
 export TB_BENCHMARK_SPLIT="$benchmark_split"
 export TB_BENCHMARK_EXPECTED_TASKS="$benchmark_expected_tasks"
 export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
-export TERMINUS_ENABLE_SUMMARIZE="${TERMINUS_ENABLE_SUMMARIZE:-0}"
+export TERMINUS_ENABLE_SUMMARIZE="${TERMINUS_ENABLE_SUMMARIZE:-1}"
+# Match Harbor's advertised context limit to the gateway prompt cap below.
+# Harbor proactively compacts with 8k tokens remaining; a larger advertised
+# limit can let the gateway reject the prompt before compaction is attempted.
+export TERMINUS_MAX_INPUT_TOKENS="${TERMINUS_MAX_INPUT_TOKENS:-188352}"
 export RLLM_HARNESS_INSTALL_TIMEOUT_S="${RLLM_HARNESS_INSTALL_TIMEOUT_S:-900}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
 export RLLM_HARNESS_VERIFIER_TIMEOUT_S="${RLLM_HARNESS_VERIFIER_TIMEOUT_S:-300}"
@@ -237,11 +241,12 @@ export WANDB_TAGS="terminal-bench,glm-5.2,${mode},${harness},${phase},${trainer_
 mkdir -p "$RLLM_HOME" "$WANDB_DIR" "${state_root}/logs"
 
 global_trajectories_per_step=$((group_size * optimizer_groups_per_step))
-printf 'run=%s mode=%s harness=%s phase=%s train=%s/%s val=%s/%s benchmark=%s region=%s trainer_replicas=%s rollout_replicas=%s gateway_port=%s deployment=%s group_size=%s optimizer_groups_per_step=%s global_trajectories_per_step=%s run_timeout_s=%s\n' \
+printf 'run=%s mode=%s harness=%s phase=%s train=%s/%s val=%s/%s benchmark=%s region=%s trainer_replicas=%s rollout_replicas=%s gateway_port=%s deployment=%s group_size=%s optimizer_groups_per_step=%s global_trajectories_per_step=%s run_timeout_s=%s terminus_compaction=%s terminus_max_input_tokens=%s\n' \
     "$run_name" "$mode" "$harness" "$phase" "$train_dataset" "$train_split" \
     "$val_dataset" "$val_split" "${benchmark_dataset:-disabled}" "${trainer_region:-control-plane-selected}" \
     "$trainer_replicas" "$rollout_replicas" "$gateway_port" "$deployment_id" "$group_size" \
-    "$optimizer_groups_per_step" "$global_trajectories_per_step" "$RLLM_HARNESS_RUN_TIMEOUT_S"
+    "$optimizer_groups_per_step" "$global_trajectories_per_step" "$RLLM_HARNESS_RUN_TIMEOUT_S" \
+    "$TERMINUS_ENABLE_SUMMARIZE" "$TERMINUS_MAX_INPUT_TOKENS"
 
 region_override=()
 if [ -n "$trainer_region" ]; then

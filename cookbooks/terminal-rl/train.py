@@ -74,11 +74,15 @@ TB_VAL_MAX = int(os.environ.get("TB_VAL_MAX", "0"))
 _terminus_max_turns = os.environ.get("TERMINUS_MAX_TURNS")
 TERMINUS_MAX_TURNS = int(_terminus_max_turns) if _terminus_max_turns and int(_terminus_max_turns) > 0 else None
 
-# Terminus-2 context compaction (summarization). Harbor enables it by default;
-# summarization subagents compress history when the context fills, which
-# fragments the trajectory the gateway captures. The train_*.sh scripts set
-# TERMINUS_ENABLE_SUMMARIZE=0 to disable it. Unset = Harbor's default (on).
+# Terminus-2 context compaction (summarization). Harbor enables it by default.
+# Compaction creates a fresh linear-history segment; the gateway and trainer
+# preserve those segments rather than treating the reset as one token prefix.
+# Unset = Harbor's default (on).
 TERMINUS_ENABLE_SUMMARIZE = os.environ.get("TERMINUS_ENABLE_SUMMARIZE", "1").strip().lower() not in ("0", "false", "no", "off")
+# Harbor uses this advertised input limit to trigger proactive compaction.
+# Launchers must align it with rllm.data.max_prompt_length so the gateway cannot
+# reject a prompt before Terminus reaches its compaction threshold.
+TERMINUS_MAX_INPUT_TOKENS = int(os.environ.get("TERMINUS_MAX_INPUT_TOKENS", "200000"))
 
 # Terminal harness: terminus-2 | opencode.
 TB_HARNESS = os.environ.get("TB_HARNESS", "terminus-2").strip().lower()
@@ -90,6 +94,7 @@ def _build_agent_flow():
             sandbox_backend=SANDBOX_BACKEND,
             max_turns=TERMINUS_MAX_TURNS,
             enable_summarize=TERMINUS_ENABLE_SUMMARIZE,
+            max_input_tokens=TERMINUS_MAX_INPUT_TOKENS,
         )
     if TB_HARNESS == "opencode":
         return OpenCodeHarness(sandbox_backend=SANDBOX_BACKEND)
@@ -133,9 +138,8 @@ def main(config: DictConfig) -> None:
     # explicit evaluator/hooks) makes AgentTrainer auto-wire SandboxTaskHooks
     # for the sandbox lifecycle + per-task verifier, and route rollouts through
     # AgentFlowEngine — rLLM's own runtime, not the remote Harbor runtime.
-    # enable_summarize controls Terminus-2 context compaction; the train_*.sh
-    # scripts set TERMINUS_ENABLE_SUMMARIZE=0 to turn it off so summarization
-    # subagents don't fragment the captured trajectory during training.
+    # enable_summarize controls Terminus-2 context compaction. Prefix resets
+    # caused by compaction are represented as separate trainable segments.
     agent_flow = _build_agent_flow()
 
     trainer = AgentTrainer(

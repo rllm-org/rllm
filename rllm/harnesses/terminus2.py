@@ -130,6 +130,12 @@ class Terminus2Harness(BaseCliHarness):
     # attribute into the sandbox, so a plain ``True`` default silently
     # overwrote the operator's host env var with "1".)
     enable_summarize: bool = os.environ.get("RLLM_TERMINUS_ENABLE_SUMMARIZE", "1") == "1"
+    # Harbor decides when to compact from the model context limit it receives.
+    # This must match the gateway's prompt cap: advertising a larger value lets
+    # the gateway reject a request before Harbor's proactive threshold fires.
+    # Direct ``rllm eval`` callers may override it on the host; cookbook
+    # launchers should pass their configured ``rllm.data.max_prompt_length``.
+    max_input_tokens: int = int(os.environ.get("RLLM_TERMINUS_MAX_INPUT_TOKENS", "200000"))
 
     def install_script(self) -> str:
         return _install_script(self.harbor_version, self.terminus_python)
@@ -158,6 +164,7 @@ class Terminus2Harness(BaseCliHarness):
             "RLLM_TERMINUS_TEMPERATURE": str(self.temperature),
             "RLLM_TERMINUS_RECORD": "1" if self.record_terminal_session else "0",
             "RLLM_TERMINUS_ENABLE_SUMMARIZE": "1" if self.enable_summarize else "0",
+            "RLLM_TERMINUS_MAX_INPUT_TOKENS": str(self.max_input_tokens),
             "RLLM_TERMINUS_INTERLEAVED_THINKING": "1" if self.interleaved_thinking else "0",
             "RLLM_TERMINUS_INSTRUCTION_FILE": _INSTRUCTION_PATH,
             "RLLM_TERMINUS_LOGS_DIR": _LOGS_DIR,
@@ -359,6 +366,11 @@ async def _main():
     # Compaction toggle: unset defaults to Harbor's own default (on). "0" turns
     # off both proactive and context-limit summarization.
     enable_summarize = os.environ.get("RLLM_TERMINUS_ENABLE_SUMMARIZE", "1") == "1"
+    # Harbor's proactive compaction threshold is computed against this limit.
+    # It must not exceed the gateway-enforced prompt cap.
+    max_input_tokens = int(os.environ.get("RLLM_TERMINUS_MAX_INPUT_TOKENS", "200000"))
+    if max_input_tokens <= 0:
+        raise ValueError("RLLM_TERMINUS_MAX_INPUT_TOKENS must be positive")
     # Keep reasoning_content in chat history and resend it on later requests.
     interleaved_thinking = os.environ.get("RLLM_TERMINUS_INTERLEAVED_THINKING", "0") == "1"
     logs_dir = Path(os.environ.get("RLLM_TERMINUS_LOGS_DIR", "/tmp/terminus2/logs"))
@@ -366,7 +378,7 @@ async def _main():
 
     # Permissive model_info: gateway-routed model names aren't in LiteLLM's cost
     # table, which would otherwise spam warnings and mis-estimate context.
-    model_info = {"max_input_tokens": 200000, "max_output_tokens": 16384}
+    model_info = {"max_input_tokens": max_input_tokens, "max_output_tokens": 16384}
 
     env = LocalEnvironment(workdir=workdir)
     agent = Terminus2(
@@ -389,7 +401,17 @@ async def _main():
     agent_timeout = float(os.environ.get("RLLM_TERMINUS_AGENT_TIMEOUT_S", "0")) or None
     setup_timeout = float(os.environ.get("RLLM_TERMINUS_SETUP_TIMEOUT_S", "0")) or None
     outcome_file = os.environ.get("RLLM_TERMINUS_OUTCOME_FILE")
-    log.info("terminus2-driver: model=%s workdir=%s parser=%s max_turns=%s agent_timeout=%s", model, workdir, parser, max_turns, agent_timeout)
+    log.info(
+        "terminus2-driver: model=%s workdir=%s parser=%s max_turns=%s "
+        "enable_summarize=%s max_input_tokens=%s agent_timeout=%s",
+        model,
+        workdir,
+        parser,
+        max_turns,
+        enable_summarize,
+        max_input_tokens,
+        agent_timeout,
+    )
 
     exc_info = None
     try:

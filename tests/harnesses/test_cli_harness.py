@@ -804,18 +804,33 @@ def test_run_exec_timeout_without_sentinel_stays_timeout():
 
 
 @pytest.mark.parametrize(
-    ("host_env", "expected_summarize", "expected_interleaved"),
+    ("host_env", "expected_summarize", "expected_interleaved", "expected_max_input_tokens"),
     [
         # No host overrides → Harbor-matching defaults.
-        ({}, "1", "0"),
+        ({}, "1", "0", "200000"),
         # Both knobs flipped from their defaults. RLLM_TERMINUS_ENABLE_SUMMARIZE=0
         # used to be silently ignored (the class default never read the env var,
         # and build_env then hard-coded "1" into the sandbox), so eval runs
         # compacted their trajectories despite the operator turning it off.
-        ({"RLLM_TERMINUS_ENABLE_SUMMARIZE": "0", "RLLM_TERMINUS_INTERLEAVED_THINKING": "1"}, "0", "1"),
+        (
+            {
+                "RLLM_TERMINUS_ENABLE_SUMMARIZE": "0",
+                "RLLM_TERMINUS_INTERLEAVED_THINKING": "1",
+                "RLLM_TERMINUS_MAX_INPUT_TOKENS": "188352",
+            },
+            "0",
+            "1",
+            "188352",
+        ),
     ],
 )
-def test_terminus2_env_knobs_reach_the_sandbox(monkeypatch, host_env, expected_summarize, expected_interleaved):
+def test_terminus2_env_knobs_reach_the_sandbox(
+    monkeypatch,
+    host_env,
+    expected_summarize,
+    expected_interleaved,
+    expected_max_input_tokens,
+):
     """The RLLM_TERMINUS_* toggles set on the host where ``rllm eval`` runs must
     land in the sandbox env verbatim — build_env overwrites the vars from the
     class attributes, so those defaults must read the host env (at import time,
@@ -825,7 +840,11 @@ def test_terminus2_env_knobs_reach_the_sandbox(monkeypatch, host_env, expected_s
     import rllm.harnesses.terminus2 as t2
 
     with monkeypatch.context() as m:
-        for var in ("RLLM_TERMINUS_ENABLE_SUMMARIZE", "RLLM_TERMINUS_INTERLEAVED_THINKING"):
+        for var in (
+            "RLLM_TERMINUS_ENABLE_SUMMARIZE",
+            "RLLM_TERMINUS_INTERLEAVED_THINKING",
+            "RLLM_TERMINUS_MAX_INPUT_TOKENS",
+        ):
             m.delenv(var, raising=False)
         for var, value in host_env.items():
             m.setenv(var, value)
@@ -835,3 +854,14 @@ def test_terminus2_env_knobs_reach_the_sandbox(monkeypatch, host_env, expected_s
 
     assert env["RLLM_TERMINUS_ENABLE_SUMMARIZE"] == expected_summarize
     assert env["RLLM_TERMINUS_INTERLEAVED_THINKING"] == expected_interleaved
+    assert env["RLLM_TERMINUS_MAX_INPUT_TOKENS"] == expected_max_input_tokens
+
+
+def test_terminus2_driver_uses_configured_input_limit():
+    """The driver must register Harbor's model with the gateway prompt cap,
+    rather than the stale 200k literal that delayed proactive compaction."""
+    from rllm.harnesses.terminus2 import _DRIVER_SCRIPT
+
+    assert 'os.environ.get("RLLM_TERMINUS_MAX_INPUT_TOKENS", "200000")' in _DRIVER_SCRIPT
+    assert '"max_input_tokens": max_input_tokens' in _DRIVER_SCRIPT
+    assert '{"max_input_tokens": 200000' not in _DRIVER_SCRIPT

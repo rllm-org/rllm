@@ -122,13 +122,11 @@ def test_prepare_data_rejects_zip_parent_traversal(tmp_path):
 
 
 @pytest.mark.parametrize("harness", ["opencode", "terminus-2"])
-def test_glm5p2_production_profile_is_full_2x6_8x16_full_suite_every_ten_steps(
-    tmp_path, harness
-):
+def test_glm5p2_production_profile_is_full_2x6_8x16_full_suite_every_ten_steps(tmp_path, harness):
     script = (_COOKBOOK_DIR / "train_fireworks_glm5p2.sh").read_text()
 
     assert "production phase requires full-parameter mode" in script
-    assert 'RLLM_HARNESS_RUN_TIMEOUT_S:-1800' in script
+    assert "RLLM_HARNESS_RUN_TIMEOUT_S:-1800" in script
     assert 'val_dataset="terminal-bench@2.1"' in script
 
     env = os.environ.copy()
@@ -163,6 +161,8 @@ def test_glm5p2_production_profile_is_full_2x6_8x16_full_suite_every_ten_steps(
     assert len(deployment_id) <= 63
     assert "global_trajectories_per_step=128" in result.stdout
     assert "run_timeout_s=1800" in result.stdout
+    assert "terminus_compaction=1" in result.stdout
+    assert "terminus_max_input_tokens=188352" in result.stdout
     assert "fireworks_config.policy_trainer_replica_count=2" in result.stdout
     assert "fireworks_config.rollout_deployment_replica_count=6" in result.stdout
     assert "fireworks_infra.trainers.policy.region=AP_MALAYSIA_2" in result.stdout
