@@ -231,14 +231,12 @@ class RejectionSamplingConfig:
     # Applied at the accumulator level in async training, before groups enter the buffer.
     filter_uniform_groups: bool = False
 
-    # What happens to a whole prompt group's optimizer-step slot when a filter drops it
-    # (uniform-reward, min-trajs, compact-filtering, ...):
-    # - True (default): refill it -- free the slot so generation backfills a fresh group, so
-    #   every step trains on mini_batch_size groups (DAPO-style dynamic sampling).
-    # - False: count it toward mini_batch_size without refilling. The dropped group takes a
-    #   slot but trains nothing; survivors renormalize over their own tokens, so the effective
-    #   batch shrinks (prime-rl's default zero-advantage handling, generalized to all drops).
-    refill_filtered_groups: bool = True
+    # Only when filter_uniform_groups is True. True (default): refill a dropped uniform group
+    # -- backfill a fresh one so the step keeps mini_batch_size signal groups (DAPO). False:
+    # count it toward mini_batch_size without refilling, so the effective batch shrinks
+    # (survivors renormalize over their own tokens; prime-rl default). Uniform drops only --
+    # min-trajs / compact-filtering / empty-group drops always refill.
+    refill_filtered_uniform_groups: bool = True
 
     @classmethod
     def from_config(cls, config: DictConfig) -> "RejectionSamplingConfig":
@@ -250,7 +248,7 @@ class RejectionSamplingConfig:
             min_trajs_per_group=config.get("min_trajs_per_group", 2),
             min_partial_solve_tasks=config.get("min_partial_solve_tasks", 1),
             filter_uniform_groups=config.get("filter_uniform_groups", False),
-            refill_filtered_groups=config.get("refill_filtered_groups", True),
+            refill_filtered_uniform_groups=config.get("refill_filtered_uniform_groups", True),
         )
 
 

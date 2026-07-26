@@ -1,14 +1,9 @@
-"""Tests for rejection_sample.refill_filtered_groups in TrajectoryGroupBuffer.
+"""Tests for rejection_sample.refill_filtered_uniform_groups in TrajectoryGroupBuffer.
 
-When a whole prompt group is dropped by a filter (uniform-reward, min-trajs, ...),
-refill_filtered_groups decides its optimizer-step slot:
-- True (default): free the staleness slot so generation backfills a fresh group.
-- False: queue an empty placeholder that occupies a mini_batch_size slot but trains
-  nothing (the filtered group "counts toward the step"; the effective batch shrinks).
-
-reward/{role}/all counts every trajectory that ran (pre-filter); reward/{role}/effective
-only the trajectories that survive into the loss -- so a dropped group is in `all` but not
-`effective` regardless of refill mode.
+When a uniform (zero-advantage) group is dropped: True (default) refills it (backfill);
+False queues an empty placeholder that counts toward the step but trains nothing. Scoped to
+uniform drops only -- min-trajs / compact-filtering drops always refill. reward/{role}/all
+counts trajectories that ran; reward/{role}/effective only those trained on.
 """
 
 import pytest
@@ -58,7 +53,7 @@ async def _feed_group(buffer: TrajectoryGroupBuffer, coordinator: SyncCoordinato
 
 @pytest.mark.asyncio
 async def test_uniform_group_refill_true_backfills():
-    rs = RejectionSamplingConfig(mode="group", min_trajs_per_group=2, filter_uniform_groups=True, refill_filtered_groups=True)
+    rs = RejectionSamplingConfig(mode="group", min_trajs_per_group=2, filter_uniform_groups=True, refill_filtered_uniform_groups=True)
     buffer, coordinator, aggregator = _make_buffer(rs)
 
     await _feed_group(buffer, coordinator, [1.0, 1.0])  # uniform -> advantage 0 -> dropped
@@ -76,7 +71,7 @@ async def test_uniform_group_refill_true_backfills():
 
 @pytest.mark.asyncio
 async def test_uniform_group_refill_false_counts_toward_step():
-    rs = RejectionSamplingConfig(mode="group", min_trajs_per_group=2, filter_uniform_groups=True, refill_filtered_groups=False)
+    rs = RejectionSamplingConfig(mode="group", min_trajs_per_group=2, filter_uniform_groups=True, refill_filtered_uniform_groups=False)
     buffer, coordinator, aggregator = _make_buffer(rs)
 
     await _feed_group(buffer, coordinator, [1.0, 1.0])  # uniform -> dropped, but counted
@@ -97,25 +92,25 @@ async def test_uniform_group_refill_false_counts_toward_step():
 
 
 @pytest.mark.asyncio
-async def test_min_trajs_drop_honors_refill_false():
-    # The flag is generic: a min-trajs drop (not a uniform drop) is also counted toward the
-    # step under refill_filtered_groups=False. group has 2 trajs < min_trajs_per_group=3.
-    rs = RejectionSamplingConfig(mode="group", min_trajs_per_group=3, filter_uniform_groups=False, refill_filtered_groups=False)
+async def test_min_trajs_drop_always_refills_even_in_count_mode():
+    # Scoping guarantee: a min-trajs drop (missing data, NOT a uniform drop) always refills,
+    # even with refill_filtered_uniform_groups=False. group has 2 trajs < min_trajs_per_group=3.
+    rs = RejectionSamplingConfig(mode="group", min_trajs_per_group=3, filter_uniform_groups=True, refill_filtered_uniform_groups=False)
     buffer, coordinator, aggregator = _make_buffer(rs)
 
     await _feed_group(buffer, coordinator, [1.0, 0.0])
 
-    assert buffer._queue.qsize() == 1
-    assert coordinator.stats()["async/in_flight_groups"] == 1
-    item = buffer._queue.get_nowait()
-    assert item.groups == []
+    assert buffer._queue.qsize() == 0  # no placeholder -- refilled, not counted
+    assert buffer._training_queue_size == 0
+    assert buffer._filtered_count == 1
+    assert coordinator.stats()["async/in_flight_groups"] == 0  # slot freed for backfill
 
 
 @pytest.mark.asyncio
 async def test_nonuniform_group_queued_normally():
     # Positive control: a group with real signal is queued with its groups regardless of the
     # refill flag, and contributes to reward/*/effective.
-    rs = RejectionSamplingConfig(mode="group", min_trajs_per_group=2, filter_uniform_groups=True, refill_filtered_groups=False)
+    rs = RejectionSamplingConfig(mode="group", min_trajs_per_group=2, filter_uniform_groups=True, refill_filtered_uniform_groups=False)
     buffer, coordinator, aggregator = _make_buffer(rs)
 
     await _feed_group(buffer, coordinator, [1.0, 0.0])  # mixed -> nonzero advantage -> survives

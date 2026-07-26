@@ -53,10 +53,9 @@ class TrajectoryGroupBuffer:
     5. If rejection sampling enabled: drop groups with all-zero advantage
     6. Queue the task batch for training
 
-    A whole group dropped by a filter is either reported to the coordinator so its
-    slot is backfilled (refill_filtered_groups, default) or queued as an empty
-    placeholder that counts toward the step but trains nothing (refill_filtered_groups
-    False). All metrics flow through the shared MetricsAggregator.
+    A dropped group frees its slot for backfill. Exception: a uniform (zero-advantage)
+    group with refill_filtered_uniform_groups False is queued as an empty placeholder
+    that counts toward the step but trains nothing. Metrics flow through the aggregator.
 
     Optionally offloads pending episodes and/or queued task batches to
     disk to reduce memory pressure (disabled by default).
@@ -120,24 +119,6 @@ class TrajectoryGroupBuffer:
         self._refresh_pbar_counters()
         if self._pbar is not None:
             self._pbar.update(1)
-
-    def _finalize_dropped_group(self) -> None:
-        """A whole prompt group was dropped by a filter. Decide its optimizer-step slot.
-
-        refill_filtered_groups=True (default): free the staleness slot so generation
-        backfills a fresh group -- the step keeps mini_batch_size trainable groups.
-        False: count it toward the step by queuing an empty placeholder that occupies a
-        slot but trains nothing; survivors renormalize over their own tokens, so the
-        effective batch shrinks. (reward/*/all already counted these trajectories;
-        reward/*/effective excludes them either way -- nothing was trained on.)"""
-        self._filtered_count += 1
-        if self._rs_config.refill_filtered_groups:
-            self._coordinator.on_group_filtered()
-        else:
-            self._queue.put_nowait(TaskBatch(groups=[], episodes=[]))
-            self._training_queue_size += 1
-            self._queue_update_event.set()
-        self._record_classified_prompt_group()
 
     async def _offload_episode(self, task_id: str, episode: Episode) -> str:
         """Serialize episode to disk, return file path."""
@@ -246,7 +227,10 @@ class TrajectoryGroupBuffer:
                 groups_after_min_trajs=0,
                 groups_after_reward_filter=0,
             )
-            self._finalize_dropped_group()
+            # Missing/broken data (min-trajs / compact-filtered / empty) always refills.
+            self._coordinator.on_group_filtered()
+            self._filtered_count += 1
+            self._record_classified_prompt_group()
             return True
 
         # 4. Compute advantages
@@ -274,7 +258,17 @@ class TrajectoryGroupBuffer:
                 groups_after_min_trajs=before_adv,
                 groups_after_reward_filter=0,
             )
-            self._finalize_dropped_group()
+            self._filtered_count += 1
+            if self._rs_config.refill_filtered_uniform_groups:
+                self._coordinator.on_group_filtered()  # default: free slot, backfill a replacement
+            else:
+                # Count toward the step: queue an empty placeholder (one slot, trains nothing).
+                # Survivors renormalize over their own tokens; effective batch shrinks. `all`
+                # already counted these trajectories; `effective` excludes them.
+                self._queue.put_nowait(TaskBatch(groups=[], episodes=[]))
+                self._training_queue_size += 1
+                self._queue_update_event.set()
+            self._record_classified_prompt_group()
             return True
 
         # reward/{role}/effective: reward per role over only the trajectories

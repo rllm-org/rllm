@@ -744,9 +744,9 @@ class UnifiedTrainer:
                 if done:
                     break
 
-                # chunk_groups is empty when every batch this pass was a dropped-group
-                # placeholder (refill_filtered_groups=false): it counts toward the step but
-                # trains nothing (the has_trajectory_groups guard below skips fwd-bwd).
+                # chunk_groups empty = this pass was all uniform-group placeholders
+                # (refill_filtered_uniform_groups=false): counts toward the step, trains nothing
+                # (has_trajectory_groups guard below skips fwd-bwd).
                 trainer_state.trajectory_groups = chunk_groups
 
                 if trainer_state.has_trajectory_groups:
@@ -784,7 +784,7 @@ class UnifiedTrainer:
             aggregator.record("async/trained_this_step", float(trained_this_step))
 
             # 3. Capture pre-sync metrics (before weight sync resets coordinator state).
-            #    weight_versions is empty if the whole step was dropped-group placeholders -- np.min([]) raises.
+            #    weight_versions is empty if the whole step was uniform-group placeholders -- np.min([]) raises.
             if weight_versions:
                 staleness_values = [coordinator.weight_version - v for v in weight_versions]
                 aggregator.record("async/staleness_mean", float(np.mean(staleness_values)))
