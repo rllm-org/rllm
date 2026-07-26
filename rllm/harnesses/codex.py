@@ -63,7 +63,7 @@ fi
 codex --version >/dev/null
 """
 
-_CODEX_HOME = "/app/codex-home"
+_CODEX_HOME = "/tmp/codex-home"
 
 
 class CodexHarness(BaseCliHarness):
