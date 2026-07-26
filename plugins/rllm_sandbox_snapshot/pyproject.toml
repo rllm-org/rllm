@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rllm-sandbox-snapshot"
+version = "0.1.0"
+description = "Snapshot rllm BwrapSandbox workdir /app + /tmp before close() teardown."
+requires-python = ">=3.11"
+# Depends on rllm being importable in the same env; not pinned as a dependency
+# because rllm is installed editable in the training venv.
+
+[tool.setuptools.packages.find]
+include = ["rllm_sandbox_snapshot*"]

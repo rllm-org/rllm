@@ -1,0 +1,3 @@
+# rllm-model-gateway config for SQLite trace persistence.
+# Used by cookbooks/multimodal_codex/train_full_8gpu.sh and the trace uploader plugin.
+sync_traces: true

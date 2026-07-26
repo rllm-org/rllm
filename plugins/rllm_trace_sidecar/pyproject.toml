@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rllm-trace-sidecar"
+version = "0.1.0"
+description = "Monkey-patch rllm VerlBackend hooks to write sidecar files for the trace uploader."
+requires-python = ">=3.11"
+# Depends on rllm being importable in the same env; not pinned as a dependency
+# because rllm is installed editable in the training venv.
+
+[tool.setuptools.packages.find]
+include = ["rllm_trace_sidecar*"]

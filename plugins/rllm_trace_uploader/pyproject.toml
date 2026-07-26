@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rllm-trace-uploader"
+version = "0.1.0"
+description = "Read rllm-model-gateway SQLite trace DB and republish to W&B Weave."
+requires-python = ">=3.11"
+dependencies = [
+    "weave>=0.53",
+    "aiosqlite",
+    "typer",
+]
+
+[project.scripts]
+rllm-trace-uploader = "rllm_trace_uploader.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["rllm_trace_uploader*"]

@@ -56,6 +56,16 @@ if [[ ! -x /tmp/uv-venv/bin/python ]]; then
     s5cmd cat s3://arcwm-code-us-west-2/ericzyma/tools/rllm-venv-cu128.tar | tar xf - -C /tmp/
 fi
 
+# --------- 1a. install observability plugins (idempotent — uv detects same version) ---------
+_UV_PIP=/tmp/uv-venv/bin/uv
+_VENV_BIN=/tmp/uv-venv/bin/python
+if [[ ! -x "$_UV_PIP" ]]; then _UV_PIP=uv; fi
+"$_UV_PIP" pip install --python "$_VENV_BIN" -q \
+    "${PROJECT_DIR:-/data/work/rllm}/plugins/rllm_trace_uploader" \
+    "${PROJECT_DIR:-/data/work/rllm}/plugins/rllm_trace_sidecar" \
+    "${PROJECT_DIR:-/data/work/rllm}/plugins/rllm_sandbox_snapshot" 2>&1 | tail -5 || \
+    echo "[full] WARN: plugin install failed (proceeding anyway)"
+
 # --------- 2. Fix torch cu128 (tar name lies, packs cu130) ---------
 _TORCH_VERSION=$(/tmp/uv-venv/bin/python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "missing")
 if [[ "$_TORCH_VERSION" != *"cu128"* ]]; then
@@ -89,6 +99,12 @@ export HF_HUB_DISABLE_XET=1
 export RLLM_HOME=/local-ssd/rllm_home
 export PATH="/tmp/uv-venv/bin:${PATH}"
 export RLLM_API_FORMAT=responses  # Codex CLI speaks Responses API — needed for both external + verl-internal gateway
+
+# --------- 5a. Observability: SQLite trace DB + Weave uploader + sandbox snapshots ---------
+export RLLM_GATEWAY_DB_PATH="$RLLM_HOME/traces.db"
+export WEAVE_PROJECT="${WEAVE_PROJECT:-${WANDB_PROJECT}}"
+export RLLM_SANDBOX_SNAPSHOT_ROOT="$RLLM_HOME/workspace_snapshots"
+mkdir -p "$RLLM_HOME/observability" "$RLLM_SANDBOX_SNAPSHOT_ROOT"
 _VENV_SITE=$(ls -d /tmp/uv-venv/lib/python*/site-packages 2>/dev/null | head -1)
 if [[ -n "$_VENV_SITE" && -d "$_VENV_SITE/nvidia/cu13/lib" ]]; then
     export LD_LIBRARY_PATH="$_VENV_SITE/nvidia/cu13/lib:${LD_LIBRARY_PATH:-}"
@@ -143,14 +159,24 @@ VLLM_PID=$!
 
 # Cleanup + last-ditch checkpoint sync on exit
 CKPT_SYNC_PID=""
+UPLOADER_PID=""
 trap '
     kill $VLLM_PID 2>/dev/null || true
     kill ${GATEWAY_PID:-} 2>/dev/null || true
     kill ${CKPT_SYNC_PID:-} 2>/dev/null || true
+    kill ${UPLOADER_PID:-} 2>/dev/null || true
     if [[ -d "$LOG_ROOT/exp" ]]; then
         echo "[full] final checkpoint sync to $CKPT_S3/"
         aws s3 sync "$LOG_ROOT/exp/" "$CKPT_S3/exp/" --quiet || true
         aws s3 sync "$LOG_ROOT/" "$CKPT_S3/logs/" --exclude "exp/*" --quiet || true
+    fi
+    if [[ -f "$RLLM_GATEWAY_DB_PATH" ]]; then
+        echo "[full] final trace DB sync to $CKPT_S3/traces.db"
+        aws s3 cp "$RLLM_GATEWAY_DB_PATH" "$CKPT_S3/traces.db" --quiet || true
+    fi
+    if [[ -d "$RLLM_SANDBOX_SNAPSHOT_ROOT" ]]; then
+        echo "[full] final workspace snapshots sync"
+        aws s3 sync "$RLLM_SANDBOX_SNAPSHOT_ROOT/" "$CKPT_S3/workspace_snapshots/" --quiet || true
     fi
 ' EXIT
 
@@ -169,8 +195,11 @@ for _ in $(seq 1 300); do
 done
 
 # --------- 8. Gateway ---------
-echo "[full] starting gateway on port $GATEWAY_PORT"
+echo "[full] starting gateway on port $GATEWAY_PORT (SQLite trace store at $RLLM_GATEWAY_DB_PATH)"
 "$VENV_PY" -m rllm_model_gateway.server \
+    --config "$PROJECT_DIR/configs/gateway_sync.yaml" \
+    --store sqlite \
+    --db-path "$RLLM_GATEWAY_DB_PATH" \
     --cumulative-token-mode \
     --renderer-family qwen3.5 \
     --model "$MODEL" \
@@ -201,21 +230,45 @@ else
     echo "[full] WARN: probe failed (proceeding to training anyway)"
 fi
 
-# --------- 9.5. Background checkpoint S3 sync (every 60s) ---------
+# --------- 9.5. Background checkpoint + trace-DB + workspace S3 sync (every 60s) ---------
 (
     while true; do
         sleep 60
         if [[ -d "$LOG_ROOT/exp" ]]; then
             aws s3 sync "$LOG_ROOT/exp/" "$CKPT_S3/exp/" --quiet || true
         fi
+        if [[ -f "$RLLM_GATEWAY_DB_PATH" ]]; then
+            aws s3 cp "$RLLM_GATEWAY_DB_PATH" "$CKPT_S3/traces.db" --quiet || true
+        fi
+        if [[ -d "$RLLM_SANDBOX_SNAPSHOT_ROOT" ]]; then
+            aws s3 sync "$RLLM_SANDBOX_SNAPSHOT_ROOT/" "$CKPT_S3/workspace_snapshots/" --quiet || true
+        fi
     done
 ) &
 CKPT_SYNC_PID=$!
-echo "[full] background checkpoint sync started (pid=$CKPT_SYNC_PID → $CKPT_S3)"
+echo "[full] background sync started (pid=$CKPT_SYNC_PID → $CKPT_S3 [exp/, traces.db, workspace_snapshots/])"
+
+# --------- 9.6. Trace uploader daemon (SQLite → W&B Weave, every 60s) ---------
+if [[ -n "${WANDB_API_KEY:-}" && -n "${WEAVE_PROJECT:-}" ]]; then
+    echo "[full] starting trace uploader daemon → Weave project=$WEAVE_PROJECT"
+    "$VENV_PY" -m rllm_trace_uploader.cli daemon \
+        --db-path "$RLLM_GATEWAY_DB_PATH" \
+        --project "$WEAVE_PROJECT" \
+        --sidecar-root "$RLLM_HOME/observability" \
+        --state-path "$RLLM_HOME/trace_uploader_state.txt" \
+        --interval 60 \
+        > "$LOG_ROOT/uploader.log" 2>&1 &
+    UPLOADER_PID=$!
+    echo "[full] uploader pid=$UPLOADER_PID (log: $LOG_ROOT/uploader.log)"
+else
+    echo "[full] SKIP uploader daemon (WANDB_API_KEY or WEAVE_PROJECT unset)"
+fi
 
 # --------- 10. verl formal training on GPU 2-7 ---------
 echo "[full] starting verl training on GPU 2-7 (log: $LOG_ROOT/train.log)"
-CUDA_VISIBLE_DEVICES=2,3,4,5,6,7 "$VENV_PY" cookbooks/multimodal_codex/train.py \
+# Use launcher wrapper that imports observability plugins (sidecar + snapshot)
+# before delegating to train.py — plugins install their monkey-patches on import.
+CUDA_VISIBLE_DEVICES=2,3,4,5,6,7 "$VENV_PY" cookbooks/multimodal_codex/train_with_observability.py \
     rllm/backend=verl \
     algorithm.adv_estimator=grpo \
     algorithm.norm_adv_by_std_in_grpo=true \
