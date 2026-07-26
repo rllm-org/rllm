@@ -138,6 +138,12 @@ rejection_sample:
   min_partial_solve_tasks: 1
   min_trajs_per_group: 2
   filter_uniform_groups: false
+  # What a filter-dropped group (uniform-reward, min-trajs, compact-filtering, ...) does to
+  # its optimizer-step slot. true (default): refill it -- backfill a fresh group so every step
+  # trains on mini_batch_size groups (DAPO dynamic sampling). false: count it toward
+  # mini_batch_size without refilling, so the effective batch shrinks (survivors renormalize
+  # over their own tokens; prime-rl default).
+  refill_filtered_groups: true
 
 # Remote Runtime Configuration (for agent-in-container runtimes like AgentCore, Harbor)
 remote_runtime:
