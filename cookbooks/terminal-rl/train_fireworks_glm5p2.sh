@@ -190,7 +190,23 @@ stamp_slug="${run_stamp,,}"
 stamp_slug="${stamp_slug//[^a-z0-9-]/-}"
 stamp_slug="${stamp_slug:0:20}"
 deployment_nonce="$(tr -d '-' </proc/sys/kernel/random/uuid | cut -c1-10)"
-deployment_id="${TB_DEPLOYMENT_ID:-tb-glm5p2-${phase}-${mode}-${harness}-${stamp_slug}-${deployment_nonce}}"
+if [ -n "${TB_DEPLOYMENT_ID:-}" ]; then
+    deployment_id="$TB_DEPLOYMENT_ID"
+else
+    # Deployment resource IDs are DNS labels and may not exceed 63 characters.
+    # Preserve the timestamp/nonce suffix for uniqueness and truncate only the
+    # descriptive prefix (notably, the Terminus-2 production prefix is longer).
+    deployment_suffix="-${stamp_slug}-${deployment_nonce}"
+    deployment_prefix="tb-glm5p2-${phase}-${mode}-${harness}"
+    max_deployment_prefix_length=$((63 - ${#deployment_suffix}))
+    deployment_prefix="${deployment_prefix:0:max_deployment_prefix_length}"
+    deployment_prefix="${deployment_prefix%-}"
+    deployment_id="${deployment_prefix}${deployment_suffix}"
+fi
+if [ "${#deployment_id}" -gt 63 ]; then
+    echo "deployment ID '$deployment_id' exceeds the 63-character limit" >&2
+    exit 2
+fi
 
 export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-docker}"
 export TB_HARNESS="$harness"

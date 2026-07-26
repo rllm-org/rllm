@@ -158,6 +158,9 @@ def test_glm5p2_production_profile_is_full_2x6_8x16_full_suite_every_ten_steps(
     )
 
     assert "val=terminal-bench@2.1/default benchmark=disabled" in result.stdout
+    summary_line = result.stdout.splitlines()[0]
+    deployment_id = summary_line.split("deployment=", 1)[1].split()[0]
+    assert len(deployment_id) <= 63
     assert "global_trajectories_per_step=128" in result.stdout
     assert "run_timeout_s=1800" in result.stdout
     assert "fireworks_config.policy_trainer_replica_count=2" in result.stdout
