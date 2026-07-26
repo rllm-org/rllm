@@ -11,6 +11,11 @@ class TraceRecord(BaseModel):
 
     trace_id: str
     session_id: str
+    # Which conversation lineage within the session this call belongs to
+    # (SessionSlots assigns one per parent/subagent lineage). None when
+    # cumulative-token mode is off (no slots) — the reader treats the whole
+    # session as one lineage, as before.
+    lineage_id: str | None = None
     model: str = ""
     # Input
     messages: list[dict[str, Any]] = Field(default_factory=list)

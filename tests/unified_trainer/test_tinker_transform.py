@@ -325,6 +325,57 @@ class TestTrajectoryToDataPrefixMerging:
 # =============================================================================
 
 
+class TestLineagePartition:
+    """One trajectory whose steps carry gateway lineage ids is partitioned by
+    lineage before merging — interleaved parent/subagent turns each become their
+    own Datum, without splitting the trajectory or touching advantages."""
+
+    def _step(self, prompt_ids, response_tokens, lineage_id, advantage=1.0):
+        return Step(
+            prompt_ids=prompt_ids,
+            response_ids=response_tokens,
+            logprobs=[0.1] * len(response_tokens),
+            advantage=advantage,
+            metadata={"lineage_id": lineage_id} if lineage_id is not None else None,
+        )
+
+    def test_interleaved_lineages_become_separate_datums(self):
+        # parent (A) interleaved with a subagent (B); parent resumes and extends.
+        p1 = self._step([1, 2], [3, 4], "A")
+        sub = self._step([100, 101, 102], [103, 104], "B")
+        p2 = self._step([1, 2, 3, 4, 5], [6, 7], "A")  # extends A's full seq [1,2,3,4]
+        trajectory = Trajectory(steps=[p1, sub, p2])
+
+        datums = trajectory_to_datums(trajectory)
+
+        # A merges (p1+p2) into one Datum, B is its own → 2, not 3.
+        assert len(datums) == 2
+        for d in datums:
+            verify_datum_structure(d)
+        # The parent Datum merged both turns: mask [0,0,1,1,0,1,1] → after [1:] [0,1,1,0,1,1]
+        parent = max(datums, key=lambda d: len(d.loss_fn_inputs["mask"].data))
+        assert parent.loss_fn_inputs["mask"].data == [0.0, 1.0, 1.0, 0.0, 1.0, 1.0]
+
+    def test_two_subagents_between_parent_turns(self):
+        steps = [
+            self._step([1, 2], [3, 4], "A"),
+            self._step([100, 101], [102], "B"),
+            self._step([200, 201], [202], "C"),
+            self._step([1, 2, 3, 4, 5], [6, 7], "A"),  # parent resumes
+            self._step([100, 101, 102, 103], [104], "B"),  # subagent B resumes
+        ]
+        datums = trajectory_to_datums(Trajectory(steps=steps))
+        # lineages A {p1,p2}, B {b1,b2}, C {c1} → 3 Datums
+        assert len(datums) == 3
+
+    def test_untagged_steps_single_partition(self):
+        # No lineage ids → one partition → original behavior (2 independent steps → 2 Datums).
+        s1 = self._step([1, 2, 3], [4, 5], None)
+        s2 = self._step([10, 11, 12], [13, 14], None)
+        datums = trajectory_to_datums(Trajectory(steps=[s1, s2]))
+        assert len(datums) == 2
+
+
 class TestTrajectoryToDataNoPrefix:
     """Tests for trajectory_to_datums when steps don't share prefix relationship."""
 
@@ -537,6 +588,37 @@ class TestTrajectoryToDataEdgeCases:
 # =============================================================================
 # Empty / all-malformed batch (forward-backward guard trigger)
 # =============================================================================
+
+
+class TestMergeMetricNaming:
+    """batch/steps_per_traj = unmerged agent steps (LLM turns) per trajectory;
+    batch/merged_steps_per_traj = training rows per trajectory after prefix-merging.
+    A cumulative multi-step trajectory keeps the two distinct (unmerged > merged) —
+    guards against the two metrics being swapped."""
+
+    def _alg(self):
+        from omegaconf import OmegaConf
+
+        from rllm.trainer.algorithms.config import AlgorithmConfig
+
+        return AlgorithmConfig.from_config(OmegaConf.create({"adv_estimator": "grpo"}))
+
+    def test_unmerged_vs_merged_steps_per_traj(self):
+        from rllm.agents.agent import TrajectoryGroup
+        from rllm.trainer.tinker.transform import transform_trajectory_groups_to_datums
+
+        # One trajectory, two steps; step2 extends step1's full sequence, so the
+        # two agent steps merge into a single training row.
+        step1 = make_step(prompt_ids=[1, 2], response_tokens=[3, 4], response_logprobs=[-0.1, -0.2], advantage=0.5)
+        step2 = make_step(prompt_ids=[1, 2, 3, 4, 5], response_tokens=[6, 7], response_logprobs=[-0.3, -0.4], advantage=0.6)
+        group = TrajectoryGroup(group_id="g0", trajectories=[Trajectory(steps=[step1, step2])])
+
+        datums, metrics = transform_trajectory_groups_to_datums([group], algorithm_config=self._alg())
+
+        assert len(datums) == 1  # merged into one row
+        assert metrics["batch/steps_per_traj/mean"] == 2.0  # unmerged: 2 agent steps
+        assert metrics["batch/merged_steps_per_traj/mean"] == 1.0  # merged: 1 row
+        assert metrics["batch/merge_compression_ratio"] == 2.0  # 2 steps / 1 row
 
 
 class TestAllMalformedBatch:
