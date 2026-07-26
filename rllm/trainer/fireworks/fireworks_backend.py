@@ -335,6 +335,18 @@ class FireworksBackend(TinkerBackend):
             resume_from_checkpoint=True,
         )
         trainer_state.global_step = start_step
+        if start_step > 0 and trainer_state.train_dataloader is not None:
+            if self.full_config.rllm.async_training.enable:
+                raise RuntimeError(
+                    "Fireworks checkpoint resume cannot infer an asynchronous "
+                    "dataloader cursor from optimizer-step count alone"
+                )
+            trainer_state.train_dataloader.seek_batches(start_step)
+            logger.info(
+                "Restored synchronous dataloader cursor after %d completed batch(es): %s",
+                start_step,
+                trainer_state.train_dataloader.state_dict(),
+            )
 
     async def _save_and_sync(
         self,

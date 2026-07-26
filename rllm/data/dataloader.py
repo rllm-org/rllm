@@ -81,6 +81,28 @@ class StatefulTaskDataLoader:
         self._cursor = state["cursor"]
         self._seed = state.get("seed", self._seed)
 
+    def seek_batches(self, completed_batches: int) -> None:
+        """Position the loader after ``completed_batches`` deterministic batches.
+
+        Fireworks DCP checkpoints persist model and optimizer state on the
+        remote trainer, but the host-side task loader is reconstructed when a
+        runner reconnects.  For synchronous training the task order is fully
+        determined by ``seed`` and epoch, so the completed optimizer-step count
+        is sufficient to restore the matching data cursor.
+        """
+        if completed_batches < 0:
+            raise ValueError(f"completed_batches must be non-negative, got {completed_batches}")
+        batches_per_epoch = len(self)
+        if batches_per_epoch == 0:
+            if completed_batches:
+                raise ValueError("cannot seek a dataloader with zero batches")
+            self._epoch = 0
+            self._cursor = 0
+            return
+
+        self._epoch, batch_in_epoch = divmod(int(completed_batches), batches_per_epoch)
+        self._cursor = batch_in_epoch * self._batch_size
+
     def clone(self) -> StatefulTaskDataLoader:
         """A detached copy at the same position — same dataset/config, independent cursor.
 

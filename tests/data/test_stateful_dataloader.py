@@ -70,3 +70,32 @@ def test_resume_continues_remaining_epochs():
             seen.append([d["id"] for d in batch])
 
     assert seen == flat_ref
+
+
+def test_seek_batches_restores_deterministic_mid_epoch_cursor():
+    reference = StatefulTaskDataLoader(_ds(12), 2, seed=5)
+    reference_batches = [[d["id"] for d in batch] for batch in reference]
+
+    resumed = StatefulTaskDataLoader(_ds(12), 2, seed=5)
+    resumed.seek_batches(3)
+
+    assert resumed.state_dict() == {"epoch": 0, "cursor": 6, "seed": 5}
+    assert [[d["id"] for d in batch] for batch in resumed] == reference_batches[3:]
+
+
+def test_seek_batches_crosses_epoch_boundary():
+    resumed = StatefulTaskDataLoader(_ds(8), 2, seed=11)
+    resumed.seek_batches(6)
+
+    assert resumed.state_dict() == {"epoch": 1, "cursor": 4, "seed": 11}
+
+
+def test_seek_batches_rejects_negative_count():
+    dataloader = StatefulTaskDataLoader(_ds(8), 2)
+
+    try:
+        dataloader.seek_batches(-1)
+    except ValueError as exc:
+        assert "non-negative" in str(exc)
+    else:
+        raise AssertionError("negative completed_batches must fail")
