@@ -19,6 +19,9 @@ export RLLM_HARNESS_INSTALL_TIMEOUT_S="${RLLM_HARNESS_INSTALL_TIMEOUT_S:-300}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-2400}"
 export RLLM_HARNESS_VERIFIER_TIMEOUT_S="${RLLM_HARNESS_VERIFIER_TIMEOUT_S:-300}"
 export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-3000}"
+export FIREWORKS_COMPARE_DIR="${FIREWORKS_COMPARE_DIR:-$PWD/train_batches/fireworks_comparison_$(date +%Y%m%d_%H%M%S)}"
+mkdir -p "$FIREWORKS_COMPARE_DIR"
+echo "Fireworks comparison artifacts: $FIREWORKS_COMPARE_DIR"
 python -u train_debug.py \
     rllm/backend=fireworks \
     model.name=accounts/fireworks/models/qwen3p5-35b-a3b \
@@ -42,14 +45,14 @@ python -u train_debug.py \
     rllm.compact_filtering.enable=false \
     rllm.algorithm.adv_estimator=grpo \
     rllm.algorithm.norm_adv_by_std_in_grpo=false \
-    rllm.algorithm.router_replay=R3 \
+    rllm.algorithm.router_replay=disabled \
     rllm.algorithm.loss_fn=dppo_tv \
     +rllm.algorithm.loss_params='{delta: 0.1}' \
     rllm.algorithm.loss_agg_mode=token-mean \
     rllm.algorithm.rollout_correction.bypass_mode=true \
     rllm.async_training.enable=true \
     rllm.async_training.mini_batch_size=8 \
-    rllm.async_training.fwd_bwd_group_size=1 \
+    rllm.async_training.fwd_bwd_group_size=8 \
     rllm.async_training.staleness_threshold=3.0 \
     rllm.async_training.trigger_parameter_sync_step=1 \
     rllm.async_training.partial_rollout=true \
@@ -62,11 +65,10 @@ python -u train_debug.py \
     rllm.gateway.cumulative_token_mode=true \
     rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=1000 \
-    rllm.episode_logging.log_episodes=true \
-    rllm.episode_logging.log_backend_batches=true \
-    rllm.episode_logging.episode_log_dir=train_batches/qwen3p5-35b-a3b-tb-v2-debug \
-    rllm.episode_logging.backend_batch_log_dir=train_batches/qwen3p5-35b-a3b-tb-v2-debug \
-    rllm.trainer.logger='[wandb]' \
+    rllm.trainer.total_batches=1 \
+    rllm.episode_logging.log_episodes=false \
+    rllm.episode_logging.log_backend_batches=false \
+    rllm.trainer.logger='[console]' \
     rllm.trainer.project_name='terminal-rl' \
     rllm.trainer.experiment_name='qwen3p5-35b-a3b-tb-v2-debug' \
     rllm.trainer.val_before_train=false \

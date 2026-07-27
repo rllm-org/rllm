@@ -312,6 +312,14 @@ class TrajectoryGroupBuffer:
         self._refresh_pbar_counters()
         return await self._load_task_batch(item)
 
+    async def add_task_batch(self, batch: TaskBatch) -> None:
+        """Queue an already-constructed task batch."""
+        if self._generation_complete:
+            raise RuntimeError("Cannot queue a task batch after generation is complete")
+        await self._queue.put(batch)
+        self._training_queue_size += 1
+        self._queue_update_event.set()
+
     async def get_many(self, count: int) -> list[TaskBatch] | None:
         """Get a full forward/backward chunk, or None if generation ended first."""
         while self._training_queue_size < count:

@@ -14,6 +14,12 @@ export RLLM_HARNESS_INSTALL_TIMEOUT_S="${RLLM_HARNESS_INSTALL_TIMEOUT_S:-300}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-2400}"
 export RLLM_HARNESS_VERIFIER_TIMEOUT_S="${RLLM_HARNESS_VERIFIER_TIMEOUT_S:-300}"
 export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-3000}"
+export RLLM_REPLAY_TRAJECTORY_GROUPS="${RLLM_REPLAY_TRAJECTORY_GROUPS:-$PWD/train_batches/fireworks_comparison_20260727_152254/optimizer_batches/000_trajectory_group_chunks.pkl}"
+
+if [[ ! -f "$RLLM_REPLAY_TRAJECTORY_GROUPS" ]]; then
+    echo "Replay trajectory batch not found: $RLLM_REPLAY_TRAJECTORY_GROUPS" >&2
+    exit 1
+fi
 
 MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-35B-A3B}"
 PROJECT_NAME="${PROJECT_NAME:-terminal-rl}"
@@ -119,13 +125,13 @@ python -u train_debug.py \
     rollout.nnodes="${ROLLOUT_NNODES}" \
     rollout.n_gpus_per_node="${N_GPUS_PER_NODE}" \
     rllm.trainer.total_epochs="${TOTAL_EPOCHS}" \
+    rllm.trainer.total_batches=1 \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=-1 \
     rllm.trainer.save_freq=25 \
-    rllm.episode_logging.log_episodes=true \
-    rllm.episode_logging.episode_log_dir="${ARTIFACT_DIR}" \
+    rllm.episode_logging.log_episodes=false \
     rllm.episode_logging.log_backend_batches=false \
-    rllm.trainer.logger='[console,wandb]' \
+    rllm.trainer.logger='[console]' \
     rllm.trainer.project_name="${PROJECT_NAME}" \
     rllm.trainer.experiment_name="${EXPERIMENT_NAME}" \
     "$@"

@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import pickle
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -39,7 +41,7 @@ from rllm.trainer.algorithms.transform import (
 )
 from rllm.trainer.algorithms.visualization import print_metrics_table, visualize_trajectory_last_steps
 from rllm.trainer.backend_protocol import BackendProtocol
-from rllm.trainer.buffer import TrajectoryGroupBuffer
+from rllm.trainer.buffer import TaskBatch, TrajectoryGroupBuffer
 from rllm.trainer.metrics_aggregator import MetricsAggregator
 from rllm.trainer.sync_coordinator import SyncCoordinator, SyncCoordinatorConfig
 from rllm.types import INFRA_ERROR_REASONS, Episode, TerminationReason, TrajectoryGroup
@@ -667,6 +669,37 @@ class UnifiedTrainer:
         coordinator: SyncCoordinator,
     ) -> None:
         """Generate episodes and stream to TrajectoryGroupBuffer."""
+        replay_path = os.environ.get("RLLM_REPLAY_TRAJECTORY_GROUPS")
+        if replay_path:
+            if self.algorithm_config.router_replay != "disabled":
+                raise RuntimeError("Trajectory-group replay requires rllm.algorithm.router_replay=disabled")
+
+            path = os.path.abspath(replay_path)
+            logger.info("Loading replay trajectory groups from %s", path)
+            with open(path, "rb") as f:
+                slots = await asyncio.to_thread(pickle.load, f)
+
+            expected = self.async_config.mini_batch_size
+            if not isinstance(slots, list) or len(slots) != expected:
+                raise ValueError(f"Replay batch must contain exactly {expected} slots, got {len(slots) if isinstance(slots, list) else type(slots).__name__}")
+
+            try:
+                for slot_idx, groups in enumerate(slots):
+                    if not isinstance(groups, list) or not groups:
+                        raise ValueError(f"Replay slot {slot_idx} must contain at least one trajectory group")
+                    for group in groups:
+                        if len(group.trajectories) != self.rllm_config.rollout.n:
+                            raise ValueError(
+                                f"Replay slot {slot_idx} has {len(group.trajectories)} trajectories; "
+                                f"expected rollout.n={self.rllm_config.rollout.n}"
+                            )
+                    coordinator.on_group_dispatched()
+                    await buffer.add_task_batch(TaskBatch(groups=groups))
+                logger.info("Queued %d replay slots; skipping rollout generation", len(slots))
+            finally:
+                buffer.mark_generation_complete()
+            return
+
         group_size = self.rllm_config.rollout.n
         train_dataloader = self._train_dataloader
         assert train_dataloader is not None, "train_dataset is required for training"
