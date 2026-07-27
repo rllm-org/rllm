@@ -125,9 +125,12 @@ class GatewayConfig(BaseModel):
     routing_policy: str | None = None
     health_check_interval: float = 10.0
     log_level: str = "INFO"
+    loop_health_enabled: bool = False
     sync_traces: bool = False
     model: str | None = None  # When set, overrides ``body.model``
     cumulative_token_mode: bool = False
+    # Upstream context window used to clamp each turn's output budget.
+    max_model_len: int | None = None
     # prime-rl family for the cumulative-mode bridge (e.g. "qwen3", "deepseek-v3"); "auto"
     # resolves from the model id. See rllm.renderers.get_renderer.
     renderer_family: str = "auto"

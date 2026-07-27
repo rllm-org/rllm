@@ -194,6 +194,8 @@ def create_app(
         local_handler=local_handler,
         cumulative_token_mode=config.cumulative_token_mode,
         renderer=renderer,
+        max_model_len=config.max_model_len,
+        loop_health_enabled=config.loop_health_enabled,
         worker_label=str(config.port) if config.port else "",
     )
     sessions = SessionManager(store)
@@ -470,6 +472,7 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         "RLLM_GATEWAY_DB_PATH": "db_path",
         "RLLM_GATEWAY_LOG_LEVEL": "log_level",
         "RLLM_GATEWAY_STORE": "store_worker",
+        "RLLM_LOOP_HEALTH_ENABLED": "loop_health_enabled",
     }
     for env_key, config_key in env_map.items():
         val = os.environ.get(env_key)
@@ -496,6 +499,8 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         data["cumulative_token_mode"] = True
     if getattr(args, "renderer_family", None) is not None:
         data["renderer_family"] = args.renderer_family
+    if getattr(args, "max_model_len", None) is not None:
+        data["max_model_len"] = args.max_model_len
 
     # Workers from CLI --worker flags (WorkerConfig validator auto-splits URLs)
     worker_urls = getattr(args, "worker", None) or []
@@ -545,6 +550,13 @@ def main() -> None:
         "is a huggingface model id, but if --model is a local path, you must explicitly set it. "
         "Check the supported model families in MODEL_RENDERER_MAP of "
         "https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py",
+    )
+
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=None,
+        help="Upstream context window. When set, each turn's max_tokens is clamped to the prompt's remaining headroom.",
     )
 
     parser.add_argument(

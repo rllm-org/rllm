@@ -17,6 +17,7 @@ Driven directly (no HTTP server) via ``asyncio.run``, mirroring
 
 import asyncio
 import json
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 from rllm_model_gateway.proxy import (
@@ -36,6 +37,15 @@ class _Request:
     state = _State()
 
 
+@dataclass
+class _ParsedToolCall:
+    raw: str = ""
+    name: str | None = None
+    arguments: dict | str | None = None
+    status: str = "ok"
+    id: str | None = None
+
+
 class _FakeRenderer:
     """parse_response returns reasoning + one tool call (prime-rl nested shape) — the
     shape a raw vLLM completion is parsed into on the HTTP-worker fallback path."""
@@ -44,7 +54,7 @@ class _FakeRenderer:
         return SimpleNamespace(
             content="",
             reasoning_content="let me think",
-            tool_calls=[{"function": {"name": "bash", "arguments": {"command": "ls"}}}],
+            tool_calls=[_ParsedToolCall(raw="<tool_call>...", name="bash", arguments={"command": "ls"})],
         )
 
 
@@ -122,6 +132,16 @@ def _run_non_streaming(handler, acc, request_body):
 def test_to_openai_tool_calls_shapes_arguments_and_ids():
     out = _to_openai_tool_calls([{"function": {"name": "bash", "arguments": {"command": "ls"}}}])
     assert out == [{"id": "call_0", "type": "function", "index": 0, "function": {"name": "bash", "arguments": '{"command": "ls"}'}}]
+
+
+def test_to_openai_tool_calls_keeps_xml_bodies_flagged_invalid_json():
+    calls = [
+        _ParsedToolCall(raw="<function=bash>", name="bash", arguments={"command": "ls"}, status="invalid_json"),
+        _ParsedToolCall(raw="<tool_call>{bad", status="missing_name"),
+    ]
+    out = _to_openai_tool_calls(calls)
+    assert [c["function"]["name"] for c in out] == ["bash"]
+    assert out[0]["function"]["arguments"] == '{"command": "ls"}'
 
 
 # --- unit: _assistant_message_from_completion (choice-based) -----------------

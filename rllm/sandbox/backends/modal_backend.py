@@ -123,16 +123,13 @@ class _CreateRateLimiter:
             time.sleep(wait)
 
 
-# Defaults sit inside the envelope observed live: a burst of ~192 concurrent
-# creates is fine, ~256 trips the limit, and the error advertises a ~5/s
-# refill. So allow a 150 burst (comfortably under the 192 that worked) and
-# refill at 4/s (under the stated 5/s) as a backstop for the long tail.
-# Steady-state create rate is usually far below the refill anyway (rollouts
-# free slots only as tasks finish), so in practice this just smooths startup.
+# Default to no concurrent startup burst and refill below Modal's stated 5/s
+# limit. This strictly paces launches instead of relying on account-level burst
+# capacity, which can vary by workspace.
 # Tune RLLM_MODAL_SANDBOX_CREATE_BURST / _RPS for your account; set _RPS=0 to
 # disable entirely (e.g. once Modal raises your limit).
 _CREATE_RATE_RPS = env_float("RLLM_MODAL_SANDBOX_CREATE_RPS", 4.0)
-_CREATE_BURST = env_float("RLLM_MODAL_SANDBOX_CREATE_BURST", 150.0)
+_CREATE_BURST = env_float("RLLM_MODAL_SANDBOX_CREATE_BURST", 1.0)
 _CREATE_LIMITER = _CreateRateLimiter(_CREATE_RATE_RPS, _CREATE_BURST)
 
 

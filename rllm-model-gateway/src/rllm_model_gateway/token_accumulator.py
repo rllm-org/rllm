@@ -395,6 +395,19 @@ class TokenAccumulator:
         self._prefix_fps = _per_message_fingerprints(messages)
         self._snapshot_mono = time.monotonic()
 
+    def build_initial_prompt(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> list[int] | None:
+        """Render an opening turn from scratch."""
+        render = getattr(self.renderer, "render_ids", None)
+        if not callable(render):
+            return None
+        token_ids = render(list(messages), tools=tools, add_generation_prompt=True)
+        return list(token_ids) if token_ids else None
+
     def build_next_prompt(
         self,
         new_messages: list[dict[str, Any]],

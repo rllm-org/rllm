@@ -1,4 +1,4 @@
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from rllm.data import Dataset
 from rllm.trainer.fireworks.fireworks_backend import FireworksBackend
@@ -36,6 +36,8 @@ class FireworksTrainerLauncher(TrainerLauncher):
         except (ValueError, AttributeError, ImportError):
             hydra_overrides = []
         sync_config(self.config, hydra_overrides)
+        OmegaConf.resolve(self.config)
+
         trainer = None
         try:
             trainer = UnifiedTrainer(

@@ -80,10 +80,18 @@ def _infer_model_name(model: str | None, tokenizer: Any) -> str:
 def _try_prime(tokenizer: Any, family: str) -> Any | None:
     """prime-rl native renderer, or None if it falls back to DefaultRenderer."""
     try:
-        from renderers import create_renderer  # type: ignore
+        import renderers as prime_renderers  # type: ignore
     except ImportError:
         return None
-    renderer = create_renderer(tokenizer, renderer=family)
+    config_from_name = getattr(prime_renderers, "config_from_name", None)
+    if config_from_name is not None:
+        try:
+            config = config_from_name(family)
+        except ValueError:
+            return None
+        renderer = prime_renderers.create_renderer(tokenizer, config)
+    else:
+        renderer = prime_renderers.create_renderer(tokenizer, renderer=family)
     if type(renderer).__name__ == "DefaultRenderer":
         return None
     return renderer

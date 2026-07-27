@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 from collections import defaultdict
 from collections.abc import Iterable
@@ -737,7 +738,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         else:
             with simple_timer("old_log_probs", timing_dict):
                 tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
-                output = self.actor_rollout_wg.compute_log_prob(batch_td)
+                output = await asyncio.to_thread(self.actor_rollout_wg.compute_log_prob, batch_td)
                 log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td)
                 entropy = no_padding_2_padding(tu.get(output, "entropy"), batch_td)
                 routed_experts = tu.get(output, "routed_experts", default=None)
@@ -796,10 +797,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             with simple_timer("ref", timing_dict):
                 tu.assign_non_tensor(batch_td, calculate_entropy=False, compute_loss=False)
                 if not self.ref_in_actor:
-                    ref_output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
+                    ref_output = await asyncio.to_thread(self.ref_policy_wg.compute_ref_log_prob, batch_td)
                 else:
                     tu.assign_non_tensor(batch_td, no_lora_adapter=True)
-                    ref_output = self.actor_rollout_wg.compute_log_prob(batch_td)
+                    ref_output = await asyncio.to_thread(self.actor_rollout_wg.compute_log_prob, batch_td)
                 ref_lp = no_padding_2_padding(tu.get(ref_output, "log_probs"), batch_td)
                 ref_log_prob = DataProto.from_tensordict(tu.get_tensordict({"ref_log_prob": ref_lp.float()}))
                 batch = batch.union(ref_log_prob)
@@ -841,7 +842,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         if self.config.trainer.get("critic_warmup", 0) <= global_steps:
             with simple_timer("update_actor", trainer_state.timing_dict):
-                self._update_actor_with_loss_routing(batch, trainer_state)
+                await asyncio.to_thread(self._update_actor_with_loss_routing, batch, trainer_state)
 
     def _update_actor_with_loss_routing(self, batch: DataProto, trainer_state: TrainerState) -> None:
         """Update actor with per-loss-group splitting when ``loss_fn_map`` is set.
@@ -971,7 +972,13 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         # Save checkpoint if configured
         if self.config.trainer.save_freq > 0 and trainer_state.global_step % self.config.trainer.save_freq == 0:
             with simple_timer("save_checkpoint", trainer_state.timing_dict):
-                save_checkpoint(self.config, self.global_steps, self.actor_rollout_wg, train_dataloader=trainer_state.train_dataloader)
+                await asyncio.to_thread(
+                    save_checkpoint,
+                    self.config,
+                    self.global_steps,
+                    self.actor_rollout_wg,
+                    train_dataloader=trainer_state.train_dataloader,
+                )
 
         # Weight synchronization (colocated only — separated mode syncs in on_policy_updated)
         if not self.is_separated:
