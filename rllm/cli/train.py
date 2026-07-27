@@ -544,12 +544,99 @@ def _load_or_pull_dataset(name: str, split: str, catalog: dict, catalog_entry_ov
 
 
 # ---------------------------------------------------------------------------
+# 2b. _run_train_from_config  — config-file training path
+# ---------------------------------------------------------------------------
+
+
+def _run_train_from_config(config_path: str, overrides: tuple[str, ...], *, dry_run: bool = False):
+    """Launch training from a self-contained config file.
+
+    ``rllm train run.toml [key=value ...]``. Composes the full trainer config
+    for the file's ``backend``, resolves the ``[run]`` definition into
+    agent/evaluator/datasets, and hands them to ``AgentTrainer`` — the same
+    facade the flag path uses.
+    """
+    from omegaconf import OmegaConf
+
+    from rllm.cli._run_resolve import resolve_run
+    from rllm.config.run_config import export_env, load_run_config
+
+    try:
+        config, run = load_run_config(config_path, overrides=list(overrides) or None)
+    except (FileNotFoundError, ValueError, TypeError) as e:
+        fail(f"Invalid config file '{config_path}': {e}")
+
+    export_env(run.env)
+
+    try:
+        resolved = resolve_run(run, for_eval=False)
+    except (KeyError, ImportError, AttributeError, TypeError, ValueError) as e:
+        fail(f"Could not resolve run definition in '{config_path}': {e}")
+
+    # ---- Header ----
+    project = OmegaConf.select(config, "rllm.trainer.project_name")
+    experiment = OmegaConf.select(config, "rllm.trainer.experiment_name")
+    model_name = OmegaConf.select(config, "model.name") or OmegaConf.select(config, "actor_rollout_ref.model.path")
+    train_n = len(resolved.train_dataset) if resolved.train_dataset is not None else 0
+    val_info = "[dim]None[/]"
+    if resolved.val_dataset is not None:
+        val_name = run.val_dataset or run.train_dataset
+        val_info = f"[val]{val_name}[/]  [dim]({len(resolved.val_dataset)} examples)[/]"
+    rows = [
+        ("Config", f"[val]{config_path}[/]"),
+        ("Backend", f"[val]{run.backend}[/]"),
+        ("Model", f"[val]{model_name}[/]"),
+        ("Agent", f"[val]{resolved.agent_display}[/]"),
+        ("Evaluator", f"[dim]{resolved.evaluator_display}[/]"),
+        ("Train data", f"[val]{run.train_dataset}[/]  [dim]({train_n} examples)[/]"),
+        ("Val data", val_info),
+        ("Project", f"[dim]{project} / {experiment}[/]"),
+    ]
+    if run.sandbox_backend:
+        rows.append(("Sandbox", f"[val]{run.sandbox_backend}[/]"))
+    if overrides:
+        rows.append(("Overrides", f"[dim]{' '.join(overrides)}[/]"))
+    console.print()
+    console.print(info_panel(rows, title="[bold]rLLM Train (config)[/]", label_width=14))
+    console.print()
+
+    if dry_run:
+        console.print("[dim]--dry-run: composed config below; not launching.[/]\n")
+        console.print(OmegaConf.to_yaml(config))
+        return
+
+    try:
+        from rllm.trainer import AgentTrainer
+    except ImportError as e:
+        fail(f"Missing training dependencies: {e}\n  Install with: pip install 'rllm[train]'")
+
+    trainer_kwargs = dict(
+        config=config,
+        backend=run.backend,
+        agent_flow=resolved.agent_flow,
+        train_dataset=resolved.train_dataset,
+        val_dataset=resolved.val_dataset,
+        sandbox_backend=run.sandbox_backend,
+        sandbox_concurrency=run.sandbox_concurrency,
+    )
+    # entrypoint may supply explicit hooks; otherwise pass the evaluator and let
+    # AgentTrainer auto-wire SandboxTaskHooks when the flow needs a sandbox.
+    if resolved.hooks is not None:
+        trainer_kwargs["hooks"] = resolved.hooks
+    else:
+        trainer_kwargs["evaluator"] = resolved.evaluator
+
+    AgentTrainer(**trainer_kwargs).train()
+
+
+# ---------------------------------------------------------------------------
 # 3. train_cmd  — Click command
 # ---------------------------------------------------------------------------
 
 
 @click.command("train")
 @click.argument("benchmark")
+@click.argument("overrides", nargs=-1)
 # Dataset options
 @click.option("--train-dataset", default=None, help="Training dataset name (default: same as <benchmark>).")
 @click.option("--train-split", default=None, help="Training split (default: catalog train_split, then 'train' if available, else eval_split).")
@@ -574,6 +661,7 @@ def _load_or_pull_dataset(name: str, split: str, catalog: dict, catalog_entry_ov
 @click.option("--experiment", default=None, help="Experiment name (default: <benchmark>).")
 @click.option("--output", "output_dir", default=None, help="Checkpoint directory.")
 @click.option("--config", "config_file", default=None, type=click.Path(exists=True), help="YAML config file merged on top of base templates. CLI flags override it.")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Config-file mode only: compose the config, resolve the run, print both, then exit without training.")
 # UI logging options
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
 # Sandbox options
@@ -592,6 +680,8 @@ def _load_or_pull_dataset(name: str, split: str, catalog: dict, catalog_entry_ov
 @click.option("--max-tokens", "max_tokens", default=None, type=int, help="Max generated tokens per call for train+val (shortcut).")
 def train_cmd(
     benchmark: str,
+    overrides: tuple[str, ...],
+    dry_run: bool,
     train_dataset: str | None,
     train_split: str | None,
     val_dataset: str | None,
@@ -620,7 +710,22 @@ def train_cmd(
     top_p: float | None,
     max_tokens: int | None,
 ):
-    """Train a model on a benchmark dataset using RL."""
+    """Train a model on a benchmark dataset using RL.
+
+    Two modes:
+
+    * ``rllm train run.toml [key=value ...]`` — config-file mode: a single
+      self-contained TOML/YAML fully specifies the run (see
+      ``design/config-file-driven-train-eval.md``). Trailing ``key=value`` args
+      are Hydra-style dotlist overrides merged last.
+    * ``rllm train <benchmark> --model ... [OPTIONS]`` — flag mode (tinker).
+    """
+    from rllm.config.run_config import is_config_file
+
+    if is_config_file(benchmark):
+        _run_train_from_config(benchmark, overrides, dry_run=dry_run)
+        return
+
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
     _ui_explicit = enable_ui is not None
     if enable_ui is None:
