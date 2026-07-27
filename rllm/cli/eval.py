@@ -133,8 +133,14 @@ def _run_eval(
     warm_queue_size: int = 0,
     sampling_config=None,
     attempts: int = 1,
+    agent_args: dict | None = None,
 ):
-    """Core eval logic, extracted for clean proxy lifecycle management."""
+    """Core eval logic, extracted for clean proxy lifecycle management.
+
+    ``agent_args`` (config-file mode) are applied to the loaded flow —
+    constructor kwargs for a class, else via ``configure()``. Flag mode passes
+    ``None`` (unchanged behavior).
+    """
     from rllm.data import DatasetRegistry
     from rllm.eval.agent_loader import load_agent
     from rllm.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
@@ -203,7 +209,7 @@ def _run_eval(
         # Construct the AgentFlow: catalog covers built-in harnesses
         # (react/bash/claude-code) and any user-registered or plugin agents.
         try:
-            agent = load_agent(agent_name)
+            agent = load_agent(agent_name, agent_args)
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             fail(f"Cannot load agent '{agent_name}': {e}")
 
@@ -288,7 +294,7 @@ def _run_eval(
         # plus user-registered + plugin agents; ``harbor:<scaffold>`` resolves
         # to a HarborRuntime via the harbor: prefix branch in load_agent.
         try:
-            agent = load_agent(agent_name)
+            agent = load_agent(agent_name, agent_args)
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             fail(f"Error loading agent '{agent_name}': {e}")
 
@@ -583,8 +589,188 @@ def _run_eval(
     console.print()
 
 
+def _resolve_eval_model_source(base_url: str | None, model: str | None, proxy_port: int | None = None):
+    """Resolve the OpenAI-compatible endpoint + model for an eval run.
+
+    Direct mode (``base_url`` given) requires ``model``. Otherwise: a
+    ``tinker://`` checkpoint routes to the Tinker OAI endpoint; a ``custom``
+    provider uses its ``base_url`` directly; any other provider auto-starts a
+    LiteLLM proxy. Returns ``(base_url, model, proxy_manager)`` — the caller
+    must call ``proxy_manager.shutdown_proxy()`` when done (it may be ``None``).
+
+    Shared by flag mode (``eval_cmd``) and config-file mode
+    (``_run_eval_from_config``).
+    """
+    if base_url is not None:
+        if model is None:
+            fail("--model is required when --base-url is provided.")
+        return base_url, model, None
+
+    import os as _os
+
+    from rllm.eval.config import load_config
+
+    config = load_config()
+
+    # A ``tinker://`` sampler-checkpoint path is served by the Tinker OAI
+    # endpoint; the checkpoint path alone determines where it can run.
+    resolved_model = model if model is not None else config.model
+    is_tinker_checkpoint = bool(resolved_model) and resolved_model.startswith("tinker://")
+
+    if is_tinker_checkpoint:
+        api_key = _os.environ.get("TINKER_API_KEY", "")
+        if not api_key:
+            fail("tinker:// checkpoint models require TINKER_API_KEY in the environment.\n\n  Export your Tinker key and re-run, e.g.:\n    export TINKER_API_KEY=<your-tinker-key>")
+        provider = "tinker"
+        model = resolved_model
+        console.print("  [success]tinker:// checkpoint detected[/] → routing through the Tinker OAI endpoint")
+    else:
+        if not config.is_configured():
+            fail("No configuration found. Run `rllm setup` first to configure your provider and API key.")
+        provider = config.provider
+        api_key = config.api_key
+        if model is None:
+            model = config.model
+
+    if provider == "custom":
+        base_url = config.base_url
+        if api_key:
+            _os.environ.setdefault("OPENAI_API_KEY", api_key)
+        console.print(f"  [success]Using custom endpoint[/] at [dim]{base_url}[/]")
+        return base_url, model, None
+
+    from rllm.eval.proxy import EvalProxyManager
+
+    proxy_manager = EvalProxyManager(
+        provider=provider,
+        model_name=model,
+        api_key=api_key,
+        proxy_port=proxy_port,
+    )
+    with Status(f"[dim]Starting LiteLLM proxy for [bold]{provider}/{model}[/bold]...[/]", console=console):
+        try:
+            proxy_manager.start_proxy_subprocess(proxy_manager.build_proxy_config())
+        except (RuntimeError, TimeoutError) as e:
+            console.print("\n  [dim]Make sure litellm is installed:[/] [bold]pip install litellm\\[proxy][/]")
+            console.print()
+            fail(f"Failed to start LiteLLM proxy.\n\n  {e}")
+    base_url = proxy_manager.get_proxy_url()
+    console.print(f"  [success]Proxy ready[/] at [dim]{base_url}[/]")
+    return base_url, model, proxy_manager
+
+
+def _run_eval_from_config(config_path: str, overrides: tuple[str, ...], *, dry_run: bool = False):
+    """Evaluate from a self-contained config file: ``rllm eval run.toml [key=value ...]``.
+
+    Reuses the ``[run]`` definition (agent / evaluator / dataset / sandbox) and
+    an optional ``[eval]`` block for eval-only knobs. Funnels into the same
+    ``_run_eval`` core the flag path uses, so resolution behavior matches.
+    """
+    from rllm.cli._sampling import resolve_eval_sampling
+    from rllm.config.run_config import export_env, load_run_config
+
+    try:
+        _config, run = load_run_config(config_path, overrides=list(overrides) or None)
+    except (FileNotFoundError, ValueError, TypeError) as exc:
+        fail(f"Invalid config file '{config_path}': {exc}")
+
+    export_env(run.env)
+
+    if run.entrypoint:
+        fail("[run].entrypoint is not yet supported for `rllm eval`; use declarative [run.agent] / [run.dataset]. (Tracked as a follow-up.)")
+
+    e = run.eval  # the [eval] block
+
+    # Dataset to evaluate on: [eval].dataset > [run.dataset].val > [run.dataset].train
+    benchmark = e.get("dataset") or run.val_dataset or run.train_dataset
+    if not benchmark:
+        fail("No eval dataset. Set [eval].dataset, [run.dataset].val, or [run.dataset].train.")
+    if not run.agent:
+        fail("config [run.agent].name is required for eval.")
+
+    split = e.get("split") or run.val_split
+    concurrency = int(e.get("concurrency", 64))
+    attempts = int(e.get("attempts", 1))
+    if attempts < 1:
+        fail("[eval].attempts must be >= 1.")
+    max_examples = e.get("max_examples")
+    task_indices = parse_index_spec(str(e["task_indices"])) if e.get("task_indices") is not None else None
+    output_path = e.get("output")
+    use_snapshot = bool(e.get("snapshot", True))
+    warm_queue_size = int(e.get("warm_queue_size", 0))
+    save_episodes = bool(e.get("save_episodes", True))
+    episodes_dir = e.get("episodes_dir")
+
+    try:
+        sampling_config = resolve_eval_sampling(e.get("sampling_params"), e.get("temperature"), e.get("top_p"), e.get("max_tokens"))
+    except (ValueError, FileNotFoundError, TypeError) as exc:
+        fail(f"Invalid [eval] sampling params: {exc}")
+
+    # UI: [eval].ui if set, else auto-detect from login (mirrors eval_cmd).
+    enable_ui = e.get("ui")
+    if enable_ui is None:
+        from rllm.eval.config import load_ui_config
+
+        enable_ui = bool(os.environ.get("RLLM_API_KEY") or load_ui_config().get("ui_api_key"))
+
+    # Header
+    rows = [
+        ("Config", f"[val]{config_path}[/]"),
+        ("Benchmark", f"[val]{benchmark}[/]" + (f"  [dim]({split})[/]" if split else "")),
+        ("Agent", f"[val]{run.agent}[/]"),
+        ("Evaluator", f"[dim]{run.evaluator or 'per-task (from dataset.toml / task.toml)'}[/]"),
+        ("Model", f"[val]{e.get('model') or '(from rllm setup)'}[/]"),
+    ]
+    if run.sandbox_backend:
+        rows.append(("Sandbox", f"[val]{run.sandbox_backend}[/]"))
+    if overrides:
+        rows.append(("Overrides", f"[dim]{' '.join(overrides)}[/]"))
+    console.print()
+    console.print(info_panel(rows, title="[bold]rLLM Eval (config)[/]", border="brand"))
+    console.print()
+
+    if dry_run:
+        console.print("[dim]--dry-run: resolved above; not evaluating.[/]\n")
+        return
+
+    base_url, model, proxy_manager = _resolve_eval_model_source(e.get("base_url"), e.get("model"), e.get("proxy_port"))
+
+    agent_metadata = {}
+    if run.sandbox_backend:
+        agent_metadata["sandbox_backend"] = run.sandbox_backend
+    if run.sandbox_concurrency is not None:
+        agent_metadata["sandbox_concurrency"] = run.sandbox_concurrency
+
+    try:
+        _run_eval(
+            benchmark,
+            run.agent,
+            run.evaluator,
+            base_url,
+            model,
+            split,
+            concurrency,
+            max_examples,
+            task_indices,
+            output_path,
+            agent_metadata=agent_metadata,
+            enable_ui=enable_ui,
+            save_episodes=save_episodes,
+            episodes_dir=episodes_dir,
+            use_snapshot=use_snapshot,
+            warm_queue_size=warm_queue_size,
+            sampling_config=sampling_config,
+            attempts=attempts,
+            agent_args=run.agent_args,
+        )
+    finally:
+        if proxy_manager is not None:
+            proxy_manager.shutdown_proxy()
+
+
 @click.command("eval")
 @click.argument("benchmark")
+@click.argument("overrides", nargs=-1)
 @click.option("--agent", "agent_name", default=None, help="Agent scaffold: registry name or module:object path.")
 @click.option("--evaluator", "evaluator_name", default=None, help="Evaluator: registry name or module:class path.")
 @click.option("--base-url", default=None, help="OpenAI-compatible API endpoint URL. If omitted, a proxy is auto-started using 'rllm setup' config.")
@@ -637,8 +823,11 @@ def _run_eval(
         "Default 3600. Sandbox lifetimes are sized to outlast this, so the environment isn't torn down mid-rollout."
     ),
 )
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Config-file mode only: resolve the run and print it, then exit without evaluating.")
 def eval_cmd(
     benchmark: str,
+    overrides: tuple[str, ...],
+    dry_run: bool,
     agent_name: str | None,
     evaluator_name: str | None,
     base_url: str | None,
@@ -663,7 +852,18 @@ def eval_cmd(
     max_tokens: int | None,
     agent_timeout: int | None,
 ):
-    """Evaluate a model on a benchmark dataset."""
+    """Evaluate a model on a benchmark dataset.
+
+    ``rllm eval run.toml [key=value ...]`` — config-file mode: the ``[run]``
+    definition + optional ``[eval]`` block specify the run. Otherwise flag mode
+    (``rllm eval <benchmark> --agent ...``).
+    """
+    from rllm.config.run_config import is_config_file
+
+    if is_config_file(benchmark):
+        _run_eval_from_config(benchmark, overrides, dry_run=dry_run)
+        return
+
     from rllm.cli._sampling import resolve_eval_sampling
 
     try:
@@ -685,68 +885,7 @@ def eval_cmd(
     if not enable_ui and not _ui_explicit:
         console.print("  [blue]Tip: Try rllm UI for live monitoring! Run [bold]rllm login[/bold] to get started.[/]")
 
-    proxy_manager = None
-
-    if base_url is not None:
-        # Direct mode: user provided --base-url, require --model too
-        if model is None:
-            fail("--model is required when --base-url is provided.")
-    else:
-        # Proxy mode: auto-start LiteLLM proxy from config
-        import os as _os
-
-        from rllm.eval.config import load_config
-
-        config = load_config()
-
-        # A ``tinker://`` sampler-checkpoint path (produced by ``rllm sft`` on the
-        # tinker backend) is served by the Tinker OAI endpoint, which the built-in
-        # "tinker" provider is pinned to. Route it there automatically no matter
-        # which provider the local config selects — or whether a config exists at
-        # all — since the checkpoint path alone determines where it can run.
-        resolved_model = model if model is not None else config.model
-        is_tinker_checkpoint = bool(resolved_model) and resolved_model.startswith("tinker://")
-
-        if is_tinker_checkpoint:
-            api_key = _os.environ.get("TINKER_API_KEY", "")
-            if not api_key:
-                fail("tinker:// checkpoint models require TINKER_API_KEY in the environment.\n\n  Export your Tinker key and re-run, e.g.:\n    export TINKER_API_KEY=<your-tinker-key>")
-            provider = "tinker"
-            model = resolved_model
-            console.print("  [success]tinker:// checkpoint detected[/] → routing through the Tinker OAI endpoint")
-        else:
-            if not config.is_configured():
-                fail("No configuration found. Run `rllm setup` first to configure your provider and API key.")
-            provider = config.provider
-            api_key = config.api_key
-            # --model overrides configured model
-            if model is None:
-                model = config.model
-
-        if provider == "custom":
-            # Custom provider: skip LiteLLM proxy, use base_url directly
-            base_url = config.base_url
-            if api_key:
-                _os.environ.setdefault("OPENAI_API_KEY", api_key)
-            console.print(f"  [success]Using custom endpoint[/] at [dim]{base_url}[/]")
-        else:
-            from rllm.eval.proxy import EvalProxyManager
-
-            proxy_manager = EvalProxyManager(
-                provider=provider,
-                model_name=model,
-                api_key=api_key,
-                proxy_port=proxy_port,
-            )
-            with Status(f"[dim]Starting LiteLLM proxy for [bold]{provider}/{model}[/bold]...[/]", console=console):
-                try:
-                    proxy_manager.start_proxy_subprocess(proxy_manager.build_proxy_config())
-                except (RuntimeError, TimeoutError) as e:
-                    console.print("\n  [dim]Make sure litellm is installed:[/] [bold]pip install litellm\\[proxy][/]")
-                    console.print()
-                    fail(f"Failed to start LiteLLM proxy.\n\n  {e}")
-            base_url = proxy_manager.get_proxy_url()
-            console.print(f"  [success]Proxy ready[/] at [dim]{base_url}[/]")
+    base_url, model, proxy_manager = _resolve_eval_model_source(base_url, model, proxy_port)
 
     # Build agent metadata from CLI options
     agent_metadata = {}
