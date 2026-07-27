@@ -242,3 +242,59 @@ def test_eval_with_explicit_evaluator(runner, tmp_rllm_home, mock_dataset):
 
     assert result.exit_code == 0
     mock_load_eval.assert_called_once_with("math_reward_fn")
+
+
+# ---------------------------------------------------------------------------
+# Config-file mode: `rllm eval run.toml`
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_eval_model_source_direct():
+    """Direct mode (base_url + model) returns them with no proxy."""
+    from rllm.cli.eval import _resolve_eval_model_source
+
+    base_url, model, proxy = _resolve_eval_model_source("http://localhost:8000/v1", "my-model")
+    assert base_url == "http://localhost:8000/v1"
+    assert model == "my-model"
+    assert proxy is None
+
+
+def test_resolve_eval_model_source_direct_requires_model():
+    """Direct mode without a model fails."""
+    from rllm.cli._ui import CliError
+    from rllm.cli.eval import _resolve_eval_model_source
+
+    with pytest.raises(CliError):
+        _resolve_eval_model_source("http://localhost:8000/v1", None)
+
+
+def test_eval_config_dry_run(runner, tmp_path):
+    """`rllm eval run.toml --dry-run` composes + resolves the run without evaluating."""
+    cfg = tmp_path / "run.toml"
+    cfg.write_text(
+        """
+backend = "fireworks"
+[run.agent]
+name = "react"
+[run.dataset]
+val = "some-benchmark"
+[eval]
+split = "test"
+base_url = "http://localhost:8000/v1"
+model = "m"
+""".strip()
+    )
+    result = runner.invoke(cli, ["eval", str(cfg), "--dry-run", "rllm.trainer.project_name=x"])
+    assert result.exit_code == 0, result.output
+    assert "rLLM Eval (config)" in result.output
+    assert "some-benchmark" in result.output
+    assert "react" in result.output
+
+
+def test_eval_config_requires_dataset(runner, tmp_path):
+    """A config with no eval dataset fails clearly."""
+    cfg = tmp_path / "run.toml"
+    cfg.write_text('backend = "fireworks"\n[run.agent]\nname = "react"\n')
+    result = runner.invoke(cli, ["eval", str(cfg), "--dry-run"])
+    assert result.exit_code != 0
+    assert "eval dataset" in result.output.lower()
