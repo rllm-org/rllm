@@ -65,6 +65,25 @@ def _detached_warm_queue(hooks):
         hooks.warm_queue = saved
 
 
+def _enforce_async_train_batch_size(config: DictConfig, async_enabled: bool) -> int | None:
+    """Force ``train_batch_size`` to 1 when fully-async training is enabled.
+
+    Async training streams one task batch at a time, so any other value is a
+    misconfig. Rather than fail the run, override it on both the canonical
+    ``rllm.data.*`` and the mirrored verl-native ``data.*`` namespaces. Returns
+    the original value when an override happened (so the caller can warn), else
+    ``None``.
+    """
+    if not async_enabled:
+        return None
+    current = OmegaConf.select(config, "rllm.data.train_batch_size")
+    if current is None or current == 1:
+        return None
+    OmegaConf.update(config, "rllm.data.train_batch_size", 1, merge=False)
+    OmegaConf.update(config, "data.train_batch_size", 1, merge=False)
+    return current
+
+
 @dataclass
 class TrainerState:
     """Common trainer state that's backend-agnostic. Reset at each training step."""
@@ -168,6 +187,16 @@ class UnifiedTrainer:
         self._setup_logging()
 
         self.async_config = AsyncTrainingConfig.from_config(self.rllm_config.get("async_training", {}))
+
+        # Fully-async training streams one task batch at a time, so train_batch_size
+        # must be 1. Rather than fail the run on a misconfig, override it (keeping the
+        # mirrored data.* / rllm.data.* namespaces in sync) with a loud warning.
+        overridden_from = _enforce_async_train_batch_size(self.config, self.async_config.enable)
+        if overridden_from is not None:
+            logger.warning(
+                "Async training requires data.train_batch_size=1; overriding the configured value %s -> 1.",
+                overridden_from,
+            )
 
         self._init_dataloaders()
 
@@ -555,7 +584,7 @@ class UnifiedTrainer:
 
     async def _fit_fully_async(self, trainer_state: TrainerState) -> None:
         """Fully-async generation + training with group-level streaming."""
-        assert self.rllm_config.data.train_batch_size == 1, f"Async training requires train_batch_size=1, got {self.rllm_config.data.train_batch_size}"
+        # train_batch_size is enforced to 1 at construction (see __init__).
         assert not getattr(self.agent_workflow_engine, "raise_on_error", False), "Async training requires raise_on_error=False so that process_task_with_retry always returns an episode"
         coord_config = SyncCoordinatorConfig(
             mini_batch_size=self.async_config.mini_batch_size,
