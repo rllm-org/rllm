@@ -5,10 +5,10 @@ description: The RLLM_* operational environment variables rLLM reads for timeout
 
 rLLM exposes a small set of `RLLM_*` environment variables for *operational* knobs — timeouts, retries, TTLs — that you tune per environment (CI vs. cluster vs. laptop) without editing code or touching the experiment config. These are deliberately env vars rather than config fields: the config system is for experiment design, while env vars cover the operational surface.
 
-Every one of these parses through the typed readers in `rllm/env.py` (`env_int` / `env_float` / `env_str`), which read `os.environ` when called — usually once at module import to produce a module-level constant. This follows the existing `RLLM_HOME` / `RLLM_LOG_LEVEL` / `RLLM_SYMPY_TIMEOUT_S` precedent.
+Every one of these parses through the typed readers in `rllm/env.py` (`env_bool` / `env_int` / `env_float` / `env_str`), which read `os.environ` when called — usually once at module import to produce a module-level constant. This follows the existing `RLLM_HOME` / `RLLM_LOG_LEVEL` / `RLLM_SYMPY_TIMEOUT_S` precedent.
 
 <Note>
-  `env_int` and `env_float` raise `ValueError` on a malformed value — a typo in an ops knob fails loudly rather than silently falling back to the default.
+  `env_bool`, `env_int`, and `env_float` raise `ValueError` on a malformed value — a typo in an ops knob fails loudly rather than silently falling back to the default.
 </Note>
 
 ## Tier-1 operational knobs
@@ -20,6 +20,7 @@ Every one of these parses through the typed readers in `rllm/env.py` (`env_int` 
 | `RLLM_MODAL_SANDBOX_TIMEOUT_S` | `1800` | Modal sandbox lifetime; raise when a single rollout can outlive 30 minutes |
 | `RLLM_OPENAI_REQUEST_TIMEOUT_S` | `3600` | Per-request HTTP timeout for OpenAI-compatible rollout calls |
 | `RLLM_GATEWAY_HEALTH_TIMEOUT_S` | `30.0` | Wait for the gateway subprocess to report healthy |
+| `RLLM_LOOP_HEALTH_ENABLED` | `false` | Emit trainer and model-gateway event-loop health probes |
 | `RLLM_TUNNEL_READY_TIMEOUT_S` | `30.0` | Wait for cloudflared to publish a public URL |
 | `RLLM_HARNESS_RUN_TIMEOUT_S` | `1800` | Global per-task agent-CLI wall-clock ceiling (per-task metadata still overrides) |
 | `RLLM_HARNESS_INSTALL_TIMEOUT_S` | `600` | In-sandbox install-script timeout |

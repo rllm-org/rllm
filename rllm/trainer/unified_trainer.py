@@ -646,18 +646,22 @@ class UnifiedTrainer:
         # high lag + high thread_cpu => the trainer loop is self-CPU bound (e.g.
         # on-loop enrich / batch prep); high lag + low thread_cpu => starved.
         # inflight/pending come from the agent-flow engine's concurrency slots.
-        from rllm.utils.loop_health import run_loop_health_monitor
+        from rllm.env import env_bool
 
-        def _trainer_gauges() -> str:
-            eng = self.agent_workflow_engine
-            parts = []
-            for name in ("inflight", "pending"):
-                v = getattr(eng, name, None)
-                if isinstance(v, int) and v >= 0:
-                    parts.append(f"{name}={v}")
-            return " ".join(parts)
+        monitor_task = None
+        if env_bool("RLLM_LOOP_HEALTH_ENABLED", False):
+            from rllm.utils.loop_health import run_loop_health_monitor
 
-        monitor_task = asyncio.create_task(run_loop_health_monitor("trainer", gauges=_trainer_gauges))
+            def _trainer_gauges() -> str:
+                eng = self.agent_workflow_engine
+                parts = []
+                for name in ("inflight", "pending"):
+                    v = getattr(eng, name, None)
+                    if isinstance(v, int) and v >= 0:
+                        parts.append(f"{name}={v}")
+                return " ".join(parts)
+
+            monitor_task = asyncio.create_task(run_loop_health_monitor("trainer", gauges=_trainer_gauges))
         try:
             gen_task = asyncio.create_task(self._generation_loop(trainer_state, buffer, coordinator))
             await self._training_loop(trainer_state, buffer, coordinator, aggregator)
@@ -668,7 +672,8 @@ class UnifiedTrainer:
                 except asyncio.CancelledError:
                     pass
         finally:
-            monitor_task.cancel()
+            if monitor_task is not None:
+                monitor_task.cancel()
             pbar.close()
 
     async def _generation_loop(
@@ -785,7 +790,10 @@ class UnifiedTrainer:
                 if trainer_state.has_trajectory_groups:
                     logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: fwd-bwd pass {pass_idx + 1}/{num_fwd_bwd_passes} ({len(chunk_groups)} groups)")
                     await self.backend.on_batch_start(trainer_state)
-                    trainer_state.backend_batch = self.backend.transform_to_backend_batch(trainer_state)
+                    trainer_state.backend_batch = await asyncio.to_thread(
+                        self.backend.transform_to_backend_batch,
+                        trainer_state,
+                    )
                     await self.backend.process_backend_batch(trainer_state)
 
                     # Count trainable sequences this pass. A pass can yield zero when every

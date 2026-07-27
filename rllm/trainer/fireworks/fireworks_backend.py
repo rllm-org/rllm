@@ -416,7 +416,7 @@ class FireworksBackend(TinkerBackend):
 
         learning_rate = trainer_state.extra_info.get("scheduled_learning_rate", self.learning_rate)
         update_training_metrics(trainer_state, learning_rate, trainer_state.total_steps)
-        if trainer_state.backend_batch:
+        if trainer_state.backend_batch and "train/entropy" not in trainer_state.metrics:
             trainer_state.metrics.update(self.policy_trainer._compute_rollout_entropy_metrics(trainer_state.backend_batch))
 
     def shutdown(self) -> None:

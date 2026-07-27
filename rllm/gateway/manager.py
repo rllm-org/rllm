@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any
 from rllm_model_gateway.client import AsyncGatewayClient, GatewayClient
 from rllm_model_gateway.models import TraceRecord
 
-from rllm.env import env_float
+from rllm.env import env_bool, env_float
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
@@ -211,6 +211,10 @@ class GatewayManager:
         self.cumulative_token_mode: bool = gw_cfg.get("cumulative_token_mode", False)
         self.renderer_family: str = gw_cfg.get("renderer_family", "auto")
 
+        # Upstream context window, so the gateway can set max_tokens dynamically.
+        rollout_cfg = config.get("actor_rollout_ref", {}).get("rollout", {})
+        self.max_model_len: int | None = rollout_cfg.get("max_model_len", None)
+
         # 0 = gateway runs in a trainer thread (default). >=1 = run it in its own
         # process(es), so its event loop no longer shares the trainer's GIL. 1 =
         # a single separate gateway process (no session-sharding); >1 needs the
@@ -273,15 +277,14 @@ class GatewayManager:
                 self._local_handler = create_tinker_handler(rollout_engine)
                 self._start_thread(local_handler=self._local_handler)
         elif engine_cls == "VerlEngine":
+            worker_urls = self._ensure_verl_engine_workers(rollout_engine)
             if self.mode == "process":
-                self._start_process()
+                self._start_verl_gateway_subprocesses(worker_urls)
             else:
                 self._start_thread()
-
-            worker_urls = self._ensure_verl_engine_workers(rollout_engine)
-            for url in worker_urls:
-                worker_id = self.client.add_worker(url=url)
-                logger.info("Registered worker %s -> %s", worker_id, url)
+                for url in worker_urls:
+                    worker_id = self.client.add_worker(url=url)
+                    logger.info("Registered worker %s -> %s", worker_id, url)
 
         else:
             logger.warning("Unknown engine type %s — no workers registered", engine_cls)
@@ -429,10 +432,14 @@ class GatewayManager:
             cmd.append("--cumulative-token-mode")
             if self.renderer_family != "auto":
                 cmd += ["--renderer-family", self.renderer_family]
+        if self.max_model_len:
+            cmd += ["--max-model-len", str(self.max_model_len)]
         if handler_factory:
             cmd += ["--handler-factory", handler_factory]
             if handler_config_path:
                 cmd += ["--handler-config", handler_config_path]
+        for u in worker_urls or []:
+            cmd += ["--worker", u]
         return cmd
 
     def _poll_health(self, port: int, proc: subprocess.Popen, timeout: float) -> None:
@@ -504,12 +511,34 @@ class GatewayManager:
         self._poll_health(self.port, front, _HEALTH_POLL_TIMEOUT)
         logger.info("Gateway running with %d workers behind front on port %d", self.num_workers, self.port)
 
-    def _start_process(self) -> None:
-        """Launch the gateway as a subprocess (verl HTTP-proxy path) and poll until healthy."""
-        cmd = self._gateway_cmd(self.port)
-        logger.info("Starting gateway subprocess: %s", " ".join(cmd))
-        self._process = subprocess.Popen(cmd)
-        self._poll_health(self.port, self._process, _HEALTH_POLL_TIMEOUT)
+    def _start_verl_gateway_subprocesses(self, upstream_urls: list[str]) -> None:
+        """Launch VERL HTTP proxies, sharded by session when requested."""
+        if self.num_workers <= 1:
+            preflight_gateway_port(self.port)
+            cmd = self._gateway_cmd(self.port, worker_urls=upstream_urls)
+            logger.info("Starting VERL gateway subprocess: %s", " ".join(cmd))
+            self._process = subprocess.Popen(cmd)
+            self._poll_health(self.port, self._process, _HEALTH_POLL_TIMEOUT)
+            return
+
+        proxy_ports = [self.port + 1 + i for i in range(self.num_workers)]
+        for port in [self.port, *proxy_ports]:
+            preflight_gateway_port(port)
+
+        for index, port in enumerate(proxy_ports):
+            cmd = self._gateway_cmd(port, worker_urls=upstream_urls)
+            logger.info("Starting VERL gateway worker %d: %s", index, " ".join(cmd))
+            proc = subprocess.Popen(cmd)
+            self._processes.append(proc)
+            self._poll_health(port, proc, _HEALTH_POLL_TIMEOUT)
+
+        proxy_urls = [f"http://127.0.0.1:{port}" for port in proxy_ports]
+        front_cmd = self._gateway_cmd(self.port, front=True, worker_urls=proxy_urls)
+        logger.info("Starting VERL gateway front subprocess: %s", " ".join(front_cmd))
+        front = subprocess.Popen(front_cmd)
+        self._processes.append(front)
+        self._poll_health(self.port, front, _HEALTH_POLL_TIMEOUT)
+        logger.info("VERL gateway running with %d workers behind front on port %d", self.num_workers, self.port)
 
     def _start_thread(self, local_handler: Any = None) -> None:
         """Start gateway in a background thread using create_app + uvicorn."""
@@ -528,6 +557,8 @@ class GatewayManager:
             add_return_token_ids=self.add_return_token_ids,
             cumulative_token_mode=self.cumulative_token_mode,
             renderer_family=self.renderer_family,
+            max_model_len=self.max_model_len,
+            loop_health_enabled=env_bool("RLLM_LOOP_HEALTH_ENABLED", False),
         )
         app = create_app(config=gw_config, local_handler=local_handler)
 

@@ -22,7 +22,6 @@ _SUM_KEYS: set[str] = {
 # Prefixes where "last value" is the correct reduction.
 _LAST_PREFIXES: tuple[str, ...] = (
     "time/",
-    "train/",
     "progress/",
     "async/",
 )
@@ -43,6 +42,14 @@ def _infer_rule(key: str) -> str:
     if key in _SUM_KEYS:
         return "sum"
 
+    if key in {
+        "train/active_tokens",
+        "train/response_tokens",
+        "train/num_sequences",
+        "train/custom_loss/num_datums",
+    }:
+        return "sum"
+
     for prefix in _LAST_PREFIXES:
         if key.startswith(prefix):
             return "last"
@@ -51,14 +58,22 @@ def _infer_rule(key: str) -> str:
         if key.startswith(prefix):
             return "mean"
 
-    # Keyword inference from the key name
-    if "/max" in key:
+    # Infer extrema from the final path component only. Metric namespaces may
+    # contain these strings (for example, ``mini-swe-agent``).
+    suffix = key.rsplit("/", 1)[-1]
+    if ":" in suffix:
+        suffix = suffix.rsplit(":", 1)[-1]
+    if suffix == "sum":
+        return "sum"
+    if suffix == "last":
+        return "last"
+    if suffix == "max":
         return "max"
-    if "/min" in key:
+    if suffix == "min":
         return "min"
-    if "/mean" in key or "/avg" in key:
+    if suffix in ("mean", "avg"):
         return "mean"
-    if "/std" in key or "/fraction" in key:
+    if suffix == "std" or suffix.startswith("fraction"):
         return "mean"
 
     return "mean"

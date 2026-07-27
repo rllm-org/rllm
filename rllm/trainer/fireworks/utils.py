@@ -16,6 +16,10 @@ _SHARED_KEYS: list[tuple[str, str]] = [
     ("data.val_batch_size", "rllm.data.val_batch_size"),
     ("data.max_prompt_length", "rllm.data.max_prompt_length"),
     ("data.max_response_length", "rllm.data.max_response_length"),
+    ("training.lr_schedule", "rllm.algorithm.lr_schedule"),
+    ("training.warmup_steps_ratio", "rllm.algorithm.warmup_steps_ratio"),
+    ("rollout_engine.accumulate_reasoning", "rllm.accumulate_reasoning"),
+    ("rollout_engine.disable_thinking", "rllm.disable_thinking"),
 ]
 
 

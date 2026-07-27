@@ -338,7 +338,7 @@ class TinkerEngine(RolloutEngine):
             remaining = self.max_model_length - prompt_length
             if remaining <= max_tokens:
                 max_tokens = remaining
-                print(f"Warning: Decreasing max_tokens to {max_tokens} to stay within max_model_length")
+                logger.info("Decreasing max_tokens to %d to stay within max_model_length", max_tokens)
 
         return max_tokens
 

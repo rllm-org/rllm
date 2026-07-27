@@ -1,15 +1,21 @@
 """Tests for cumulative token mode.
 
 Verifies that when cumulative_token_mode=True, the gateway:
-1. Forwards turn 1 to /v1/chat/completions normally
+1. Renders turn 1 through /v1/completions when supported, otherwise falls back to chat
 2. Rewrites turn 2+ to /v1/completions with raw token IDs
 3. Translates the response back to chat/completions format
 4. Stores traces with correct prompt_token_ids and completion_token_ids
 """
 
+import asyncio
+import json
+from types import SimpleNamespace
+
 import openai
 import pytest
 from rllm_model_gateway import GatewayClient, GatewayConfig, create_app
+from rllm_model_gateway.proxy import ReverseProxy
+from rllm_model_gateway.store.memory_store import MemoryTraceStore
 
 from tests.helpers.gateway_server import GatewayServer
 from tests.helpers.mock_vllm import MockVLLMServer
@@ -73,8 +79,8 @@ def cumulative_gateway(mock_vllm: MockVLLMServer):
 
 
 class TestCumulativeTokenMode:
-    def test_turn1_uses_chat_completions(self, cumulative_gateway):
-        """First turn goes to /v1/chat/completions normally."""
+    def test_turn1_falls_back_to_chat_without_initial_renderer(self, cumulative_gateway):
+        """First turn uses chat when the renderer cannot build an initial prompt."""
         server, mock_vllm = cumulative_gateway
         gw_url = server.url
 
@@ -615,3 +621,140 @@ class TestPerRequestLineageBinding:
         t2 = acc.next_trace_id(replay=False)  # turn 2 -> new id
         assert t2 != t1
         assert acc.trace_id == t2
+
+
+class _InitialPromptRenderer:
+    def render_ids(self, messages, *, tools=None, add_generation_prompt=False):
+        assert add_generation_prompt
+        return [1, 2, 3] + ([9] if tools else [])
+
+
+class _DirectRequest:
+    method = "POST"
+
+    def __init__(self, payload: dict):
+        self._payload = json.dumps(payload).encode()
+        self.state = SimpleNamespace(session_id="sess1", originally_requested_logprobs=False, weight_version=0)
+        self.url = SimpleNamespace(path="/v1/chat/completions", query="")
+
+    async def body(self) -> bytes:
+        return self._payload
+
+
+def _direct_proxy(*, renderer=None, local_handler=None, max_model_len=None):
+    return ReverseProxy(
+        router=None,
+        store=MemoryTraceStore(),
+        sync_traces=True,
+        local_handler=local_handler,
+        cumulative_token_mode=True,
+        renderer=renderer,
+        max_model_len=max_model_len,
+    )
+
+
+def _route_first_turn(*, renderer, local_handler=None):
+    proxy = _direct_proxy(renderer=renderer, local_handler=local_handler)
+    routed: dict = {}
+
+    async def _cumulative(
+        request,
+        request_body,
+        session_id,
+        acc,
+        token_ids,
+        originally_requested_logprobs=False,
+        *,
+        replay=False,
+    ):
+        routed["path"] = "completions"
+        routed["token_ids"] = token_ids
+        return "cumulative"
+
+    async def _chat(request, raw_body, request_body, session_id, originally_requested_logprobs=False):
+        routed["path"] = "chat"
+        return "chat"
+
+    async def _started():
+        return None
+
+    proxy._handle_cumulative_turn = _cumulative
+    proxy._handle_non_streaming = _chat
+    proxy._ensure_started = _started
+    return proxy, routed
+
+
+_TOOLS = [{"type": "function", "function": {"name": "bash", "description": "run a command"}}]
+_FIRST_TURN_BODY = {"model": "q", "messages": [{"role": "user", "content": "solve it"}], "tools": _TOOLS}
+
+
+def test_first_turn_is_rendered_and_sent_to_completions():
+    proxy, routed = _route_first_turn(renderer=_InitialPromptRenderer())
+    assert asyncio.run(proxy.handle(_DirectRequest(_FIRST_TURN_BODY))) == "cumulative"
+    assert routed == {"path": "completions", "token_ids": [1, 2, 3, 9]}
+
+
+def test_first_turn_keeps_chat_path_for_in_process_handlers():
+    async def handler(body):
+        return {}
+
+    proxy, routed = _route_first_turn(renderer=_InitialPromptRenderer(), local_handler=handler)
+    assert asyncio.run(proxy.handle(_DirectRequest(_FIRST_TURN_BODY))) == "chat"
+    assert routed["path"] == "chat"
+
+
+def test_first_turn_falls_back_to_chat_when_the_renderer_cannot_render():
+    proxy, routed = _route_first_turn(renderer=object())
+    assert asyncio.run(proxy.handle(_DirectRequest(_FIRST_TURN_BODY))) == "chat"
+    assert routed["path"] == "chat"
+
+
+def _sent_clamped_body(*, prompt_len, max_tokens, max_model_len):
+    proxy = _direct_proxy(max_model_len=max_model_len)
+    captured: dict = {}
+
+    async def _non_streaming(
+        request,
+        request_body,
+        completions_body,
+        session_id,
+        acc,
+        token_ids,
+        originally_requested_logprobs=False,
+        *,
+        replay=False,
+    ):
+        captured.update(completions_body)
+        return "sent"
+
+    proxy._handle_cumulative_non_streaming = _non_streaming
+    body = {"model": "q", "messages": [{"role": "user", "content": "x"}], "max_tokens": max_tokens}
+    asyncio.run(proxy._handle_cumulative_turn(_DirectRequest(body), body, "sess1", None, list(range(prompt_len))))
+    return captured
+
+
+def test_long_prompt_shrinks_max_tokens_to_the_remaining_window():
+    body = _sent_clamped_body(prompt_len=55710, max_tokens=16384, max_model_len=67584)
+    assert body["max_tokens"] == 67584 - 55710
+
+
+def test_short_prompt_keeps_the_requested_cap():
+    body = _sent_clamped_body(prompt_len=4096, max_tokens=16384, max_model_len=67584)
+    assert body["max_tokens"] == 16384
+
+
+def test_prompt_at_the_window_still_asks_for_one_token():
+    body = _sent_clamped_body(prompt_len=67584, max_tokens=16384, max_model_len=67584)
+    assert body["max_tokens"] == 1
+
+
+def test_no_clamping_without_a_configured_window():
+    body = _sent_clamped_body(prompt_len=55710, max_tokens=16384, max_model_len=None)
+    assert body["max_tokens"] == 16384
+
+
+def test_absent_max_tokens_is_left_for_the_server_to_derive():
+    proxy = _direct_proxy(max_model_len=67584)
+    body: dict = {"prompt": [1, 2, 3]}
+    proxy._clamp_max_tokens(body, 55710)
+    assert "max_tokens" not in body

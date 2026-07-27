@@ -494,9 +494,11 @@ class FireworksEngine(TinkerEngine):
         # trajectory's turns. Set once per turn from the trajectory id.
         session_headers = None
         if session_id:
+            session_id = str(session_id)
+            sampling_params["user"] = session_id
             session_headers = {
-                "x-multi-turn-session-id": str(session_id),
-                "x-session-affinity": str(session_id),
+                "x-multi-turn-session-id": session_id,
+                "x-session-affinity": session_id,
             }
 
         raw, server_metrics = await self._completions_with_retry(

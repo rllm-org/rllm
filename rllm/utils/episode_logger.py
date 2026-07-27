@@ -115,6 +115,11 @@ class EpisodeLogger:
                         "reward": step.reward,
                         "done": step.done,
                         "model_response": step.model_response,
+                        "model_output": (
+                            step.model_output.to_dict()
+                            if step.model_output is not None and hasattr(step.model_output, "to_dict")
+                            else step.model_output
+                        ),
                         "chat_completions": step.chat_completions,
                         "timing": step.info.get("timing", {}),  # Add step-level timing
                     }
