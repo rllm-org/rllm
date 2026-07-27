@@ -1,0 +1,24 @@
+"""Helpers for the FireworksBackend, mirroring verl/tinker's config-sync structure."""
+
+from __future__ import annotations
+
+from omegaconf import DictConfig
+
+from rllm.trainer.algorithms.config import sync_shared_keys
+
+# (fireworks_native_path, rllm_path) — kept in parity by sync_config so a run can
+# set either the verl-native ``data.*`` or the canonical ``rllm.data.*`` and get
+# the same result. The Fireworks engine reads ``data.max_{prompt,response}_length``;
+# UnifiedTrainer reads the ``rllm.data.*`` batch sizes. Syncing lets cookbooks
+# specify the ``rllm.data.*`` namespace alone. Matches ``tinker/utils.py``.
+_SHARED_KEYS: list[tuple[str, str]] = [
+    ("data.train_batch_size", "rllm.data.train_batch_size"),
+    ("data.val_batch_size", "rllm.data.val_batch_size"),
+    ("data.max_prompt_length", "rllm.data.max_prompt_length"),
+    ("data.max_response_length", "rllm.data.max_response_length"),
+]
+
+
+def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) -> None:
+    """Mirror rllm.* into fireworks' native config over the shared-keys table."""
+    sync_shared_keys(config, _SHARED_KEYS, hydra_overrides=hydra_overrides)

@@ -2,6 +2,7 @@ from omegaconf import DictConfig
 
 from rllm.data import Dataset
 from rllm.trainer.fireworks.fireworks_backend import FireworksBackend
+from rllm.trainer.fireworks.utils import sync_config
 from rllm.trainer.unified_trainer import TrainerLauncher, UnifiedTrainer
 from rllm.workflows.store import Store
 from rllm.workflows.workflow import Workflow
@@ -26,6 +27,15 @@ class FireworksTrainerLauncher(TrainerLauncher):
         super().__init__(config, workflow_class, train_dataset, val_dataset, workflow_args, store=store, **kwargs)
 
     def train(self):
+        # Keep the verl-native ``data.*`` engine knobs in parity with the
+        # canonical ``rllm.data.*`` namespace, so a run can set either one.
+        try:
+            from hydra.core.hydra_config import HydraConfig
+
+            hydra_overrides = list(HydraConfig.get().overrides.task)
+        except (ValueError, AttributeError, ImportError):
+            hydra_overrides = []
+        sync_config(self.config, hydra_overrides)
         trainer = None
         try:
             trainer = UnifiedTrainer(
