@@ -15,11 +15,14 @@ export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-2400}"
 export RLLM_HARNESS_VERIFIER_TIMEOUT_S="${RLLM_HARNESS_VERIFIER_TIMEOUT_S:-300}"
 export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-3000}"
 export RLLM_REPLAY_TRAJECTORY_GROUPS="${RLLM_REPLAY_TRAJECTORY_GROUPS:-$PWD/train_batches/fireworks_comparison_20260727_152254/optimizer_batches/000_trajectory_group_chunks.pkl}"
+export RLLM_VERL_COMPARE_DIR="${RLLM_VERL_COMPARE_DIR:-$PWD/train_batches/verl_comparison_$(date +%Y%m%d_%H%M%S)}"
 
 if [[ ! -f "$RLLM_REPLAY_TRAJECTORY_GROUPS" ]]; then
     echo "Replay trajectory batch not found: $RLLM_REPLAY_TRAJECTORY_GROUPS" >&2
     exit 1
 fi
+mkdir -p "$RLLM_VERL_COMPARE_DIR"
+echo "Verl comparison artifacts: $RLLM_VERL_COMPARE_DIR"
 
 MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-35B-A3B}"
 PROJECT_NAME="${PROJECT_NAME:-terminal-rl}"

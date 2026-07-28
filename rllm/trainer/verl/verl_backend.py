@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
+import pickle
 from collections import defaultdict
 from collections.abc import Iterable
 from functools import reduce
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -62,6 +65,33 @@ _DEFAULT_VERL_LOSS = "vanilla"
 _VERL_KNOWN_LOSSES: set[str] | None = None
 
 
+def _comparison_dir() -> Path | None:
+    value = os.environ.get("RLLM_VERL_COMPARE_DIR")
+    return Path(value) if value else None
+
+
+def _dump_comparison_artifact(name: str, value: Any) -> None:
+    root = _comparison_dir()
+    if root is None:
+        return
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as f:
+        pickle.dump(value, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def _cpu_value(value: Any) -> Any:
+    if torch.is_tensor(value):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {key: _cpu_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_cpu_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_cpu_value(item) for item in value)
+    return value
+
+
 class CustomPPOLoss:
     """The verl actor loss. Dispatches to either a verl-native kernel or an rLLM loss.
 
@@ -83,6 +113,7 @@ class CustomPPOLoss:
         # Modules to import on the worker so a user's @register_loss fires there (entry-point
         # losses self-discover via get_loss; this covers the explicit loss_plugins list).
         self.loss_plugins = list(loss_plugins or [])
+        self._comparison_call_idx = 0
 
     def __call__(self, model_output, data, dp_group=None):
         from verl.utils import tensordict_utils as _tu
@@ -96,17 +127,94 @@ class CustomPPOLoss:
         # Native-first: if verl has a fused kernel for this name (e.g. dppo_tv/gspo/cispo on
         # 0.8), use it. Only fall back to the in-process rLLM loss when verl can't run it.
         if is_custom_loss(loss_mode) and loss_mode not in native_loss_names("verl"):
-            return self._rllm_loss(loss_mode, model_output, data)
+            result = self._rllm_loss(loss_mode, model_output, data)
+            self._capture_comparison_call(loss_mode, model_output, data, result)
+            return result
 
         # verl-native loss (vanilla / gspo / ...), with per-call mode override.
         if override is not None:
             original = self.config.policy_loss.get("loss_mode", "vanilla")
             self.config.policy_loss["loss_mode"] = override
             try:
-                return ppo_loss(self.config, model_output, data, dp_group)
+                result = ppo_loss(self.config, model_output, data, dp_group)
             finally:
                 self.config.policy_loss["loss_mode"] = original
-        return ppo_loss(self.config, model_output, data, dp_group)
+        else:
+            result = ppo_loss(self.config, model_output, data, dp_group)
+        self._capture_comparison_call(loss_mode, model_output, data, result)
+        return result
+
+    def _capture_comparison_call(self, loss_mode, model_output, data, result) -> None:
+        if _comparison_dir() is None:
+            return
+
+        from verl.workers.utils.padding import no_padding_2_padding
+
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        call_idx = self._comparison_call_idx
+        self._comparison_call_idx += 1
+
+        fields = ["response_mask", "old_log_probs", "advantages"]
+        for optional in ("rollout_log_probs", "rollout_is_weights", "ref_log_prob"):
+            if optional in data:
+                fields.append(optional)
+        padded = data.select(*fields).to_padded_tensor()
+        loss, metrics = result
+        log_probs = no_padding_2_padding(model_output["log_probs"], data)
+        metric_values = {}
+        for key, metric in metrics.items():
+            metric_values[key] = {
+                "value": _cpu_value(getattr(metric, "value", metric)),
+                "aggregation": str(getattr(metric, "aggregation", "")),
+            }
+
+        token_diagnostics = None
+        if loss_mode == "dppo_tv":
+            old_log_probs = padded["old_log_probs"]
+            advantages = padded["advantages"]
+            response_mask = padded["response_mask"].to(torch.bool)
+            log_ratio = torch.clamp(log_probs.detach() - old_log_probs, min=-20.0, max=20.0)
+            ratio = torch.exp(log_ratio)
+            clip_ratio = float(self.config.clip_ratio)
+            clip_low = float(self.config.clip_ratio_low if self.config.clip_ratio_low is not None else clip_ratio)
+            clip_high = float(self.config.clip_ratio_high if self.config.clip_ratio_high is not None else clip_ratio)
+            clip_ratio_c = float(self.config.get("clip_ratio_c", 20.0))
+            probability_delta = torch.exp(log_probs.detach()) - torch.exp(old_log_probs)
+            valid_positive = probability_delta <= clip_high
+            valid_negative = probability_delta >= -clip_low
+            valid_mask = torch.where(advantages > 0, valid_positive, valid_negative)
+            per_token_loss = -advantages * torch.clamp(ratio, max=clip_ratio_c) * log_probs.detach() * valid_mask
+            if "rollout_is_weights" in padded:
+                per_token_loss = per_token_loss * padded["rollout_is_weights"]
+            token_diagnostics = {
+                "log_ratio": log_ratio.cpu(),
+                "ratio": ratio.cpu(),
+                "probability_delta": probability_delta.cpu(),
+                "valid_positive_mask": valid_positive.cpu(),
+                "valid_negative_mask": valid_negative.cpu(),
+                "valid_mask": valid_mask.cpu(),
+                "per_token_loss": per_token_loss.cpu(),
+                "active_tokens": response_mask.sum().cpu(),
+                "kept_tokens": (valid_mask & response_mask).sum().cpu(),
+                "local_loss_sum": (per_token_loss * response_mask).sum().cpu(),
+            }
+
+        _dump_comparison_artifact(
+            f"loss_calls/rank_{rank:05d}_call_{call_idx:04d}.pkl",
+            {
+                "rank": rank,
+                "call_idx": call_idx,
+                "loss_mode": loss_mode,
+                "log_probs": log_probs.detach().cpu(),
+                "data": _cpu_value(dict(padded.items())),
+                "dp_size": _cpu_value(data["dp_size"]),
+                "batch_num_tokens": _cpu_value(data["batch_num_tokens"]),
+                "global_batch_size": _cpu_value(data["global_batch_size"]),
+                "loss": loss.detach().cpu(),
+                "metrics": metric_values,
+                "token_diagnostics": token_diagnostics,
+            },
+        )
 
     def _rllm_loss(self, name, model_output, data):
         """Run a single rLLM loss in-process. Builds a LossContext from the verl batch and
@@ -841,6 +949,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
 
         if self.config.trainer.get("critic_warmup", 0) <= global_steps:
+            if _comparison_dir() is not None:
+                await asyncio.to_thread(_dump_comparison_artifact, "backend_batch.pkl", batch)
+                pre_update = await asyncio.to_thread(self._comparison_forward, batch)
+                await asyncio.to_thread(_dump_comparison_artifact, "pre_update_forward.pkl", pre_update)
             backend_batch_logger = getattr(self, "backend_batch_logger", None)
             if backend_batch_logger is not None:
                 await asyncio.to_thread(
@@ -850,6 +962,21 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
                 )
             with simple_timer("update_actor", trainer_state.timing_dict):
                 await asyncio.to_thread(self._update_actor_with_loss_routing, batch, trainer_state)
+            if _comparison_dir() is not None:
+                post_update = await asyncio.to_thread(self._comparison_forward, batch)
+                await asyncio.to_thread(_dump_comparison_artifact, "post_update_forward.pkl", post_update)
+
+    def _comparison_forward(self, batch: DataProto) -> dict[str, Any]:
+        batch_td = batch.to_tensordict()
+        batch_td = left_right_2_no_padding(batch_td)
+        tu.assign_non_tensor(batch_td, calculate_entropy=False, compute_loss=False)
+        output = self.actor_rollout_wg.compute_log_prob(batch_td)
+        log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td)
+        return {
+            "input": _cpu_value(batch_td),
+            "output": _cpu_value(output),
+            "log_probs": log_probs.detach().cpu(),
+        }
 
     def _update_actor_with_loss_routing(self, batch: DataProto, trainer_state: TrainerState) -> None:
         """Update actor with per-loss-group splitting when ``loss_fn_map`` is set.
@@ -894,7 +1021,9 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             if loss_override is not None:
                 metadata["policy_loss_mode_override"] = loss_override
             tu.assign_non_tensor(batch_td, **metadata)
+            _dump_comparison_artifact("actor_update_input.pkl", _cpu_value(batch_td))
             actor_output = self.actor_rollout_wg.update_actor(batch_td)
+            _dump_comparison_artifact("actor_update_output.pkl", _cpu_value(actor_output))
             actor_metrics = tu.get(actor_output, "metrics")
             trainer_state.metrics.update(reduce_metrics(actor_metrics))
 
