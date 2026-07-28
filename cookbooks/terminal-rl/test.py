@@ -69,6 +69,22 @@ def test_train_module_imports():
     assert callable(mod.main)
 
 
+def test_validation_metrics_use_a_stable_dataset_namespace():
+    from rllm.data.dataset import Dataset
+
+    mod = _import_cookbook_module("train")
+    dataset = Dataset(
+        [
+            {"task_id": "one", "data_source": "harbor:one"},
+            {"task_id": "two", "data_source": "harbor:two"},
+        ]
+    )
+
+    mod._set_validation_metric_source(dataset, "terminal-bench@2.1")
+
+    assert {row["data_source"] for row in dataset.get_data()} == {"terminal-bench-2.1"}
+
+
 def test_prepare_data_module_imports():
     """``prepare_data.py`` must import and expose its dataset names."""
     mod = _import_cookbook_module("prepare_data")
@@ -214,3 +230,68 @@ def test_glm5p2_sanity_profile_is_one_step_lora_opencode_without_midtest():
     assert 'total_batches="${TB_SANITY_TOTAL_BATCHES:-1}"' in script
     assert 'trainer_replicas="${TB_TRAINER_REPLICAS:-4}"' in script
     assert 'rollout_replicas="${TB_ROLLOUT_REPLICAS:-4}"' in script
+
+
+def test_glm5p2_medium_curriculum_is_four_epochs_and_evaluates_at_epoch_boundaries(tmp_path):
+    env = os.environ.copy()
+    env.update(
+        {
+            "FIREWORKS_API_KEY": "dry-run",
+            "WANDB_API_KEY": "dry-run",
+            "RLLM_PYTHON": "/bin/echo",
+            "TB_STATE_ROOT": str(tmp_path),
+            "TB_RUN_STAMP": "dryrun",
+            "TB_TRAINER_REGION": "AP_MALAYSIA_2",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            str(_COOKBOOK_DIR / "train_fireworks_glm5p2.sh"),
+            "full",
+            "opencode",
+            "curriculum",
+        ],
+        cwd=_COOKBOOK_DIR,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "train=tb-opencode-medium-48/train" in result.stdout
+    assert "val=terminal-bench@2.1/default benchmark=disabled" in result.stdout
+    assert "global_trajectories_per_step=128" in result.stdout
+    assert "fireworks_config.policy_trainer_replica_count=2" in result.stdout
+    assert "fireworks_config.rollout_deployment_replica_count=6" in result.stdout
+    assert "training.group_size=8" in result.stdout
+    assert "rllm.data.train_batch_size=16" in result.stdout
+    assert "rllm.trainer.total_epochs=4" in result.stdout
+    assert "rllm.trainer.total_batches=-1" in result.stdout
+    assert "rllm.trainer.val_before_train=false" in result.stdout
+    assert "rllm.trainer.test_freq=3" in result.stdout
+
+
+def test_curate_opencode_medium_requires_three_to_five_successes_and_env_done(tmp_path):
+    mod = _import_cookbook_module("curate_opencode_medium")
+    lines = []
+    for task_id, successes, final_termination in [
+        ("clean-three", 3, "ENV_DONE"),
+        ("clean-five", 5, "ENV_DONE"),
+        ("too-hard", 2, "ENV_DONE"),
+        ("has-timeout", 4, "TIMEOUT"),
+    ]:
+        for rollout_index in range(8):
+            reward = 1.0 if rollout_index < successes else 0.0
+            termination = final_termination if rollout_index == 7 else "ENV_DONE"
+            lines.append(
+                f"[{task_id}:{rollout_index}] Rewards: [opencode: {reward}] "
+                f"in 1s, Termination: TerminationReason.{termination}"
+            )
+    log_path = tmp_path / "run.log"
+    log_path.write_text("\n".join(lines))
+
+    assert mod.clean_medium_candidates(log_path) == [
+        mod.Candidate(task_id="clean-three", successes=(3,)),
+        mod.Candidate(task_id="clean-five", successes=(5,)),
+    ]

@@ -35,17 +35,19 @@ Usage (from rllm repo root)::
 from __future__ import annotations
 
 import os
+import re
 
 import hydra
 from omegaconf import DictConfig
 
-from rllm.data.dataset import DatasetRegistry
+from rllm.data.dataset import Dataset, DatasetRegistry
 from rllm.harnesses.opencode import OpenCodeHarness
 from rllm.harnesses.terminus2 import Terminus2Harness
 from rllm.trainer import AgentTrainer
 
 TRAIN_DATASET = os.environ.get("TB_TRAIN_DATASET", "tb-opus-pass")
 TRAIN_SPLIT = os.environ.get("TB_TRAIN_SPLIT", "train")
+TRAIN_EXPECTED_TASKS = int(os.environ.get("TB_TRAIN_EXPECTED_TASKS", "0"))
 
 # The periodic validation suite and boundary-only benchmark are independent.
 # Production uses the full pinned Terminal-Bench 2.1 suite for validation at
@@ -88,6 +90,13 @@ TERMINUS_MAX_INPUT_TOKENS = int(os.environ.get("TERMINUS_MAX_INPUT_TOKENS", "200
 TB_HARNESS = os.environ.get("TB_HARNESS", "terminus-2").strip().lower()
 
 
+def _set_validation_metric_source(dataset: Dataset, dataset_name: str) -> None:
+    """Use one stable, W&B-safe validation namespace per dataset."""
+    metric_source = re.sub(r"[^a-zA-Z0-9._-]+", "-", dataset_name).strip("-") or "evaluation"
+    for row in dataset.get_data():
+        row["data_source"] = metric_source
+
+
 def _build_agent_flow():
     if TB_HARNESS in ("terminus-2", "terminus2"):
         return Terminus2Harness(
@@ -109,6 +118,8 @@ def main(config: DictConfig) -> None:
 
     if train_dataset is None:
         raise RuntimeError(f"Dataset '{TRAIN_DATASET}/{TRAIN_SPLIT}' not found. Run: python cookbooks/terminal-rl/prepare_data.py")
+    if TRAIN_EXPECTED_TASKS > 0 and len(train_dataset) != TRAIN_EXPECTED_TASKS:
+        raise RuntimeError(f"Training dataset '{TRAIN_DATASET}/{TRAIN_SPLIT}' has {len(train_dataset)} tasks; expected {TRAIN_EXPECTED_TASKS}")
     if val_dataset is None:
         raise RuntimeError(f"Dataset '{VAL_DATASET}/{VAL_SPLIT}' not found. Run: python cookbooks/terminal-rl/prepare_data.py")
     if BENCHMARK_DATASET and benchmark_dataset is None:
@@ -121,6 +132,10 @@ def main(config: DictConfig) -> None:
         val_dataset = val_dataset.select(range(TB_VAL_MAX))
     if VAL_EXPECTED_TASKS > 0 and len(val_dataset) != VAL_EXPECTED_TASKS:
         raise RuntimeError(f"Validation '{VAL_DATASET}/{VAL_SPLIT}' has {len(val_dataset)} tasks; expected {VAL_EXPECTED_TASKS}")
+
+    _set_validation_metric_source(val_dataset, VAL_DATASET)
+    if benchmark_dataset is not None:
+        _set_validation_metric_source(benchmark_dataset, BENCHMARK_DATASET)
 
     train_ids = {str(row.get("task_id")) for row in train_dataset.get_data()}
     val_ids = {str(row.get("task_id")) for row in val_dataset.get_data()}

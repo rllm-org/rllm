@@ -3,7 +3,7 @@
 # GLM-5.2 Terminal-Bench RL launcher for the Fireworks backend.
 #
 # Usage:
-#   train_fireworks_glm5p2.sh <lora|full> <opencode|terminus-2> <debug|train|sanity|production>
+#   train_fireworks_glm5p2.sh <lora|full> <opencode|terminus-2> <debug|train|sanity|production|curriculum>
 #
 # The debug phase uses the eight-task tb_v2_debug split, one optimizer batch,
 # and two Terminal-Bench 2.0 validation tasks. The train phase uses the full
@@ -26,9 +26,9 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-mode="${1:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|sanity|production>}"
-harness="${2:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|sanity|production>}"
-phase="${3:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|sanity|production>}"
+mode="${1:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|sanity|production|curriculum>}"
+harness="${2:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|sanity|production|curriculum>}"
+phase="${3:?usage: $0 <lora|full> <opencode|terminus-2> <debug|train|sanity|production|curriculum>}"
 
 case "$mode" in
     lora)
@@ -59,6 +59,7 @@ case "$phase" in
     debug)
         train_dataset="tb_v2_debug"
         train_split="train"
+        train_expected_tasks=0
         val_dataset="terminal-bench@2.0"
         val_split="default"
         benchmark_dataset=""
@@ -81,6 +82,7 @@ case "$phase" in
     train)
         train_dataset="tb-opus-pass"
         train_split="train"
+        train_expected_tasks=0
         val_dataset="terminal-bench@2.0"
         val_split="default"
         benchmark_dataset=""
@@ -119,6 +121,7 @@ case "$phase" in
         fi
         train_dataset="tb-opus-pass"
         train_split="train"
+        train_expected_tasks=0
         val_dataset="terminal-bench@2.1"
         benchmark_split="default"
         val_max=0
@@ -164,8 +167,35 @@ case "$phase" in
         fi
         n_parallel_tasks="${TB_TRAIN_N_PARALLEL_TASKS:-64}"
         ;;
+    curriculum)
+        if [ "$mode" != "full" ] || [ "$harness" != "opencode" ]; then
+            echo "curriculum phase requires: full opencode curriculum" >&2
+            exit 2
+        fi
+        train_dataset="${TB_CURRICULUM_DATASET:-tb-opencode-medium-48}"
+        train_split="train"
+        train_expected_tasks=48
+        val_dataset="terminal-bench@2.1"
+        val_split="default"
+        val_expected_tasks=89
+        val_max=0
+        benchmark_dataset=""
+        benchmark_split="default"
+        benchmark_expected_tasks=0
+        benchmark_before_train=false
+        benchmark_after_train=false
+        total_batches=-1
+        total_epochs=4
+        test_freq=3
+        val_before_train=false
+        trainer_replicas="${TB_TRAINER_REPLICAS:-2}"
+        rollout_replicas="${TB_ROLLOUT_REPLICAS:-6}"
+        group_size="${TB_GROUP_SIZE:-8}"
+        optimizer_groups_per_step="${TB_TRAIN_GROUPS_PER_STEP:-${TB_TRAIN_ASYNC_MINI_BATCH_SIZE:-16}}"
+        n_parallel_tasks="${TB_TRAIN_N_PARALLEL_TASKS:-64}"
+        ;;
     *)
-        echo "unsupported phase '$phase' (expected debug, train, sanity, or production)" >&2
+        echo "unsupported phase '$phase' (expected debug, train, sanity, production, or curriculum)" >&2
         exit 2
         ;;
 esac
@@ -212,6 +242,7 @@ export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-docker}"
 export TB_HARNESS="$harness"
 export TB_TRAIN_DATASET="$train_dataset"
 export TB_TRAIN_SPLIT="$train_split"
+export TB_TRAIN_EXPECTED_TASKS="$train_expected_tasks"
 export TB_VAL_DATASET="$val_dataset"
 export TB_VAL_SPLIT="$val_split"
 export TB_VAL_MAX="$val_max"

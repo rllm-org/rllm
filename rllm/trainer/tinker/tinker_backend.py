@@ -27,7 +27,7 @@ from rllm.trainer.tinker.tinker_metrics_utils import (
     update_training_metrics,
 )
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
-from rllm.types import Episode
+from rllm.types import Episode, Task
 
 if TYPE_CHECKING:
     from transformers.tokenization_utils import PreTrainedTokenizer
@@ -235,6 +235,19 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         # Execute tasks using the agent workflow engine (async)
         episodes = await agent_workflow_engine.execute_tasks(interleaved_batch, task_ids, is_validation=is_validation, **kwargs)
+
+        # Preserve the dataset source on episodes so validation metrics are
+        # attributed to their real dataset instead of UnifiedTrainer's
+        # ``unknown`` fallback. This mirrors the native Verl backend.
+        for episode, task in zip(episodes, interleaved_batch, strict=True):
+            if isinstance(task, dict):
+                data_source = task.get("data_source")
+            elif isinstance(task, Task):
+                data_source = task.metadata.get("data_source")
+            else:
+                data_source = None
+            if data_source is not None:
+                episode.info["data_source"] = data_source
 
         return episodes
 
