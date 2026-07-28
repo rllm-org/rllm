@@ -1,0 +1,206 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+<title id="title">GLM-5.2 OpenCode reinforcement-learning metrics over twelve optimizer steps</title>
+<desc id="desc">Four plots show training and Terminal-Bench success, policy entropy, trainer-to-rollout KLD, and PPO clipping fraction.</desc>
+<style>
+            text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+            .chart-title { font-size: 20px; font-weight: 600; }
+            .panel-title { font-size: 15px; font-weight: 600; }
+            .tick, .note { font-size: 11px; fill: #57606a; }
+            .axis-label, .legend { font-size: 12px; fill: #57606a; }
+            .axis { stroke: #8c959f; stroke-width: 1; }
+            .grid { stroke: #d8dee4; stroke-width: 1; }
+            .epoch { stroke-dasharray: 3 4; }
+            .series { fill: none; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+            .point { stroke: none; }
+            .series.train { stroke: #0969da; }
+            .series.eval { stroke: #bf8700; }
+            .series.entropy { stroke: #8250df; }
+            .series.kld { stroke: #1a7f37; }
+            .series.ppo { stroke: #cf222e; }
+            .point.train { fill: #0969da; }
+            .point.eval { fill: #bf8700; }
+            .point.entropy { fill: #8250df; }
+            .point.kld { fill: #1a7f37; }
+            .point.ppo { fill: #cf222e; }
+            @media (prefers-color-scheme: dark) {
+                text { fill: #f0f6fc; }
+                .tick, .note, .axis-label, .legend { fill: #8c959f; }
+                .axis { stroke: #6e7681; }
+                .grid { stroke: #30363d; }
+                .series.train { stroke: #58a6ff; }
+                .series.eval { stroke: #d29922; }
+                .series.entropy { stroke: #d2a8ff; }
+                .series.kld { stroke: #3fb950; }
+                .series.ppo { stroke: #ff7b72; }
+                .point.train { fill: #58a6ff; }
+                .point.eval { fill: #d29922; }
+                .point.entropy { fill: #d2a8ff; }
+                .point.kld { fill: #3fb950; }
+                .point.ppo { fill: #ff7b72; }
+            }
+        </style>
+<text class="chart-title" x="64" y="40">GLM-5.2 OpenCode: model metrics across 12 optimizer steps</text>
+<text class="panel-title" x="64" y="99">Success rate (%)</text>
+<line class="grid" x1="126" y1="292.4" x2="554" y2="292.4"/>
+<text class="tick" x="116" y="296.4" text-anchor="end">40</text>
+<line class="grid" x1="126" y1="249.3" x2="554" y2="249.3"/>
+<text class="tick" x="116" y="253.3" text-anchor="end">50</text>
+<line class="grid" x1="126" y1="206.2" x2="554" y2="206.2"/>
+<text class="tick" x="116" y="210.2" text-anchor="end">60</text>
+<line class="grid" x1="126" y1="163.1" x2="554" y2="163.1"/>
+<text class="tick" x="116" y="167.1" text-anchor="end">70</text>
+<line class="grid" x1="126" y1="120.0" x2="554" y2="120.0"/>
+<text class="tick" x="116" y="124.0" text-anchor="end">80</text>
+<line class="grid epoch" x1="126.0" y1="120" x2="126.0" y2="314"/>
+<text class="tick" x="126.0" y="336" text-anchor="middle">0</text>
+<line class="grid epoch" x1="233.0" y1="120" x2="233.0" y2="314"/>
+<text class="tick" x="233.0" y="336" text-anchor="middle">3</text>
+<line class="grid epoch" x1="340.0" y1="120" x2="340.0" y2="314"/>
+<text class="tick" x="340.0" y="336" text-anchor="middle">6</text>
+<line class="grid epoch" x1="447.0" y1="120" x2="447.0" y2="314"/>
+<text class="tick" x="447.0" y="336" text-anchor="middle">9</text>
+<line class="grid epoch" x1="554.0" y1="120" x2="554.0" y2="314"/>
+<text class="tick" x="554.0" y="336" text-anchor="middle">12</text>
+<line class="axis" x1="126" y1="314" x2="554" y2="314"/>
+<line class="axis" x1="126" y1="120" x2="126" y2="314"/>
+<text class="axis-label" x="340.0" y="359" text-anchor="middle">Optimizer step</text>
+<polyline class="series train" points="161.7,246.0 197.3,232.5 233.0,229.1 268.7,158.4 304.3,225.8 340.0,144.9 375.7,176.3 411.3,144.9 447.0,175.2 482.7,188.7 518.3,232.5 554.0,249.3"/>
+<circle class="point train" cx="161.7" cy="246.0" r="3.8"/>
+<circle class="point train" cx="197.3" cy="232.5" r="3.8"/>
+<circle class="point train" cx="233.0" cy="229.1" r="3.8"/>
+<circle class="point train" cx="268.7" cy="158.4" r="3.8"/>
+<circle class="point train" cx="304.3" cy="225.8" r="3.8"/>
+<circle class="point train" cx="340.0" cy="144.9" r="3.8"/>
+<circle class="point train" cx="375.7" cy="176.3" r="3.8"/>
+<circle class="point train" cx="411.3" cy="144.9" r="3.8"/>
+<circle class="point train" cx="447.0" cy="175.2" r="3.8"/>
+<circle class="point train" cx="482.7" cy="188.7" r="3.8"/>
+<circle class="point train" cx="518.3" cy="232.5" r="3.8"/>
+<circle class="point train" cx="554.0" cy="249.3" r="3.8"/>
+<polyline class="series eval" points="126.0,251.8 233.0,232.4 340.0,217.8 447.0,222.7 554.0,285.7"/>
+<circle class="point eval" cx="126.0" cy="251.8" r="3.8"/>
+<circle class="point eval" cx="233.0" cy="232.4" r="3.8"/>
+<circle class="point eval" cx="340.0" cy="217.8" r="3.8"/>
+<circle class="point eval" cx="447.0" cy="222.7" r="3.8"/>
+<circle class="point eval" cx="554.0" cy="285.7" r="3.8"/>
+<line class="series train" x1="368" y1="102" x2="390" y2="102"/><text class="legend" x="398" y="106">train success</text>
+<line class="series eval" x1="368" y1="121" x2="390" y2="121"/><text class="legend" x="398" y="125">TB2.1 pass@1</text>
+<text class="note" x="131.0" y="242.8" text-anchor="start">44/89</text>
+<text class="note" x="233.0" y="223.4" text-anchor="middle">48/89</text>
+<text class="note" x="340.0" y="208.8" text-anchor="middle">51/89</text>
+<text class="note" x="447.0" y="213.7" text-anchor="middle">50/89</text>
+<text class="note" x="549.0" y="276.7" text-anchor="end">37/89</text>
+<text class="panel-title" x="644" y="99">Policy entropy</text>
+<line class="grid" x1="706" y1="314.0" x2="1134" y2="314.0"/>
+<text class="tick" x="696" y="318.0" text-anchor="end">0.0</text>
+<line class="grid" x1="706" y1="260.1" x2="1134" y2="260.1"/>
+<text class="tick" x="696" y="264.1" text-anchor="end">0.1</text>
+<line class="grid" x1="706" y1="206.2" x2="1134" y2="206.2"/>
+<text class="tick" x="696" y="210.2" text-anchor="end">0.2</text>
+<line class="grid" x1="706" y1="152.3" x2="1134" y2="152.3"/>
+<text class="tick" x="696" y="156.3" text-anchor="end">0.3</text>
+<line class="grid epoch" x1="706.0" y1="120" x2="706.0" y2="314"/>
+<text class="tick" x="706.0" y="336" text-anchor="middle">0</text>
+<line class="grid epoch" x1="813.0" y1="120" x2="813.0" y2="314"/>
+<text class="tick" x="813.0" y="336" text-anchor="middle">3</text>
+<line class="grid epoch" x1="920.0" y1="120" x2="920.0" y2="314"/>
+<text class="tick" x="920.0" y="336" text-anchor="middle">6</text>
+<line class="grid epoch" x1="1027.0" y1="120" x2="1027.0" y2="314"/>
+<text class="tick" x="1027.0" y="336" text-anchor="middle">9</text>
+<line class="grid epoch" x1="1134.0" y1="120" x2="1134.0" y2="314"/>
+<text class="tick" x="1134.0" y="336" text-anchor="middle">12</text>
+<line class="axis" x1="706" y1="314" x2="1134" y2="314"/>
+<line class="axis" x1="706" y1="120" x2="706" y2="314"/>
+<text class="axis-label" x="920.0" y="359" text-anchor="middle">Optimizer step</text>
+<polyline class="series entropy" points="741.7,128.7 777.3,181.8 813.0,221.0 848.7,242.2 884.3,247.0 920.0,261.5 955.7,268.9 991.3,272.1 1027.0,278.2 1062.7,284.6 1098.3,287.7 1134.0,293.1"/>
+<circle class="point entropy" cx="741.7" cy="128.7" r="3.8"/>
+<circle class="point entropy" cx="777.3" cy="181.8" r="3.8"/>
+<circle class="point entropy" cx="813.0" cy="221.0" r="3.8"/>
+<circle class="point entropy" cx="848.7" cy="242.2" r="3.8"/>
+<circle class="point entropy" cx="884.3" cy="247.0" r="3.8"/>
+<circle class="point entropy" cx="920.0" cy="261.5" r="3.8"/>
+<circle class="point entropy" cx="955.7" cy="268.9" r="3.8"/>
+<circle class="point entropy" cx="991.3" cy="272.1" r="3.8"/>
+<circle class="point entropy" cx="1027.0" cy="278.2" r="3.8"/>
+<circle class="point entropy" cx="1062.7" cy="284.6" r="3.8"/>
+<circle class="point entropy" cx="1098.3" cy="287.7" r="3.8"/>
+<circle class="point entropy" cx="1134.0" cy="293.1" r="3.8"/>
+<text class="note" x="741.7" y="118.7" text-anchor="middle">0.344</text>
+<text class="note" x="1134.0" y="283.1" text-anchor="middle">0.039</text>
+<text class="panel-title" x="64" y="437">Trainer ↔ rollout KLD</text>
+<line class="grid" x1="126" y1="652.0" x2="554" y2="652.0"/>
+<text class="tick" x="116" y="656.0" text-anchor="end">0.000</text>
+<line class="grid" x1="126" y1="603.5" x2="554" y2="603.5"/>
+<text class="tick" x="116" y="607.5" text-anchor="end">0.002</text>
+<line class="grid" x1="126" y1="555.0" x2="554" y2="555.0"/>
+<text class="tick" x="116" y="559.0" text-anchor="end">0.004</text>
+<line class="grid" x1="126" y1="506.5" x2="554" y2="506.5"/>
+<text class="tick" x="116" y="510.5" text-anchor="end">0.006</text>
+<line class="grid" x1="126" y1="458.0" x2="554" y2="458.0"/>
+<text class="tick" x="116" y="462.0" text-anchor="end">0.008</text>
+<line class="grid epoch" x1="126.0" y1="458" x2="126.0" y2="652"/>
+<text class="tick" x="126.0" y="674" text-anchor="middle">0</text>
+<line class="grid epoch" x1="233.0" y1="458" x2="233.0" y2="652"/>
+<text class="tick" x="233.0" y="674" text-anchor="middle">3</text>
+<line class="grid epoch" x1="340.0" y1="458" x2="340.0" y2="652"/>
+<text class="tick" x="340.0" y="674" text-anchor="middle">6</text>
+<line class="grid epoch" x1="447.0" y1="458" x2="447.0" y2="652"/>
+<text class="tick" x="447.0" y="674" text-anchor="middle">9</text>
+<line class="grid epoch" x1="554.0" y1="458" x2="554.0" y2="652"/>
+<text class="tick" x="554.0" y="674" text-anchor="middle">12</text>
+<line class="axis" x1="126" y1="652" x2="554" y2="652"/>
+<line class="axis" x1="126" y1="458" x2="126" y2="652"/>
+<text class="axis-label" x="340.0" y="697" text-anchor="middle">Optimizer step</text>
+<polyline class="series kld" points="161.7,561.3 197.3,519.4 233.0,496.6 268.7,480.3 304.3,476.4 340.0,499.0 375.7,500.4 411.3,512.3 447.0,519.8 482.7,529.8 518.3,550.4 554.0,553.5"/>
+<circle class="point kld" cx="161.7" cy="561.3" r="3.8"/>
+<circle class="point kld" cx="197.3" cy="519.4" r="3.8"/>
+<circle class="point kld" cx="233.0" cy="496.6" r="3.8"/>
+<circle class="point kld" cx="268.7" cy="480.3" r="3.8"/>
+<circle class="point kld" cx="304.3" cy="476.4" r="3.8"/>
+<circle class="point kld" cx="340.0" cy="499.0" r="3.8"/>
+<circle class="point kld" cx="375.7" cy="500.4" r="3.8"/>
+<circle class="point kld" cx="411.3" cy="512.3" r="3.8"/>
+<circle class="point kld" cx="447.0" cy="519.8" r="3.8"/>
+<circle class="point kld" cx="482.7" cy="529.8" r="3.8"/>
+<circle class="point kld" cx="518.3" cy="550.4" r="3.8"/>
+<circle class="point kld" cx="554.0" cy="553.5" r="3.8"/>
+<text class="note" x="304.3" y="466.4" text-anchor="middle">max 0.00724</text>
+<text class="panel-title" x="644" y="437">PPO clipped tokens (%)</text>
+<line class="grid" x1="706" y1="652.0" x2="1134" y2="652.0"/>
+<text class="tick" x="696" y="656.0" text-anchor="end">0</text>
+<line class="grid" x1="706" y1="587.3" x2="1134" y2="587.3"/>
+<text class="tick" x="696" y="591.3" text-anchor="end">2</text>
+<line class="grid" x1="706" y1="522.7" x2="1134" y2="522.7"/>
+<text class="tick" x="696" y="526.7" text-anchor="end">4</text>
+<line class="grid" x1="706" y1="458.0" x2="1134" y2="458.0"/>
+<text class="tick" x="696" y="462.0" text-anchor="end">6</text>
+<line class="grid epoch" x1="706.0" y1="458" x2="706.0" y2="652"/>
+<text class="tick" x="706.0" y="674" text-anchor="middle">0</text>
+<line class="grid epoch" x1="813.0" y1="458" x2="813.0" y2="652"/>
+<text class="tick" x="813.0" y="674" text-anchor="middle">3</text>
+<line class="grid epoch" x1="920.0" y1="458" x2="920.0" y2="652"/>
+<text class="tick" x="920.0" y="674" text-anchor="middle">6</text>
+<line class="grid epoch" x1="1027.0" y1="458" x2="1027.0" y2="652"/>
+<text class="tick" x="1027.0" y="674" text-anchor="middle">9</text>
+<line class="grid epoch" x1="1134.0" y1="458" x2="1134.0" y2="652"/>
+<text class="tick" x="1134.0" y="674" text-anchor="middle">12</text>
+<line class="axis" x1="706" y1="652" x2="1134" y2="652"/>
+<line class="axis" x1="706" y1="458" x2="706" y2="652"/>
+<text class="axis-label" x="920.0" y="697" text-anchor="middle">Optimizer step</text>
+<polyline class="series ppo" points="741.7,511.0 777.3,490.0 813.0,484.5 848.7,494.9 884.3,502.0 920.0,517.2 955.7,527.5 991.3,534.0 1027.0,536.2 1062.7,541.7 1098.3,554.0 1134.0,555.0"/>
+<circle class="point ppo" cx="741.7" cy="511.0" r="3.8"/>
+<circle class="point ppo" cx="777.3" cy="490.0" r="3.8"/>
+<circle class="point ppo" cx="813.0" cy="484.5" r="3.8"/>
+<circle class="point ppo" cx="848.7" cy="494.9" r="3.8"/>
+<circle class="point ppo" cx="884.3" cy="502.0" r="3.8"/>
+<circle class="point ppo" cx="920.0" cy="517.2" r="3.8"/>
+<circle class="point ppo" cx="955.7" cy="527.5" r="3.8"/>
+<circle class="point ppo" cx="991.3" cy="534.0" r="3.8"/>
+<circle class="point ppo" cx="1027.0" cy="536.2" r="3.8"/>
+<circle class="point ppo" cx="1062.7" cy="541.7" r="3.8"/>
+<circle class="point ppo" cx="1098.3" cy="554.0" r="3.8"/>
+<circle class="point ppo" cx="1134.0" cy="555.0" r="3.8"/>
+<text class="note" x="741.7" y="501.0" text-anchor="middle">4.36%</text>
+<text class="note" x="1134.0" y="545.0" text-anchor="middle">3.00%</text>
+<text class="note" x="64" y="744">Evaluation uses one OpenCode rollout on each of the same 89 Terminal-Bench 2.1 tasks.</text>
+</svg>

@@ -51,25 +51,29 @@ rerun.
 Hence this run used one harness, a fixed medium-difficulty curriculum, repeated
 epochs, and epoch-boundary evaluation.
 
-## Twelve optimizer steps
+## Base and twelve optimizer steps
+
+![Training success, evaluation pass rate, entropy, KLD, and PPO clipping across twelve optimizer steps](glm52_opencode_medium_metrics.svg)
 
 “Useful” means the group contains both successes and failures. E/H is the
-number of uniform all-pass/all-fail groups.
+number of uniform all-pass/all-fail groups. Eval gains and regressions are
+paired on the same 89 task IDs against the preceding evaluation.
 
-| Step | Epoch | Train success | Useful | E/H | Entropy | PPO clipped | KLD | TB2.1 |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 1 | 65/128 (50.8%) | 10/16 | 3/3 | 0.3438 | 4.36% | 0.00374 | — |
-| 2 | 1 | 69/128 (53.9%) | 13/16 | 2/1 | 0.2454 | 5.01% | 0.00547 | — |
-| 3 | 1 | 70/128 (54.7%) | 14/16 | 2/0 | 0.1726 | 5.18% | 0.00641 | 48/89 |
-| 4 | 2 | 91/128 (71.1%) | 11/16 | 5/0 | 0.1332 | 4.86% | 0.00708 | — |
-| 5 | 2 | 71/128 (55.5%) | 13/16 | 3/0 | 0.1243 | 4.64% | 0.00724 | — |
-| 6 | 2 | 95/128 (74.2%) | 13/16 | 3/0 | 0.0975 | 4.17% | 0.00631 | 51/89 |
-| 7 | 3 | 85/127 (66.9%) | 15/16 | 1/0 | 0.0837 | 3.85% | 0.00625 | — |
-| 8 | 3 | 95/128 (74.2%) | 12/16 | 3/1 | 0.0778 | 3.65% | 0.00576 | — |
-| 9 | 3 | 86/128 (67.2%) | 10/16 | 6/0 | 0.0664 | 3.58% | 0.00545 | 50/89 |
-| 10 | 4 | 82/128 (64.1%) | 15/16 | 1/0 | 0.0546 | 3.41% | 0.00504 | — |
-| 11 | 4 | 69/128 (53.9%) | 13/16 | 2/1 | 0.0488 | 3.03% | 0.00419 | — |
-| 12 | 4 | 64/128 (50.0%) | 15/16 | 0/1 | 0.0387 | 3.00% | 0.00406 | 37/89 |
+| Step | Epoch | Train success | Useful | E/H | Entropy | PPO clipped | KLD | TB2.1 passed | Gained | Regressed |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | Base | — | — | — | — | — | — | 44/89 (49.4%) | — | — |
+| 1 | 1 | 65/128 (50.8%) | 10/16 | 3/3 | 0.3438 | 4.36% | 0.00374 | — | — | — |
+| 2 | 1 | 69/128 (53.9%) | 13/16 | 2/1 | 0.2454 | 5.01% | 0.00547 | — | — | — |
+| 3 | 1 | 70/128 (54.7%) | 14/16 | 2/0 | 0.1726 | 5.18% | 0.00641 | 48/89 (53.9%) | 11 | 7 |
+| 4 | 2 | 91/128 (71.1%) | 11/16 | 5/0 | 0.1332 | 4.86% | 0.00708 | — | — | — |
+| 5 | 2 | 71/128 (55.5%) | 13/16 | 3/0 | 0.1243 | 4.64% | 0.00724 | — | — | — |
+| 6 | 2 | 95/128 (74.2%) | 13/16 | 3/0 | 0.0975 | 4.17% | 0.00631 | 51/89 (57.3%) | 7 | 4 |
+| 7 | 3 | 85/127 (66.9%) | 15/16 | 1/0 | 0.0837 | 3.85% | 0.00625 | — | — | — |
+| 8 | 3 | 95/128 (74.2%) | 12/16 | 3/1 | 0.0778 | 3.65% | 0.00576 | — | — | — |
+| 9 | 3 | 86/128 (67.2%) | 10/16 | 6/0 | 0.0664 | 3.58% | 0.00545 | 50/89 (56.2%) | 8 | 9 |
+| 10 | 4 | 82/128 (64.1%) | 15/16 | 1/0 | 0.0546 | 3.41% | 0.00504 | — | — | — |
+| 11 | 4 | 69/128 (53.9%) | 13/16 | 2/1 | 0.0488 | 3.03% | 0.00419 | — | — | — |
+| 12 | 4 | 64/128 (50.0%) | 15/16 | 0/1 | 0.0387 | 3.00% | 0.00406 | 37/89 (41.6%) | 4 | 17 |
 
 ## Diagnosis
 
@@ -88,9 +92,3 @@ number of uniform all-pass/all-fail groups.
 Use `val/reward/mean` or the canonical `evaluation/tb21/*` overlay for the
 89-task result. `val/reward/opencode/mean` excludes masked episodes and is not
 the benchmark pass rate.
-
-## Decision
-
-For future runs, stop at step 6/two epochs unless held-out evaluation improves.
-A stronger uplift claim requires paired multi-rollout base versus step-6
-evaluation; the current evidence already establishes epoch-4 degradation.
