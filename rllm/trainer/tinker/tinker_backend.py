@@ -112,9 +112,10 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             transform_config=kwargs.get("transform_config"),
             algorithm_config=kwargs.get("algorithm_config"),
         )
-        # model.name may be a Tinker model id (e.g. "nvidia/...:peft:262144") that
-        # isn't a valid HF repo id; render/tokenize from the HF tokenizer_model when
-        # set, falling back to model.name. (Mirrors the fireworks + SFT tinker backends.)
+        # model.name may be a Tinker model id (e.g. "nvidia/...:peft:262144") or a
+        # Fireworks model resource name — neither is a valid HF repo id; render/
+        # tokenize from the HF tokenizer_model when set, falling back to model.name.
+        # (Mirrors the fireworks + SFT tinker backends.)
         tokenizer_name = self.full_config.model.get("tokenizer_model") or self.full_config.model.name
         # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been initialized yet
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
@@ -156,7 +157,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         rollout_extra.setdefault("renderer_family", gateway_family)
         self.rollout_engine = TinkerEngine(
             base_url=self.full_config.tinker_base_url,
-            model_name=self.full_config.model.name,
+            model_name=tokenizer_name,
             service_client=self.service_client,
             tokenizer=self.tokenizer,
             max_prompt_length=self.full_config.data.max_prompt_length,
