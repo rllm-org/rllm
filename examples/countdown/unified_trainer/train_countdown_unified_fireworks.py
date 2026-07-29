@@ -19,7 +19,7 @@ def main(config):
         config=config,
         train_dataset=train_dataset,
         val_dataset=test_dataset,
-        backend="fireworks",
+        backend=config.rllm.get("backend", "fireworks"),
     )
     trainer.train()
 

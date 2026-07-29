@@ -3,12 +3,12 @@
 # Fireworks pooled serverless training. Unlike the managed Fireworks backend,
 # this provisions neither a trainer job nor an inference deployment.
 fireworks_base_url: "https://api.fireworks.ai"
-tinker_base_url: ${fireworks_base_url}
+tinker_base_url: "${fireworks_base_url}/training/v1/serverless"
 fuse_forward_backward_and_optim_step: false
 
 model:
-  name: accounts/fireworks/models/qwen3-4b-instruct-2507
-  tokenizer_model: Qwen/Qwen3-4B-Instruct-2507
+  name: accounts/fireworks/models/qwen3p5-9b
+  tokenizer_model: Qwen/Qwen3.5-9B
   lora_rank: 32
   train_unembed: false
   train_attn: true
