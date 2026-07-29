@@ -1006,7 +1006,7 @@ class AgentTrainer:
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
-        backend: Literal["verl", "tinker", "fireworks"] = "verl",
+        backend: Literal["verl", "tinker", "fireworks", "fireworks_serverless"] = "verl",
         agent_flow: Any = None,
         evaluator: Any = None,
         hooks: Any = None,
@@ -1096,6 +1096,20 @@ class AgentTrainer:
             from rllm.trainer.fireworks.fireworks_launcher import FireworksTrainerLauncher
 
             self.launcher = FireworksTrainerLauncher(
+                config=config,
+                workflow_class=workflow_class,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+                workflow_args=workflow_args,
+                store=store,
+                **kwargs,
+            )
+        elif backend == "fireworks_serverless":
+            from rllm.trainer.fireworks.fireworks_serverless_launcher import (
+                FireworksServerlessTrainerLauncher,
+            )
+
+            self.launcher = FireworksServerlessTrainerLauncher(
                 config=config,
                 workflow_class=workflow_class,
                 train_dataset=train_dataset,
