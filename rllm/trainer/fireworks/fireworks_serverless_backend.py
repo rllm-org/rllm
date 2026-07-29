@@ -15,16 +15,6 @@ from rllm.trainer.fireworks.fireworks_serverless_policy_trainer import (
 from rllm.trainer.tinker.tinker_backend import TinkerBackend
 
 
-def serverless_base_url(base_url: str) -> str:
-    """Normalize a Fireworks API URL to its serverless training endpoint."""
-    root = base_url.rstrip("/")
-    if root.endswith("/training/v1/serverless"):
-        return root
-    if root.endswith("/training/v1"):
-        return f"{root}/serverless"
-    return f"{root}/training/v1/serverless"
-
-
 class FireworksServerlessBackend(TinkerBackend):
     """Train and sample from one pooled Fireworks serverless session."""
 
@@ -37,7 +27,7 @@ class FireworksServerlessBackend(TinkerBackend):
         self.full_config = config
         self.service_client = FiretitanServiceClient(
             api_key=os.environ.get("FIREWORKS_API_KEY"),
-            base_url=serverless_base_url(config.fireworks_base_url),
+            base_url=config.tinker_base_url,
         )
         self.policy_trainer = None
         self.tokenizer = None

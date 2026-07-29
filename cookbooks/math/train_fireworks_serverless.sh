@@ -14,8 +14,8 @@ set -euo pipefail
 
 python -u train.py \
     rllm/backend=fireworks_serverless \
-    model.name=accounts/fireworks/models/qwen3-4b-instruct-2507 \
-    model.tokenizer_model=Qwen/Qwen3-4B-Instruct-2507 \
+    model.name=accounts/fireworks/models/qwen3p5-9b \
+    model.tokenizer_model=Qwen/Qwen3.5-9B \
     model.lora_rank=32 \
     training.max_length=16384 \
     training.group_size=8 \
@@ -26,6 +26,6 @@ python -u train.py \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.test_freq=10 \
     rllm.trainer.project_name=math \
-    rllm.trainer.experiment_name=qwen3-4b-instruct-fireworks-serverless \
+    rllm.trainer.experiment_name=qwen3p5-9b-fireworks-serverless \
     rllm.trainer.logger=[console,ui] \
     "$@"
