@@ -230,7 +230,15 @@ class MiniSweAgentHarness(BaseCliHarness):
         return status, finish_reason, error
 
     @staticmethod
-    def _map_exit_status(status: str | None, finish_reason: str | None = None) -> TerminationReason:
+    def _map_exit_status(
+        status: str | None,
+        finish_reason: str | None = None,
+        error: dict[str, str] | None = None,
+    ) -> TerminationReason:
+        if error:
+            error_text = "\n".join(str(error.get(key, "")) for key in ("message", "traceback"))
+            if "context_length_exceeded" in error_text:
+                return TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED
         if status == "Submitted":
             return TerminationReason.ENV_DONE
         if status == "LimitsExceeded":
@@ -255,7 +263,7 @@ class MiniSweAgentHarness(BaseCliHarness):
         if error is not None:
             episode.metadata["error"] = error
         if status is not None:
-            episode.termination_reason = self._map_exit_status(status, finish_reason)
+            episode.termination_reason = self._map_exit_status(status, finish_reason, error)
         elif episode.termination_reason is None:
             episode.termination_reason = TerminationReason.UNKNOWN
         return episode

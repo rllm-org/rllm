@@ -247,6 +247,7 @@ class UnifiedTrainer:
                 n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
                 retry_limit=self.rllm_config.workflow.retry_limit,
                 raise_on_error=self.rllm_config.workflow.get("raise_on_error", True),
+                verify_only_on_env_done=self.rllm_config.workflow.get("verify_only_on_env_done", False),
                 episode_logger=self.episode_logger,
                 train_sampling_params=training_sampling_params,
                 val_sampling_params=val_sampling_params,

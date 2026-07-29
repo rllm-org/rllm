@@ -29,6 +29,7 @@ python -u train_debug.py \
     fireworks_config.rollout_deployment_replica_count=2 \
     training.group_size=16 \
     training.learning_rate=1e-6 \
+    training.grad_clip_norm=0.0 \
     training.beta2=0.999 \
     training.max_length=67584 \
     rllm.rollout.train.temperature=1.0 \
@@ -49,13 +50,15 @@ python -u train_debug.py \
     rllm.algorithm.rollout_correction.bypass_mode=true \
     rllm.async_training.enable=true \
     rllm.async_training.mini_batch_size=8 \
-    rllm.async_training.fwd_bwd_group_size=1 \
+    rllm.async_training.fwd_bwd_group_size=8 \
     rllm.async_training.staleness_threshold=3.0 \
     rllm.async_training.trigger_parameter_sync_step=1 \
     rllm.async_training.partial_rollout=true \
     rllm.workflow.n_parallel_tasks=192 \
     rllm.workflow.raise_on_error=false \
+    rllm.workflow.verify_only_on_env_done=true \
     rllm.rejection_sample.filter_uniform_groups=true \
+    rllm.rejection_sample.refill_filtered_uniform_groups=true \
     rllm.gateway.tunnel=http://5.78.144.17:19090 \
     rllm.gateway.port=9200 \
     rllm.gateway.num_workers=4 \

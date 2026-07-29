@@ -53,6 +53,23 @@ logger = logging.getLogger(__name__)
 _MIN_FD_LIMIT = 8192
 
 
+def _log_error_termination(uid: str, episode: Episode) -> None:
+    if episode.termination_reason != TerminationReason.ERROR:
+        return
+    error = episode.metadata.get("error", {})
+    error = error if isinstance(error, dict) else {}
+    traceback_text = error.get("traceback")
+    if traceback_text:
+        logger.error("[%s] TerminationReason.ERROR traceback:\n%s", uid, traceback_text)
+    else:
+        logger.error(
+            "[%s] TerminationReason.ERROR without a captured traceback (%s): %s",
+            uid,
+            error.get("error_type", "unknown"),
+            error.get("message", ""),
+        )
+
+
 def _step_returned_nothing(step) -> bool:
     """True when a model call produced no usable output — empty content AND no tool
     calls. A dead/erroring upstream (proxy down, API failure) looks like this; a
@@ -388,6 +405,7 @@ class AgentFlowEngine:
         n_parallel_tasks: int = 128,
         retry_limit: int = 3,
         raise_on_error: bool = True,
+        verify_only_on_env_done: bool = False,
         episode_logger: EpisodeLogger | None = None,
         hooks: TaskHooks | None = None,
         train_sampling_params: dict | None = None,
@@ -410,6 +428,7 @@ class AgentFlowEngine:
         self.n_parallel_tasks = n_parallel_tasks
         self.retry_limit = retry_limit
         self.raise_on_error = raise_on_error
+        self.verify_only_on_env_done = verify_only_on_env_done
         self.episode_logger = episode_logger
         self.hooks = hooks
         self.train_sampling_params = train_sampling_params
@@ -628,6 +647,7 @@ class AgentFlowEngine:
                         f"[{uid}] Rewards: [{', '.join(reward_strs)}]{timing_str}, Termination: {episode.termination_reason}",
                         fg="green" if episode.is_correct else "yellow",
                     )
+                    _log_error_termination(uid, episode)
 
                     await self._log_episode(episode)
                     return task_id, rollout_idx, result_idx, episode
@@ -656,6 +676,7 @@ class AgentFlowEngine:
                             }
                         },
                     )
+                    _log_error_termination(uid, episode)
                     await self._log_episode(episode)
                     return task_id, rollout_idx, result_idx, episode
 
@@ -822,15 +843,23 @@ class AgentFlowEngine:
             strict=not is_validation,
         )
 
-        # The hook-resolved evaluator always receives the Task (legacy
-        # dict-style evaluators are adapted at hook-construction time).
         t = time.perf_counter()
-        eval_output: EvalOutput = await loop.run_in_executor(
-            self.executor,
-            ctx.evaluator.evaluate,
-            task_obj,
-            enriched,
-        )
+        if self.verify_only_on_env_done and enriched.termination_reason != TerminationReason.ENV_DONE:
+            eval_output = EvalOutput(
+                reward=0.0,
+                is_correct=False,
+                metadata={"verifier_skipped": 1.0},
+            )
+        else:
+            # The hook-resolved evaluator always receives the Task (legacy
+            # dict-style evaluators are adapted at hook-construction time).
+            eval_output = await loop.run_in_executor(
+                self.executor,
+                ctx.evaluator.evaluate,
+                task_obj,
+                enriched,
+            )
+            eval_output.metadata.setdefault("verifier_skipped", 0.0)
         if _timings is not None:
             _timings["time/evaluator_s"] = time.perf_counter() - t
             _agentflow_s = _timings.get("time/agentflow_s", 0.0)
