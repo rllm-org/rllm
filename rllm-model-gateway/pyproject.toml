@@ -16,7 +16,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "aiosqlite>=0.19.0",
     "PyYAML>=6.0",
-    "renderers>=0.1.7",
+    "renderers>=0.1.8",
     "transformers>=4.50.0",
 ]
 
@@ -31,6 +31,9 @@ dev = [
 
 [project.scripts]
 rllm-model-gateway = "rllm_model_gateway.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rllm_model_gateway", "src/rllm_model_gateway_v2"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
