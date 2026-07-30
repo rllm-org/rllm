@@ -117,8 +117,11 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # tokenize from the HF tokenizer_model when set, falling back to model.name.
         # (Mirrors the fireworks + SFT tinker backends.)
         tokenizer_name = self.full_config.model.get("tokenizer_model") or self.full_config.model.name
-        # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been initialized yet
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been
+        # initialized yet — unless a subclass (e.g. the Fireworks serverless backend)
+        # already built one in its own __init__.
+        if self.tokenizer is None:
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
         # Load image processor for vision-language models.
         # For VLM models, the tinker renderer requires an image_processor to

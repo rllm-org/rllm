@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 def _detached_warm_queue(hooks):
     """Temporarily detach a training warm queue so the enclosed work (validation,
     whose tasks aren't in the train schedule) falls back to direct sandbox creation."""
-    if hooks is None:
+    if hooks is None or not hasattr(hooks, "warm_queue"):
         yield
         return
     saved = hooks.warm_queue

@@ -29,6 +29,11 @@ def test_detached_warm_queue_detaches_and_restores():
     with _detached_warm_queue(None):
         pass
 
+    # Hooks without sandbox warm-queue support are also a no-op.
+    hooks_without_queue = SimpleNamespace()
+    with _detached_warm_queue(hooks_without_queue):
+        assert not hasattr(hooks_without_queue, "warm_queue")
+
 
 def _fake_trainer(warm_queue_size, sandbox_backend, hooks_present=True):
     rllm_config = OmegaConf.create(
