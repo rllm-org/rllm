@@ -7,6 +7,7 @@ from typing import Any
 
 from fireworks.training.sdk import FiretitanServiceClient
 from omegaconf import DictConfig
+from transformers import AutoTokenizer
 
 from rllm.trainer.backend_protocol import BackendProtocol
 from rllm.trainer.fireworks.fireworks_serverless_policy_trainer import (
@@ -25,12 +26,13 @@ class FireworksServerlessBackend(TinkerBackend):
         # ServiceClient, while this backend needs Fireworks' pooled session.
         BackendProtocol.__init__(self, config, **kwargs)
         self.full_config = config
+        tokenizer_name = config.model.get("tokenizer_model") or config.model.name
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.service_client = FiretitanServiceClient(
             api_key=os.environ.get("FIREWORKS_API_KEY"),
             base_url=config.tinker_base_url,
         )
         self.policy_trainer = None
-        self.tokenizer = None
         self.rollout_engine = None
         self.sampling_client = None
         self._algorithm_config = None

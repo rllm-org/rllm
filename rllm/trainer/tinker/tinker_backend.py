@@ -115,7 +115,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Fireworks model resource names are not HuggingFace-resolvable, so
         # backends compatible with Tinker can provide a tokenizer_model.
         tokenizer_name = self.full_config.model.get("tokenizer_model") or self.full_config.model.name
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        if self.tokenizer is None:
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
         # Load image processor for vision-language models.
         # For VLM models, the tinker renderer requires an image_processor to

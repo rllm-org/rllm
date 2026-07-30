@@ -44,7 +44,7 @@ rollout_engine:
   accumulate_reasoning: false
   disable_thinking: false
   bypass_render_with_parser: false
-  renderer_name: null
+  renderer_name: qwen3_5
 
 data:
   train_files: null
