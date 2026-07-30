@@ -163,7 +163,7 @@ async def frozenlake_flow(task: Task, config: AgentConfig) -> Episode:
     env = gym.make("FrozenLake-v1", desc=desc, is_slippery=is_slippery)
     env.reset(seed=seed)
 
-    client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
+    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key or "EMPTY")
 
     messages: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT},

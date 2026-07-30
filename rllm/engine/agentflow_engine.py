@@ -7,11 +7,9 @@ Single execution engine for both training and eval. Each rollout:
    is wrapped in :class:`rllm.hooks.FixedEvaluatorHooks` so the engine has
    exactly one execution path.
 2. The agent flow runs against the gateway session URL.
-3. Traces are fetched and the Episode is enriched with token-level Steps
-   (strict for training, relaxed for validation).
-4. The hook-resolved evaluator scores the enriched Episode.
-5. Reward is written back; the hook context is torn down. Sessions are
-   batch-deleted from the trace store at the end of the step.
+3. Traces are fetched and the gateway session is deleted.
+4. The Episode is enriched with token-level Steps and evaluated.
+5. Reward is written back and the hook context is torn down.
 
 Eval and training differ only in which hooks they install — the per-task
 pipeline in :meth:`_run_single` is identical.
@@ -41,8 +39,9 @@ from rllm.workflows.workflow import TerminationReason
 
 if TYPE_CHECKING:
     from rllm_model_gateway.models import TraceRecord
+    from rllm_model_gateway.v2.types import TraceRecord as V2TraceRecord
 
-    from rllm.gateway.manager import GatewayManager
+    from rllm.gateway.types import GatewayManagerProtocol
     from rllm.types import AgentFlow, Evaluator
     from rllm.utils.episode_logger import EpisodeLogger
 
@@ -101,7 +100,7 @@ class TaskHooks(Protocol):
 
 def enrich_episode_with_traces(
     episode: Episode,
-    traces: list[TraceRecord],
+    traces: list[TraceRecord | V2TraceRecord],
     uid: str,
     task: dict,
     *,
@@ -248,19 +247,27 @@ def enrich_episode_with_traces(
     )
 
 
-def _summarize_llm_latencies(traces: list[Any], agentflow_s: float) -> tuple[float, float]:
+def _summarize_llm_latencies(traces: list[TraceRecord | V2TraceRecord], agentflow_s: float) -> tuple[float, float]:
     """Return ``(llm_sum_s, llm_wall_s)`` from trace latencies (sum and interval-union)."""
     if not traces:
         return 0.0, 0.0
 
-    llm_sum_s = sum(getattr(tr, "latency_ms", 0.0) or 0.0 for tr in traces) / 1000.0
-
     intervals: list[tuple[float, float]] = []
+    llm_sum_s = 0.0
     for tr in traces:
-        end = float(getattr(tr, "timestamp", 0.0) or 0.0)
-        dur = (getattr(tr, "latency_ms", 0.0) or 0.0) / 1000.0
+        started_at = getattr(tr, "started_at", None)
+        completed_at = getattr(tr, "completed_at", None)
+        if started_at is not None and completed_at is not None:
+            start = float(started_at)
+            end = float(completed_at)
+            dur = max(0.0, end - start)
+        else:
+            end = float(getattr(tr, "timestamp", 0.0) or 0.0)
+            dur = (getattr(tr, "latency_ms", 0.0) or 0.0) / 1000.0
+            start = end - dur
+        llm_sum_s += dur
         if end > 0 and dur > 0:
-            intervals.append((end - dur, end))
+            intervals.append((start, end))
     if not intervals:
         return llm_sum_s, min(llm_sum_s, agentflow_s)
 
@@ -341,7 +348,7 @@ class AgentFlowEngine:
         self,
         agent_flow: AgentFlow,
         evaluator: Evaluator | None,
-        gateway: GatewayManager,
+        gateway: GatewayManagerProtocol,
         model: str,
         n_parallel_tasks: int = 128,
         retry_limit: int = 3,
@@ -406,9 +413,7 @@ class AgentFlowEngine:
 
         Runs per-task pipelines (flow + trace fetch + enrich + evaluate)
         in parallel, streamed via ``asyncio.as_completed`` so the
-        rollout-completed log lines arrive as each task finishes. One
-        ``POST /sessions/batch_delete`` at the end of the step cleans
-        up the trace store.
+        rollout-completed log lines arrive as each task finishes.
         """
         if task_ids is None:
             task_ids = [str(uuid.uuid4()) for _ in tasks]
@@ -416,12 +421,9 @@ class AgentFlowEngine:
         task_id_counter: dict[str, int] = defaultdict(int)
 
         futures = []
-        uids: list[str] = []
         for idx, (task, task_id) in enumerate(zip(tasks, task_ids, strict=True)):
             rollout_idx = task_id_counter[task_id]
             task_id_counter[task_id] += 1
-            uid = f"{task_id}:{rollout_idx}"
-            uids.append(uid)
             futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
 
         results: list[Episode | None] = [None] * len(tasks)
@@ -432,15 +434,6 @@ class AgentFlowEngine:
                 pbar.update(1)
 
         ordered_results: list[Episode] = results  # type: ignore[assignment]
-
-        # Batch session delete at end of step to keep the trace store from
-        # growing unboundedly. One ``POST /sessions/batch_delete`` for all
-        # uids instead of N (flush + DELETE) RTTs.
-        if uids:
-            try:
-                await self.gateway.adelete_sessions(uids)
-            except Exception:
-                logger.exception("Batch session delete failed; sessions may linger in the trace store")
 
         if self.episode_logger is not None:
             try:
@@ -479,7 +472,7 @@ class AgentFlowEngine:
                     try:
                         await self.gateway.adelete_session(uid)
                     except Exception as cleanup_err:
-                        logger.warning("[%s] failed to clear prior traces before retry: %s", uid, cleanup_err)
+                        logger.debug("[%s] retry cleanup did not remove a session: %s", uid, cleanup_err)
                 try:
                     episode = await self._run_single(task_obj, uid, is_validation=is_validation)
                     episode.id = uid
@@ -544,7 +537,13 @@ class AgentFlowEngine:
         )
         try:
             t = time.perf_counter()
-            traces = await self.gateway.aget_traces(uid)
+            try:
+                traces = await self.gateway.aget_traces(uid)
+            finally:
+                try:
+                    await self.gateway.adelete_session(uid)
+                except Exception:
+                    logger.warning("[%s] failed to delete gateway session", uid, exc_info=True)
             timings["time/traces_s"] = time.perf_counter() - t
 
             enriched = await self._finish_episode(
@@ -600,25 +599,22 @@ class AgentFlowEngine:
         )
         _timings["time/setup_s"] = time.perf_counter() - t
 
+        session_created = False
         try:
             if getattr(self.agent_flow, "needs_env", False) and ctx.env is None:
                 raise RuntimeError(
                     f"{type(self.agent_flow).__name__} needs a sandbox but hooks {type(self.hooks).__name__} provisioned none — pass hooks=SandboxTaskHooks(...) or run via AgentTrainer / run_dataset."
                 )
 
-            # Attach resolved sampling params to the session so the gateway
-            # enforces them on every LLM call; skip when there are none.
             session_sampling_params = (self.val_sampling_params if is_validation else self.train_sampling_params) or None
-            if session_sampling_params:
-                await self.gateway.acreate_session(uid, is_validation=is_validation, sampling_params=session_sampling_params)
-
-            # Flows whose LLM client runs *inside* the env (CLI harnesses)
-            # need the publicly-reachable URL — rewritten for in-container
-            # networking on the backend that actually provisioned this task's
-            # sandbox. Host-side flows keep the local gateway URL so they
-            # never depend on a tunnel hostname.
             llm_inside_env = getattr(self.agent_flow, "llm_inside_env", False)
-            session_url = self.gateway.get_session_url(uid, public=llm_inside_env)
+            session = await self.gateway.acreate_session(
+                uid,
+                is_validation=is_validation,
+                sampling_params=session_sampling_params,
+            )
+            session_url = self.gateway.get_session_url(session.session_id, public=llm_inside_env)
+            session_created = True
             if llm_inside_env and ctx.env is not None:
                 session_url = container_reachable_url(session_url, ctx.env_backend)
 
@@ -626,6 +622,7 @@ class AgentFlowEngine:
                 base_url=session_url,
                 model=self.model,
                 session_uid=uid,
+                api_key=session.api_key,
                 is_validation=is_validation,
                 sampling_params=session_sampling_params or {},
             )
@@ -636,6 +633,11 @@ class AgentFlowEngine:
             logger.debug("[%s] Agent flow completed, %d trajectories", uid, len(episode.trajectories))
             return episode, ctx
         except BaseException:
+            if session_created:
+                try:
+                    await self.gateway.adelete_session(uid)
+                except Exception:
+                    logger.warning("[%s] failed to delete gateway session after flow error", uid, exc_info=True)
             # Tear down on failure; success path defers teardown to the caller.
             try:
                 await loop.run_in_executor(self.executor, ctx.run_teardown)
@@ -646,7 +648,7 @@ class AgentFlowEngine:
     async def _finish_episode(
         self,
         raw_episode: Episode,
-        traces: list[TraceRecord],
+        traces: list[TraceRecord | V2TraceRecord],
         uid: str,
         task_obj: Task,
         ctx: TaskContext,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from rllm.engine.rollout.types import TokenInput, Tokenizer, TokenOutput
@@ -99,6 +99,10 @@ class RolloutEngine:
     async def get_token_output_from_token_input(self, token_input: TokenInput, **kwargs) -> TokenOutput:
         """Obtain the token output from the given token input."""
         raise NotImplementedError("get_token_output_from_token_input is not implemented")
+
+    def gateway_backend_config(self) -> dict[str, Any]:
+        """Return the serializable backend config used by the token gateway."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not provide a token gateway backend")
 
     @property
     def supports_token_in_token_out(self) -> bool:

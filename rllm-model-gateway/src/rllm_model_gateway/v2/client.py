@@ -4,12 +4,11 @@ from urllib.parse import quote
 import httpx
 from pydantic import BaseModel
 
-from rllm_model_gateway.v2.contracts import SessionTraces
+from rllm_model_gateway.v2.types import SessionTraces
 
 
 class SessionCredentials(BaseModel):
     session_id: str
-    url: str
     agent_key: str
 
 

@@ -1,13 +1,18 @@
 """Convert gateway TraceRecord to training-compatible Step, plus shared metrics."""
 
+from __future__ import annotations
+
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rllm_model_gateway.models import TraceRecord
 
 from rllm.engine.rollout import ModelOutput
 from rllm.tools.tool_base import ToolCall
 from rllm.types import Step, Trajectory
+
+if TYPE_CHECKING:
+    from rllm_model_gateway.v2.types import TraceRecord as V2TraceRecord
 
 
 def _parse_openai_tool_calls(raw_tool_calls: list[dict[str, Any]]) -> list[ToolCall]:
@@ -28,7 +33,7 @@ def _parse_openai_tool_calls(raw_tool_calls: list[dict[str, Any]]) -> list[ToolC
     return result
 
 
-def trace_record_to_step(trace: TraceRecord) -> Step:
+def trace_record_to_step(trace: TraceRecord | V2TraceRecord) -> Step:
     """Convert a gateway TraceRecord to a training Step.
 
     TraceRecord has clean top-level fields from vLLM:
@@ -36,6 +41,49 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
     - completion_token_ids
     - logprobs (per-token)
     """
+    if not isinstance(trace, TraceRecord):
+        from rllm_model_gateway.v2.types import TraceRecord as V2TraceRecord
+
+        if not isinstance(trace, V2TraceRecord):
+            raise TypeError(f"unsupported gateway trace type: {type(trace).__name__}")
+        content = trace.response.content if trace.response.content is not None else trace.response.text
+        reasoning = trace.response.reasoning_content or ""
+        tool_calls = _parse_openai_tool_calls(trace.response.tool_calls) if trace.response.tool_calls else None
+        metadata = dict(trace.output.metadata)
+        metadata["request_id"] = trace.request.request_id
+        if trace.response.finish_reason is not None:
+            metadata["finish_reason"] = trace.response.finish_reason
+        model_output = ModelOutput(
+            content=content,
+            reasoning=reasoning,
+            tool_calls=tool_calls,
+            prompt_ids=trace.input.prompt_token_ids,
+            completion_ids=trace.output.completion_token_ids,
+            logprobs=trace.output.logprobs or [],
+            routing_matrices=trace.output.routed_experts,
+            prompt_length=len(trace.input.prompt_token_ids),
+            completion_length=len(trace.output.completion_token_ids),
+            finish_reason=trace.response.finish_reason,
+            weight_version=trace.output.weight_version,
+        )
+        response_message: dict[str, Any] = {"role": "assistant", "content": content}
+        if reasoning:
+            response_message["reasoning"] = reasoning
+        if trace.response.tool_calls:
+            response_message["tool_calls"] = trace.response.tool_calls
+        chat_completions = list(trace.request.messages)
+        chat_completions.append(response_message)
+        return Step(
+            id=trace.request.request_id,
+            chat_completions=chat_completions,
+            model_output=model_output,
+            model_response=content,
+            output=content,
+            thought=reasoning,
+            metadata=metadata,
+            weight_version=trace.output.weight_version,
+        )
+
     content = trace.response_message.get("content", "") or ""
     reasoning = trace.response_message.get("reasoning", "") or ""
 

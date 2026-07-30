@@ -1,20 +1,20 @@
 from rllm_model_gateway.v2.config import BackendConfig, GatewayConfig, TokenizationConfig
 from rllm_model_gateway.v2.client import AsyncGatewayClient, GatewayClient, SessionCredentials
-from rllm_model_gateway.v2.contracts import (
-    CanonicalOutput,
-    CanonicalRequest,
+from rllm_model_gateway.v2.types import (
+    GatewayRequest,
+    GatewayResponse,
     SessionTraces,
     TokenInput,
     TokenOutput,
-    Trace,
+    TraceRecord,
 )
 from rllm_model_gateway.v2.server import create_app
 
 __all__ = [
     "AsyncGatewayClient",
     "BackendConfig",
-    "CanonicalOutput",
-    "CanonicalRequest",
+    "GatewayRequest",
+    "GatewayResponse",
     "GatewayConfig",
     "GatewayClient",
     "SessionCredentials",
@@ -22,6 +22,6 @@ __all__ = [
     "TokenInput",
     "TokenizationConfig",
     "TokenOutput",
-    "Trace",
+    "TraceRecord",
     "create_app",
 ]

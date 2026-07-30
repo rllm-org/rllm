@@ -106,6 +106,7 @@ class HarborRuntime:
         *,
         model_name: str | None = None,
         inference_url: str | None = None,
+        inference_api_key: str | None = None,
         trial_name: str = "",
         timeout: float | None = None,
     ) -> HarborTaskOutcome:
@@ -116,6 +117,7 @@ class HarborRuntime:
             agent_name=self.agent_name,
             model_name=model_name,
             inference_url=inference_url,
+            inference_api_key=inference_api_key,
             environment_type=self.environment_type,
             agent_kwargs=self.agent_kwargs,
             agent_timeout_multiplier=self.agent_timeout_multiplier,
@@ -150,6 +152,7 @@ class HarborRuntime:
             task_path=task_path,
             model_name=config.model,
             inference_url=config.base_url,
+            inference_api_key=config.api_key,
             trial_name=config.session_uid,
         )
 
@@ -207,6 +210,7 @@ class HarborRuntime:
                 task_path=task_path,
                 model_name=MODEL_PLACEHOLDER,
                 inference_url=sub.inference_url,
+                inference_api_key=sub.inference_api_key,
                 trial_name=sub.session_id,
                 timeout=timeout,
             )

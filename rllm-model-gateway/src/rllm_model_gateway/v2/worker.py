@@ -6,8 +6,7 @@ from typing import Any
 
 from rllm_model_gateway.v2.backend import build_backend
 from rllm_model_gateway.v2.config import WorkerProcessConfig
-from rllm_model_gateway.v2.contracts import CanonicalRequest
-from rllm_model_gateway.v2.errors import GatewayError
+from rllm_model_gateway.v2.types import GatewayError, GatewayRequest
 from rllm_model_gateway.v2.service import GatewayService
 from rllm_model_gateway.v2.tokenization import TokenizationService
 
@@ -26,7 +25,7 @@ class WorkerRuntime:
                 payload.get("sampling_params"),
             )
         if operation == "generate":
-            request = CanonicalRequest.model_validate(payload["request"])
+            request = GatewayRequest.model_validate(payload["request"])
             output = await self._service.generate(request)
             return output.model_dump(mode="json")
         if operation == "get_session_traces":

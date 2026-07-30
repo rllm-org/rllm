@@ -148,23 +148,21 @@ remote_runtime:
 
 # Gateway Configuration (model gateway for AgentFlow-based training)
 gateway:
+  version: v1       # "v1" (legacy proxy) | "v2" (token-native gateway)
   port: 9090
   host: null          # Auto-detects routable IP; set explicitly to override
-  tunnel: null        # Reach gateway from remote sandboxes. Either a backend name ("cloudflared")
-                      # to auto-spawn a tunnel, or an http(s):// URL reachable from the sandbox
-                      # (your own tailscale IP, bore/ngrok/frp URL, internal DNS, etc.).
+  num_workers: null   # v2 generation workers; null defaults to 1
+  tunnel: null        # Existing public URL or managed backend, e.g. "cloudflared" or "ngrok"
+  worker_startup_timeout_seconds: 300
+  request_timeout_seconds: 3600
+  heartbeat_seconds: 10
+  cumulative_token_mode: false
+  renderer_family: auto
+  renderer_kwargs: {}
   store: memory       # "memory" (non-persistent) | "sqlite" (writes traces to disk)
   db_path: null       # Only used when store=sqlite; null → auto-resolved path (logged at startup)
   # Sampling params attached to a session overwrite those keys on every LLM call;
   # keys not set pass through untouched.
-  cumulative_token_mode: false   # Drift-free multi-turn token forwarding: rewrites turn 2+ to
-                                 # /v1/completions with cumulative raw token IDs built by the renderer.
-                                 # The tokenizer is loaded from the served model path (model.name).
-  renderer_family: auto  # renderers family for the cumulative-mode bridge. Renderers can auto infer it
-                         # if your input model.name is a huggingface model it. If model.name is a local
-                         # path, you must set this explicitly (e.g. qwen3, qwen3.5, qwen3.6, glm-5, 
-                         # deepseek-v3, gpt-oss). Check supported model families in MODEL_RENDERER_MAP of 
-                         # https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py
 
 # Async Training Configuration
 async_training:

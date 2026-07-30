@@ -54,7 +54,7 @@ class BashHarness(SandboxedAgentFlow):
 
         sandbox = env
 
-        client = OpenAI(base_url=config.base_url, api_key="EMPTY")
+        client = OpenAI(base_url=config.base_url, api_key=config.api_key or "EMPTY")
         max_turns = int(task.metadata.get("rllm", {}).get("max_turns") or 50)
         agent_timeout = float(task.metadata.get("agent_timeout", 600))
         agent_user = task.metadata.get("agent_user")

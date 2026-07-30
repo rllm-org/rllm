@@ -17,6 +17,7 @@ from tqdm import tqdm
 from rllm.data import Dataset, StatefulTaskDataLoader
 from rllm.engine.rollout import RolloutEngine
 from rllm.engine.unified_workflow_engine import UnifiedWorkflowEngine
+from rllm.gateway.manager import GatewayManager
 from rllm.trainer.algorithms.advantage import (
     AlgorithmConfig,
     collect_reward_and_advantage_from_trajectory_groups,
@@ -163,6 +164,11 @@ class UnifiedTrainer:
         remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)
         if not has_agent_flow and not remote_runtime_enabled:
             assert workflow_class is not None, "Either workflow_class, (agent_flow AND (evaluator OR hooks)), or remote_runtime must be provided"
+        if has_agent_flow or remote_runtime_enabled:
+            from rllm.gateway.manager import DEFAULT_GATEWAY_PORT, preflight_gateway_port
+
+            gateway_config = config.rllm.get("gateway", {}) or {}
+            preflight_gateway_port(int(gateway_config.get("port", DEFAULT_GATEWAY_PORT)))
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
@@ -223,10 +229,10 @@ class UnifiedTrainer:
 
         if agent_flow is not None and (evaluator is not None or hooks is not None):
             from rllm.engine.agentflow_engine import AgentFlowEngine
-            from rllm.gateway.manager import GatewayManager
+            from rllm.gateway.manager import create_gateway_manager
 
             gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
-            self._gateway = GatewayManager(self.config, mode=gateway_mode)
+            self._gateway = create_gateway_manager(self.config, mode=gateway_mode)
 
             training_sampling_params = OmegaConf.to_container(self.rllm_config.rollout.train, resolve=True)
             val_sampling_params = OmegaConf.to_container(self.rllm_config.rollout.val, resolve=True)
@@ -253,10 +259,10 @@ class UnifiedTrainer:
                 RemoteRuntimeConfig,
                 create_remote_runtime,
             )
-            from rllm.gateway.manager import GatewayManager
+            from rllm.gateway.manager import create_gateway_manager
 
             gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
-            self._gateway = GatewayManager(self.config, mode=gateway_mode)
+            self._gateway = create_gateway_manager(self.config, mode=gateway_mode)
 
             remote_runtime_config = RemoteRuntimeConfig(
                 enabled=True,
@@ -404,22 +410,26 @@ class UnifiedTrainer:
         trainer_state.train_dataloader = self._train_dataloader
 
         await self.backend.on_train_start(trainer_state)
-
-        if hasattr(self, "_gateway") and self._gateway is not None:
-            self._gateway.start(self.backend.rollout_engine)
-            self._gateway.set_weight_version(trainer_state.weight_version)
-
-        if self.rllm_config.trainer.get("val_before_train", True):
-            await self._validate_async(trainer_state)
-            if self.rllm_config.trainer.get("val_only", False):
-                return
-
-        # we start from step (1 + original start batch index)
-        trainer_state.global_step += 1
-
         try:
+            if self._gateway is not None:
+                self._gateway.start(self.backend.rollout_engine)
+                if isinstance(self._gateway, GatewayManager):
+                    self._gateway.set_weight_version(trainer_state.weight_version)
+
+            if self.rllm_config.trainer.get("val_before_train", True):
+                await self._validate_async(trainer_state)
+                if self.rllm_config.trainer.get("val_only", False):
+                    return
+
+            # we start from step (1 + original start batch index)
+            trainer_state.global_step += 1
             await self._fit_async(trainer_state)
         finally:
+            if self._gateway is not None:
+                try:
+                    await self._gateway.astop()
+                except Exception:
+                    logger.exception("Gateway shutdown failed during fit_async() cleanup")
             try:
                 await self.backend.on_train_end(trainer_state)
             except Exception:
@@ -819,7 +829,7 @@ class UnifiedTrainer:
         await self.backend.on_policy_updated(trainer_state)
         if rollout_engine is not None:
             rollout_engine.weight_version = trainer_state.weight_version
-        if self._gateway is not None:
+        if isinstance(self._gateway, GatewayManager):
             await self._gateway.aset_weight_version(trainer_state.weight_version)
         coordinator.on_sync_complete()
 
@@ -986,15 +996,14 @@ class AgentTrainer:
     Provide exactly one of ``workflow_class`` or ``agent_flow``. When the run
     needs sandboxes (the flow declares ``needs_env``, or any dataset row
     carries an environment — see :func:`rllm.hooks.scan_env_requirements`),
-    :class:`rllm.hooks.SandboxTaskHooks` and gateway loopback/tunnel are
+    :class:`rllm.hooks.SandboxTaskHooks` and local Docker gateway routing are
     auto-wired. A passed ``evaluator`` becomes the hooks' FixedEvaluation
     policy (it does not disable the sandbox lifecycle); pass ``hooks=``
     explicitly to take over per-task setup entirely.
 
     Args:
         sandbox_backend: Backend for the auto-wired sandbox hooks
-            (``"docker"`` / ``"local"`` / ``"modal"`` / …). Remote backends
-            auto-spawn a cloudflared tunnel.
+            (``"docker"`` / ``"local"`` / ``"modal"`` / …).
         sandbox_concurrency: Override ``max_concurrent`` on a
             :class:`SandboxedAgentFlow` agent.
     """
@@ -1015,14 +1024,13 @@ class AgentTrainer:
         store: Store | None = None,
         **kwargs,
     ):
-        # Loopback/tunnel pinning must happen here, before the launcher
+        # Local Docker loopback pinning must happen here, before the launcher
         # constructs GatewayManager, and applies to explicitly-passed hooks too.
         if agent_flow is not None:
             from rllm.gateway.tunnel import is_local_sandbox_backend
             from rllm.hooks import (
                 FixedEvaluation,
                 SandboxTaskHooks,
-                enable_gateway_tunnel,
                 pin_gateway_host_loopback,
                 scan_env_requirements,
             )
@@ -1035,13 +1043,9 @@ class AgentTrainer:
                 )
                 evaluator = None
             if hooks is not None and scan.needs_env:
-                config = pin_gateway_host_loopback(config)
-                # The hooks-backend clause matters only for explicitly-passed
-                # hooks; auto-wired hooks share `sandbox_backend`, already
-                # folded into `scan.any_remote`.
                 hooks_backend = getattr(hooks, "sandbox_backend", None)
-                if scan.any_remote or not is_local_sandbox_backend(hooks_backend):
-                    config = enable_gateway_tunnel(config)
+                if not scan.any_remote and is_local_sandbox_backend(hooks_backend):
+                    config = pin_gateway_host_loopback(config)
 
         # Forward CLI overrides through the flow's configure(); the wiring
         # warns about anything it returns unconsumed.

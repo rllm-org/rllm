@@ -122,19 +122,15 @@ class BaseCliHarness(SandboxedAgentFlow):
     def gateway_api_key(config: AgentConfig, fallback_env_var: str) -> str:
         """Return the API key to inject into the sandbox for *fallback_env_var*.
 
-        When the eval gateway is exposed publicly it generates an
-        ``inbound_auth_token`` and stamps it on
-        ``config.metadata["gateway_auth_token"]``. Every provider key
-        the harness writes into the sandbox env (``OPENAI_API_KEY``,
-        ``ANTHROPIC_API_KEY``, …) must be that bearer token, because
-        that's what the gateway's middleware checks. The gateway then
-        replaces the auth header with the route's pre-resolved upstream
-        auth header before forwarding.
+        Training gateways provide a session-scoped ``config.api_key``.
+        Eval gateways may instead stamp their inbound token on
+        ``config.metadata["gateway_auth_token"]``. Every provider key the
+        harness writes into the sandbox must use that gateway credential.
 
         Loopback gateways (no token) keep the current behaviour: pass
         the user's real key through, or a placeholder if unset.
         """
-        token = (config.metadata or {}).get("gateway_auth_token")
+        token = config.api_key or (config.metadata or {}).get("gateway_auth_token")
         if token:
             return token
         import os

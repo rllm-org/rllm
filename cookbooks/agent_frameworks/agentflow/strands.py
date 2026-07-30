@@ -38,7 +38,7 @@ async def strands_math(task: Task, config: AgentConfig) -> None:
     framework auto-builds the Episode; the evaluator reads the answer from
     the trajectory's last assistant message.
     """
-    client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
+    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key or "EMPTY")
     model = OpenAIModel(client=client, model_id=config.model)
     agent = Agent(model=model, tools=[calculate], system_prompt=SYSTEM_PROMPT)
     await agent.invoke_async(task.instruction)

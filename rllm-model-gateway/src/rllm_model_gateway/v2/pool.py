@@ -9,7 +9,7 @@ from multiprocessing.process import BaseProcess
 from typing import Any
 
 from rllm_model_gateway.v2.config import GatewayConfig
-from rllm_model_gateway.v2.errors import GatewayError, WorkerUnavailableError
+from rllm_model_gateway.v2.types import GatewayError, WorkerUnavailableError
 from rllm_model_gateway.v2.worker import worker_main
 
 logger = logging.getLogger(__name__)
@@ -166,7 +166,7 @@ class WorkerPool:
 
     def _wait_until_ready(self) -> None:
         waiting = set(range(self.num_workers))
-        deadline = time.monotonic() + self._config.request_timeout_seconds
+        deadline = time.monotonic() + self._config.worker_startup_timeout_seconds
         while waiting:
             remaining = deadline - time.monotonic()
             if remaining <= 0:

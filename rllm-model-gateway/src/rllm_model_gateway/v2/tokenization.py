@@ -13,7 +13,7 @@ class TokenizationService:
     def __init__(self, config: TokenizationConfig) -> None:
         self._tokenizer = AutoTokenizer.from_pretrained(
             config.model,
-            trust_remote_code=config.trust_remote_code,
+            trust_remote_code=False,
         )
         self._renderer = create_renderer(
             self._tokenizer,

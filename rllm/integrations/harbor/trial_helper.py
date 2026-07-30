@@ -109,6 +109,7 @@ def build_harbor_trial_config(
     agent_name: str,
     model_name: str | None = None,
     inference_url: str | None = None,
+    inference_api_key: str | None = None,
     environment_type: str | None = None,
     agent_kwargs: dict[str, Any] | None = None,
     agent_timeout_multiplier: float | None = None,
@@ -170,6 +171,9 @@ def build_harbor_trial_config(
         env["OPENAI_BASE_URL"] = container_url
         env["LLM_BASE_URL"] = container_url
         env["ANTHROPIC_BASE_URL"] = container_url
+    if inference_api_key:
+        for key in _DUMMY_API_KEYS:
+            env[key] = inference_api_key
 
     env_type = None
     if environment_type:
@@ -306,6 +310,7 @@ async def run_harbor_task(
     agent_name: str,
     model_name: str | None = None,
     inference_url: str | None = None,
+    inference_api_key: str | None = None,
     environment_type: str | None = None,
     agent_kwargs: dict[str, Any] | None = None,
     agent_timeout_multiplier: float | None = None,
@@ -347,6 +352,7 @@ async def run_harbor_task(
             agent_name=agent_name,
             model_name=model_name,
             inference_url=inference_url,
+            inference_api_key=inference_api_key,
             environment_type=environment_type,
             agent_kwargs=agent_kwargs,
             agent_timeout_multiplier=agent_timeout_multiplier,

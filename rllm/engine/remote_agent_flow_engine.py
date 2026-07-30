@@ -16,7 +16,7 @@ from rllm.engine.remote_runtime.protocol import (
     TaskSubmission,
 )
 from rllm.engine.trace_converter import compute_step_metrics, trace_record_to_step
-from rllm.gateway.manager import GatewayManager
+from rllm.gateway.types import GatewayManagerProtocol
 from rllm.types import Episode, Step, Trajectory
 from rllm.utils.episode_logger import EpisodeLogger
 from rllm.workflows.workflow import TerminationReason
@@ -30,7 +30,7 @@ class RemoteAgentFlowEngine:
     def __init__(
         self,
         runtime: RemoteAgentRuntime,
-        gateway: GatewayManager,
+        gateway: GatewayManagerProtocol,
         session_timeout: float = 900.0,
         n_parallel_tasks: int = 128,
         episode_logger: EpisodeLogger | None = None,
@@ -108,44 +108,45 @@ class RemoteAgentFlowEngine:
             session_id = str(uuid.uuid4())
             is_validation = kwargs.get("is_validation", False)
 
-            await self.gateway.acreate_session(session_id, is_validation=is_validation)
-            session_url = self.gateway.get_session_url(session_id)
+            created_session = await self.gateway.acreate_session(session_id, is_validation=is_validation)
+            session_url = self.gateway.get_session_url(created_session.session_id)
 
             submission = TaskSubmission(
                 task=task,
                 session_id=session_id,
                 task_id=task_id,
                 inference_url=session_url,
+                inference_api_key=created_session.api_key,
             )
-            results = await self.runtime.execute_tasks([submission], timeout=self.session_timeout)
-            result = results[0]
-
-            if not result.finished:
-                logger.warning("Remote task failed (session=%s, assigning reward=0): %s", result.session_id, result.error)
-                result.reward = 0.0
-
-            traces = await self.gateway.aget_traces(session_id)
-            episode = _build_episode(traces, result, uid, task)
-            if result.metadata:
-                episode.metadata.update(result.metadata)
-            if not result.finished:
-                error_info: dict = {
-                    "error_message": result.error or "Unknown error",
-                    "elapsed": result.elapsed,
-                }
-                if result.raw_result:
-                    for k in ("stop_reason", "traceback", "status_code"):
-                        if k in result.raw_result:
-                            error_info[k] = result.raw_result[k]
-                episode.metadata["error"] = error_info
-
-            # Delete traces from gateway DB to prevent unbounded growth
             try:
-                await self.gateway.adelete_session(session_id)
-            except Exception as e:
-                logger.warning("[%s] Failed to delete session (non-fatal): %s", uid, e)
+                results = await self.runtime.execute_tasks([submission], timeout=self.session_timeout)
+                result = results[0]
 
-            return task_id, rollout_idx, result_idx, episode
+                if not result.finished:
+                    logger.warning("Remote task failed (session=%s, assigning reward=0): %s", result.session_id, result.error)
+                    result.reward = 0.0
+
+                traces = await self.gateway.aget_traces(session_id)
+                episode = _build_episode(traces, result, uid, task)
+                if result.metadata:
+                    episode.metadata.update(result.metadata)
+                if not result.finished:
+                    error_info: dict = {
+                        "error_message": result.error or "Unknown error",
+                        "elapsed": result.elapsed,
+                    }
+                    if result.raw_result:
+                        for k in ("stop_reason", "traceback", "status_code"):
+                            if k in result.raw_result:
+                                error_info[k] = result.raw_result[k]
+                    episode.metadata["error"] = error_info
+
+                return task_id, rollout_idx, result_idx, episode
+            finally:
+                try:
+                    await self.gateway.adelete_session(session_id)
+                except Exception as e:
+                    logger.warning("[%s] Failed to delete session (non-fatal): %s", uid, e)
 
     def shutdown(self) -> None:
         """No local resources to clean up (runtime shutdown is separate)."""

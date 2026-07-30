@@ -16,9 +16,8 @@ declared needs:
 * the **task** declares it (``environment/`` dir or ``task_path`` metadata).
 
 Wiring-time call sites (trainer/CLI) use :func:`scan_env_requirements` over
-the datasets to decide *whether to install these hooks at all* and whether
-the gateway needs a public tunnel — the same predicate, evaluated before
-any per-task bind.
+the datasets to decide *whether to install these hooks at all*, evaluated
+before any per-task bind.
 """
 
 from __future__ import annotations
@@ -327,21 +326,6 @@ def pin_gateway_host_loopback(config: DictConfig) -> DictConfig:
     )
 
 
-def enable_gateway_tunnel(config: DictConfig) -> DictConfig:
-    """Auto-wire ``rllm.gateway.tunnel="cloudflared"`` when no tunnel is already set.
-
-    Callers decide *when* (sandboxes run off-host — see
-    :func:`scan_env_requirements`); this helper only applies the setting.
-    """
-    gw = config.rllm.get("gateway", {}) or {}
-    if gw.get("tunnel"):
-        return config
-    return OmegaConf.merge(
-        config,
-        OmegaConf.create({"rllm": {"gateway": {"tunnel": "cloudflared"}}}),
-    )
-
-
 __all__ = [
     "EnvRequirements",
     "EvaluationPolicy",
@@ -350,7 +334,6 @@ __all__ = [
     "FromTaskEvaluation",
     "RolloutPlan",
     "SandboxTaskHooks",
-    "enable_gateway_tunnel",
     "pin_gateway_host_loopback",
     "resolve_rollout_plan",
     "scan_env_requirements",

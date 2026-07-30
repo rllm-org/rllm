@@ -55,7 +55,7 @@ async def deepcoder_flow(task: Task, config: AgentConfig) -> Episode:
     meta = task.metadata or {}
     question = str(meta.get("question") or task.instruction or "")
 
-    client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
+    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key or "EMPTY")
 
     messages: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT},

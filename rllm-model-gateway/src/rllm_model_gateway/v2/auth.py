@@ -1,7 +1,7 @@
 import hmac
 import secrets
 
-from rllm_model_gateway.v2.errors import GatewayError
+from rllm_model_gateway.v2.types import GatewayError
 
 
 class GatewayAuth:

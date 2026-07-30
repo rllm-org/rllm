@@ -6,7 +6,6 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
-from urllib.parse import quote
 
 import uvicorn
 from fastapi import FastAPI, Header, Request
@@ -15,8 +14,7 @@ from pydantic import BaseModel, Field
 
 from rllm_model_gateway.v2.auth import GatewayAuth
 from rllm_model_gateway.v2.config import BackendConfig, GatewayConfig, TokenizationConfig
-from rllm_model_gateway.v2.contracts import APIProtocol, CanonicalOutput, SessionTraces
-from rllm_model_gateway.v2.errors import GatewayError
+from rllm_model_gateway.v2.types import APIProtocol, GatewayError, GatewayResponse, SessionTraces
 from rllm_model_gateway.v2.pool import WorkerPool
 from rllm_model_gateway.v2.protocols import error_payload, normalize_request, response_payload, stream_events
 
@@ -67,9 +65,7 @@ def create_app(config: GatewayConfig, pool: WorkerPool | None = None) -> FastAPI
             },
         )
         agent_key = auth.issue_session_key(session_id)
-        base_url = config.agent_base_url.rstrip("/")
-        session_path = quote(session_id, safe="/")
-        return {"session_id": session_id, "url": f"{base_url}/sessions/{session_path}/v1", "agent_key": agent_key}
+        return {"session_id": session_id, "agent_key": agent_key}
 
     @app.get("/admin/sessions/{session_id:path}")
     async def get_session(session_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -107,13 +103,13 @@ def create_app(config: GatewayConfig, pool: WorkerPool | None = None) -> FastAPI
         response_model = str(body.get("model") or "")
         created_at = int(time.time())
 
-        async def run() -> CanonicalOutput:
+        async def run() -> GatewayResponse:
             payload = await worker_pool.call(
                 session_id,
                 "generate",
                 {"request": canonical_request.model_dump(mode="json")},
             )
-            return CanonicalOutput.model_validate(payload)
+            return GatewayResponse.model_validate(payload)
 
         if not stream:
             task = asyncio.create_task(run())
@@ -183,12 +179,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=9090)
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--worker-startup-timeout-seconds", type=float, default=300.0)
     parser.add_argument("--admin-key", required=True)
-    parser.add_argument("--agent-base-url", required=True)
     parser.add_argument("--backend", required=True)
     parser.add_argument("--backend-kwargs-json", default="{}")
     parser.add_argument("--tokenizer-model", required=True)
-    parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--renderer", default="auto")
     parser.add_argument("--renderer-kwargs-json", default="{}")
     parser.add_argument("--cumulative", action=argparse.BooleanOptionalAction, default=False)
@@ -215,12 +210,11 @@ def main() -> None:
         host=args.host,
         port=args.port,
         num_workers=args.workers,
+        worker_startup_timeout_seconds=args.worker_startup_timeout_seconds,
         admin_key=args.admin_key,
-        agent_base_url=args.agent_base_url,
         cumulative=args.cumulative,
         tokenization=TokenizationConfig(
             model=args.tokenizer_model,
-            trust_remote_code=args.trust_remote_code,
             renderer=args.renderer,
             renderer_kwargs=renderer_kwargs,
         ),

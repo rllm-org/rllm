@@ -32,7 +32,7 @@ async def langgraph_math(task: Task, config: AgentConfig) -> None:
     llm = ChatOpenAI(
         model=config.model,
         base_url=config.base_url,
-        api_key="EMPTY",
+        api_key=config.api_key or "EMPTY",
     )
     agent = create_react_agent(llm, tools=[calculate], prompt=SYSTEM_PROMPT)
     await agent.ainvoke({"messages": [("user", task.instruction)]})

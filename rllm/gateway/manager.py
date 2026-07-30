@@ -28,6 +28,7 @@ For Tinker backends, an in-process handler is injected into the gateway
 
 from __future__ import annotations
 
+import errno
 import logging
 import re
 import socket
@@ -41,6 +42,7 @@ from rllm_model_gateway.client import AsyncGatewayClient, GatewayClient
 from rllm_model_gateway.models import TraceRecord
 
 from rllm.env import env_float
+from rllm.gateway.types import GatewayManagerProtocol, GatewaySession
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
@@ -52,6 +54,24 @@ logger = logging.getLogger(__name__)
 _HEALTH_POLL_INTERVAL = 0.5
 _HEALTH_POLL_TIMEOUT = env_float("RLLM_GATEWAY_HEALTH_TIMEOUT_S", 30.0)  # set env var: export RLLM_GATEWAY_HEALTH_TIMEOUT_S=xxx
 _TRACE_API_TIMEOUT = 600.0
+DEFAULT_GATEWAY_PORT = 9090
+
+
+class GatewayPortInUseError(RuntimeError):
+    pass
+
+
+def preflight_gateway_port(port: int) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("0.0.0.0", port))
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+            raise GatewayPortInUseError(
+                f"Gateway port {port} is already in use. Choose another with rllm.gateway.port=<port>."
+            ) from exc
 
 
 def _find_free_port() -> int:
@@ -149,7 +169,7 @@ class GatewayManager:
         gw_cfg = config.rllm.get("gateway", {})
         configured_host = gw_cfg.get("host", None)
         self.host: str = configured_host if configured_host else _get_routable_ip()
-        self.port: int = gw_cfg.get("port", 9090)
+        self.port: int = gw_cfg.get("port", DEFAULT_GATEWAY_PORT)
         self.store: str = gw_cfg.get("store", "memory")
         self.db_path: str | None = gw_cfg.get("db_path", None)
         if self.store not in ("memory", "sqlite"):
@@ -239,12 +259,9 @@ class GatewayManager:
 
     def _start_tunnel(self) -> None:
         """Spawn the named tunnel backend and pin its public URL onto ``self.public_url``."""
-        if self.tunnel_backend != "cloudflared":
-            raise ValueError(f"Unsupported gateway tunnel backend: {self.tunnel_backend!r}. Supported: 'cloudflared', or pass an http(s):// URL.")
+        from rllm.gateway.tunnel import create_tunnel
 
-        from rllm.gateway.tunnel import CloudflaredTunnel
-
-        tunnel = CloudflaredTunnel(self.gateway_url)
+        tunnel = create_tunnel(self.tunnel_backend, self.gateway_url)
         self.public_url = tunnel.start()
         self._tunnel = tunnel
 
@@ -280,9 +297,10 @@ class GatewayManager:
 
     # -- Session / trace API -------------------------------------------------
 
-    def create_session(self, session_id: str, is_validation: bool = False, sampling_params: dict[str, Any] | None = None) -> str:
+    def create_session(self, session_id: str, is_validation: bool = False, sampling_params: dict[str, Any] | None = None) -> GatewaySession:
         sp = sampling_params if sampling_params is not None else (self._val_sampling_params if is_validation else self._train_sampling_params)
-        return self.client.create_session(session_id=session_id, sampling_params=sp or None)
+        created_session_id = self.client.create_session(session_id=session_id, sampling_params=sp or None)
+        return GatewaySession(session_id=created_session_id, api_key="EMPTY")
 
     def get_session_url(self, session_id: str, *, public: bool = True) -> str:
         """Session-scoped base URL for the flow's LLM client.
@@ -304,9 +322,10 @@ class GatewayManager:
 
     # -- Async session / trace API -------------------------------------------
 
-    async def acreate_session(self, session_id: str, is_validation: bool = False, sampling_params: dict[str, Any] | None = None) -> str:
+    async def acreate_session(self, session_id: str, is_validation: bool = False, sampling_params: dict[str, Any] | None = None) -> GatewaySession:
         sp = sampling_params if sampling_params is not None else (self._val_sampling_params if is_validation else self._train_sampling_params)
-        return await self.async_client.create_session(session_id=session_id, sampling_params=sp or None)
+        created_session_id = await self.async_client.create_session(session_id=session_id, sampling_params=sp or None)
+        return GatewaySession(session_id=created_session_id, api_key="EMPTY")
 
     async def aget_traces(self, session_id: str) -> list[TraceRecord]:
         await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
@@ -323,6 +342,12 @@ class GatewayManager:
             return 0
         await self.async_client.flush()
         return await self.async_client.delete_sessions(session_ids)
+
+    async def astop(self) -> None:
+        if self._async_client is not None:
+            await self._async_client.close()
+            self._async_client = None
+        self.stop()
 
     # -- Weight version ------------------------------------------------------
 
@@ -503,3 +528,19 @@ class EvalGatewayManager(GatewayManager):
 
         if self.tunnel_backend and not self.public_url:
             self._start_tunnel()
+
+
+def create_gateway_manager(config: DictConfig, mode: str = "thread") -> GatewayManagerProtocol:
+    version = str(config.rllm.get("gateway", {}).get("version", "v1")).lower()
+    if version == "v1":
+        return GatewayManager(config, mode=mode)
+    if version == "v2":
+        try:
+            from rllm.gateway.manager_v2 import GatewayManagerV2
+        except ModuleNotFoundError as exc:
+            if exc.name and exc.name.startswith("rllm_model_gateway.v2"):
+                raise RuntimeError("gateway.version=v2 requires an rllm-model-gateway installation with V2 support") from exc
+            raise
+
+        return GatewayManagerV2(config)
+    raise ValueError(f"rllm.gateway.version must be 'v1' or 'v2', got {version!r}")

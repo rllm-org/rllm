@@ -40,7 +40,7 @@ class ReActHarness:
 
         from rllm.eval.reward_fns._resolver import get_verifier_system_prompt
 
-        client = OpenAI(base_url=config.base_url, api_key="EMPTY")
+        client = OpenAI(base_url=config.base_url, api_key=config.api_key or "EMPTY")
 
         # Compose system prompt: base + verifier-specific output-format hint
         system_msg = self.system_prompt

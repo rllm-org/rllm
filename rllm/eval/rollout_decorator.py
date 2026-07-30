@@ -157,7 +157,7 @@ def rollout(
 
         @rllm.rollout
         async def solver(task, config):
-            client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
+            client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key or "EMPTY")
             await client.chat.completions.create(
                 model=config.model,
                 messages=[{"role": "user", "content": task.metadata["question"]}],

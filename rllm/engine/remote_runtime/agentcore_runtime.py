@@ -65,6 +65,7 @@ class AgentCoreRuntime(RemoteAgentRuntime):
                 input_id=sub.task_id,
                 base_url=sub.inference_url,
                 model_id=self._model_id,
+                api_key=sub.inference_api_key,
             )
         except Exception as e:
             logger.error("Task %s submission failed: %s", sub.session_id, e)
