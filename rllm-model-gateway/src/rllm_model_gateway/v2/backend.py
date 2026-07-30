@@ -1,8 +1,8 @@
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from rllm_model_gateway_v2.config import BackendConfig
-from rllm_model_gateway_v2.contracts import TokenInput, TokenOutput
+from rllm_model_gateway.v2.config import BackendConfig
+from rllm_model_gateway.v2.contracts import TokenInput, TokenOutput
 
 
 class GenerationBackend(Protocol):

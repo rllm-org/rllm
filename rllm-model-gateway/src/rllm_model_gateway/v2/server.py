@@ -13,12 +13,12 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from rllm_model_gateway_v2.auth import GatewayAuth
-from rllm_model_gateway_v2.config import BackendConfig, GatewayConfig, TokenizationConfig
-from rllm_model_gateway_v2.contracts import APIProtocol, CanonicalOutput, SessionTraces
-from rllm_model_gateway_v2.errors import GatewayError
-from rllm_model_gateway_v2.pool import WorkerPool
-from rllm_model_gateway_v2.protocols import error_payload, normalize_request, response_payload, stream_events
+from rllm_model_gateway.v2.auth import GatewayAuth
+from rllm_model_gateway.v2.config import BackendConfig, GatewayConfig, TokenizationConfig
+from rllm_model_gateway.v2.contracts import APIProtocol, CanonicalOutput, SessionTraces
+from rllm_model_gateway.v2.errors import GatewayError
+from rllm_model_gateway.v2.pool import WorkerPool
+from rllm_model_gateway.v2.protocols import error_payload, normalize_request, response_payload, stream_events
 
 
 class SessionCreateRequest(BaseModel):

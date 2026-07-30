@@ -3,8 +3,8 @@ import uuid
 from collections.abc import Iterator
 from typing import Any
 
-from rllm_model_gateway_v2.contracts import APIProtocol, CanonicalOutput, CanonicalRequest
-from rllm_model_gateway_v2.errors import GatewayError
+from rllm_model_gateway.v2.contracts import APIProtocol, CanonicalOutput, CanonicalRequest
+from rllm_model_gateway.v2.errors import GatewayError
 
 
 _HEAD_FIELDS = {"model", "stream", "stream_options", "prompt", "messages", "tools"}

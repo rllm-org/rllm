@@ -3,8 +3,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from rllm_model_gateway_v2.backend import GenerationBackend
-from rllm_model_gateway_v2.contracts import (
+from rllm_model_gateway.v2.backend import GenerationBackend
+from rllm_model_gateway.v2.contracts import (
     CanonicalOutput,
     CanonicalRequest,
     SessionTraces,
@@ -12,8 +12,8 @@ from rllm_model_gateway_v2.contracts import (
     TokenOutput,
     Trace,
 )
-from rllm_model_gateway_v2.errors import GatewayError
-from rllm_model_gateway_v2.tokenization import TokenizationService
+from rllm_model_gateway.v2.errors import GatewayError
+from rllm_model_gateway.v2.tokenization import TokenizationService
 
 
 @dataclass

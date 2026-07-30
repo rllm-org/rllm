@@ -33,7 +33,7 @@ dev = [
 rllm-model-gateway = "rllm_model_gateway.server:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/rllm_model_gateway", "src/rllm_model_gateway_v2"]
+packages = ["src/rllm_model_gateway"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

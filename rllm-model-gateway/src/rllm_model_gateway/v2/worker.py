@@ -4,12 +4,12 @@ import traceback
 from multiprocessing.queues import Queue
 from typing import Any
 
-from rllm_model_gateway_v2.backend import build_backend
-from rllm_model_gateway_v2.config import WorkerProcessConfig
-from rllm_model_gateway_v2.contracts import CanonicalRequest
-from rllm_model_gateway_v2.errors import GatewayError
-from rllm_model_gateway_v2.service import GatewayService
-from rllm_model_gateway_v2.tokenization import TokenizationService
+from rllm_model_gateway.v2.backend import build_backend
+from rllm_model_gateway.v2.config import WorkerProcessConfig
+from rllm_model_gateway.v2.contracts import CanonicalRequest
+from rllm_model_gateway.v2.errors import GatewayError
+from rllm_model_gateway.v2.service import GatewayService
+from rllm_model_gateway.v2.tokenization import TokenizationService
 
 
 class WorkerRuntime:

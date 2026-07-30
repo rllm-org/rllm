@@ -6,7 +6,7 @@ from typing import Any
 from renderers import ParsedToolCall, config_from_name, create_renderer
 from transformers import AutoTokenizer
 
-from rllm_model_gateway_v2.config import TokenizationConfig
+from rllm_model_gateway.v2.config import TokenizationConfig
 
 
 class TokenizationService:

@@ -8,9 +8,9 @@ import uuid
 from multiprocessing.process import BaseProcess
 from typing import Any
 
-from rllm_model_gateway_v2.config import GatewayConfig
-from rllm_model_gateway_v2.errors import GatewayError, WorkerUnavailableError
-from rllm_model_gateway_v2.worker import worker_main
+from rllm_model_gateway.v2.config import GatewayConfig
+from rllm_model_gateway.v2.errors import GatewayError, WorkerUnavailableError
+from rllm_model_gateway.v2.worker import worker_main
 
 logger = logging.getLogger(__name__)
 

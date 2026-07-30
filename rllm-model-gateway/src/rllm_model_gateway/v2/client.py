@@ -4,7 +4,7 @@ from urllib.parse import quote
 import httpx
 from pydantic import BaseModel
 
-from rllm_model_gateway_v2.contracts import SessionTraces
+from rllm_model_gateway.v2.contracts import SessionTraces
 
 
 class SessionCredentials(BaseModel):
@@ -30,6 +30,10 @@ class GatewayClient:
         response = self._client.post("/admin/sessions", json=body)
         response.raise_for_status()
         return SessionCredentials.model_validate(response.json())
+
+    def health(self) -> None:
+        response = self._client.get("/health")
+        response.raise_for_status()
 
     def get_session(self, session_id: str) -> SessionTraces:
         response = self._client.get(f"/admin/sessions/{_path(session_id)}")
@@ -67,6 +71,10 @@ class AsyncGatewayClient:
         response = await self._client.post("/admin/sessions", json=body)
         response.raise_for_status()
         return SessionCredentials.model_validate(response.json())
+
+    async def health(self) -> None:
+        response = await self._client.get("/health")
+        response.raise_for_status()
 
     async def get_session(self, session_id: str) -> SessionTraces:
         response = await self._client.get(f"/admin/sessions/{_path(session_id)}")
