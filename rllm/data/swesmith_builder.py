@@ -102,7 +102,10 @@ def spread_task_ids(ids: list[str], n: int) -> list[str]:
     return sorted(picked)
 
 
-def _snapshot_download_with_retry(patterns: list[str] | None) -> Path:
+def _snapshot_download_with_retry(
+    patterns: list[str] | None,
+    revision: str | None = None,
+) -> Path:
     """``snapshot_download`` that sleeps out HF 429 rate-limit windows.
 
     The free tier allows 5000 resolver requests per 5 minutes and every file
@@ -115,7 +118,14 @@ def _snapshot_download_with_retry(patterns: list[str] | None) -> Path:
 
     while True:
         try:
-            return Path(snapshot_download(REPO_ID, repo_type="dataset", allow_patterns=patterns))
+            return Path(
+                snapshot_download(
+                    REPO_ID,
+                    repo_type="dataset",
+                    revision=revision,
+                    allow_patterns=patterns,
+                )
+            )
         except HfHubHTTPError as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
             if status != 429:

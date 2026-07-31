@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import tomllib
 
@@ -72,6 +72,61 @@ def test_list_task_ids_forwards_revision(monkeypatch):
             "revision": "dataset-sha",
         }
     ]
+
+
+def test_snapshot_download_preserves_revision_across_retry(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+
+    class FakeHfHubHTTPError(Exception):
+        def __init__(self):
+            self.response = SimpleNamespace(
+                status_code=429,
+                headers={"Retry-After": "0"},
+            )
+
+    def fake_snapshot_download(
+        repo_id,
+        *,
+        repo_type,
+        revision,
+        allow_patterns,
+    ):
+        calls.append(
+            {
+                "repo_id": repo_id,
+                "repo_type": repo_type,
+                "revision": revision,
+                "allow_patterns": allow_patterns,
+            }
+        )
+        if len(calls) == 1:
+            raise FakeHfHubHTTPError
+        return str(tmp_path)
+
+    hub = ModuleType("huggingface_hub")
+    hub.snapshot_download = fake_snapshot_download
+    errors = ModuleType("huggingface_hub.errors")
+    errors.HfHubHTTPError = FakeHfHubHTTPError
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    monkeypatch.setitem(sys.modules, "huggingface_hub.errors", errors)
+    monkeypatch.setattr(swesmith_builder.time, "sleep", lambda _wait: None)
+
+    result = swesmith_builder._snapshot_download_with_retry(
+        ["repo_a/*"],
+        revision="dataset-sha",
+    )
+
+    expected_call = {
+        "repo_id": swesmith_builder.REPO_ID,
+        "repo_type": "dataset",
+        "revision": "dataset-sha",
+        "allow_patterns": ["repo_a/*"],
+    }
+    assert result == tmp_path
+    assert calls == [expected_call, expected_call]
 
 
 class TestBugInTestFile:
