@@ -86,6 +86,21 @@ For LoRA-only training (the legacy `examples/gsm8k_lora/` use case), set `--lora
 bash cookbooks/math/train_tinker.sh
 ```
 
+### Fireworks (serverless)
+
+```bash
+uv pip install -e ".[fireworks]"
+export FIREWORKS_API_KEY=...
+bash cookbooks/math/train_fireworks_serverless.sh
+```
+
+This uses a shared pooled trainer and rollout host. It does not provision a
+trainer job or inference deployment. `training.max_length` and a positive
+`model.lora_rank` are required.
+
+For dedicated managed infrastructure instead, use
+`cookbooks/math/train_fireworks.sh`.
+
 ### Verl (distributed GPU)
 
 ```bash
@@ -108,6 +123,8 @@ pytest cookbooks/math/test.py -v
 | `evaluator.py` | `math_evaluator` — wraps `rllm.eval.reward_fns.math` |
 | `train.py` | Python API training script (Hydra config) |
 | `train_tinker.sh` | Tinker backend — single-machine training |
+| `train_fireworks_serverless.sh` | Fireworks backend — pooled serverless training |
+| `train_fireworks.sh` | Fireworks backend — dedicated managed infrastructure |
 | `train_verl.sh` | Verl backend — distributed multi-GPU training |
 | `pyproject.toml` | Plugin metadata and entry points |
 | `test.py` | Unit tests for evaluator scoring |
