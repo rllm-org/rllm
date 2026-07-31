@@ -4,10 +4,12 @@ A FakeSandbox captures every ``exec`` call so we can assert on the
 shape of install scripts, env var construction, and config-file
 contents without needing Docker.
 
-These harnesses return ``None`` from ``run()`` — the gateway captures
-LLM calls and the engine builds the trajectory during enrichment. The
-tests therefore assert on side-effects (sandbox calls, config files,
-invocation strings), not on returned Steps/Trajectories.
+These harnesses return a lightweight outcome ``Episode`` from ``run()`` (one
+empty-step Trajectory the engine enriches from gateway traces) carrying the
+``termination_reason`` the run observed — ``TIMEOUT`` on the agent's wall-clock
+budget, ``ERROR`` on a sandbox/exec failure, or ``None`` on a clean exit for the
+engine to classify. The tests assert on that reason plus the usual side-effects
+(sandbox calls, config files, invocation strings).
 """
 
 from __future__ import annotations
@@ -23,7 +25,8 @@ from rllm.harnesses.kimi_cli import KimiCliHarness
 from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
 from rllm.harnesses.opencode import OpenCodeHarness
 from rllm.harnesses.qwen_code import QwenCodeHarness
-from rllm.types import AgentConfig, Task
+from rllm.sandbox.protocol import SandboxCommandTimeout
+from rllm.types import AgentConfig, Episode, Task, TerminationReason
 
 ALL_HARNESSES = [
     AiderHarness,
@@ -50,8 +53,11 @@ class FakeSandbox:
     stdout: str = "OK"
     calls: list[_ExecCall] = field(default_factory=list)
     fail_on_substring: str | None = None
+    timeout_on_substring: str | None = None
 
     def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:
+        if self.timeout_on_substring and self.timeout_on_substring in command:
+            raise SandboxCommandTimeout(f"command timed out: {self.timeout_on_substring!r}")
         if self.fail_on_substring and self.fail_on_substring in command:
             raise RuntimeError(f"sandbox exec failed: {self.fail_on_substring!r}")
         self.calls.append(_ExecCall(command=command, user=user, timeout=timeout))
@@ -77,20 +83,26 @@ def _make_config(base_url: str = "http://gw:8000/sessions/eval-0/v1", model: str
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle: install on sandbox-ready, run() returns None and execs the CLI
+# Lifecycle: install on sandbox-ready, run() execs the CLI and returns an
+# outcome Episode whose termination_reason reflects what the run observed.
 # (BaseCliHarness.run is shared by every subclass — tested once here)
 # ---------------------------------------------------------------------------
 
 
-def test_run_returns_none_so_gateway_drives_trajectory():
-    """Harnesses don't build Episodes — the gateway captures LLM calls and
-    the engine's enrichment pass populates Steps from those traces."""
+def test_run_returns_empty_outcome_episode_on_clean_exit():
+    """A clean exit yields an Episode with one empty-step Trajectory (the
+    gateway/engine enrichment fills its Steps) and no termination_reason —
+    the engine derives done/length/max-turns from the traces."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox(stdout="opencode said hi")
 
     result = h.run(_make_task(), _make_config(), env=sandbox)
 
-    assert result is None
+    assert isinstance(result, Episode)
+    assert len(result.trajectories) == 1
+    assert result.trajectories[0].name == h.name
+    assert result.trajectories[0].steps == []
+    assert result.termination_reason is None
 
 
 def test_run_execs_cli_against_agent_user_with_env_exported():
@@ -111,15 +123,114 @@ def test_run_execs_cli_against_agent_user_with_env_exported():
     assert "opencode --model=" in invocation.command
 
 
-def test_run_swallows_cli_failure_and_returns_none():
-    """A CLI failure should not raise — the gateway-captured traces (up to
-    the point of failure) plus the verifier still drive the reward."""
+def test_run_marks_error_on_cli_failure():
+    """A CLI failure should not raise — the gateway-captured traces (up to the
+    point of failure) plus the verifier still drive the reward — but the
+    Episode is marked ERROR (with details) so compact filtering can drop it."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox(fail_on_substring="opencode --model")
 
     result = h.run(_make_task(), _make_config(), env=sandbox)
 
-    assert result is None
+    assert isinstance(result, Episode)
+    assert result.termination_reason == TerminationReason.ERROR
+    assert result.metadata["error"]["error_type"] == "RuntimeError"
+    assert "message" in result.metadata["error"]
+
+
+def test_run_marks_sandbox_error_when_box_died_mid_run():
+    """A dead sandbox surfaces as a generic exec failure; the is_alive() probe
+    distinguishes it from a benign CLI crash and marks SANDBOX_ERROR (infra)."""
+    h = OpenCodeHarness()
+    sandbox = FakeSandbox(fail_on_substring="opencode --model")
+    sandbox.is_alive = lambda: False  # box is gone
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason == TerminationReason.SANDBOX_ERROR
+    assert result.metadata["error"]["error_type"] == "RuntimeError"
+
+
+def test_run_marks_error_when_cli_failed_but_box_alive():
+    """A non-zero CLI exit on a *live* box stays ERROR, not SANDBOX_ERROR."""
+    h = OpenCodeHarness()
+    sandbox = FakeSandbox(fail_on_substring="opencode --model")
+    sandbox.is_alive = lambda: True  # box is healthy; the agent just failed
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason == TerminationReason.ERROR
+
+
+def test_run_marks_timeout_on_budget_exhaustion():
+    """Hitting the wall-clock budget (SandboxCommandTimeout) is expected, not a
+    failure: the captured steps are still scored, and the run is marked TIMEOUT
+    so compact filtering avoids punishing it."""
+    h = OpenCodeHarness()
+    sandbox = FakeSandbox(timeout_on_substring="opencode --model")
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert isinstance(result, Episode)
+    assert result.termination_reason == TerminationReason.TIMEOUT
+    assert "error" not in result.metadata
+
+
+# ---------------------------------------------------------------------------
+# Outcome sentinel (in-sandbox driver verdict) + wall-clock backstop. A driver
+# like terminus2 records why it stopped; run() trusts that over the exit code
+# (which ``| tee`` masks). Without a sentinel, an exec that ran ~to the budget
+# is classified TIMEOUT regardless of a masked clean-looking exit.
+# ---------------------------------------------------------------------------
+
+
+class _DriverHarness(OpenCodeHarness):
+    """OpenCode harness with a stubbed driver outcome, to drive run()'s sentinel path."""
+
+    outcome: dict | None = None
+
+    def _read_outcome(self, sandbox):  # type: ignore[override]
+        return self.outcome
+
+
+def test_run_sentinel_agent_timeout_maps_to_timeout():
+    h = _DriverHarness()
+    h.outcome = {"exception_type": "AgentTimeoutError", "message": "Agent execution timed out after 60.0s"}
+    result = h.run(_make_task(), _make_config(), env=FakeSandbox())
+    assert result.termination_reason == TerminationReason.TIMEOUT
+
+
+def test_run_sentinel_verifier_timeout_distinct_from_agent_timeout():
+    h = _DriverHarness()
+    h.outcome = {"exception_type": "VerifierTimeoutError", "message": "verifier timed out"}
+    result = h.run(_make_task(), _make_config(), env=FakeSandbox())
+    assert result.termination_reason == TerminationReason.VERIFIER_TIMEOUT
+    assert result.metadata["error"]["error_type"] == "VerifierTimeoutError"
+
+
+def test_run_sentinel_clean_finish_beats_elapsed_backstop(monkeypatch):
+    """A driver that finished cleanly is ENV_DONE even past the wall clock —
+    the sentinel is authoritative, so the elapsed heuristic must not fire."""
+    import rllm.harnesses.cli_harness as mod
+
+    ticks = iter([0.0, 10_000.0])
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(ticks))
+    h = _DriverHarness()
+    h.outcome = {}  # sentinel present, no exception → clean finish
+    result = h.run(_make_task(), _make_config(), env=FakeSandbox())
+    assert result.termination_reason is None  # ENV_DONE, not TIMEOUT
+
+
+def test_run_elapsed_backstop_marks_timeout_when_exit_masked(monkeypatch):
+    """No sentinel + ran ~to the budget with a clean-looking exit (the ``| tee``
+    masking case) → TIMEOUT, reconstructed from the clock."""
+    import rllm.harnesses.cli_harness as mod
+
+    ticks = iter([0.0, 10_000.0])  # elapsed >> 0.95 * run_timeout
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(ticks))
+    h = OpenCodeHarness()  # base harness writes no sentinel
+    result = h.run(_make_task(), _make_config(), env=FakeSandbox())
+    assert result.termination_reason == TerminationReason.TIMEOUT
 
 
 @pytest.mark.parametrize(
@@ -218,7 +329,10 @@ def test_opencode_writes_config_with_custom_provider_to_bypass_models_dev():
 def test_opencode_invocation_uses_custom_provider_prefix_and_detaches_stdin():
     """--model must carry the custom provider id, not the inferred
     openai/anthropic. And opencode blocks on its initial stdin read on
-    Modal sandboxes — the invocation must redirect stdin from /dev/null."""
+    Modal sandboxes — the invocation must redirect stdin from /dev/null.
+
+    ``--title`` must also be present: it pins the session title so opencode
+    skips its separate title-generation LLM call during training."""
     h = OpenCodeHarness()
     cmd = h.build_invocation(
         instruction="hi",
@@ -226,6 +340,7 @@ def test_opencode_invocation_uses_custom_provider_prefix_and_detaches_stdin():
         config=_make_config(model="gpt-5.4-mini"),
     )
     assert "--model=rllm-gateway/gpt-5.4-mini" in cmd
+    assert "--title " in cmd
     assert "</dev/null" in cmd
 
 
@@ -579,3 +694,86 @@ def test_gateway_api_key_resolution(monkeypatch, metadata: dict, env_value: str 
     config = AgentConfig(base_url="http://gw/v1", model="gpt-4o", session_uid="eval-0", metadata=metadata)
 
     assert BaseCliHarness.gateway_api_key(config, "OPENAI_API_KEY") == expected
+
+
+# ---------------------------------------------------------------------------
+# Exec timeout + sentinel: a SandboxCommandTimeout does not necessarily mean
+# the agent spent its budget — the backend may have lost the exec completion
+# in transport (e.g. a NAT dropping the idle long-poll; 2026-07-01). The
+# sentinel is authoritative there too.
+# ---------------------------------------------------------------------------
+
+
+def test_run_exec_timeout_with_clean_sentinel_recovers_env_done():
+    """Transport-lost completion: exec 'timed out' but the driver finished
+    cleanly → ENV_DONE with an ExecCompletionLost audit marker, not TIMEOUT."""
+    h = _DriverHarness()
+    h.outcome = {}  # sentinel present, no exception → driver finished fine
+    sandbox = FakeSandbox(timeout_on_substring="opencode --model")
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason is None  # ENV_DONE
+    assert result.metadata["error"]["error_type"] == "ExecCompletionLost"
+
+
+def test_run_exec_timeout_with_typed_sentinel_maps_reason():
+    """Exec timeout + a typed driver verdict → the verdict's reason wins."""
+    h = _DriverHarness()
+    h.outcome = {"exception_type": "AgentTimeoutError", "message": "budget spent"}
+    sandbox = FakeSandbox(timeout_on_substring="opencode --model")
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason == TerminationReason.TIMEOUT
+    assert result.metadata["error"]["error_type"] == "AgentTimeoutError"
+
+
+def test_run_exec_timeout_without_sentinel_stays_timeout():
+    """No sentinel to consult → the exec timeout is taken at face value."""
+    h = _DriverHarness()
+    h.outcome = None
+    sandbox = FakeSandbox(timeout_on_substring="opencode --model")
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason == TerminationReason.TIMEOUT
+
+
+# ---------------------------------------------------------------------------
+# Terminus2Harness — env knob toggles
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("host_env", "expected_summarize", "expected_interleaved"),
+    [
+        # No host overrides → Harbor-matching defaults.
+        ({}, "1", "0"),
+        # Both knobs flipped from their defaults. RLLM_TERMINUS_ENABLE_SUMMARIZE=0
+        # used to be silently ignored (the class default never read the env var,
+        # and build_env then hard-coded "1" into the sandbox), so eval runs
+        # compacted their trajectories despite the operator turning it off.
+        ({"RLLM_TERMINUS_ENABLE_SUMMARIZE": "0", "RLLM_TERMINUS_INTERLEAVED_THINKING": "1"}, "0", "1"),
+    ],
+)
+def test_terminus2_env_knobs_reach_the_sandbox(monkeypatch, host_env, expected_summarize, expected_interleaved):
+    """The RLLM_TERMINUS_* toggles set on the host where ``rllm eval`` runs must
+    land in the sandbox env verbatim — build_env overwrites the vars from the
+    class attributes, so those defaults must read the host env (at import time,
+    like every knob here; reload simulates a fresh launch)."""
+    import importlib
+
+    import rllm.harnesses.terminus2 as t2
+
+    with monkeypatch.context() as m:
+        for var in ("RLLM_TERMINUS_ENABLE_SUMMARIZE", "RLLM_TERMINUS_INTERLEAVED_THINKING"):
+            m.delenv(var, raising=False)
+        for var, value in host_env.items():
+            m.setenv(var, value)
+        mod = importlib.reload(t2)
+        env = mod.Terminus2Harness().build_env(_make_task(), _make_config())
+    importlib.reload(t2)  # restore class defaults from the real host env
+
+    assert env["RLLM_TERMINUS_ENABLE_SUMMARIZE"] == expected_summarize
+    assert env["RLLM_TERMINUS_INTERLEAVED_THINKING"] == expected_interleaved

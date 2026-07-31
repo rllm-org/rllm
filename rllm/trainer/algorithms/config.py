@@ -5,8 +5,7 @@ from typing import Any, Literal
 
 from omegaconf import DictConfig, OmegaConf
 
-from rllm.types import _DEFAULT_TRAJ_NAME
-from rllm.workflows.workflow import TerminationReason
+from rllm.types import _DEFAULT_TRAJ_NAME, TerminationReason
 
 
 def _explicit_override_keys(hydra_overrides: list[str] | None = None) -> set[str]:
@@ -33,6 +32,18 @@ def _explicit_override_keys(hydra_overrides: list[str] | None = None) -> set[str
 def _plain(value: Any) -> Any:
     """Resolve-free plain-Python view of a config value (for equality checks)."""
     return OmegaConf.to_container(value, resolve=False) if OmegaConf.is_config(value) else value
+
+
+def _to_plain_list(value: Any) -> list:
+    """Convert an OmegaConf list (e.g. ``algorithm.loss_plugins``) to a plain list.
+
+    Returns ``[]`` for ``None`` so downstream code sees ordinary Python values.
+    """
+    if value is None:
+        return []
+    if OmegaConf.is_config(value):
+        return OmegaConf.to_container(value, resolve=True)  # type: ignore[return-value]
+    return list(value)
 
 
 def sync_shared_keys(
@@ -128,6 +139,15 @@ class CompactFilteringConfig:
     mask_timeout: bool = False
     mask_unknown: bool = False
     mask_error: bool = False
+    # Infra/grading failures: the reward isn't a real task score (verifier timed
+    # out/crashed, sandbox or setup died), so it shouldn't enter the loss. These
+    # default False in the dataclass for back-compat; base.yaml turns them on.
+    mask_verifier_timeout: bool = False
+    mask_grading_error: bool = False
+    mask_sandbox_error: bool = False
+    mask_agent_setup_timeout: bool = False
+    mask_env_start_timeout: bool = False
+    mask_model_error: bool = False
 
     @classmethod
     def from_config(cls, config: DictConfig) -> "CompactFilteringConfig":
@@ -158,6 +178,12 @@ class CompactFilteringConfig:
             or (self.mask_timeout and termination_reason == TerminationReason.TIMEOUT)
             or (self.mask_unknown and termination_reason == TerminationReason.UNKNOWN)
             or (self.mask_error and termination_reason == TerminationReason.ERROR)
+            or (self.mask_verifier_timeout and termination_reason == TerminationReason.VERIFIER_TIMEOUT)
+            or (self.mask_grading_error and termination_reason == TerminationReason.GRADING_ERROR)
+            or (self.mask_sandbox_error and termination_reason == TerminationReason.SANDBOX_ERROR)
+            or (self.mask_agent_setup_timeout and termination_reason == TerminationReason.AGENT_SETUP_TIMEOUT)
+            or (self.mask_env_start_timeout and termination_reason == TerminationReason.ENV_START_TIMEOUT)
+            or (self.mask_model_error and termination_reason == TerminationReason.MODEL_ERROR)
         )
 
 
@@ -205,6 +231,13 @@ class RejectionSamplingConfig:
     # Applied at the accumulator level in async training, before groups enter the buffer.
     filter_uniform_groups: bool = False
 
+    # Only when filter_uniform_groups is True. True (default): refill a dropped uniform group
+    # -- backfill a fresh one so the step keeps mini_batch_size signal groups (DAPO). False:
+    # count it toward mini_batch_size without refilling, so the effective batch shrinks
+    # (survivors renormalize over their own tokens; prime-rl default). Uniform drops only --
+    # min-trajs / compact-filtering / empty-group drops always refill.
+    refill_filtered_uniform_groups: bool = True
+
     @classmethod
     def from_config(cls, config: DictConfig) -> "RejectionSamplingConfig":
         mode = config.get("mode", None)
@@ -215,6 +248,7 @@ class RejectionSamplingConfig:
             min_trajs_per_group=config.get("min_trajs_per_group", 2),
             min_partial_solve_tasks=config.get("min_partial_solve_tasks", 1),
             filter_uniform_groups=config.get("filter_uniform_groups", False),
+            refill_filtered_uniform_groups=config.get("refill_filtered_uniform_groups", True),
         )
 
 
@@ -250,11 +284,22 @@ class rLLMAdvantageEstimator(str, Enum):
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
     PRPO = "prpo"
     RLOO = "rloo"
+    # ECHO (arXiv:2605.24517): GRPO advantages + an auxiliary cross-entropy loss
+    # on environment-observation tokens. The advantage math is identical to GRPO;
+    # selecting `echo` flips on the env-loss term (see `env_loss_coef`).
+    ECHO = "echo"
     OTHER = "other"
 
     @classmethod
     def _missing_(cls, value: object) -> "rLLMAdvantageEstimator":
         return cls.OTHER
+
+
+# Default rLLM loss for an advantage estimator when the user doesn't set loss_fn. ECHO pairs
+# with its `echo` loss (which reads its own env_loss_coef from loss_params, like any other loss).
+_ESTIMATOR_DEFAULT_LOSS: dict[rLLMAdvantageEstimator, str] = {
+    rLLMAdvantageEstimator.ECHO: "echo",
+}
 
 
 @dataclass
@@ -283,8 +328,18 @@ class AlgorithmConfig:
     # advantage computation (GRPO/REINFORCE). Steps missing advantages default to 0.0.
     # When False (default), always compute advantages normally.
     use_precomputed_advantage: bool = False
-    # Global loss function (backend-specific values; null = backend default)
+    # The single loss selector (verl-style; maps to verl's policy_loss.loss_mode). A
+    # backend-native name (verl `vanilla`/`gspo`, tinker `ppo`, fireworks `grpo`) runs the
+    # native kernel; an rLLM-registered name (`dppo_tv`, `ppo_clip`, `echo`, or a
+    # user `@rllm.register_loss`) runs the rLLM loss. null = backend default.
     loss_fn: str | None = None
+    # Loss-specific hyperparameters passed to an rLLM loss via ctx.params (verl-style: like
+    # verl's policy_loss sub-fields), merged with eps_clip/eps_clip_high/kl_beta. Examples:
+    # {delta: 0.2} for dppo_tv, {env_loss_coef: 0.05} for echo.
+    loss_params: dict = field(default_factory=dict)
+    # Modules imported at startup so their @register_loss decorators run (lets a blackbox
+    # `pip install rllm` user define custom losses without editing rllm).
+    loss_plugins: list = field(default_factory=list)
     lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
     warmup_steps: int = -1
     warmup_steps_ratio: float = 0.0
@@ -293,7 +348,7 @@ class AlgorithmConfig:
     kl_beta: float = 0.0
     eps_clip: float = 0.2
     eps_clip_high: float | None = None
-    loss_agg_mode: Literal["token-mean", "seq-mean-token-sum", "seq-mean-token-mean", None] = None
+    loss_agg_mode: Literal["token-mean", "token-sum", "seq-mean-token-sum", "seq-mean-token-mean", None] = "token-mean"
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
     router_replay: Literal["disabled", "R2", "R3"] = "disabled"
 
@@ -328,13 +383,15 @@ class AlgorithmConfig:
             norm_adv_by_std_in_grpo=algorithm_config.get("norm_adv_by_std_in_grpo", True),
             use_precomputed_advantage=algorithm_config.get("use_precomputed_advantage", False),
             loss_fn=algorithm_config.get("loss_fn", None),
+            loss_params=dict(algorithm_config.get("loss_params", None) or {}),
+            loss_plugins=_to_plain_list(algorithm_config.get("loss_plugins", None)),
             lr_schedule=algorithm_config.get("lr_schedule", "constant"),
             warmup_steps=algorithm_config.get("warmup_steps", -1),
             warmup_steps_ratio=algorithm_config.get("warmup_steps_ratio", 0.0),
             kl_beta=algorithm_config.get("kl_beta", 0.0),
             eps_clip=algorithm_config.get("eps_clip", 0.2),
             eps_clip_high=algorithm_config.get("eps_clip_high", None),
-            loss_agg_mode=algorithm_config.get("loss_agg_mode", None),
+            loss_agg_mode=algorithm_config.get("loss_agg_mode", "token-mean"),
             rollout_correction=rollout_correction,
             router_replay=algorithm_config.get("router_replay", "disabled"),
         )
@@ -348,6 +405,11 @@ class AlgorithmConfig:
                 DeprecationWarning,
                 stacklevel=2,
             )
+
+        # Default loss_fn from the estimator when the user didn't pick one (e.g. echo → `echo`,
+        # whose env_loss_coef comes from loss_params like any other loss's hyperparameters).
+        if self.loss_fn is None:
+            self.loss_fn = _ESTIMATOR_DEFAULT_LOSS.get(self.estimator)
 
         # Normalize estimator_map: split (estimator, loss_fn) tuples.
         normalized_map: dict[str, rLLMAdvantageEstimator | str] = {}

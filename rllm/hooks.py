@@ -244,7 +244,7 @@ class SandboxTaskHooks:
 
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext:
         from rllm.engine.agentflow_engine import TaskContext
-        from rllm.eval._resolution import _resolve_backend, _setup_task_environment
+        from rllm.eval._resolution import _resolve_backend, _run_healthcheck, _setup_task_environment
 
         plan = resolve_rollout_plan(task, agent_flow, self.evaluation)
 
@@ -266,6 +266,12 @@ class SandboxTaskHooks:
                         sandbox.exec(install, timeout=getattr(agent_flow, "install_timeout", env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600)), user="root")
                     except Exception as e:
                         raise RuntimeError(f"Failed to install {getattr(agent_flow, 'name', type(agent_flow).__name__)} in sandbox: {e}") from e
+
+                # Boot any declared service ([environment.healthcheck], e.g. LocalStack)
+                # and wait for readiness before the agent runs — rLLM boots the container
+                # with `sleep infinity`, so the image CMD never starts it. No-op when no
+                # healthcheck is declared (every non-service eval/training task).
+                _run_healthcheck(task, sandbox)
 
             evaluator = self.evaluation.resolve(task, sandbox, plan.verifier_kind, plan.verifier_config)
         except BaseException:
@@ -328,17 +334,27 @@ def pin_gateway_host_loopback(config: DictConfig) -> DictConfig:
 
 
 def enable_gateway_tunnel(config: DictConfig) -> DictConfig:
-    """Auto-wire ``rllm.gateway.tunnel="cloudflared"`` when no tunnel is already set.
+    """Auto-wire ``rllm.gateway.tunnel`` when no tunnel is explicitly set.
 
     Callers decide *when* (sandboxes run off-host — see
-    :func:`scan_env_requirements`); this helper only applies the setting.
+    :func:`scan_env_requirements`); this helper resolves *what*. An explicit
+    ``rllm.gateway.tunnel`` always wins; otherwise resolution falls to
+    ``$RLLM_GATEWAY_TUNNEL`` → a running ``rllm tunnel up`` daemon → a free
+    Cloudflare quick tunnel (with a warning) — see
+    :func:`rllm.gateway.tunnel.resolve_auto_tunnel`.
     """
     gw = config.rllm.get("gateway", {}) or {}
     if gw.get("tunnel"):
         return config
+
+    from rllm.gateway.tunnel import resolve_auto_tunnel
+
+    value, warning = resolve_auto_tunnel()
+    if warning:
+        logger.warning(warning)
     return OmegaConf.merge(
         config,
-        OmegaConf.create({"rllm": {"gateway": {"tunnel": "cloudflared"}}}),
+        OmegaConf.create({"rllm": {"gateway": {"tunnel": value}}}),
     )
 
 

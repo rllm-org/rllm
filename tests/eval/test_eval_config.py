@@ -148,6 +148,20 @@ class TestLoadSaveConfig:
             data = json.load(f)
         assert "base_url" not in data
 
+    def test_save_preserves_unrelated_keys(self, tmp_rllm_home):
+        """save_config must not clobber keys it doesn't own (e.g. ui_api_key from `rllm login`)."""
+        config_path = os.path.join(tmp_rllm_home, "config.json")
+        os.makedirs(tmp_rllm_home, exist_ok=True)
+        with open(config_path, "w") as f:
+            json.dump({"provider": "openai", "api_keys": {"openai": "k1"}, "model": "m1", "ui_api_key": "rllm_abc"}, f)
+        # A provider/model swap should leave the UI token intact.
+        save_config(RllmConfig(provider="tinker", api_keys={"tinker": "tml-xyz"}, model="m2"))
+        with open(config_path) as f:
+            data = json.load(f)
+        assert data["ui_api_key"] == "rllm_abc"
+        assert data["provider"] == "tinker"
+        assert data["model"] == "m2"
+
 
 class TestConstants:
     def test_openai_in_supported_providers(self):

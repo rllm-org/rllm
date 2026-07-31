@@ -1,9 +1,11 @@
 """Unit tests for GatewayManager store-backend selection and validation."""
 
+import socket
+
 import pytest
 from omegaconf import OmegaConf
 
-from rllm.gateway.manager import GatewayManager, container_reachable_url
+from rllm.gateway.manager import GatewayManager, GatewayPortInUseError, _find_free_port, container_reachable_url, preflight_gateway_port
 
 
 def _make_config(**gateway_overrides):
@@ -59,3 +61,40 @@ class TestContainerReachableUrl:
     )
     def test_loopback_rewrite_only_for_docker_backend(self, url, backend, expected):
         assert container_reachable_url(url, backend) == expected
+
+
+class TestPreflightGatewayPort:
+    def test_free_port_passes(self):
+        preflight_gateway_port(_find_free_port())
+
+    def test_occupied_port_raises(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("0.0.0.0", 0))
+            s.listen(1)
+            port = s.getsockname()[1]
+            with pytest.raises(GatewayPortInUseError, match=str(port)):
+                preflight_gateway_port(port)
+
+    def test_loopback_only_listener_still_detected(self):
+        # A holder bound to 127.0.0.1 (not 0.0.0.0) must still trip the
+        # probe — the gateway's 0.0.0.0 bind would collide with it.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            port = s.getsockname()[1]
+            with pytest.raises(GatewayPortInUseError):
+                preflight_gateway_port(port)
+
+    def test_daemon_upstream_conflict_names_the_tunnel(self, monkeypatch):
+        import rllm.gateway.tunnel as tunnel_mod
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("0.0.0.0", 0))
+            s.listen(1)
+            port = s.getsockname()[1]
+            monkeypatch.setattr(tunnel_mod, "live_tunnel", lambda: {"backend": "ngrok", "url": "https://x.ngrok-free.app", "pid": 1, "upstream": f"http://127.0.0.1:{port}"})
+            with pytest.raises(GatewayPortInUseError, match="rllm tunnel up"):
+                preflight_gateway_port(port)

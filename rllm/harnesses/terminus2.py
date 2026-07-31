@@ -24,6 +24,7 @@ builds the trajectory. Reward comes from rLLM's per-task verifier, not here.
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
@@ -37,6 +38,10 @@ _VENV_DIR = "/opt/terminus2-venv"
 _DRIVER_PATH = "/opt/terminus2/driver.py"
 _INSTRUCTION_PATH = "/tmp/terminus2/instruction.txt"
 _LOGS_DIR = "/tmp/terminus2/logs"
+# The driver records a structured outcome here (Harbor ExceptionInfo-shaped) so
+# the harness can label TIMEOUT / AGENT_SETUP_TIMEOUT / ... by the agent's actual
+# verdict instead of an exit code the ``| tee`` pipeline would mask.
+_OUTCOME_PATH = "/tmp/terminus2/outcome.json"
 
 
 def _install_script(harbor_version: str, py_version: str) -> str:
@@ -51,8 +56,10 @@ def _install_script(harbor_version: str, py_version: str) -> str:
     return rf"""
 set -e
 export DEBIAN_FRONTEND=noninteractive
-# Marker keeps this a no-op on a snapshot that already baked the install.
-if [ -f {_VENV_DIR}/.terminus2-ready ]; then
+# Skip only when harbor is ALREADY at the pinned version — this self-heals a
+# snapshot that baked an older harbor. A bare "ready" marker would let a stale
+# (e.g. 0.3.0) harbor stand, which crashes the modern driver.
+if [ -x {_VENV_DIR}/bin/python ] && {_VENV_DIR}/bin/python -c "import importlib.metadata as _m, sys; sys.exit(0 if _m.version('harbor') == '{harbor_version}' else 1)" 2>/dev/null; then
     exit 0
 fi
 # tmux + `script` (util-linux) + ps (procps) are what Terminus-2's TmuxSession
@@ -69,8 +76,12 @@ if ! command -v uv >/dev/null 2>&1; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
 export PATH="$HOME/.local/bin:$PATH"
-# Private interpreter + venv; harbor and its deps live only here.
-uv venv --python {shlex.quote(py_version)} {_VENV_DIR}
+# Private interpreter + venv; harbor and its deps live only here. Create the venv
+# only if missing (don't clobber an existing one), then install/upgrade harbor to
+# the pinned version in place — so a 0.3.0 snapshot self-heals to {harbor_version}.
+if [ ! -x {_VENV_DIR}/bin/python ]; then
+    uv venv --python {shlex.quote(py_version)} {_VENV_DIR}
+fi
 uv pip install --python {_VENV_DIR}/bin/python {shlex.quote("harbor==" + harbor_version)}
 touch {_VENV_DIR}/.terminus2-ready
 """
@@ -85,14 +96,40 @@ class Terminus2Harness(BaseCliHarness):
     stdout_log_path = "/tmp/terminus2.log"
 
     # ---- Terminus-2 knobs (overridable via agent kwargs / configure) ----
-    harbor_version: str = "0.3.0"
+    harbor_version: str = "0.13.2"  # match the host venv; 0.3.0 is far too old (no harbor.trial.errors, ancient Terminus-2)
     terminus_python: str = "3.12"
     parser_name: str = "json"  # "json" or "xml"
-    temperature: float = 0.7
-    max_turns: int = 50
+    # Temperature the agent requests; in `rllm eval`/training the gateway
+    # enforces its own sampling params on top (default 1.0), so this is the
+    # value used only when sampling isn't gateway-enforced. Kept at 1.0 to match.
+    temperature: float = 1.0
+    # Per-rollout turn cap. ``None`` = don't impose one — let Harbor's own
+    # (effectively unbounded) default apply, so the agent isn't artificially
+    # cut short; the per-rollout run timeout (RLLM_HARNESS_RUN_TIMEOUT_S) still
+    # bounds wall-clock. Set a value (e.g. via the train_*.sh scripts) to cap.
+    max_turns: int | None = None
     # Asciinema recording needs an extra dep and a writable trial dir; off by
     # default since rLLM scores from the verifier, not the cast.
     record_terminal_session: bool = False
+    # Keep each turn's reasoning_content in the chat history and resend it on
+    # subsequent requests (Harbor's ``interleaved_thinking``). Off by default —
+    # matching Harbor — so past thinking is stripped from the assistant history
+    # messages the model sees. Whether the serving stack re-injects the resent
+    # reasoning into the prompt depends on its chat template. The env default
+    # lets ``rllm eval`` toggle it without a constructor: export
+    # RLLM_TERMINUS_INTERLEAVED_THINKING=1.
+    interleaved_thinking: bool = os.environ.get("RLLM_TERMINUS_INTERLEAVED_THINKING", "0") == "1"
+    # Context summarization ("compaction"). Harbor's Terminus-2 enables this by
+    # default: it spawns summarization subagents to compress history when the
+    # context fills, which fragments the trajectory the gateway captures. Set
+    # ``enable_summarize=False`` (e.g. via the harness constructor) to turn both
+    # proactive and context-limit summarization off — the agent then simply hits
+    # its context limit instead of compacting. The env default lets ``rllm eval``
+    # toggle it without a constructor, mirroring interleaved_thinking above:
+    # export RLLM_TERMINUS_ENABLE_SUMMARIZE=0. (build_env re-exports this
+    # attribute into the sandbox, so a plain ``True`` default silently
+    # overwrote the operator's host env var with "1".)
+    enable_summarize: bool = os.environ.get("RLLM_TERMINUS_ENABLE_SUMMARIZE", "1") == "1"
 
     def install_script(self) -> str:
         return _install_script(self.harbor_version, self.terminus_python)
@@ -118,13 +155,50 @@ class Terminus2Harness(BaseCliHarness):
             "RLLM_TERMINUS_API_BASE": gateway_url,
             "RLLM_TERMINUS_WORKDIR": str(task.metadata.get("workdir") or ""),
             "RLLM_TERMINUS_PARSER": self.parser_name,
-            "RLLM_TERMINUS_MAX_TURNS": str(self.max_turns),
             "RLLM_TERMINUS_TEMPERATURE": str(self.temperature),
             "RLLM_TERMINUS_RECORD": "1" if self.record_terminal_session else "0",
+            "RLLM_TERMINUS_ENABLE_SUMMARIZE": "1" if self.enable_summarize else "0",
+            "RLLM_TERMINUS_INTERLEAVED_THINKING": "1" if self.interleaved_thinking else "0",
             "RLLM_TERMINUS_INSTRUCTION_FILE": _INSTRUCTION_PATH,
             "RLLM_TERMINUS_LOGS_DIR": _LOGS_DIR,
+            "RLLM_TERMINUS_OUTCOME_FILE": _OUTCOME_PATH,
+            # The driver self-limits the agent loop at this budget and records an
+            # AgentTimeoutError, so the timeout is labelled correctly even though
+            # the outer ``| tee`` exec masks the kill's exit code. The harness's
+            # exec gets a grace window beyond this (see BaseCliHarness.run).
+            "RLLM_TERMINUS_AGENT_TIMEOUT_S": str(self._effective_timeout(task)),
         }
+        # Only pass a turn cap when one is set; absent var = no artificial limit.
+        if self.max_turns is not None:
+            env["RLLM_TERMINUS_MAX_TURNS"] = str(self.max_turns)
         return env
+
+    def _read_outcome(self, sandbox: Sandbox) -> dict | None:
+        """Read the driver's outcome sentinel (Harbor ExceptionInfo-shaped).
+
+        Returns ``{"exception_type", "message"}`` when the driver recorded a
+        failure, ``{}`` (present, no exception) on a clean finish, or ``None``
+        when the file is absent/unreadable — e.g. the driver was SIGKILLed
+        before it could write, in which case run() applies its elapsed backstop.
+        """
+        import json
+
+        try:
+            raw = sandbox.exec(f"cat {shlex.quote(_OUTCOME_PATH)} 2>/dev/null || true", timeout=15, user=self.agent_user).strip()
+        except Exception as e:
+            logger.debug("terminus2 outcome read failed: %s", e)
+            return None
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except Exception as e:
+            logger.debug("terminus2 outcome parse failed: %s", e)
+            return None
+        info = data.get("exception_info")
+        if info:
+            return {"exception_type": info.get("exception_type"), "message": info.get("exception_message", "")}
+        return {}
 
     def write_configs(
         self,
@@ -159,15 +233,31 @@ class Terminus2Harness(BaseCliHarness):
 # ---------------------------------------------------------------------------
 _DRIVER_SCRIPT = r'''
 import asyncio
+import json
 import logging
 import os
 import shutil
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.agent.context import AgentContext
 from harbor.models.environment_type import EnvironmentType
+
+
+# Defined locally on purpose: harbor 0.3.0 (the version installed in the sandbox)
+# has no ``harbor.trial.errors`` module. Only the class *names* matter — the
+# harness maps them to a TerminationReason via the exception_type string in the
+# outcome sentinel, so matching Harbor's names is all that's needed.
+class AgentSetupTimeoutError(asyncio.TimeoutError):
+    pass
+
+
+class AgentTimeoutError(asyncio.TimeoutError):
+    pass
+
 
 log = logging.getLogger("terminus2-driver")
 
@@ -260,9 +350,17 @@ async def _main():
     api_base = os.environ.get("RLLM_TERMINUS_API_BASE") or None
     workdir = os.environ.get("RLLM_TERMINUS_WORKDIR") or None
     parser = os.environ.get("RLLM_TERMINUS_PARSER", "json")
-    max_turns = int(os.environ.get("RLLM_TERMINUS_MAX_TURNS", "50"))
-    temperature = float(os.environ.get("RLLM_TERMINUS_TEMPERATURE", "0.7"))
+    # Unset/empty = no artificial cap; Harbor's Terminus2 treats max_turns=None
+    # as its own (effectively unbounded) default.
+    _max_turns = os.environ.get("RLLM_TERMINUS_MAX_TURNS")
+    max_turns = int(_max_turns) if _max_turns else None
+    temperature = float(os.environ.get("RLLM_TERMINUS_TEMPERATURE", "1.0"))
     record = os.environ.get("RLLM_TERMINUS_RECORD", "0") == "1"
+    # Compaction toggle: unset defaults to Harbor's own default (on). "0" turns
+    # off both proactive and context-limit summarization.
+    enable_summarize = os.environ.get("RLLM_TERMINUS_ENABLE_SUMMARIZE", "1") == "1"
+    # Keep reasoning_content in chat history and resend it on later requests.
+    interleaved_thinking = os.environ.get("RLLM_TERMINUS_INTERLEAVED_THINKING", "0") == "1"
     logs_dir = Path(os.environ.get("RLLM_TERMINUS_LOGS_DIR", "/tmp/terminus2/logs"))
     logs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -279,16 +377,60 @@ async def _main():
         max_turns=max_turns,
         temperature=temperature,
         record_terminal_session=record,
+        enable_summarize=enable_summarize,
+        interleaved_thinking=interleaved_thinking,
         model_info=model_info,
         suppress_max_turns_warning=True,
     )
     ctx = AgentContext()
-    log.info("terminus2-driver: model=%s workdir=%s parser=%s max_turns=%s", model, workdir, parser, max_turns)
-    await agent.setup(env)
-    await agent.run(instruction, env, ctx)
+    # Budgets: self-limit the agent loop so a wall-clock kill is recorded as a
+    # typed AgentTimeoutError (mirrors harbor Trial), instead of relying on the
+    # outer exec's exit code which the `| tee` pipeline masks. 0/unset = no cap.
+    agent_timeout = float(os.environ.get("RLLM_TERMINUS_AGENT_TIMEOUT_S", "0")) or None
+    setup_timeout = float(os.environ.get("RLLM_TERMINUS_SETUP_TIMEOUT_S", "0")) or None
+    outcome_file = os.environ.get("RLLM_TERMINUS_OUTCOME_FILE")
+    log.info("terminus2-driver: model=%s workdir=%s parser=%s max_turns=%s agent_timeout=%s", model, workdir, parser, max_turns, agent_timeout)
+
+    exc_info = None
+    try:
+        if setup_timeout:
+            try:
+                await asyncio.wait_for(agent.setup(env), timeout=setup_timeout)
+            except asyncio.TimeoutError:
+                raise AgentSetupTimeoutError(f"Agent setup timed out after {setup_timeout}s")
+        else:
+            await agent.setup(env)
+        if agent_timeout:
+            try:
+                await asyncio.wait_for(agent.run(instruction, env, ctx), timeout=agent_timeout)
+            except asyncio.TimeoutError:
+                raise AgentTimeoutError(f"Agent execution timed out after {agent_timeout}s")
+        else:
+            await agent.run(instruction, env, ctx)
+    except BaseException as e:  # noqa: BLE001 — record the verdict, never crash the exec
+        # Captures harbor's typed timeouts plus ContextLengthExceededError /
+        # OutputLengthExceededError raised inside agent.run.
+        exc_info = {
+            "exception_type": type(e).__name__,
+            "exception_message": str(e),
+            "exception_traceback": traceback.format_exc(),
+            "occurred_at": datetime.now().isoformat(),
+        }
+        log.warning("terminus2-driver agent phase failed: %s: %s", type(e).__name__, e)
+
+    # Mirror harbor's ExceptionInfo; exit 0 regardless so the agent's partial
+    # container state survives for the verifier (a timeout is still graded).
+    if outcome_file:
+        try:
+            Path(outcome_file).parent.mkdir(parents=True, exist_ok=True)
+            Path(outcome_file).write_text(json.dumps({"exception_info": exc_info, "finished": exc_info is None}))
+        except Exception as e:
+            log.warning("terminus2-driver failed to write outcome file: %s", e)
+
     log.info(
-        "terminus2-driver done: episodes=%s in_tokens=%s out_tokens=%s",
+        "terminus2-driver done: episodes=%s in_tokens=%s out_tokens=%s exc=%s",
         (ctx.metadata or {}).get("n_episodes"), ctx.n_input_tokens, ctx.n_output_tokens,
+        (exc_info or {}).get("exception_type"),
     )
 
 

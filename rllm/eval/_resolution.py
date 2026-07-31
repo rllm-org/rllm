@@ -93,6 +93,21 @@ def _read_verifier_config(task: Task) -> dict:
     return {}
 
 
+def _effective_verifier_timeout(task: Task) -> float | None:
+    """Per-task verifier timeout (s), with RLLM_HARNESS_VERIFIER_TIMEOUT_S as a hard cap
+    (mirrors RLLM_HARNESS_RUN_TIMEOUT_S for the agent). Returns None only when the task
+    declares no verifier_timeout and no cap is set (callers apply their own default)."""
+    from rllm.env import env_int
+
+    declared = task.metadata.get("verifier_timeout")
+    cap = env_int("RLLM_HARNESS_VERIFIER_TIMEOUT_S", 0)
+    if declared is None:
+        return float(cap) if cap > 0 else None
+    if cap > 0:
+        return min(float(declared), float(cap))
+    return float(declared)
+
+
 def _resolve_evaluator(
     task: Task,
     sandbox: Sandbox | None,
@@ -107,7 +122,7 @@ def _resolve_evaluator(
             sandbox=sandbox,
             script_path=verifier_config.get("script", "tests/test.sh"),
             verifier_user=task.metadata.get("verifier_user"),
-            verifier_timeout=float(task.metadata.get("verifier_timeout", 600.0)),
+            verifier_timeout=(_effective_verifier_timeout(task) or 600.0),
             reward_file_override=verifier_config.get("reward_file"),
         )
 
@@ -193,7 +208,28 @@ def _create_base_sandbox(task: Task, backend: str, *, image: str | None = None, 
     if name is None:
         safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
         name = f"rllm-{safe_id}-{uuid.uuid4().hex[:6]}"
-    return create_sandbox(backend, name=name, image=image, **_sandbox_resource_kwargs(task, backend), **backend_kwargs)
+    # Explicit caller kwargs override the per-task resource defaults — both may
+    # carry Modal's ``timeout`` (e.g. the snapshot builder's build_timeout).
+    kwargs = {**_sandbox_resource_kwargs(task, backend), **backend_kwargs}
+    return create_sandbox(backend, name=name, image=image, **kwargs)
+
+
+def _should_replay_dockerfile(task: Task) -> bool:
+    """Whether to replay the Dockerfile's ``RUN`` steps on non-docker backends.
+
+    Two task conventions are supported via ``[environment].replay_dockerfile``:
+
+    * **SWE-bench style** (default, ``true``): the configured ``docker_image``
+      is a *base*; the Dockerfile's ``RUN`` steps (e.g. ``uv``, needed by the
+      grader) are not in that image and must be replayed on top.
+    * **Terminal-bench / Harbor style** (``false``): the configured
+      ``docker_image`` is the *fully built* task image, so replaying its ``RUN``
+      steps double-applies the build (``git clone ... already exists``, missing
+      ``COPY``'d files, etc.). These tasks set
+      ``[environment]\nreplay_dockerfile = false`` to boot the image as-is.
+    """
+    env = task.metadata.get("environment", {}) or {}
+    return bool(env.get("replay_dockerfile", True))
 
 
 def _replay_dockerfile(task: Task, sandbox: Sandbox, backend: str) -> None:
@@ -202,17 +238,95 @@ def _replay_dockerfile(task: Task, sandbox: Sandbox, backend: str) -> None:
     Non-docker backends pull the Dockerfile's FROM base instead of building
     it, so the RUN steps (e.g. swebench's ``uv``, needed by the grader) must
     be replayed. Best-effort: a failed step shouldn't abort the task. Docker
-    builds the image, so its RUN steps already ran — skip.
+    builds the image, so its RUN steps already ran — skip. Tasks that boot a
+    fully-built image opt out via ``[environment].replay_dockerfile = false``
+    (see :func:`_should_replay_dockerfile`).
     """
     if backend == "docker":
+        return
+    if not _should_replay_dockerfile(task):
         return
     for cmd in _dockerfile_run_commands(task):
         _safe_exec(sandbox, cmd, timeout=900)
 
 
+def _task_dockerfile(task: Task) -> Path | None:
+    """Locate a task's ``environment/Dockerfile`` (task dir first, then dataset dir)."""
+    for base in (task.task_dir, task.dataset_dir):
+        df = base / "environment" / "Dockerfile"
+        if df.exists():
+            return df
+    return None
+
+
+# Remote backends that build images themselves and so can build the *real* Dockerfile
+# (COPY/ENV/WORKDIR/RUN) instead of pulling FROM + replaying RUN. ``docker`` is excluded
+# because it already builds via ``docker build``; ``local`` cannot build. ``modal`` is a
+# tracked follow-up (it accepts a ``modal.Image`` and already keepalive-overrides the
+# entrypoint, but the from_dockerfile path there is untested — see _dockerfile_image).
+_FROM_DOCKERFILE_BACKENDS = ("daytona",)
+
+
+def _builds_from_dockerfile(task: Task, backend: str) -> Path | None:
+    """Return the Dockerfile to build directly on a remote backend, else ``None``.
+
+    For remote backends that build images themselves, building the real Dockerfile keeps
+    ``COPY``/``ENV``/``WORKDIR`` (which ``_replay_dockerfile`` silently drops) — required by
+    COPY-then-RUN tasks like honeycomb's AWS/LocalStack tasks (``COPY start_localstack.sh``
+    + ``ready.d``). Only when the task is Dockerfile-based (``replay_dockerfile`` true);
+    prebuilt-image tasks (``replay_dockerfile = false``) boot their image as-is.
+    """
+    if backend not in _FROM_DOCKERFILE_BACKENDS or not _should_replay_dockerfile(task):
+        return None
+    return _task_dockerfile(task)
+
+
+def _dockerfile_image(backend: str, dockerfile: Path):
+    """Backend-native build spec for the real Dockerfile (COPY context = its directory)."""
+    if backend == "daytona":
+        from daytona import Image  # daytona.Image.from_dockerfile bundles the Dockerfile dir as context
+
+        return Image.from_dockerfile(str(dockerfile))
+    raise ValueError(f"from_dockerfile build unsupported for backend {backend!r}")
+
+
+def _dockerfile_context_fingerprint(dockerfile: Path) -> str:
+    """Stable hash of a Dockerfile's build context (its directory) for snapshot identity.
+
+    Tasks built via ``Image.from_dockerfile`` must key on the *whole* context, not just
+    ``FROM``+``RUN``: two tasks that share a base image and RUN block but differ in COPYed
+    data (e.g. AWS tasks with different ``ready.d`` seeds) would otherwise collide on one
+    snapshot / warm-queue sandbox. Hashes the Dockerfile text plus every file under its
+    directory (relative path + bytes).
+    """
+    import hashlib
+
+    ctx = dockerfile.parent
+    h = hashlib.sha256()
+    for p in sorted(ctx.rglob("*")):
+        if p.is_file():
+            h.update(str(p.relative_to(ctx)).encode("utf-8") + b"\0")
+            try:
+                h.update(p.read_bytes())
+            except OSError:
+                pass
+    return h.hexdigest()[:16]
+
+
 def _create_sandbox_for_task(task: Task, sandbox_backend: str | None) -> Sandbox:
-    """Cold-path sandbox creation: base image + RUN replay (today's behavior)."""
+    """Cold-path sandbox creation.
+
+    When a Dockerfile-based task runs on a remote backend that builds images itself
+    (``_builds_from_dockerfile``), build the *real* Dockerfile (full COPY/ENV/WORKDIR/RUN
+    fidelity — the same primitive harbor's own environment uses) so nothing needs replaying.
+    Otherwise create from the base/prebuilt image and replay the Dockerfile's RUN steps
+    (``_replay_dockerfile``; a no-op for docker, which already built the image, and for
+    prebuilt-image tasks that set ``replay_dockerfile = false``).
+    """
     backend = _resolve_backend(task, sandbox_backend)
+    dockerfile = _builds_from_dockerfile(task, backend)
+    if dockerfile is not None:
+        return _create_base_sandbox(task, backend, image=_dockerfile_image(backend, dockerfile))
     sandbox = _create_base_sandbox(task, backend)
     _replay_dockerfile(task, sandbox, backend)
     return sandbox
@@ -225,18 +339,87 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
     these a remote sandbox runs at the backend default (Daytona: 1 GiB), which
     OOM-kills compile-heavy graders (e.g. ``go test ./...``). Modal takes memory
     in MB; Daytona takes memory/disk in GB. Docker/local ignore the values.
+
+    Those per-task values are baked into ``task.toml`` at dataset-build time, so
+    an over-provisioned default can only be shrunk by rebuilding the dataset.
+    Three provider-agnostic *caps* let an operator clamp every sandbox down at
+    runtime instead — each lowers the task's declared value (``min``) when set
+    (>0); a task already at or below the cap is untouched, and a task that
+    declares nothing is left at the backend default (a cap only lowers — it never
+    raises a task above what it declared, nor introduces a value where there is
+    none):
+
+    * ``RLLM_SANDBOX_MAX_CPUS`` (float) — max physical cores.
+    * ``RLLM_SANDBOX_MAX_MEMORY_MB`` (int) — max memory in MB.
+    * ``RLLM_SANDBOX_MAX_STORAGE_MB`` (int) — max disk in MB (Daytona only; Modal
+      never receives ``storage`` and bills scratch disk as part of compute).
+
+    Modal Sandboxes bill on reserved CPU+memory per second, so capping cuts the
+    per-rollout bill proportionally (e.g. ``RLLM_SANDBOX_MAX_CPUS=2`` halves the
+    CPU term of a 4-core task).
+
+    The sandbox lifetime is sized to this task's own budget so the box always
+    outlives the agent + verifier it hosts (both run inside it). A flat default
+    could be shorter than agent+verifier and reap the box mid-rollout ("Sandbox
+    already shut down" / ENOSPC mid-run). The provider-agnostic
+    ``RLLM_SANDBOX_TIMEOUT_S`` (seconds) is a *floor* on top of that, applied the
+    same way for every backend; each backend then expresses it in its own unit
+    (Modal's hard ``timeout`` in seconds; Daytona's idle ``auto_stop_interval``
+    in minutes).
     """
+    from rllm.env import env_float, env_int, sandbox_timeout_override_s
+
     env = task.metadata.get("environment", {}) or {}
     cpus, mem_mb, disk_mb = env.get("cpus"), env.get("memory_mb"), env.get("storage_mb")
+
+    # Operator caps clamp the baked-in task.toml values down (see docstring):
+    # shrink an over-provisioned sandbox at runtime without rebuilding. A cap
+    # only lowers — never raises a task above its declared value, nor sets one
+    # where the task declares none (a min against a missing value would be wrong).
+    cpu_cap = env_float("RLLM_SANDBOX_MAX_CPUS", 0.0)
+    mem_cap = env_int("RLLM_SANDBOX_MAX_MEMORY_MB", 0)
+    disk_cap = env_int("RLLM_SANDBOX_MAX_STORAGE_MB", 0)
+    if cpu_cap > 0 and cpus:
+        cpus = min(float(cpus), cpu_cap)
+    if mem_cap > 0 and mem_mb:
+        mem_mb = min(int(mem_mb), mem_cap)
+    if disk_cap > 0 and disk_mb:
+        disk_mb = min(int(disk_mb), disk_cap)
+
+    # Per-task lifetime floor (seconds), shared across backends: agent + verifier
+    # + install + teardown/scheduling slack, raised to the operator override. The
+    # sandbox lifetime tracks the *effective* agent timeout: RLLM_HARNESS_RUN_TIMEOUT_S,
+    # when set, is a hard CAP on a task's own agent_timeout (matching
+    # cli_harness._effective_timeout) — otherwise a task's large baked-in agent_timeout
+    # (e.g. SWE-bench Verified) keeps the sandbox alive far past the operator cap.
+    _run_cap = env_int("RLLM_HARNESS_RUN_TIMEOUT_S", 0)
+    _per_task = task.metadata.get("agent_timeout")
+    if _per_task is None:
+        agent_t = float(_run_cap or 3600)
+    elif _run_cap > 0:
+        agent_t = min(float(_per_task), float(_run_cap))
+    else:
+        agent_t = float(_per_task)
+    # Sandbox must outlast the full rollout (agent + verifier + teardown). When the task
+    # declares a verifier_timeout, budget exactly that plus 300s teardown/scheduling slack;
+    # otherwise a flat 600s cushion. Raised to the operator override (RLLM_SANDBOX_TIMEOUT_S).
+    verifier_t = _effective_verifier_timeout(task)
+    if verifier_t is not None:
+        lifetime_s = int(agent_t + float(verifier_t) + 300)
+    else:
+        lifetime_s = int(agent_t + 600)
+    lifetime_s = max(lifetime_s, sandbox_timeout_override_s())
+
     kw: dict = {}
     if backend == "modal":
         if cpus:
             kw["cpu"] = float(cpus)
         if mem_mb:
             kw["memory"] = int(mem_mb)
+        kw["timeout"] = lifetime_s  # Modal's hard lifetime, in seconds
     elif backend == "daytona":
         if cpus:
-            kw["cpu"] = int(cpus)
+            kw["cpu"] = max(1, int(cpus))  # Daytona cores are ints; a fractional Modal-style cap floors to 1
         if mem_mb:
             kw["memory"] = max(1, round(mem_mb / 1024))
         if disk_mb:
@@ -245,13 +428,21 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
         # for multi-GB SWE images routinely exceeds the SDK's 120s default.
         # Honor the task's declared build timeout, with a pull-friendly floor.
         kw["create_timeout"] = float(env.get("build_timeout_sec") or 600.0)
+        # Daytona's lifetime knob is an idle auto-stop in minutes (its default
+        # 30-min idle can reap a long task, e.g. during a stalled LLM call that
+        # looks idle). Express the shared lifetime floor in minutes, rounded up.
+        kw["auto_stop_interval"] = (lifetime_s + 59) // 60
     return kw
 
 
 def _dockerfile_run_commands(task: Task) -> list[str]:
-    """Return a task's ``environment/Dockerfile`` ``RUN`` shell steps (joining
-    ``\\``-continuations). Non-``RUN`` directives — ``COPY``/``ADD`` etc. — are
-    skipped; only ``RUN`` is replayable on a live sandbox.
+    """Return a task's ``environment/Dockerfile`` ``RUN`` shell steps.
+
+    ``\\``-continuations are joined into a single logical command with a space
+    (matching shell line-continuation semantics) so multi-line ``RUN`` steps
+    stay valid when re-executed via ``bash -c``. Non-``RUN`` directives —
+    ``COPY``/``ADD`` etc. — are skipped; only ``RUN`` is replayable on a live
+    sandbox.
     """
     dockerfile = task.task_dir / "environment" / "Dockerfile"
     if not dockerfile.exists():
@@ -275,7 +466,7 @@ def _dockerfile_run_commands(task: Task) -> list[str]:
                 if i >= len(lines):
                     break
                 parts.append(lines[i])
-            cmd = "\n".join(parts).strip()
+            cmd = " ".join(part.strip() for part in parts).strip()
             if cmd:
                 commands.append(cmd)
         i += 1
@@ -326,6 +517,52 @@ def _build_docker_image(context_dir: Path, task_id: str) -> str:
     return tag
 
 
+def _run_healthcheck(task: Task, sandbox: Sandbox) -> None:
+    """Boot a task's declared service and wait for readiness before the agent.
+
+    Harbor-format tasks may declare ``[environment.healthcheck]`` (command +
+    interval/timeout/retries/start-period) that boots an in-image service and
+    blocks until it is ready — e.g. honeycomb's AWS/LocalStack tasks run
+    ``bash /usr/local/bin/start_localstack.sh`` to start LocalStack and seed
+    ``ready.d``. rLLM boots the container with ``sleep infinity`` and never runs
+    the image CMD/entrypoint, so without this the service never starts and the
+    agent (and verifier) hit a dead endpoint. Mirrors harbor's ``run_healthcheck``
+    (run after environment setup, before the agent).
+
+    No-op when the task declares no healthcheck — so non-service eval *and*
+    training tasks are unaffected. Raises on exhaustion so an unbootable service
+    surfaces as an explicit infra error rather than a silent reward 0.0.
+    """
+    import time
+
+    hc = (task.metadata.get("environment", {}) or {}).get("healthcheck")
+    if not isinstance(hc, dict):
+        return
+    command = hc.get("command")
+    if not command:
+        return
+
+    timeout_s = float(hc.get("timeout_sec") or 300.0)
+    interval_s = float(hc.get("interval_sec") or 5.0)
+    retries = int(hc.get("retries") if hc.get("retries") is not None else 3)
+    start_period_s = float(hc.get("start_period_sec") or 0.0)
+
+    if start_period_s > 0:
+        time.sleep(start_period_s)
+
+    last_err: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            sandbox.exec(command, timeout=timeout_s)
+            logger.info("Healthcheck passed (attempt %d/%d): %s", attempt + 1, retries + 1, command)
+            return
+        except Exception as e:  # non-zero exit / timeout → service not ready yet
+            last_err = e
+            if attempt < retries:
+                time.sleep(interval_s)
+    raise RuntimeError(f"Healthcheck failed after {retries + 1} attempt(s) for command {command!r}: {last_err}")
+
+
 def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:
     """Upload environment/files/, run setup.sh and [rllm].setup_commands.
 
@@ -362,16 +599,29 @@ def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:
 
     agent_user = task.metadata.get("agent_user")
     if agent_user:
+        # Lock the verifier/reward dirs away from the (sandboxed) agent user, but
+        # keep them owned by whoever runs the verifier — root unless the task set
+        # a distinct verifier_user — so the verifier (now actually switched to
+        # that user via the backend's su emulation) can still write reward files.
+        verifier_owner = task.metadata.get("verifier_user") or "root"
         _safe_exec(sandbox, "mkdir -p /logs/verifier /tmp/rllm /tests", timeout=10)
         _safe_exec(sandbox, "chmod 700 /logs/verifier /tmp/rllm /tests", timeout=10)
-        _safe_exec(sandbox, "chown root:root /logs/verifier /tmp/rllm /tests", timeout=10)
+        _safe_exec(sandbox, f"chown {verifier_owner} /logs/verifier /tmp/rllm /tests", timeout=10)
         if workdir:
             _safe_exec(sandbox, f"chown -R {agent_user} {workdir}", timeout=30)
 
     env_vars = task.metadata.get("env_vars", {}) or task.metadata.get("environment", {}).get("env", {})
     if env_vars:
-        exports = " && ".join(f"export {k}='{v}'" for k, v in env_vars.items())
-        _safe_exec(sandbox, exports, timeout=10)
+        # Make declared env present in *every* later exec (agent + verifier), the
+        # way Harbor injects [environment].env as a per-exec Secret. A one-shot
+        # ``export`` wouldn't survive — each exec is a fresh shell. Backends that
+        # expose ``set_env`` (e.g. Modal) honor it; others fall back to export.
+        set_env = getattr(sandbox, "set_env", None)
+        if callable(set_env):
+            set_env(env_vars)
+        else:
+            exports = " && ".join(f"export {k}='{v}'" for k, v in env_vars.items())
+            _safe_exec(sandbox, exports, timeout=10)
 
 
 def _safe_exec(sandbox: Sandbox, command: str, timeout: float | None = None, user: str | None = None) -> str:

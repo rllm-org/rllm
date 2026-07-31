@@ -402,13 +402,19 @@ def fetch_fireworks_models(api_key: str | None = None) -> list[str]:
 
 
 def fetch_fireworks_deployed_models(api_key: str | None = None) -> list[str]:
-    """Return the caller's actively deployed model IDs (best-effort).
+    """Return the caller's runnable dedicated-deployment IDs (best-effort).
 
-    Discovers the caller's account ID(s) via ``GET /v1/accounts``, then lists
-    each account's ``deployedModels`` that are in state ``DEPLOYED`` — i.e.
-    models currently serving inference on a dedicated deployment (not merely
-    uploaded). These can be sampled with no further setup. The shared public
-    ``fireworks`` namespace is excluded (see :func:`fetch_fireworks_models`).
+    Discovers the caller's account ID(s) via ``GET /v1/accounts``, then collects
+    two complementary sources (the shared public ``fireworks`` namespace is
+    excluded — see :func:`fetch_fireworks_models`):
+
+    * ``deployedModels`` in state ``DEPLOYED`` — a custom/fine-tuned model bound
+      to a deployment; addressed for inference by its ``model`` id.
+    * ``deployments`` in state ``READY`` — a dedicated deployment of a base
+      model has no ``deployedModel`` entry (``model`` is null) and is addressed
+      for inference by its own ``accounts/<acct>/deployments/<id>`` name. Without
+      this, base-model deployments are invisible to the picker even though
+      that's the exact id evals run against.
 
     Returns an empty list on any failure so callers can degrade gracefully.
     """
@@ -421,6 +427,9 @@ def fetch_fireworks_deployed_models(api_key: str | None = None) -> list[str]:
             for dm in _fireworks_paged(f"accounts/{account}/deployedModels", key, "deployedModels"):
                 if dm.get("state") == "DEPLOYED" and dm.get("model"):
                     names.append(dm["model"])
+            for dep in _fireworks_paged(f"accounts/{account}/deployments", key, "deployments"):
+                if dep.get("state") == "READY" and dep.get("name"):
+                    names.append(dep["name"])
         return sorted(set(names))
     except Exception:
         return []
@@ -508,6 +517,54 @@ def save_ui_config(ui_api_key: str | None) -> None:
     os.chmod(path, 0o600)
 
 
+def load_tunnel_config() -> dict:
+    """Return the gateway-tunnel config (``backend``/``domain``/``port``) from ``~/.rllm/config.json``.
+
+    Written by ``rllm tunnel setup``; consumed by ``rllm tunnel up`` and the
+    quick-tunnel fallback warning. Empty dict if unset or unreadable.
+    """
+    path = _config_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        tunnel = data.get("tunnel")
+        return dict(tunnel) if isinstance(tunnel, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_tunnel_config(backend: str | None, *, domain: str | None = None, port: int | None = None) -> None:
+    """Merge or remove the ``tunnel`` block in ``~/.rllm/config.json``.
+
+    ``backend=None`` removes the block. Merges into the existing file so the
+    provider/model and ``ui_api_key`` entries survive.
+    """
+    path = _config_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data: dict = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    if backend is None:
+        data.pop("tunnel", None)
+    else:
+        entry: dict = {"backend": backend}
+        if domain:
+            entry["domain"] = domain
+        if port:
+            entry["port"] = port
+        data["tunnel"] = entry
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.chmod(path, 0o600)
+
+
 def load_config() -> RllmConfig:
     """Load configuration from ``~/.rllm/config.json``.
 
@@ -544,17 +601,30 @@ def save_config(config: RllmConfig) -> str:
     Creates parent directories as needed and sets file permissions to 0o600
     (owner read/write only) since the file contains API keys.
 
+    Merges into any existing file so unrelated keys (e.g. ``ui_api_key``
+    written by ``rllm login``) survive provider/model changes instead of
+    being clobbered.
+
     Returns the path that was written.
     """
     path = _config_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    data: dict[str, object] = {
-        "provider": config.provider,
-        "model": config.model,
-        "api_keys": dict(config.api_keys),
-    }
+    data: dict[str, object] = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    data["provider"] = config.provider
+    data["model"] = config.model
+    data["api_keys"] = dict(config.api_keys)
     if config.base_url:
         data["base_url"] = config.base_url
+    else:
+        data.pop("base_url", None)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
         f.write("\n")

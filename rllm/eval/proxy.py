@@ -4,9 +4,12 @@ The caller controls the proxy lifecycle::
 
     pm = EvalProxyManager(provider="openai", model_name="gpt-4o", api_key="sk-...")
     pm.start_proxy_subprocess(pm.build_proxy_config())
-    base_url = pm.get_proxy_url()  # http://127.0.0.1:4000/v1
+    base_url = pm.get_proxy_url()  # http://127.0.0.1:<auto-port>/v1
     # ... run eval ...
     pm.shutdown_proxy()
+
+By default the proxy binds a free port (so concurrent ``rllm eval`` jobs each
+get their own and don't collide); pass ``proxy_port=`` to pin a specific one.
 
 This proxy is the bridge to commercial providers during ``rllm eval``. For
 training and for vLLM-backed eval, requests go through ``rllm-model-gateway``
@@ -19,6 +22,7 @@ import atexit
 import logging
 import os
 import resource
+import socket
 import subprocess
 import sys
 import tempfile
@@ -34,6 +38,22 @@ logger = logging.getLogger(__name__)
 
 _NUM_RETRIES = env_int("RLLM_EVAL_PROXY_NUM_RETRIES", 3)  # set env var: export RLLM_EVAL_PROXY_NUM_RETRIES=xxx
 _STARTUP_TIMEOUT_S = env_float("RLLM_EVAL_PROXY_STARTUP_TIMEOUT_S", 30.0)  # set env var: export RLLM_EVAL_PROXY_STARTUP_TIMEOUT_S=xxx
+# Retries for the rare TOCTOU race where an auto-picked free port is taken
+# between selection and the subprocess binding it (matters for concurrent
+# `rllm eval` launches, each auto-starting its own proxy).
+_PORT_BIND_RETRIES = env_int("RLLM_EVAL_PROXY_PORT_BIND_RETRIES", 5)
+
+
+def _find_free_port() -> int:
+    """Ask the OS for a free TCP port on the loopback interface.
+
+    Mirrors ``rllm.gateway.manager._find_free_port`` — used so every
+    auto-started eval proxy binds a distinct port instead of the fixed 4000,
+    letting multiple ``rllm eval`` jobs run concurrently without colliding.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 class _ProxyManagerBase:
@@ -42,11 +62,15 @@ class _ProxyManagerBase:
     def __init__(
         self,
         proxy_host: str = "127.0.0.1",
-        proxy_port: int = 4000,
+        proxy_port: int | None = None,
         admin_token: str | None = None,
     ) -> None:
         self.proxy_host = proxy_host
-        self.proxy_port = proxy_port
+        # ``proxy_port=None`` (the default) auto-picks a free port so concurrent
+        # ``rllm eval`` jobs don't collide on the old hardcoded 4000. Pass an
+        # explicit port to pin it (e.g. for debugging a single run).
+        self._port_auto = proxy_port is None
+        self.proxy_port = proxy_port if proxy_port is not None else _find_free_port()
         self.admin_token = admin_token
         self._proxy_process: subprocess.Popen | None = None
 
@@ -95,6 +119,7 @@ class _ProxyManagerBase:
         if self._proxy_process is None:
             return
 
+        self._shutting_down = True  # tell the monitor this exit is expected
         logger.info("Shutting down proxy subprocess...")
         self._proxy_process.terminate()
         try:
@@ -117,7 +142,7 @@ class EvalProxyManager(_ProxyManagerBase):
         model_name: str,
         api_key: str,
         proxy_host: str = "127.0.0.1",
-        proxy_port: int = 4000,
+        proxy_port: int | None = None,
     ) -> None:
         super().__init__(proxy_host=proxy_host, proxy_port=proxy_port)
         self.provider = provider
@@ -167,16 +192,6 @@ class EvalProxyManager(_ProxyManagerBase):
         if not snapshot_path or not os.path.exists(snapshot_path):
             raise RuntimeError("Config snapshot not available. Cannot start proxy.")
 
-        cmd = [
-            sys.executable,
-            "-m",
-            "rllm.eval._litellm_server",
-            "--host",
-            self.proxy_host,
-            "--port",
-            str(self.proxy_port),
-        ]
-
         env = os.environ.copy()
         try:
             import certifi
@@ -195,32 +210,81 @@ class EvalProxyManager(_ProxyManagerBase):
             except (ValueError, OSError):
                 pass
 
-        # Capture stderr to a temp file so we can show errors on failure
-        stderr_file = tempfile.NamedTemporaryFile(mode="w", prefix="rllm_proxy_", suffix=".log", delete=False)
-        self._stderr_path = stderr_file.name
+        # An auto-picked free port can be grabbed by another process between
+        # selection and bind (concurrent eval launches), so retry on a fresh
+        # port. A pinned port gets a single attempt — the user asked for that
+        # exact port, so surface the failure instead of silently moving.
+        max_attempts = _PORT_BIND_RETRIES if self._port_auto else 1
+        for attempt in range(1, max_attempts + 1):
+            cmd = [
+                sys.executable,
+                "-m",
+                "rllm.eval._litellm_server",
+                "--host",
+                self.proxy_host,
+                "--port",
+                str(self.proxy_port),
+            ]
 
-        logger.info("Starting proxy subprocess: %s", " ".join(cmd))
-        self._proxy_process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=stderr_file,
-            env=env,
-            preexec_fn=set_limits,
-        )
+            # Fresh stderr capture per attempt so a death leaves a readable trail.
+            stderr_file = tempfile.NamedTemporaryFile(mode="w", prefix="rllm_proxy_", suffix=".log", delete=False)
+            self._stderr_path = stderr_file.name
 
-        try:
-            self._wait_for_proxy(timeout=_STARTUP_TIMEOUT_S)
-            logger.info("Proxy server started, sending configuration...")
-            self.reload_proxy_config(config=config)
-            logger.info("Proxy configuration loaded successfully")
-        except Exception:
-            self._report_proxy_failure()
-            self.shutdown_proxy()
-            raise
+            logger.info("Starting proxy subprocess (attempt %d/%d): %s", attempt, max_attempts, " ".join(cmd))
+            self._proxy_process = subprocess.Popen(
+                cmd,
+                stdout=stderr_file,  # capture stdout too (litellm logs + crash output) so a death leaves a trail
+                stderr=stderr_file,
+                env=env,
+                preexec_fn=set_limits,
+            )
+
+            try:
+                self._wait_for_proxy(timeout=_STARTUP_TIMEOUT_S)
+                logger.info("Proxy server started, sending configuration...")
+                self.reload_proxy_config(config=config)
+                logger.info("Proxy configuration loaded successfully")
+                break
+            except Exception:
+                self._report_proxy_failure()
+                self.shutdown_proxy()
+                if attempt >= max_attempts:
+                    raise
+                old_port = self.proxy_port
+                self.proxy_port = _find_free_port()
+                logger.warning("Proxy startup failed on port %s; retrying on %s", old_port, self.proxy_port)
 
         atexit.register(self.shutdown_proxy)
         logger.info("Proxy subprocess ready (PID: %s)", self._proxy_process.pid)
+        self._start_proxy_monitor()
         return snapshot_path
+
+    def _start_proxy_monitor(self) -> None:
+        """Watch the proxy subprocess; if it dies mid-run, scream loudly with its
+        captured output. Otherwise the gateway silently routes to a dead worker
+        and every subsequent rollout returns empty completions (scoring 0) with
+        no visible cause — exactly the failure that's been impossible to debug.
+        """
+        import threading
+
+        proc = self._proxy_process
+        if proc is None:
+            return
+
+        def _monitor() -> None:
+            rc = proc.wait()  # blocks until the proxy process exits
+            if getattr(self, "_shutting_down", False):
+                return  # expected teardown at end of run
+            tail = self._read_stderr_tail(max_lines=60)
+            logger.error(
+                "\n🚨🚨🚨 LITELLM PROXY DIED MID-RUN (exit code %s) 🚨🚨🚨\n"
+                "Every subsequent LLM call now returns EMPTY and all remaining rollouts "
+                "score 0. THIS is why the run is failing. Proxy stdout/stderr tail:\n%s\n",
+                rc,
+                tail or "(nothing captured — likely SIGKILL / OOM / external kill)",
+            )
+
+        threading.Thread(target=_monitor, daemon=True, name="rllm-proxy-monitor").start()
 
     def _wait_for_proxy(self, timeout: float = 30.0) -> None:
         if self._proxy_process is None:

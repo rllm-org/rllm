@@ -15,17 +15,84 @@ from tinker_cookbook.renderers import Message, Renderer, TrainOnWhat
 from tinker_cookbook.supervised.common import datum_from_model_input_weights
 from tinker_cookbook.supervised.types import SupervisedDataset
 
+from rllm.data.sft_schema import SFTSchemaError, normalize_messages
+from rllm.trainer.sft.backend import SFTConfigError
+
 logger = logging.getLogger(__name__)
+
+
+def _ensure_trainable(conversation: list[Message], last_only: bool) -> list[Message]:
+    """Legacy trainable-flag derivation (superseded by :mod:`rllm.data.sft_schema`).
+
+    Retained as an importable helper for callers/tests that still reference it;
+    the render path below now normalizes via the schema instead. Self-describing
+    rows (e.g. from ``from-eval``'s automerge) already carry the flag and are
+    returned untouched. A row without flags gets a derived default: assistant
+    messages train (only the *last* when ``last_only``), reproducing the legacy
+    ``ALL_ASSISTANT_MESSAGES`` / ``LAST_ASSISTANT_MESSAGE`` behavior.
+    """
+    if conversation and isinstance(conversation[0], dict) and "trainable" in conversation[0]:
+        return conversation
+    last_asst = max((i for i, m in enumerate(conversation) if m.get("role") == "assistant"), default=-1)
+    return [{**m, "trainable": m.get("role") == "assistant" and (not last_only or i == last_asst)} for i, m in enumerate(conversation)]
+
+
+def _row_context(conversation, limit: int = 400) -> str:
+    """A truncated repr of a failing conversation, for actionable errors."""
+    text = repr(conversation)
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+# Process-wide truncation-warning counter: warn loudly on the first few
+# over-length rows, then thin out so a fully over-length dataset doesn't flood
+# the logs (one reminder every 1000 rows).
+_truncation_warn_count = 0
+
+
+def _warn_truncation(row_tokens: int, max_length: int) -> None:
+    global _truncation_warn_count
+    _truncation_warn_count += 1
+    if _truncation_warn_count <= 5 or _truncation_warn_count % 1000 == 0:
+        logger.warning(
+            "SFT row renders to %d tokens > data.max_length=%d: the datum is TRUNCATED and its tail — including "
+            "the final trainable turn(s) — is dropped from training. If that is not intended, raise --max-length "
+            "to at least %d (SFTSpec.max_length defaults to 2048, far below typical multi-turn trajectories). "
+            "[over-length row #%d%s]",
+            row_tokens,
+            max_length,
+            row_tokens,
+            _truncation_warn_count,
+            "; further warnings thinned to every 1000th" if _truncation_warn_count == 5 else "",
+        )
 
 
 def conversation_to_datum(
     conversation: list[Message],
     renderer: Renderer,
     max_length: int | None,
-    train_on_what: TrainOnWhat = TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+    last_only: bool = False,
 ) -> tinker.Datum:
-    """Convert a conversation (list of messages) to a Tinker Datum."""
-    model_input, weights = renderer.build_supervised_example(conversation, train_on_what=train_on_what)
+    """Convert a conversation (list of messages) to a Tinker Datum.
+
+    Normalizes the raw messages through :mod:`rllm.data.sft_schema` (str/None
+    content coercion, parquet ``None``-artifact stripping, structured
+    ``tool_calls``, trainable-flag derivation) and renders with tinker's
+    ``CUSTOMIZED`` masking — each message's ``trainable`` flag alone decides the
+    loss mask. ``last_only`` selects the flag-less default (train just the last
+    assistant turn) rather than the all-assistant default.
+
+    Schema/validation failures are re-raised as :class:`SFTConfigError` with the
+    failing row's context.
+    """
+    default_trainable = "last" if last_only else "all"
+    try:
+        messages = normalize_messages(conversation, default_trainable=default_trainable)
+        tinker_messages = [m.to_tinker_message() for m in messages]
+    except SFTSchemaError as e:
+        raise SFTConfigError(f"SFT row failed schema normalization: {e}\n  row={_row_context(conversation)}") from e
+    model_input, weights = renderer.build_supervised_example(tinker_messages, train_on_what=TrainOnWhat.CUSTOMIZED)
+    if max_length is not None and model_input.length > max_length:
+        _warn_truncation(model_input.length, max_length)
     return datum_from_model_input_weights(model_input, weights, max_length)
 
 
@@ -43,13 +110,13 @@ class TinkerSFTDataset(SupervisedDataset):
         renderer: Renderer,
         batch_size: int,
         max_length: int | None = None,
-        train_on_what: TrainOnWhat = TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+        last_only: bool = False,
         max_samples: int = -1,
     ):
         self.renderer = renderer
         self.batch_size = batch_size
         self.max_length = max_length
-        self.train_on_what = train_on_what
+        self.last_only = last_only
 
         if isinstance(dataset_or_files, str | list):
             if isinstance(dataset_or_files, str):
@@ -67,7 +134,7 @@ class TinkerSFTDataset(SupervisedDataset):
             logger.info(f"Limited dataset to {max_samples} samples")
 
         logger.info(f"Loaded {len(self.dataset)} examples from {source}")
-        logger.info(f"Training on: {train_on_what}")
+        logger.info(f"Masking: CUSTOMIZED (derive last_only={last_only} for flag-less rows)")
 
     def get_batch(self, index: int) -> list[tinker.Datum]:
         start_idx = index * self.batch_size
@@ -75,7 +142,10 @@ class TinkerSFTDataset(SupervisedDataset):
         datums = []
         for i in range(start_idx, end_idx):
             row = self.dataset[i]
-            datums.append(conversation_to_datum(row["messages"], self.renderer, self.max_length, self.train_on_what))
+            try:
+                datums.append(conversation_to_datum(row["messages"], self.renderer, self.max_length, self.last_only))
+            except SFTConfigError as e:
+                raise SFTConfigError(f"dataset row {i}: {e}") from e
         return datums
 
     def set_epoch(self, seed: int = 0):
@@ -93,7 +163,7 @@ def create_tinker_sft_datasets(
     batch_size: int,
     val_batch_size: int | None = None,
     max_length: int | None = None,
-    train_on_what: TrainOnWhat = TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+    last_only: bool = False,
     max_train_samples: int = -1,
     max_val_samples: int = -1,
 ) -> tuple[TinkerSFTDataset, TinkerSFTDataset | None]:
@@ -106,7 +176,7 @@ def create_tinker_sft_datasets(
         renderer=renderer,
         batch_size=batch_size,
         max_length=max_length,
-        train_on_what=train_on_what,
+        last_only=last_only,
         max_samples=max_train_samples,
     )
 
@@ -117,7 +187,7 @@ def create_tinker_sft_datasets(
             renderer=renderer,
             batch_size=val_batch_size,
             max_length=max_length,
-            train_on_what=train_on_what,
+            last_only=last_only,
             max_samples=max_val_samples,
         )
 

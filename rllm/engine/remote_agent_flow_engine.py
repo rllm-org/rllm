@@ -15,11 +15,10 @@ from rllm.engine.remote_runtime.protocol import (
     RemoteTaskResult,
     TaskSubmission,
 )
-from rllm.engine.trace_converter import compute_step_metrics, trace_record_to_step
+from rllm.engine.trace_converter import compute_step_metrics, filter_empty_response_traces, trace_record_to_step
 from rllm.gateway.manager import GatewayManager
-from rllm.types import Episode, Step, Trajectory
+from rllm.types import Episode, Step, TerminationReason, Trajectory
 from rllm.utils.episode_logger import EpisodeLogger
-from rllm.workflows.workflow import TerminationReason
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +162,10 @@ def _build_episode(
     Converts all traces to training Steps via trace_record_to_step(),
     creates a single Trajectory with the remote reward, and computes metrics.
     """
+    trace_attempt_count = len(traces)
+    traces = filter_empty_response_traces(traces)
+    empty_response_traces_dropped = trace_attempt_count - len(traces)
+
     # Convert traces to training steps
     training_steps: list[Step] = []
     if traces:
@@ -192,8 +195,9 @@ def _build_episode(
 
     # Compute metrics
     metrics = compute_step_metrics(trajectories)
-    metrics["empty"] = int(len(traces) == 0)
-    metrics["steps_collected"] = len(traces)
+    metrics["empty"] = int(len(training_steps) == 0)
+    metrics["steps_collected"] = len(training_steps)
+    metrics["empty_response_traces_dropped"] = empty_response_traces_dropped
 
     remote_metrics = (result.raw_result or {}).get("metrics") or {}
     scalar_remote = {k: int(v) if isinstance(v, bool) else v for k, v in remote_metrics.items() if isinstance(v, (bool | int | float))}

@@ -17,18 +17,57 @@ import atexit
 import io
 import logging
 import os
+import shlex
 import tarfile
 import threading
+import time
 import weakref
 
-from rllm.env import env_int
-from rllm.sandbox.protocol import SnapshotNotFound
+from rllm.env import env_float, env_int, rllm_run_id, sandbox_timeout_override_s
+from rllm.sandbox.protocol import SandboxCommandTimeout, SnapshotNotFound
 
 logger = logging.getLogger(__name__)
 
-# Default sandbox lifetime: 30 minutes (Modal default is 5 min). Raise via the
-# env var for workloads whose single rollout can exceed it (e.g. long builds).
-_DEFAULT_TIMEOUT = env_int("RLLM_MODAL_SANDBOX_TIMEOUT_S", 30 * 60)
+# Headroom the sandbox lifetime keeps *beyond* the agent run timeout + install,
+# to cover the post-run verifier, teardown, and scheduling slack.
+_SANDBOX_LIFETIME_HEADROOM_S = 10 * 60
+
+
+def _default_sandbox_timeout() -> int:
+    """Default Modal sandbox lifetime (seconds) — must outlast a full rollout.
+
+    The lifetime clock starts at ``Sandbox.create()``, *before* the cold-path
+    install, the agent run, and the verifier. If it doesn't exceed their sum the
+    container is reaped mid-rollout (exit 137 + "Sandbox already shut down").
+    So derive it from the agent run-timeout knob with headroom for install +
+    verify + teardown. ``RLLM_SANDBOX_TIMEOUT_S`` (provider-agnostic) overrides
+    outright. (Modal's own default is only 5 min.)
+    """
+    explicit = sandbox_timeout_override_s()
+    if explicit > 0:
+        return explicit
+    run_timeout = env_int("RLLM_HARNESS_RUN_TIMEOUT_S", 3600)
+    install_timeout = env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600)
+    return run_timeout + install_timeout + _SANDBOX_LIFETIME_HEADROOM_S
+
+
+def _supports_create_tags(sandbox_cls) -> bool:
+    """Whether this modal SDK's ``Sandbox.create`` accepts a ``tags`` kwarg (>= 1.5)."""
+    import inspect
+
+    try:
+        return "tags" in inspect.signature(sandbox_cls.create).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _attach_run_tags(sandbox, tags: dict[str, str], name: str) -> None:
+    """Best-effort ``set_tags`` for SDKs without the create-time kwarg."""
+    try:
+        sandbox.set_tags(tags)
+    except Exception:
+        logger.debug("could not tag sandbox %s", name, exc_info=True)
+
 
 # Modal caps an exec's total argv at 64 KiB (ARG_MAX); payloads above this go
 # through a chunked temp-file path instead of being inlined in the command.
@@ -37,6 +76,64 @@ _B64_ARGV_LIMIT = 50_000
 # atexit-tracked sandboxes; terminated on process exit to avoid leaks.
 _LIVE_SANDBOXES: weakref.WeakSet = weakref.WeakSet()
 _LIVE_LOCK = threading.Lock()
+
+
+class _CreateRateLimiter:
+    """Process-global token bucket pacing ``Sandbox.create()``.
+
+    Modal's create cap is a **token bucket**, not a flat cap: it absorbs an
+    initial burst, then refills at the rate its ``RESOURCE_EXHAUSTED`` error
+    advertises (~5/s). That shape is why a batch of ~192 concurrent creates can
+    sail through while ~256 trips it — the burst fits the bucket, then the extra
+    creates outrun the refill and Modal's client spends the batch in
+    retry/backoff (the repeated rate-limit warnings).
+
+    This mirrors that bucket on our side, gating every create through the one
+    chokepoint (:meth:`ModalSandbox.__init__`): up to ``burst`` go through
+    immediately, after which creates are paced at ``rate``/s. Tuned under
+    Modal's envelope, the startup burst is absorbed and only the long tail is
+    throttled — so creates queue locally instead of failing-and-retrying, with
+    little added latency for batches within the burst.
+
+    Thread-safe; token accounting is serialized under the lock while the wait
+    sleeps outside it, so concurrent callers self-correct on the next loop and
+    never collectively exceed ``rate``. Scope is per-process, which matches the
+    AgentFlowEngine path (all creates happen in the driver process).
+    """
+
+    def __init__(self, rate: float, burst: float) -> None:
+        self._rate = rate
+        self._capacity = max(1.0, burst)
+        self._tokens = self._capacity
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        if self._rate <= 0:  # disabled — e.g. account limit was raised
+            return
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._tokens = min(self._capacity, self._tokens + (now - self._last) * self._rate)
+                self._last = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                wait = (1.0 - self._tokens) / self._rate
+            time.sleep(wait)
+
+
+# Defaults sit inside the envelope observed live: a burst of ~192 concurrent
+# creates is fine, ~256 trips the limit, and the error advertises a ~5/s
+# refill. So allow a 150 burst (comfortably under the 192 that worked) and
+# refill at 4/s (under the stated 5/s) as a backstop for the long tail.
+# Steady-state create rate is usually far below the refill anyway (rollouts
+# free slots only as tasks finish), so in practice this just smooths startup.
+# Tune RLLM_MODAL_SANDBOX_CREATE_BURST / _RPS for your account; set _RPS=0 to
+# disable entirely (e.g. once Modal raises your limit).
+_CREATE_RATE_RPS = env_float("RLLM_MODAL_SANDBOX_CREATE_RPS", 4.0)
+_CREATE_BURST = env_float("RLLM_MODAL_SANDBOX_CREATE_BURST", 150.0)
+_CREATE_LIMITER = _CreateRateLimiter(_CREATE_RATE_RPS, _CREATE_BURST)
 
 
 def _terminate_all_live() -> None:
@@ -54,6 +151,30 @@ def _terminate_all_live() -> None:
 
 
 atexit.register(_terminate_all_live)
+
+
+def _build_exec_command(command: str, persistent_env: dict[str, str] | None, user: str | int | None) -> str:
+    """Wrap *command* with persistent-env exports and an optional ``su`` user-switch.
+
+    Pure string transform (no Modal calls) so the exec contract is unit-testable:
+
+    * ``persistent_env`` is exported ahead of the command so every exec sees the
+      task's declared environment (a one-shot ``export`` wouldn't persist — each
+      Modal exec is a fresh shell). Mirrors harbor's per-exec env injection.
+    * ``user`` switches via ``su <user> -s /bin/bash -c <cmd>`` — Modal's SDK has
+      no ``user=`` on exec — matching ``harbor.environments.modal``'s emulation.
+      An ``int`` is treated as a uid and resolved to its name; a ``str`` is used
+      verbatim. The env exports are placed *inside* the switched shell so they
+      apply to the target user.
+    """
+    run = command
+    if persistent_env:
+        prefix = "".join(f"export {k}={shlex.quote(str(v))}; " for k, v in persistent_env.items())
+        run = prefix + run
+    if user is not None:
+        user_arg = f"$(getent passwd {user} | cut -d: -f1)" if isinstance(user, int) else shlex.quote(str(user))
+        run = f"su {user_arg} -s /bin/bash -c {shlex.quote(run)}"
+    return run
 
 
 class ModalSandbox:
@@ -84,8 +205,14 @@ class ModalSandbox:
 
         self.name = name
         self._image_spec = image
-        self._timeout = kwargs.pop("timeout", _DEFAULT_TIMEOUT)
-        self._app_name = kwargs.pop("app_name", "rllm-sandbox")
+        self._timeout = kwargs.pop("timeout", None) or _default_sandbox_timeout()
+        # Per-run App name so a run's sandboxes are isolated on a shared Modal
+        # account: `modal app stop rllm-sandbox-<run_id>` kills only this run's
+        # sandboxes (set RLLM_RUN_ID; else a random per-process id). Pass an
+        # explicit app_name to override.
+        self._app_name = kwargs.pop("app_name", None) or f"rllm-sandbox-{rllm_run_id()}"
+        # Env exported into every exec (populated via set_env); see exec().
+        self._persistent_env: dict[str, str] = {}
 
         # A stored snapshot ref is a bare Modal image id ("im-…", no registry/tag);
         # the ":" / "/" guard keeps real docker images off the from_id path.
@@ -105,16 +232,38 @@ class ModalSandbox:
                 modal_image = image  # already a modal.Image
 
             create_kwargs: dict = {"app": self._app, "image": modal_image, "timeout": self._timeout}
+            # name = per-task label (visible in `modal sandbox list`); tags carry
+            # the run id so you can filter/terminate a run's sandboxes:
+            #   modal.Sandbox.list(tags={"rllm_run_id": "<id>"})  -> .terminate()
+            # Older modal SDKs (< 1.5) have no ``tags`` create kwarg — attach
+            # them post-create via set_tags() instead.
+            create_kwargs["name"] = self.name[:64]
+            run_tags = {"rllm_run_id": rllm_run_id()}
+            post_create_tags: dict[str, str] | None = None
+            if _supports_create_tags(modal.Sandbox):
+                create_kwargs["tags"] = run_tags
+            else:
+                post_create_tags = run_tags
             for key in ("secrets", "volumes", "workdir", "gpu", "cpu", "memory"):
                 if key in kwargs:
                     create_kwargs[key] = kwargs.pop(key)
 
-            self._sandbox = modal.Sandbox.create(**create_kwargs)
+            # Keep the sandbox alive for exec-based use regardless of the image's
+            # own ENTRYPOINT/CMD (task images often set one that exits at once).
+            # Mirrors harbor.environments.modal's keepalive; override via the
+            # ``entrypoint`` kwarg.
+            entrypoint = kwargs.pop("entrypoint", ["sh", "-c", "sleep infinity"])
+
+            # Pace creates under Modal's account-wide rate cap (see _CreateRateLimiter).
+            _CREATE_LIMITER.acquire()
+            self._sandbox = modal.Sandbox.create(*entrypoint, **create_kwargs)
         except modal.exception.NotFoundError as e:
             if from_snapshot:
                 raise SnapshotNotFound(f"modal snapshot {image} no longer exists") from e
             raise
         self._sandbox_id = self._sandbox.object_id
+        if post_create_tags is not None:
+            _attach_run_tags(self._sandbox, post_create_tags, self.name)
 
         with _LIVE_LOCK:
             _LIVE_SANDBOXES.add(self)
@@ -126,20 +275,35 @@ class ModalSandbox:
             image if isinstance(image, str) else "<modal.Image>",
         )
 
-    def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:  # noqa: ARG002
+    def set_env(self, env: dict[str, str]) -> None:
+        """Register env vars exported into every subsequent :meth:`exec`.
+
+        Modal execs are independent shells, so persistent task env (Harbor's
+        ``[environment].env``) must be re-applied per command. Mirrors how
+        Harbor injects the same vars as a per-exec Secret.
+        """
+        for k, v in (env or {}).items():
+            self._persistent_env[str(k)] = str(v)
+
+    def exec(self, command: str, timeout: float | None = None, user: str | int | None = None) -> str:
         """Execute a command inside the Modal sandbox.
 
-        ``user`` is accepted for protocol compatibility but currently ignored.
+        Runs ``bash -c <command>`` and returns stdout. Raises ``RuntimeError``
+        on non-zero exit code (matching DockerSandbox behavior).
 
-        Runs ``bash -c <command>`` and returns stdout. Raises
-        ``RuntimeError`` on non-zero exit code (matching DockerSandbox
-        behavior).
+        ``user`` switches the command to another OS user via ``su`` — Modal's
+        SDK has no ``user=`` on exec — mirroring how harbor's Modal environment
+        applies the agent/verifier user. Env registered via :meth:`set_env` is
+        exported into every command so the agent and verifier observe the task's
+        declared environment. See :func:`_build_exec_command`.
         """
         exec_kwargs = {}
         if timeout is not None:
             exec_kwargs["timeout"] = int(timeout)
 
-        process = self._sandbox.exec("bash", "-c", command, **exec_kwargs)
+        run = _build_exec_command(command, self._persistent_env, user)
+        start = time.monotonic()
+        process = self._sandbox.exec("bash", "-c", run, **exec_kwargs)
 
         stdout = process.stdout.read()
         stderr = process.stderr.read()
@@ -147,9 +311,22 @@ class ModalSandbox:
         # Wait for the process to complete and get exit code
         process.wait()
         exit_code = process.returncode
+        elapsed = time.monotonic() - start
 
         if exit_code != 0:
-            logger.warning(
+            # A timeout SIGKILL surfaces as a negative returncode; flag it so an
+            # agent that simply spent its time budget isn't reported as a failure.
+            timed_out = timeout is not None and exit_code < 0 and elapsed >= timeout * 0.95
+            if timed_out:
+                logger.warning(
+                    "Command hit its %ds timeout in sandbox %s (killed after %.0fs): %s",
+                    int(timeout),
+                    self.name,
+                    elapsed,
+                    command[:200],
+                )
+                raise SandboxCommandTimeout(f"Command hit its {int(timeout)}s timeout in sandbox {self.name} (killed after {elapsed:.0f}s)")
+            logger.debug(
                 "Command failed in sandbox %s: %s\nstderr: %s",
                 self.name,
                 command,
@@ -166,7 +343,11 @@ class ModalSandbox:
         argv-sized chunks and streamed from there.
         """
         if len(b64) <= _B64_ARGV_LIMIT:
-            self._exec_unchecked(f"echo '{b64}' | {consume}")
+            # Checked: a failed write here means the upload silently no-ops,
+            # and a broken environment's reward-0 would train as a legitimate
+            # failure. Callers (setup hooks / evaluator) classify the raise as
+            # SANDBOX_ERROR / AddTestsDirError.
+            self.exec(f"echo '{b64}' | {consume}")
             return
         import uuid as _uuid
 
@@ -176,7 +357,8 @@ class ModalSandbox:
             self._exec_unchecked(f"printf %s '{b64[i : i + _B64_ARGV_LIMIT]}' >> {tmp}")
         # Brace group so the stdin redirect feeds the FIRST pipeline member
         # (`cmd1 | cmd2 < f` would bind f to cmd2 and leave cmd1 blocked).
-        self._exec_unchecked(f"{{ {consume}; }} < {tmp}; rc=$?; rm -f {tmp}; exit $rc")
+        # Checked (see above): the script propagates the consume rc on purpose.
+        self.exec(f"{{ {consume}; }} < {tmp}; rc=$?; rm -f {tmp}; exit $rc")
 
     def upload_file(self, local_path: str, remote_path: str) -> None:
         """Upload a single file into the Modal sandbox.
@@ -322,7 +504,12 @@ def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force:
     (stored as a diff from the base). A failed install fails the build — a
     snapshot keyed on the install must actually contain it.
     """
-    from rllm.eval._resolution import _create_base_sandbox, _dockerfile_run_commands, _replay_dockerfile
+    from rllm.eval._resolution import (
+        _create_base_sandbox,
+        _dockerfile_run_commands,
+        _replay_dockerfile,
+        _should_replay_dockerfile,
+    )
 
     if prior_ref and not force and _modal_ref_alive(prior_ref):
         logger.info("modal snapshot %s already live (%s) — reusing", key, prior_ref)
@@ -330,10 +517,12 @@ def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force:
 
     # Size the build sandbox's lifetime to the worst-case replay: each RUN is
     # bounded at 900s (a step that hangs against a prebuilt image burns its
-    # full bound), plus the install bound and pull/capture slack. With the
-    # 30-min default, two hung steps killed the sandbox mid-build.
+    # full bound), plus the install bound and pull/capture slack — floored at
+    # the rollout default. Without this floor, two hung steps killed the
+    # sandbox mid-build.
     install_budget = env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 900) if install_script else 0
-    build_timeout = max(_DEFAULT_TIMEOUT, 900 * len(_dockerfile_run_commands(task)) + install_budget + 600)
+    n_replay = len(_dockerfile_run_commands(task)) if _should_replay_dockerfile(task) else 0
+    build_timeout = max(_default_sandbox_timeout(), 900 * n_replay + install_budget + 600)
     sb = _create_base_sandbox(task, "modal", name=f"{key}-build", timeout=build_timeout)
     try:
         _replay_dockerfile(task, sb, "modal")

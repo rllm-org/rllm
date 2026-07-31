@@ -98,6 +98,7 @@
             "group": "Guides",
             "pages": [
               "guides/customizing-training",
+              "guides/sft-distillation",
               "guides/distributed-training",
               "guides/ray-runtime-env",
               "guides/environment-variables"
@@ -114,8 +115,10 @@
           {
             "group": "Advanced algorithms",
             "pages": [
+              "core-concepts/rl-algorithms",
               "training/capability-matrix",
               "training/advantage-estimator",
+              "training/custom-loss",
               "training/precompute-advantage"
             ]
           }

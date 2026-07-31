@@ -1,0 +1,149 @@
+"""Tinker adapter: pre-tokenized prompt path for cumulative token mode.
+
+When the gateway runs in ``cumulative_token_mode``, turn 2+ arrives at the
+in-process handler as a completions-style request whose ``prompt`` is raw token
+IDs (built by ``renderers.bridge_to_next_turn``). The handler must sample
+straight from those tokens — bypassing message rendering — and return a
+completions-style body the gateway can extract token IDs from.
+
+Uses a fake engine so no Tinker service / model is required.
+"""
+
+import asyncio
+from types import SimpleNamespace
+
+from rllm.gateway.tinker_adapter import _to_openai_tool_calls, create_tinker_handler
+
+
+class _ModelOutput:
+    text = "ls -la"
+    content = "ls -la"
+    reasoning = ""
+    tool_calls = []
+    prompt_ids = [1, 2, 3, 4]
+    completion_ids = [10, 11]
+    logprobs = [-0.1, -0.2]
+    prompt_length = 4
+    completion_length = 2
+    finish_reason = "stop"
+
+
+class _FakeEngine:
+    model_name = "qwen"
+
+    def __init__(self):
+        self.token_input = None
+        self.messages = None
+
+    async def get_token_output_from_token_input(self, token_input, **kwargs):
+        self.token_input = token_input
+        self.sampling_kwargs = kwargs
+        return "sampled"
+
+    def assemble_model_output(self, token_input, token_output):
+        return _ModelOutput()
+
+    async def get_model_response(self, messages, **kwargs):
+        self.messages = messages
+        return _ModelOutput()
+
+
+def test_token_prompt_path_samples_from_tokens():
+    engine = _FakeEngine()
+    handler = create_tinker_handler(engine)
+
+    resp = asyncio.run(handler({"prompt": [1, 2, 3, 4], "temperature": 0.7, "model": "qwen"}))
+
+    # Sampled directly from the token IDs — message rendering bypassed.
+    assert engine.token_input == [1, 2, 3, 4]
+    assert engine.messages is None
+    assert engine.sampling_kwargs.get("temperature") == 0.7
+
+    # Completions-style body the gateway's cumulative handler understands.
+    assert resp["object"] == "text_completion"
+    assert resp["prompt_token_ids"] == [1, 2, 3, 4]
+    assert resp["choices"][0]["text"] == "ls -la"
+    assert resp["choices"][0]["token_ids"] == [10, 11]
+    assert resp["choices"][0]["logprobs"]["token_logprobs"] == [-0.1, -0.2]
+
+
+def test_chat_path_unchanged_by_token_branch():
+    engine = _FakeEngine()
+    handler = create_tinker_handler(engine)
+
+    resp = asyncio.run(handler({"messages": [{"role": "user", "content": "hi"}], "model": "qwen"}))
+
+    assert engine.messages == [{"role": "user", "content": "hi"}]
+    assert engine.token_input is None  # token path not taken
+    assert resp["object"] == "chat.completion"
+    assert resp["choices"][0]["message"]["content"] == "ls -la"
+    assert resp["prompt_token_ids"] == [1, 2, 3, 4]
+
+
+def test_non_int_prompt_falls_through_to_chat():
+    """A string ``prompt`` (or none) must not trigger the token path."""
+    engine = _FakeEngine()
+    handler = create_tinker_handler(engine)
+
+    # No messages and a string prompt: should still go down the chat path
+    # (messages defaulting to []), not the token path.
+    asyncio.run(handler({"prompt": "hello", "messages": [{"role": "user", "content": "hi"}]}))
+    assert engine.token_input is None
+    assert engine.messages == [{"role": "user", "content": "hi"}]
+
+
+# ---------------------------------------------------------------------------
+# Tool-call conversion. The prime-rl ``renderers`` parsers (parse_qwen35 etc.)
+# return tool calls nested under ``function`` — reading top-level ``name`` there
+# silently produced empty tool calls, which broke OpenAI function-calling clients
+# (opencode) in cumulative-mode training. Both handler paths must now emit correct,
+# structured tool_calls, and must NOT reinject the raw <tool_call> XML into content.
+# ---------------------------------------------------------------------------
+
+
+def test_to_openai_tool_calls_handles_all_producer_shapes():
+    # prime-rl nested shape (the one that used to yield name="").
+    assert _to_openai_tool_calls([{"function": {"name": "bash", "arguments": {"command": "ls"}}}]) == [
+        {"id": "call_0", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}}
+    ]
+    # flat dict and ToolCall object still work.
+    assert _to_openai_tool_calls([{"name": "edit", "arguments": {"p": 1}}])[0]["function"]["name"] == "edit"
+    assert _to_openai_tool_calls([SimpleNamespace(name="read", arguments={"f": "x"})])[0]["function"]["name"] == "read"
+
+
+class _ToolModelOutput(_ModelOutput):
+    content = ""  # parse-stripped when the whole turn is a tool call
+    text = "<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>"
+    reasoning = "let me think"
+    tool_calls = [{"function": {"name": "bash", "arguments": {"command": "ls"}}}]  # prime-rl nested
+
+
+class _ToolEngine(_FakeEngine):
+    def assemble_model_output(self, token_input, token_output):
+        return _ToolModelOutput()
+
+    async def get_model_response(self, messages, **kwargs):
+        self.messages = messages
+        return _ToolModelOutput()
+
+
+_TOOLS = [{"type": "function", "function": {"name": "bash"}}]
+
+
+def test_token_path_emits_structured_tool_calls():
+    handler = create_tinker_handler(_ToolEngine())
+    resp = asyncio.run(handler({"prompt": [1, 2, 3, 4], "tools": _TOOLS, "model": "qwen"}))
+    ch = resp["choices"][0]
+    assert ch["tool_calls"][0]["function"] == {"name": "bash", "arguments": '{"command": "ls"}'}
+    assert ch["finish_reason"] == "tool_calls"
+    assert ch["reasoning"] == "let me think"
+    assert ch["text"] == ""  # raw XML NOT reinjected into content
+
+
+def test_chat_path_emits_structured_tool_calls():
+    handler = create_tinker_handler(_ToolEngine())
+    resp = asyncio.run(handler({"messages": [{"role": "user", "content": "hi"}], "tools": _TOOLS, "model": "qwen"}))
+    ch = resp["choices"][0]
+    assert ch["message"]["tool_calls"][0]["function"] == {"name": "bash", "arguments": '{"command": "ls"}'}
+    assert ch["message"]["content"] == ""  # raw XML NOT reinjected
+    assert ch["finish_reason"] == "tool_calls"

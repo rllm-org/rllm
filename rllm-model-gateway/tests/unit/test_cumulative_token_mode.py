@@ -152,6 +152,38 @@ class TestCumulativeTokenMode:
         # So turn 2 prompt should start with [1,2,3,4,5,10,11,12] + bridge
         assert prompt[:8] == [1, 2, 3, 4, 5, 10, 11, 12]
 
+    def test_duplicate_resend_overwrites_trace_not_appends(self, cumulative_gateway):
+        """A duplicate resend (upstream retry) replays the turn in place and
+        OVERWRITES that turn's trace, instead of leaving a second, superseded
+        trace for one logical turn (which would break the trainer's linear merge).
+        """
+        import httpx as _httpx
+
+        server, _mock_vllm = cumulative_gateway
+        gw_url = server.url
+        sid = "cum-dup"
+        oai = openai.OpenAI(base_url=f"{gw_url}/sessions/{sid}/v1", api_key="dummy")
+
+        oai.chat.completions.create(model="mock-model", messages=[{"role": "user", "content": "Hello"}])
+        turn2 = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hello from mock!"},
+            {"role": "user", "content": "More"},
+        ]
+        oai.chat.completions.create(model="mock-model", messages=turn2)
+
+        with _httpx.Client(timeout=10.0) as c:
+            before = len(c.get(f"{gw_url}/sessions/{sid}/traces").json())  # 2 traces: turn1 + turn2
+
+        # Resend turn 2 identically -> DUPLICATE -> replay (regenerate in place).
+        oai.chat.completions.create(model="mock-model", messages=turn2)
+
+        with _httpx.Client(timeout=10.0) as c:
+            after = len(c.get(f"{gw_url}/sessions/{sid}/traces").json())
+
+        assert before == 2
+        assert after == before  # replay overwrote turn 2's trace; store did not grow
+
     def test_traces_have_correct_token_ids(self, cumulative_gateway):
         """Both turns produce traces with prompt_token_ids and completion_token_ids."""
         server, mock_vllm = cumulative_gateway
@@ -260,15 +292,16 @@ class TestCumulativeTokenMode:
         assert "messages" in mock_vllm.request_log[2]
         assert "prompt" not in mock_vllm.request_log[2]
 
-    def test_declined_bridge_resets_and_reingests(self, cumulative_gateway):
-        """When the renderer declines a cumulative (non-divergent) turn, the
-        accumulator must reset so that turn is re-ingested on the chat path.
+    def test_declined_bridge_forks_and_reingests(self, cumulative_gateway):
+        """When the renderer declines a cumulative (non-divergent) turn, the proxy
+        forks a fresh chain and re-ingests that turn on the chat path, rather than
+        resetting the matched chain in place.
 
-        Regression: without the reset, the stale prefix drops the declined
+        Regression: without re-ingesting, the stale prefix drops the declined
         turn's completion tokens from the next cumulative prompt, breaking the
-        prefix-extension invariant. A bridge can return None even when the
-        message prefix is cumulative (e.g. DefaultRenderer, or a slice the
-        renderer can't bridge).
+        prefix-extension invariant. A bridge can return None even when the message
+        prefix is cumulative (e.g. DefaultRenderer, or a slice the renderer can't
+        bridge). Forking keeps chains immutable (one lineage == one token chain).
         """
         server, mock_vllm = cumulative_gateway
         gw_url = server.url
@@ -304,9 +337,12 @@ class TestCumulativeTokenMode:
         # Declined -> chat path (not /v1/completions).
         assert "messages" in mock_vllm.request_log[1]
         assert "prompt" not in mock_vllm.request_log[1]
-        # Reset + re-ingest: prefix snapshot now reflects turn-2's 3 messages,
-        # not turn-1's single message (the bug leaves this at 1).
-        assert acc_store["cum-decline"].message_count == 3
+        # Fork + re-ingest: a NEW chain is opened (matched chain #0 stays
+        # immutable) and .active is the forked chain holding turn-2's 3 messages.
+        slots_decline = acc_store["cum-decline"]
+        assert len(slots_decline._slots) == 2  # forked, not reset-in-place
+        assert slots_decline.active.message_count == 3
+        assert slots_decline._slots[0].message_count == 1  # original chain untouched
 
         # Turn 3 — cumulative extension resumes from the re-ingested turn-2 state.
         oai.chat.completions.create(
@@ -341,7 +377,7 @@ class TestCumulativeTokenMode:
             model="mock-model",
             messages=[{"role": "user", "content": "Fresh start"}],
         )
-        # is_cumulative returns False when len(messages) <= message_count, triggering reset
+        # Snapshot-covered prefix changed (PREFIX_CHANGED) -> reset -> chat path.
         assert "messages" in mock_vllm.request_log[1]  # went through chat path
 
         # Turn 3 — cumulative extension of the new history
@@ -449,3 +485,133 @@ class TestCumulativeStreaming:
         usage = usage_chunks[-1]["usage"]
         assert "prompt_tokens" in usage
         assert "completion_tokens" in usage
+
+
+class TestLocalStreamingTurn0Ingest:
+    """The local (Tinker) fake-streaming path must seed the accumulator on turn 0.
+
+    Regression: it used to persist the trace but never ``ingest_turn`` /
+    ``update_prefix``, so the slot stayed at turn 0. Then ``continues()`` was False
+    for every later turn, so each turn opened a NEW lineage — one trajectory per turn
+    for a streaming session (opencode/claude-code), with cumulative bridging never
+    engaging. The HTTP-streaming and non-streaming turn-0 paths always ingested; only
+    the local-handler streaming path was missing it.
+    """
+
+    async def test_streaming_local_turn0_seeds_slot_and_stays_one_lineage(self):
+        async def fake_handler(request_body):
+            # Mirrors the Tinker adapter: chat.completion carrying token ids.
+            return {
+                "object": "chat.completion",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "token_ids": [5, 6], "finish_reason": "stop"}],
+                "prompt_token_ids": [1, 2, 3],
+            }
+
+        config = GatewayConfig(
+            store_worker="memory",
+            workers=[{"url": "http://127.0.0.1:1/v1", "worker_id": "w0"}],
+            health_check_interval=999,
+            sync_traces=True,
+            cumulative_token_mode=False,  # inject a mock renderer instead of loading one
+        )
+        proxy = create_app(config).state.proxy
+        proxy.renderer = _MockRenderer()
+        proxy.cumulative_token_mode = True
+        proxy.local_handler = fake_handler
+
+        sid = "loc-stream-1"
+        turn0 = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hello"}]
+        slots = proxy._session_slots(sid)
+        slot = slots.select(turn0)  # mirror handle() routing before it dispatches to streaming
+
+        # _handle_streaming passes the request's bound slot; mirror that here.
+        await proxy._handle_streaming_local({"messages": turn0, "stream": True}, sid, False, 1, slot=slot)
+
+        turn0_slot = slot
+        # The fix: turn-0 ingest advanced the slot (was stuck at 0 before).
+        assert turn0_slot.turn_count == 1
+        assert turn0_slot.message_count == len(turn0)
+
+        # A cumulative turn 1 must route back to the SAME lineage, not fork a new one.
+        turn1 = turn0 + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "next"}]
+        acc1 = slots.select(turn1)
+        assert acc1 is turn0_slot
+        assert len(slots._slots) == 1
+        assert acc1.lineage_id == turn0_slot.lineage_id
+
+
+class TestPerRequestLineageBinding:
+    """The lineage tag binds to the chain select() chose for THIS request
+    (request.state.slot), not the shared .active pointer — so a concurrent
+    same-session request (e.g. opencode's async title-generation call) can't
+    cross-tag a trace onto the wrong lineage."""
+
+    def _proxy(self):
+        config = GatewayConfig(
+            store_worker="memory",
+            workers=[{"url": "http://127.0.0.1:1/v1", "worker_id": "w0"}],
+            health_check_interval=999,
+            sync_traces=True,
+            cumulative_token_mode=False,  # inject a mock renderer instead of loading one
+        )
+        proxy = create_app(config).state.proxy
+        proxy.renderer = _MockRenderer()
+        proxy.cumulative_token_mode = True
+        return proxy
+
+    def test_lineage_tag_follows_request_slot_not_active(self):
+        from types import SimpleNamespace
+
+        proxy = self._proxy()
+        slots = proxy._session_slots("sess")
+
+        # Request A: main agent -> chain #0.
+        main = [{"role": "system", "content": "You are opencode"}, {"role": "user", "content": "task"}]
+        slot_a = slots.select(main)
+        req_a = SimpleNamespace(state=SimpleNamespace(slot=slot_a))
+
+        # Request B: concurrent title-gen with a divergent prefix -> forks chain #1
+        # and clobbers the shared .active pointer.
+        titlegen = [{"role": "system", "content": "You are a title generator"}, {"role": "user", "content": "task"}]
+        slot_b = slots.select(titlegen)
+        req_b = SimpleNamespace(state=SimpleNamespace(slot=slot_b))
+
+        assert slot_a.lineage_id != slot_b.lineage_id
+        assert slots.active is slot_b  # .active now points at B, not A
+
+        # Each request's tag follows its OWN chain, immune to .active being clobbered.
+        assert proxy._request_lineage_id(req_a) == slot_a.lineage_id
+        assert proxy._request_lineage_id(req_b) == slot_b.lineage_id
+        # No bound slot (cumulative off / non-chat request) -> None.
+        assert proxy._request_lineage_id(SimpleNamespace(state=SimpleNamespace())) is None
+
+    def test_fork_opens_new_immutable_chain(self):
+        from rllm_model_gateway.token_accumulator import SessionSlots
+
+        slots = SessionSlots(_MockRenderer(), session_id="sess")
+        msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
+        a = slots.select(msgs)
+        a.ingest_turn([1, 2], [3])
+        a.update_prefix(msgs)
+
+        b = slots.fork()
+
+        assert b is not a
+        assert b.lineage_id != a.lineage_id
+        assert slots.active is b
+        assert len(slots._slots) == 2
+        # The matched chain is untouched (immutable) — fork never resets it.
+        assert a.turn_count == 1
+        assert a.message_count == 2
+        assert b.turn_count == 0
+
+    def test_next_trace_id_replay_reuses_else_fresh(self):
+        from rllm_model_gateway.token_accumulator import TokenAccumulator
+
+        acc = TokenAccumulator(_MockRenderer(), session_id="sess")
+        t1 = acc.next_trace_id(replay=False)  # turn 1 -> fresh id, remembered
+        assert acc.trace_id == t1
+        assert acc.next_trace_id(replay=True) == t1  # replay -> reuse (overwrite that turn)
+        t2 = acc.next_trace_id(replay=False)  # turn 2 -> new id
+        assert t2 != t1
+        assert acc.trace_id == t2

@@ -498,8 +498,16 @@ def _describe_sandbox_routing(
         public_url, tunnel_backend = parse_tunnel(tunnel)
         if public_url:
             gateway_note = f"public_url={public_url}"
+        elif tunnel_backend:
+            gateway_note = f"{tunnel_backend} tunnel (auto-spawn)"
         else:
-            gateway_note = f"{tunnel_backend or 'cloudflared'} tunnel (auto-spawn)"
+            # No explicit tunnel: show what auto-resolution will actually use
+            # ($RLLM_GATEWAY_TUNNEL / `rllm tunnel up` daemon / cloudflared).
+            from rllm.gateway.tunnel import resolve_auto_tunnel
+
+            resolved, _ = resolve_auto_tunnel()
+            rp, rb = parse_tunnel(resolved)
+            gateway_note = (f"public_url={rp}" if rp else f"{rb} tunnel (auto-spawn)") + " [auto]"
     concurrency_note = f", concurrency={sandbox_concurrency}" if sandbox_concurrency is not None else ""
     return f"[val]{backend}[/]  [dim]· gateway: {gateway_note}{concurrency_note}[/]"
 

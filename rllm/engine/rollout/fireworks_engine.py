@@ -18,10 +18,15 @@ is inherited from ``TinkerEngine``.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import dataclasses
+import functools
 import logging
+import ssl
+import time
 from typing import Any
 
+import httpx
 from fireworks.training.sdk import DeploymentSampler
 from typing_extensions import override
 
@@ -35,20 +40,165 @@ from rllm.engine.rollout.types import (
     TinkerTokenOutput,
     Tokenizer,
 )
-from rllm.workflows import TerminationEvent, TerminationReason
+from rllm.types import TerminationEvent, TerminationReason
 
 logger = logging.getLogger(__name__)
 
 _MAX_SAMPLE_ATTEMPTS = 5
+# The gateway wires FireworksEngine as an in-process handler, so these retries
+# run *inside* the agent's HTTP call and hold that (byte-silent, no-heartbeat on
+# the cumulative path) connection open the whole time. Retrying long enough to
+# ride out a transient reset / weight-sync reload is good; holding past the
+# client/tunnel tolerance is not — the client re-sends, surfacing as
+# TokenAccumulator "duplicate" churn + wasted regeneration. So cap the total
+# retry wall-clock: ride out the common case, then fail fast so a persistent
+# outage surfaces instead of stalling the connection.
+_RETRY_BUDGET_S = 90.0
+# Per-retry backoff cap: the old 10/20/30/40s schedule alone could sleep ~100s,
+# well past the budget. Cap it so backoff can't dominate the budget.
+_RETRY_BACKOFF_CAP_S = 15.0
 _TRANSIENT_ERROR_MARKERS = (
     "502",
     "503",
     "425",
+    "429",
     "Connection",
     "incomplete chunked read",
     "_SSETruncationError",
     "closed the SSE stream mid-generation",
 )
+
+
+# Per-request inference headers (e.g. Fireworks session-affinity) injected into
+# DeploymentSampler requests. ``DeploymentSampler.async_completions_stream`` only
+# forwards body params and a fixed set of client-level headers, so there is no
+# per-call header hook; we patch ``_inference_headers`` to merge whatever the
+# current async context stashed here. A ContextVar is async-safe — each rollout
+# task carries its own copy, so concurrent trajectories don't clobber each
+# other's session-affinity key.
+_per_request_headers: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar("rllm_fw_request_headers", default=None)
+
+
+def _install_inference_header_patch() -> None:
+    """Patch ``DeploymentSampler._inference_headers`` to merge per-request headers.
+
+    Idempotent: re-imports / repeated calls are no-ops.
+    """
+    orig = DeploymentSampler._inference_headers
+    if getattr(orig, "_rllm_session_affinity_patch", False):
+        return
+
+    def _inference_headers(self):  # noqa: ANN001 - matches SDK signature
+        headers = orig(self)
+        extra = _per_request_headers.get()
+        if extra:
+            headers = {**headers, **extra}
+        return headers
+
+    _inference_headers._rllm_session_affinity_patch = True  # type: ignore[attr-defined]
+    DeploymentSampler._inference_headers = _inference_headers
+
+
+_install_inference_header_patch()
+
+
+def _install_httpx_orjson_patch() -> None:
+    """Serialize httpx ``json=`` request bodies with orjson instead of stdlib json.
+
+    ``DeploymentSampler`` POSTs the full (≤120K-token) prompt via
+    ``client.post(json=payload)``; httpx serializes it with stdlib ``json`` on the
+    calling thread — the gateway's single event loop — which at high concurrency is
+    the dominant per-request on-loop CPU cost. orjson is ~3x faster and matches
+    httpx's wire semantics (compact, UTF-8, rejects NaN).
+
+    Best-effort and guarded: httpx internals (``encode_json`` returning
+    ``(headers, ByteStream)``) are version-specific, so we probe the shape against
+    the real function before installing and skip (keeping stdlib) on any mismatch —
+    a future httpx upgrade can degrade the speedup but never break sampling.
+    """
+    try:
+        import httpx._content as _hc
+        import orjson
+        from httpx._content import ByteStream
+    except Exception:  # noqa: BLE001 - httpx/orjson layout unknown → skip patch
+        return
+
+    orig = getattr(_hc, "encode_json", None)
+    if orig is None or getattr(orig, "_rllm_orjson_patch", False):
+        return
+
+    def _encode_json(json):  # noqa: ANN001 - matches httpx signature
+        try:
+            body = orjson.dumps(json)
+        except TypeError:
+            return orig(json)  # exotic types orjson can't handle → stdlib
+        headers = {"Content-Length": str(len(body)), "Content-Type": "application/json"}
+        return headers, ByteStream(body)
+
+    # Verify our output matches the real httpx contract (types + headers) on a
+    # tiny probe before swapping; otherwise leave stdlib in place.
+    try:
+        ref_headers, ref_stream = orig({"_rllm_probe": 1})
+        new_headers, new_stream = _encode_json({"_rllm_probe": 1})
+        if type(new_stream) is not type(ref_stream) or set(new_headers) != set(ref_headers):
+            raise ValueError("httpx encode_json shape mismatch")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("httpx orjson patch skipped (%s); using stdlib json for httpx bodies", e)
+        return
+
+    _encode_json._rllm_orjson_patch = True  # type: ignore[attr-defined]
+    _hc.encode_json = _encode_json
+    logger.info("Installed httpx orjson encode_json patch (faster large-prompt serialization off the gateway loop's critical path)")
+
+
+_install_httpx_orjson_patch()
+
+
+def _install_sdk_response_parse_patch() -> None:
+    """Parse the SDK's streaming completion chunks with orjson.
+
+    ``DeploymentSampler.async_completions_stream`` parses every SSE chunk with
+    stdlib ``json.loads(sse.data)`` on the event-loop thread; across many
+    concurrent streams that per-chunk parse is a continuous on-loop cost. Swap
+    the SDK ``sampling`` module's ``json`` reference for a shim whose ``loads`` is
+    orjson and which delegates every other attribute (``dumps``,
+    ``JSONDecodeError``, …) to stdlib json — so nothing else in the module
+    changes behaviour. ``orjson.JSONDecodeError`` subclasses ``ValueError``, so
+    the SDK's ``except (ValueError, TypeError)`` still catches malformed chunks.
+
+    Best-effort and idempotent: skips silently if the SDK/orjson layout differs.
+    """
+    try:
+        import json as _stdlib_json
+
+        import orjson
+        from fireworks.training.sdk import sampling as _sdk
+    except Exception:  # noqa: BLE001 - layout unknown → skip
+        return
+
+    if getattr(_sdk, "_rllm_orjson_json_shim", False):
+        return
+
+    class _OrjsonJson:
+        loads = staticmethod(orjson.loads)  # the hot path
+
+        def __getattr__(self, name):  # noqa: ANN001 - delegate everything else
+            return getattr(_stdlib_json, name)
+
+    shim = _OrjsonJson()
+    try:
+        assert shim.loads('{"a":1}') == {"a": 1}
+        assert shim.dumps({"a": 1}) == '{"a": 1}'  # delegates to stdlib → str
+    except Exception as e:  # noqa: BLE001
+        logger.warning("SDK response-parse orjson patch skipped (%s); using stdlib json", e)
+        return
+
+    _sdk.json = shim
+    _sdk._rllm_orjson_json_shim = True  # type: ignore[attr-defined]
+    logger.info("Installed orjson patch for Fireworks SDK streaming response parse")
+
+
+_install_sdk_response_parse_patch()
 
 
 class _EmptyCompletionIdsError(RuntimeError):
@@ -86,6 +236,11 @@ class FireworksEngine(TinkerEngine):
     ``TinkerTokenOutput`` are fully supported.
     """
 
+    # Signals the gateway handler to forward a per-trajectory ``rllm_session_id``
+    # so this engine can set Fireworks session-affinity headers (prefix-cache
+    # reuse across a rollout's turns). Other engines ignore the session id.
+    supports_session_affinity = True
+
     def __init__(
         self,
         tokenizer: Tokenizer,
@@ -100,6 +255,9 @@ class FireworksEngine(TinkerEngine):
         sample_timeout: int = 600,
         processor=None,
         router_replay: bool = False,
+        bypass_render_with_parser: bool = False,
+        renderer_name: str | None = None,
+        renderer_family: str = "auto",
         **kwargs,
     ):
         """
@@ -137,17 +295,89 @@ class FireworksEngine(TinkerEngine):
         self.train_sampling_params = dict((sampling_params or {}).get("train", {}))
         self.val_sampling_params = dict((sampling_params or {}).get("val", {}))
 
-        # Chat template parser (same setup as TinkerEngine bypass mode)
-        self.bypass_render_with_parser = True
-        self.chat_parser = ChatTemplateParser.get_parser(
-            tokenizer,
-            processor=processor,
-            disable_thinking=disable_thinking,
-        )
+        # Resolve the renderer the same way the gateway does, so the engine renders
+        # turn 0 with the same renderer the gateway uses for the turn-1+ cumulative
+        # bridge. resolve() auto-detects Fireworks-cookbook models (e.g. GLM-5.2 ->
+        # "glm5") with no config. We adopt the unified renderer — and skip
+        # ChatTemplateParser, whose eager apply_chat_template check rejects some
+        # served templates (GLM-5.2 -> "'str object' has no attribute 'items'") —
+        # when it is explicitly pinned, or when auto-detection lands on a
+        # Fireworks-cookbook renderer (a model chat_parser can't serve). prime-rl
+        # models under plain auto keep the existing chat_parser path (no regression).
+        #
+        # bypass_render_with_parser=True is an explicit escape hatch: force
+        # ChatTemplateParser and skip the unified renderer entirely.
+        if bypass_render_with_parser:
+            self.unified_renderer = None
+        else:
+            from rllm.renderers import resolve
+
+            res = resolve(
+                getattr(tokenizer, "name_or_path", None),
+                tokenizer,
+                backend="fireworks",
+                family=renderer_family,
+                renderer_name=renderer_name,
+            )
+            explicit = renderer_name is not None or renderer_family != "auto"
+            self.unified_renderer = res.renderer if (res.source == "tinker" or (explicit and res.source != "chat_template")) else None
+            if self.unified_renderer is not None:
+                logger.info("FireworksEngine rendering via %s renderer (%s)", res.name, res.source)
+            elif explicit and res.source == "chat_template":
+                logger.warning(
+                    "renderer_family=%r / renderer_name=%r did not resolve a native renderer for %s; using ChatTemplateParser.",
+                    renderer_family,
+                    renderer_name,
+                    getattr(tokenizer, "name_or_path", None),
+                )
+
+        # No tinker_cookbook renderer on this path; the unified renderer (above) or
+        # chat_parser owns rendering+parsing — both handled by the shared TinkerEngine.
+        # ``renderer`` stays None so the shared legacy/VLM branch is never reached here.
+        self.renderer = None
+        # bypass_render_with_parser reflects who owns rendering+parsing: True =
+        # ChatTemplateParser (built below); False = the unified renderer.
+        self.bypass_render_with_parser = self.unified_renderer is None
+        self.chat_parser = None if self.unified_renderer is not None else ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
 
         self.sample_timeout = sample_timeout
         self.router_replay = router_replay
         self.sampling_client = sampler
+        # Retained so a separate-process gateway can rebuild an equivalent engine
+        # (see handler_factory_spec / rllm.gateway.worker_handlers).
+        self.renderer_family = renderer_family
+
+    def handler_factory_spec(self) -> tuple[str, dict[str, Any]]:
+        """Recipe for rebuilding this engine as a gateway ``local_handler`` in a
+        separate process (Path 1 / rllm.gateway.manager multi-process mode).
+
+        Returns ``(import_path, config)`` where ``import_path`` is a
+        ``"module:function"`` that maps ``config`` -> a ``local_handler``. The
+        config carries only serializable, non-secret values — the subprocess
+        attaches to the *same* Fireworks deployment via the sampler's
+        ``base_url``/``model`` (no re-provisioning); the API key comes from the
+        inherited ``FIREWORKS_API_KEY`` env, not this config.
+        """
+        sampler = self.sampling_client
+        return (
+            "rllm.gateway.worker_handlers:build_fireworks_handler",
+            {
+                "inference_url": getattr(sampler, "base_url", None),
+                "model": getattr(sampler, "model", None),
+                "tokenizer_model": getattr(self.tokenizer, "name_or_path", None),
+                "max_prompt_length": self.max_prompt_length,
+                "max_response_length": self.max_response_length,
+                # __init__ stored (input - 1); pass +1 so a rebuild lands identically.
+                "max_model_length": self.max_model_length + 1,
+                "sampling_params": {"train": self.train_sampling_params, "val": self.val_sampling_params},
+                "reasoning_effort": self.reasoning_effort,
+                "accumulate_reasoning": self.accumulate_reasoning,
+                "router_replay": self.router_replay,
+                "sample_timeout": self.sample_timeout,
+                "renderer_family": self.renderer_family,
+                "bypass_render_with_parser": self.bypass_render_with_parser,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Token-in / token-out override
@@ -161,15 +391,23 @@ class FireworksEngine(TinkerEngine):
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
         reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
 
-        prompt = self.chat_parser.parse(
-            messages,
-            add_generation_prompt=True,
-            is_first_msg=True,
-            tools=tools,
-            reasoning_effort=reasoning_effort,
-            accumulate_reasoning=accumulate_reasoning,
+        # Rendering a ≤120K-token prompt is CPU-bound and (via the HF fast
+        # tokenizer) releases the GIL, so run it in a worker thread instead of on
+        # the gateway's single event loop — otherwise every turn-0 request blocks
+        # the loop from flushing responses / firing heartbeats for all other
+        # in-flight requests, which at high concurrency shows up as client
+        # timeouts + TokenAccumulator "duplicate" churn.
+        loop = asyncio.get_running_loop()
+        token_input = await loop.run_in_executor(
+            None,
+            functools.partial(
+                self._render_prompt_token_input,
+                messages,
+                tools=tools,
+                reasoning_effort=reasoning_effort,
+                accumulate_reasoning=accumulate_reasoning,
+            ),
         )
-        token_input = self.tokenizer.encode(prompt, add_special_tokens=False)
 
         if application_id is not None:
             kwargs["user"] = application_id
@@ -237,6 +475,10 @@ class FireworksEngine(TinkerEngine):
         requested_max_tokens = sampling_params.pop("max_tokens", requested_max_tokens)
         max_tokens = self._prepare_max_tokens(requested_max_tokens, input_length)
 
+        # Per-trajectory session id (gateway forwards it for affinity); it must
+        # NOT leak into the request body, so pop it before building sampling params.
+        session_id = kwargs.pop("rllm_session_id", None)
+
         for key in ("temperature", "top_p", "top_k", "user", "reasoning_effort"):
             if key in kwargs:
                 sampling_params[key] = kwargs.pop(key)
@@ -247,10 +489,21 @@ class FireworksEngine(TinkerEngine):
         if self.router_replay:
             sampling_params["include_routing_matrix"] = True
 
+        # Fireworks routes requests carrying the same session id to the same
+        # replica, so its per-replica prompt-prefix KV is reused across a
+        # trajectory's turns. Set once per turn from the trajectory id.
+        session_headers = None
+        if session_id:
+            session_headers = {
+                "x-multi-turn-session-id": str(session_id),
+                "x-session-affinity": str(session_id),
+            }
+
         raw, server_metrics = await self._completions_with_retry(
             prompt_ids,
             max_tokens,
             sampling_params,
+            session_headers=session_headers,
         )
 
         choice = raw["choices"][0]
@@ -296,21 +549,32 @@ class FireworksEngine(TinkerEngine):
         prompt_ids: list[int],
         max_tokens: int,
         sampling_kwargs: dict[str, Any],
+        session_headers: dict[str, str] | None = None,
     ) -> tuple[dict[str, Any], dict | None]:
         """Call ``DeploymentSampler.async_completions_stream`` with transient-error retries.
 
-        Returns (response_dict, server_metrics_dict)."""
+        ``session_headers``, when given, are merged into the request's HTTP
+        headers (via the ``_inference_headers`` patch) so Fireworks routes this
+        request to the trajectory's pinned replica. Returns
+        (response_dict, server_metrics_dict)."""
 
+        start = time.monotonic()
+        first_failure: float | None = None
         for attempt in range(_MAX_SAMPLE_ATTEMPTS):
             try:
-                result, server_metrics = await self.sampling_client.async_completions_stream(
-                    prompt=prompt_ids,
-                    max_tokens=max_tokens,
-                    raw_output=True,
-                    logprobs=True,
-                    http_timeout=self.sample_timeout,
-                    **sampling_kwargs,
-                )
+                token = _per_request_headers.set(session_headers) if session_headers else None
+                try:
+                    result, server_metrics = await self.sampling_client.async_completions_stream(
+                        prompt=prompt_ids,
+                        max_tokens=max_tokens,
+                        raw_output=True,
+                        logprobs=True,
+                        http_timeout=self.sample_timeout,
+                        **sampling_kwargs,
+                    )
+                finally:
+                    if token is not None:
+                        _per_request_headers.reset(token)
                 metrics_dict = {k: v for k, v in dataclasses.asdict(server_metrics).items() if v is not None} if server_metrics else None
                 choice = (result.get("choices") or [{}])[0]
                 completion_ids = (choice.get("raw_output") or {}).get("completion_token_ids") or []
@@ -320,24 +584,48 @@ class FireworksEngine(TinkerEngine):
             except Exception as exc:
                 err = str(exc)
                 exc_name = exc.__class__.__name__
-                transient = isinstance(exc, _EmptyCompletionIdsError) or any(marker in err or marker in exc_name for marker in _TRANSIENT_ERROR_MARKERS)
-                if transient and attempt < _MAX_SAMPLE_ATTEMPTS - 1:
-                    wait = 10 * (attempt + 1)
+                # Timeouts/transport errors have an empty str(exc), so the string
+                # markers below miss them; classify by type instead. Raw
+                # ssl.SSLError (e.g. bad_record_mac) escapes the SDK's SSE
+                # stream unwrapped by httpx.
+                is_network_error = isinstance(exc, httpx.TimeoutException | httpx.TransportError | ssl.SSLError)
+                transient = isinstance(exc, _EmptyCompletionIdsError) or is_network_error or any(marker in err or marker in exc_name for marker in _TRANSIENT_ERROR_MARKERS)
+                elapsed = time.monotonic() - start
+                if first_failure is None:
+                    first_failure = time.monotonic()
+                wait = min(10 * (attempt + 1), _RETRY_BACKOFF_CAP_S)
+                # Retry only while there's budget left to both back off and make
+                # another attempt worthwhile — else fail fast so the held client
+                # connection is released instead of stalled past its tolerance.
+                # The budget clock starts at the FIRST FAILURE, not request start:
+                # a long healthy generation that dies mid-stream must not have its
+                # own streaming time charged against the retry budget.
+                budget_left = (time.monotonic() - first_failure) + wait < _RETRY_BUDGET_S
+                if transient and attempt < _MAX_SAMPLE_ATTEMPTS - 1 and budget_left:
                     logger.debug(
-                        "Attempt %d/%d failed (%s), retrying in %ds...",
+                        "Attempt %d/%d failed (%s: %s) after %.1fs, retrying in %ds...",
                         attempt + 1,
                         _MAX_SAMPLE_ATTEMPTS,
+                        exc_name,
                         exc,
+                        elapsed,
                         wait,
                     )
                     await asyncio.sleep(wait)
                     continue
-                resp_text = getattr(getattr(exc, "response", None), "text", None)
+                resp = getattr(exc, "response", None)
+                resp_text = getattr(resp, "text", None)
+                resp_headers = dict(getattr(resp, "headers", None) or {})
+                give_up = "retry budget exhausted" if (transient and not budget_left) else "permanent"
                 logger.error(
-                    "Sampling failed permanently after %d attempts: %s\n%s",
+                    "Sampling failed (%s) after %d attempts / %.1fs (%s): %s\n%s\nheaders: %s",
+                    give_up,
                     attempt + 1,
+                    elapsed,
+                    exc_name,
                     exc,
                     resp_text or "",
+                    resp_headers,
                 )
                 raise
         raise RuntimeError("unreachable")

@@ -54,6 +54,37 @@ class VerlSFTBackend(SFTBackend):
             raise SFTConfigError(f"Unsupported lr_schedule {self.spec.lr_schedule!r} for verl. Use one of {sorted(_LR_SCHEDULE_MAP)}.")
         if self.spec.lr_schedule == "linear":
             logger.warning("verl has no 'linear' LR schedule; using 'cosine' instead.")
+        self._reject_structured_rows(self.spec.train_dataset, "train")
+        if self.spec.val_dataset is not None:
+            self._reject_structured_rows(self.spec.val_dataset, "val")
+
+    @staticmethod
+    def _reject_structured_rows(dataset, label: str) -> None:
+        """Reject the tinker-only structured SFT schema on verl.
+
+        verl's parquet/``messages`` path consumes plain ``{role, content:str}``
+        turns; it can't render structured rows — parts-list content (thinking /
+        tool-call parts) or per-message ``trainable`` flags. Fail fast and point
+        at the hosted backends. Pure dict inspection over the first 64 rows (no
+        verl import).
+        """
+        try:
+            rows = dataset.get_data()[:64]
+        except Exception:  # noqa: BLE001 - gate is best-effort
+            return
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for msg in row.get("messages") or []:
+                if not isinstance(msg, dict):
+                    continue
+                if isinstance(msg.get("content"), list) or "trainable" in msg:
+                    raise SFTConfigError(
+                        f"{label} dataset has structured SFT rows (parts-list content / per-message "
+                        "'trainable' flags) representing reasoning (<think>) or tool-calls. These are "
+                        "not supported on the verl backend yet — use --backend tinker (or fireworks) "
+                        "for structured SFT."
+                    )
 
     def _compose_base(self) -> DictConfig:
         """Compose verl's full ``sft_trainer_engine`` config (all sub-groups)."""
@@ -79,6 +110,13 @@ class VerlSFTBackend(SFTBackend):
 
         lora_rank = int(spec.lora_rank or 0)
         max_token_len = max(int(spec.max_length), 8192)
+        # verl SFT delegates to verl's own Tracking (inside torchrun), which
+        # asserts on unknown backends and has no 'ui' logger — drop it with a
+        # warning rather than crash the launcher.
+        sft_logger = list(spec.logger) if spec.logger else ["console"]
+        if "ui" in sft_logger:
+            logger.warning("rllm UI logging is not supported on the verl SFT backend; dropping 'ui' from the logger list.")
+            sft_logger = [b for b in sft_logger if b != "ui"]
         overrides = OmegaConf.create(
             {
                 "model": {
@@ -110,7 +148,7 @@ class VerlSFTBackend(SFTBackend):
                     "test_freq": int(spec.val_freq),
                     "project_name": spec.project,
                     "experiment_name": spec.experiment or "default",
-                    "logger": ["console", "wandb"],
+                    "logger": sft_logger,
                     "default_local_dir": spec.output_dir or self._default_local_dir(),
                 },
             }

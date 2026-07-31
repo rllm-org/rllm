@@ -4,7 +4,7 @@ import pytest
 
 from rllm.agents.agent import Episode, Trajectory
 from rllm.data.utils import task_from_row
-from rllm.engine.agentflow_engine import AgentFlowEngine
+from rllm.engine.agentflow_engine import AgentFlowEngine, enrich_episode_with_traces
 from rllm.eval.types import EvalOutput
 from rllm.workflows.workflow import TerminationReason
 
@@ -90,6 +90,64 @@ def _empty_token_trace(session_id: str):
         finish_reason="stop",
         metadata={},
     )
+
+
+def _empty_response_trace(session_id: str, trace_id: str):
+    from rllm_model_gateway.models import TraceRecord
+
+    return TraceRecord(
+        trace_id=trace_id,
+        session_id=session_id,
+        model="m",
+        messages=[{"role": "user", "content": "Q"}],
+        response_message={},
+        prompt_token_ids=[],
+        completion_token_ids=[],
+        logprobs=[],
+        finish_reason=None,
+        metadata={},
+    )
+
+
+def _valid_token_trace(session_id: str):
+    from rllm_model_gateway.models import TraceRecord
+
+    return TraceRecord(
+        trace_id=f"valid-{session_id}",
+        session_id=session_id,
+        model="m",
+        messages=[{"role": "user", "content": "Q"}],
+        response_message={"role": "assistant", "content": "A"},
+        prompt_token_ids=[1, 2],
+        completion_token_ids=[3],
+        logprobs=[-0.1],
+        finish_reason="stop",
+        metadata={},
+    )
+
+
+def test_empty_response_retries_are_filtered_before_strict_enrichment():
+    """Transient API attempts have no response envelope and must not poison
+    the successful same-turn retry that follows them."""
+    session_id = "task:0"
+    episode = Episode(id=session_id, trajectories=[Trajectory(name="solver")])
+    traces = [
+        _empty_response_trace(session_id, "empty-1"),
+        _empty_response_trace(session_id, "empty-2"),
+        _valid_token_trace(session_id),
+    ]
+
+    enriched = enrich_episode_with_traces(
+        episode,
+        traces,
+        session_id,
+        {"question": "q"},
+        strict=True,
+    )
+
+    assert [step.id for step in enriched.trajectories[0].steps] == [f"valid-{session_id}"]
+    assert enriched.metrics["steps_collected"] == 1
+    assert enriched.metrics["empty_response_traces_dropped"] == 2
 
 
 @pytest.mark.parametrize("is_validation", [False, True])
@@ -189,3 +247,31 @@ def test_env_flow_receives_sandbox_and_container_url():
 
     assert seen["env"] is sandbox
     assert seen["base_url"].startswith("http://host.docker.internal:9131/")
+
+
+def test_no_usable_model_output_detects_dead_upstream():
+    """No LLM calls at all, or every call empty (no content, no tool_calls) =
+    downed upstream — the signal _finish_episode promotes to MODEL_ERROR instead
+    of a clean ENV_DONE."""
+    from types import SimpleNamespace as NS
+
+    from rllm.engine.agentflow_engine import _no_usable_model_output, _step_returned_nothing
+
+    def step(content, tool_calls=None):
+        return NS(model_output=NS(content=content), chat_completions=[{"role": "assistant", "content": content, "tool_calls": tool_calls}])
+
+    assert _step_returned_nothing(step("")) is True
+    assert _step_returned_nothing(step("ls -la")) is False
+    assert _step_returned_nothing(step("", tool_calls=[{"id": "1"}])) is False  # tool-only turn is real work
+
+    assert _no_usable_model_output(NS(trajectories=[NS(steps=[step(""), step("")])])) is True  # dead proxy
+    assert _no_usable_model_output(NS(trajectories=[NS(steps=[])])) is True  # no LLM calls (the broken-eval case)
+    assert _no_usable_model_output(NS(trajectories=[NS(steps=[step(""), step("echo hi")])])) is False  # partial — real work
+
+
+def test_infra_taxonomy_membership_and_mapping():
+    from rllm.types import INFRA_ERROR_REASONS, TerminationReason, termination_reason_from_error
+
+    assert TerminationReason.MODEL_ERROR in INFRA_ERROR_REASONS
+    assert termination_reason_from_error("DaytonaValidationError") == TerminationReason.SANDBOX_ERROR
+    assert termination_reason_from_error("EmptyCompletion", default=TerminationReason.MODEL_ERROR) == TerminationReason.MODEL_ERROR
