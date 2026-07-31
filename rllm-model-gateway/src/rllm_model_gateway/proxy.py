@@ -23,6 +23,7 @@ from rllm_model_gateway.data_process import (
     extract_completion_token_ids,
     extract_logprobs,
     extract_prompt_token_ids,
+    extract_routing_matrices,
     strip_vllm_fields,
 )
 from rllm_model_gateway.models import TraceRecord
@@ -107,6 +108,11 @@ def _merge_resumed_response(
         choice["text"] = (choice.get("text") or "") + (resumed_choice.get("text") or "")
         if prior_logprobs or resumed_logprobs:
             choice["logprobs"] = {"token_logprobs": prior_logprobs + resumed_logprobs}
+
+    prior_routing = extract_routing_matrices(response, len(prompt_token_ids))
+    # A resumed chunk starts one token back, covering the token whose row the aborted chunk never got.
+    resumed_routing = extract_routing_matrices(resumed, len(prompt_token_ids) + max(len(prior_ids) - 1, 0))
+    choice["routed_experts"] = prior_routing + resumed_routing if prior_routing is not None and resumed_routing is not None else None
 
     choice["token_ids"] = prior_ids + resumed_ids
     choice["finish_reason"] = resumed_choice.get("finish_reason")

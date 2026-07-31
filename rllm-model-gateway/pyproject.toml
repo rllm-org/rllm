@@ -16,6 +16,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "aiosqlite>=0.19.0",
     "PyYAML>=6.0",
+    "numpy>=1.24",
     "renderers>=0.1.7",
     "transformers>=4.50.0",
     "orjson>=3.9.0",

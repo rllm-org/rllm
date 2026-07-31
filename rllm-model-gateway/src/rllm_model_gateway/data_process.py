@@ -5,10 +5,14 @@ Extracted from ``rllm/sdk/data_process.py``.  No dependency on rLLM's
 dicts and produces ``TraceRecord`` instances.
 """
 
+import base64
+import io
 import logging
 import time
 import uuid
 from typing import Any
+
+import numpy as np
 
 from rllm_model_gateway.models import TraceRecord
 
@@ -84,16 +88,24 @@ def extract_weight_version(response: dict[str, Any]) -> int | None:
     return int(version) if version is not None else None
 
 
-def extract_routing_matrices(response: dict[str, Any]) -> list[str] | None:
-    """Per-token routing matrices stamped by the rollout engine (R3 router replay).
+def _encode_npy(array: np.ndarray) -> str:
+    """Base64 ``.npy`` bytes, so shape and dtype travel with the payload."""
+    buf = io.BytesIO()
+    np.save(buf, array)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
-    Carried on the choice alongside ``token_ids``; absent on plain vLLM responses.
-    """
+
+def extract_routing_matrices(response: dict[str, Any], start: int) -> list[str] | None:
+    """R3 routing matrices, one base64 entry per completion token bar the last, which has no routing."""
     choices = response.get("choices")
     if not choices:
         return None
-    rm = choices[0].get("routing_matrices")
-    return list(rm) if rm else None
+    routed = choices[0].get("routed_experts")
+    if not routed:
+        return None
+    if isinstance(routed, list):
+        return list(routed)
+    return [_encode_npy(row) for row in np.load(io.BytesIO(base64.b64decode(routed)))[start:]]
 
 
 # ------------------------------------------------------------------
@@ -156,7 +168,7 @@ _VLLM_CHOICE_FIELDS = frozenset(
     {
         "token_ids",
         "stop_reason",
-        "routing_matrices",
+        "routed_experts",
     }
 )
 
@@ -213,16 +225,18 @@ def build_trace_record(
     if weight_version is None:
         weight_version = extract_weight_version(response_body)
 
+    prompt_token_ids = extract_prompt_token_ids(response_body)
+
     return TraceRecord(
         trace_id=str(uuid.uuid4()),
         session_id=session_id,
         model=request_body.get("model", response_body.get("model", "")),
         messages=request_body.get("messages", []),
-        prompt_token_ids=extract_prompt_token_ids(response_body),
+        prompt_token_ids=prompt_token_ids,
         response_message=first_choice.get("message") or first_choice.get("delta") or {},
         completion_token_ids=extract_completion_token_ids(response_body),
         logprobs=extract_logprobs(response_body) or None,
-        routing_matrices=extract_routing_matrices(response_body),
+        routing_matrices=extract_routing_matrices(response_body, len(prompt_token_ids)),
         finish_reason=first_choice.get("finish_reason"),
         weight_version=weight_version,
         latency_ms=latency_ms,

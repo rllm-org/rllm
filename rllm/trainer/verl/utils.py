@@ -31,7 +31,6 @@ _SHARED_KEYS: list[tuple[str, str]] = [
     ("actor_rollout_ref.actor.optim.lr_warmup_steps", "rllm.algorithm.warmup_steps"),
     ("actor_rollout_ref.actor.optim.lr_warmup_steps_ratio", "rllm.algorithm.warmup_steps_ratio"),
     ("actor_rollout_ref.actor.clip_ratio_high", "rllm.algorithm.eps_clip_high"),
-    ("actor_rollout_ref.actor.router_replay.mode", "rllm.algorithm.router_replay"),
     ("actor_rollout_ref.rollout.n", "rllm.rollout.n"),
     ("actor_rollout_ref.rollout.val_kwargs.n", "rllm.rollout.n_val"),
     ("actor_rollout_ref.rollout.temperature", "rllm.rollout.train.temperature"),
@@ -165,6 +164,26 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
         if eps_clip_high is not None:
             OmegaConf.update(config, "actor_rollout_ref.actor.clip_ratio_high", eps_clip_high, merge=False)
 
+    def sync_router_replay() -> None:
+        rllm_path = "rllm.algorithm.router_replay"
+        strategy = OmegaConf.select(config, "actor_rollout_ref.actor.strategy")
+        # The worker reads the mode off the per-strategy engine config, not the generic actor key.
+        engine_path = f"actor_rollout_ref.actor.{strategy}.router_replay.mode" if strategy in ("megatron", "veomni") else None
+        native_paths = ["actor_rollout_ref.actor.router_replay.mode"] + ([engine_path] if engine_path else [])
+        sync_shared_keys(config, [(p, rllm_path) for p in native_paths], explicit=explicit, on_native_override=warn_verl_override)
+
+        # Only the native key the user actually set is resolved above, so fan the mode back out to all of them.
+        mode = OmegaConf.select(config, rllm_path) or "disabled"
+        for path in native_paths:
+            OmegaConf.update(config, path, mode, merge=False)
+        if mode == "disabled":
+            return
+        if engine_path is None:
+            raise ValueError(f"router_replay={mode!r} requires actor.strategy 'megatron' or 'veomni', got {strategy!r}")
+        # R3 records routing during generation; R2 records in compute_log_prob instead.
+        if mode == "R3":
+            OmegaConf.update(config, "actor_rollout_ref.rollout.enable_rollout_routing_replay", True, merge=False)
+
     def sync_lr_schedule() -> None:
         optim = OmegaConf.select(config, "actor_rollout_ref.actor.optim")
         if optim is None:
@@ -187,10 +206,8 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
             kl_beta = 0.0
         OmegaConf.update(config, "actor_rollout_ref.actor.use_kl_loss", kl_beta > 0, merge=False)
 
-    # Router replay: derive verl's rollout-side flag from the rllm mode (R3 records at rollout).
-    router_replay_mode = config.rllm.algorithm.get("router_replay", "disabled")
-    if router_replay_mode == "R3":
-        OmegaConf.update(config, "actor_rollout_ref.rollout.enable_rollout_routing_replay", True, merge=False)
+    # Router replay: strategy-dependent key, so it can't live in _SHARED_KEYS.
+    sync_router_replay()
 
     # clip_ratio family: verl uses clip_ratio_{low,high} when set, else falls back to clip_ratio.
     # Mirror the effective low bound to/from rllm.algorithm.eps_clip.

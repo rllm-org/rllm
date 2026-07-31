@@ -73,7 +73,6 @@ python -u train_debug.py \
     actor_rollout_ref.rollout.gpu_memory_utilization="${GPU_MEM_UTIL}" \
     actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}" \
     actor_rollout_ref.rollout.calculate_log_probs=true \
-    actor_rollout_ref.rollout.enable_rollout_routing_replay=false \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=true \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="${ACTOR_MAX_TOKEN_LEN_PER_GPU}" \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024 \
@@ -91,7 +90,7 @@ python -u train_debug.py \
     rllm.algorithm.adv_estimator=grpo \
     rllm.algorithm.norm_adv_by_std_in_grpo=false \
     rllm.algorithm.kl_beta=0.0 \
-    rllm.algorithm.router_replay=disabled \
+    rllm.algorithm.router_replay=R3 \
     rllm.algorithm.loss_fn=dppo_tv \
     rllm.algorithm.loss_agg_mode=token-mean \
     rllm.algorithm.eps_clip=0.1 \

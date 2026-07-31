@@ -130,7 +130,7 @@ async def _token_prompt_completion(
         "text": text,
         "token_ids": completion_ids,
         "finish_reason": finish_reason,
-        "routing_matrices": routing_matrices,
+        "routed_experts": routing_matrices,
         "logprobs": {"token_logprobs": logprobs},
     }
     if tool_calls:
@@ -239,7 +239,7 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
                     "message": response_message,
                     "finish_reason": finish_reason,
                     "token_ids": completion_ids,
-                    "routing_matrices": getattr(model_output, "routing_matrices", None),
+                    "routed_experts": getattr(model_output, "routing_matrices", None),
                     "logprobs": {
                         "content": [{"logprob": lp} for lp in logprobs],
                     },

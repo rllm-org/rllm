@@ -495,8 +495,8 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         router_replay_mode = self.config.rllm.algorithm.get("router_replay", "disabled")
         if router_replay_mode != "disabled":
             strategy = self.config.actor_rollout_ref.actor.strategy
-            if strategy != "megatron":
-                raise ValueError(f"router_replay={router_replay_mode!r} requires actor.strategy='megatron', got {strategy!r}")
+            if strategy not in ("megatron", "veomni"):
+                raise ValueError(f"router_replay={router_replay_mode!r} requires actor.strategy 'megatron' or 'veomni', got {strategy!r}")
 
     async def generate_episodes(self, batch: Any, agent_workflow_engine: UnifiedWorkflowEngine, is_validation: bool = False, **kwargs) -> list[Episode]:
         """Generate episodes using the workflow engine.

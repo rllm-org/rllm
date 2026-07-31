@@ -208,7 +208,8 @@ def test_token_prompt_completion_carries_routing_matrices():
     rm = ["layer-blob-a", "layer-blob-b"]
     resp = asyncio.run(_token_prompt_completion(_routing_engine(rm), {"model": "q"}, [1, 2, 3], {}))
     # Read off TokenOutput, not ModelOutput (which never carried them here).
-    assert resp["choices"][0]["routing_matrices"] == rm
+    # Stamped under vLLM's key so the gateway has one field to read.
+    assert resp["choices"][0]["routed_experts"] == rm
 
 
 def test_token_prompt_completion_routing_matrices_none_when_absent():
@@ -216,7 +217,7 @@ def test_token_prompt_completion_routing_matrices_none_when_absent():
     from rllm.gateway.tinker_adapter import _token_prompt_completion
 
     resp = asyncio.run(_token_prompt_completion(_routing_engine(None), {"model": "q"}, [1, 2, 3], {}))
-    assert resp["choices"][0]["routing_matrices"] is None
+    assert resp["choices"][0]["routed_experts"] is None
 
 
 def test_cumulative_local_persists_routing_matrices_to_trace():
@@ -235,7 +236,7 @@ def test_cumulative_local_persists_routing_matrices_to_trace():
                     "text": "next action",
                     "token_ids": [91, 92],
                     "finish_reason": "stop",
-                    "routing_matrices": rm,
+                    "routed_experts": rm,
                     "logprobs": {"token_logprobs": [-0.1, -0.2]},
                 }
             ],
