@@ -129,6 +129,80 @@ def test_snapshot_download_preserves_revision_across_retry(
     assert calls == [expected_call, expected_call]
 
 
+def test_build_benchmark_uses_one_revision_for_discovery_and_download(
+    monkeypatch,
+    tmp_path,
+):
+    cache = tmp_path / "cache"
+    task = _make_task(
+        cache,
+        patch_target="src/a.py",
+        f2p_file="tests/test_a.py",
+    )
+    calls = []
+
+    class FakeHfApi:
+        def list_repo_files(self, repo_id, *, repo_type, revision):
+            calls.append(("list", repo_id, repo_type, revision))
+            return [
+                f"{task.name}/task.toml",
+                f"{task.name}/tests/config.json",
+            ]
+
+    class FakeHfHubHTTPError(Exception):
+        pass
+
+    def fake_snapshot_download(
+        repo_id,
+        *,
+        repo_type,
+        revision,
+        allow_patterns,
+    ):
+        calls.append(
+            (
+                "download",
+                repo_id,
+                repo_type,
+                revision,
+                allow_patterns,
+            )
+        )
+        return str(cache)
+
+    hub = ModuleType("huggingface_hub")
+    hub.HfApi = FakeHfApi
+    hub.snapshot_download = fake_snapshot_download
+    errors = ModuleType("huggingface_hub.errors")
+    errors.HfHubHTTPError = FakeHfHubHTTPError
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    monkeypatch.setitem(sys.modules, "huggingface_hub.errors", errors)
+
+    out = swesmith_builder.build_benchmark(
+        out_dir=tmp_path / "out",
+        revision="dataset-sha",
+        limit=1,
+        register=False,
+    )
+
+    assert (out / task.name / "task.toml").is_file()
+    assert calls == [
+        (
+            "list",
+            swesmith_builder.REPO_ID,
+            "dataset",
+            "dataset-sha",
+        ),
+        (
+            "download",
+            swesmith_builder.REPO_ID,
+            "dataset",
+            "dataset-sha",
+            [f"{task.name}/*"],
+        ),
+    ]
+
+
 class TestBugInTestFile:
     def test_source_bug_is_solvable(self, tmp_path):
         task = _make_task(tmp_path, patch_target="src/repo/core.py", f2p_file="tests/test_core.py")
