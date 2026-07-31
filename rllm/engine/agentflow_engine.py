@@ -610,7 +610,6 @@ class AgentFlowEngine:
             llm_inside_env = getattr(self.agent_flow, "llm_inside_env", False)
             session = await self.gateway.acreate_session(
                 uid,
-                is_validation=is_validation,
                 sampling_params=session_sampling_params,
             )
             session_url = self.gateway.get_session_url(session.session_id, public=llm_inside_env)

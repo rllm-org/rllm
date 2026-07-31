@@ -1,6 +1,9 @@
-from rllm_model_gateway.v2.config import BackendConfig, GatewayConfig, TokenizationConfig
 from rllm_model_gateway.v2.client import AsyncGatewayClient, GatewayClient, SessionCredentials
+from rllm_model_gateway.v2.config import GatewayConfig
+from rllm_model_gateway.v2.inference import InferenceClient, InferenceClientClass
+from rllm_model_gateway.v2.server import create_app
 from rllm_model_gateway.v2.types import (
+    GatewayError,
     GatewayRequest,
     GatewayResponse,
     SessionTraces,
@@ -8,19 +11,19 @@ from rllm_model_gateway.v2.types import (
     TokenOutput,
     TraceRecord,
 )
-from rllm_model_gateway.v2.server import create_app
 
 __all__ = [
     "AsyncGatewayClient",
-    "BackendConfig",
+    "GatewayError",
     "GatewayRequest",
     "GatewayResponse",
     "GatewayConfig",
     "GatewayClient",
+    "InferenceClient",
+    "InferenceClientClass",
     "SessionCredentials",
     "SessionTraces",
     "TokenInput",
-    "TokenizationConfig",
     "TokenOutput",
     "TraceRecord",
     "create_app",

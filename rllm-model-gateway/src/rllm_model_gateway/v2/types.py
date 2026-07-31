@@ -35,7 +35,7 @@ class GatewayRequest(BaseModel):
     def require_one_input(self) -> "GatewayRequest":
         input_count = int(bool(self.messages)) + int(self.prompt is not None) + int(self.prompt_token_ids is not None)
         if input_count != 1:
-            raise ValueError("canonical request must contain exactly one of messages, prompt, or prompt_token_ids")
+            raise ValueError("gateway request must contain exactly one of messages, prompt, or prompt_token_ids")
         return self
 
 

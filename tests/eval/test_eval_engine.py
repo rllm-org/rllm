@@ -65,7 +65,7 @@ class _FakeGateway:
         self.create_calls: list[str] = []
         self.delete_calls: list[str] = []
 
-    async def acreate_session(self, session_id: str, is_validation: bool = False, sampling_params: dict | None = None) -> str:
+    async def acreate_session(self, session_id: str, sampling_params: dict | None = None) -> str:
         self.create_calls.append(session_id)
         return session_id
 

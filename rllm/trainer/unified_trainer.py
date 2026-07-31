@@ -18,6 +18,7 @@ from rllm.data import Dataset, StatefulTaskDataLoader
 from rllm.engine.rollout import RolloutEngine
 from rllm.engine.unified_workflow_engine import UnifiedWorkflowEngine
 from rllm.gateway.manager import GatewayManager
+from rllm.gateway.manager_v2 import GatewayManagerV2
 from rllm.trainer.algorithms.advantage import (
     AlgorithmConfig,
     collect_reward_and_advantage_from_trajectory_groups,
@@ -206,13 +207,21 @@ class UnifiedTrainer:
 
         self._init_dataloaders()
 
-        rollout_engine: RolloutEngine = self.backend.init_rollout_engine(
+        backend_init_kwargs = dict(
             cf_config=self.cf_config,
             transform_config=self.transform_config,
             rs_config=self.rs_config,
             algorithm_config=self.algorithm_config,
             total_training_steps=self._total_training_steps,
         )
+
+        gateway_version = str(self.rllm_config.get("gateway", {}).get("version", "v1")).lower()
+        use_v2_gateway = (has_agent_flow or remote_runtime_enabled) and gateway_version == "v2"
+
+        self.backend.initialize(**backend_init_kwargs)
+        rollout_engine: RolloutEngine | None = None
+        if not use_v2_gateway:
+            rollout_engine = self.backend.init_rollout_engine()
 
         # Determine which engine path to use:
         # 1. agent_flow + evaluator → AgentFlowEngine (gateway-based, local)
@@ -226,6 +235,8 @@ class UnifiedTrainer:
         hooks = kwargs.get("hooks")
 
         remote_runtime_cfg = self.rllm_config.get("remote_runtime", {})
+        training_sampling_params = OmegaConf.to_container(self.rllm_config.rollout.train, resolve=True)
+        val_sampling_params = OmegaConf.to_container(self.rllm_config.rollout.val, resolve=True)
 
         if agent_flow is not None and (evaluator is not None or hooks is not None):
             from rllm.engine.agentflow_engine import AgentFlowEngine
@@ -233,9 +244,6 @@ class UnifiedTrainer:
 
             gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
             self._gateway = create_gateway_manager(self.config, mode=gateway_mode)
-
-            training_sampling_params = OmegaConf.to_container(self.rllm_config.rollout.train, resolve=True)
-            val_sampling_params = OmegaConf.to_container(self.rllm_config.rollout.val, resolve=True)
 
             self.agent_workflow_engine = AgentFlowEngine(
                 agent_flow=agent_flow,
@@ -283,9 +291,12 @@ class UnifiedTrainer:
                 session_timeout=remote_runtime_config.session_timeout,
                 n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
                 episode_logger=self.episode_logger,
+                train_sampling_params=training_sampling_params,
+                val_sampling_params=val_sampling_params,
             )
 
         else:
+            assert rollout_engine is not None
             self.agent_workflow_engine = UnifiedWorkflowEngine(
                 workflow_cls=self.workflow_class,
                 workflow_args=self.workflow_args,
@@ -298,7 +309,7 @@ class UnifiedTrainer:
                 store=self.store,
             )
 
-        if self._gateway is not None and self.backend.__class__.__name__ == "VerlBackend" and self.rllm_config.algorithm.get("router_replay", "disabled") == "R3":
+        if isinstance(self._gateway, GatewayManager) and self.backend.__class__.__name__ == "VerlBackend" and self.rllm_config.algorithm.get("router_replay", "disabled") == "R3":
             raise ValueError("R3 is not supported with the gateway-based rollout (agent_flow / remote_runtime) on the verl backend.")
 
         self.tokenizer = None
@@ -412,8 +423,12 @@ class UnifiedTrainer:
         await self.backend.on_train_start(trainer_state)
         try:
             if self._gateway is not None:
-                self._gateway.start(self.backend.rollout_engine)
-                if isinstance(self._gateway, GatewayManager):
+                if isinstance(self._gateway, GatewayManagerV2):
+                    inference_client_cls, inference_client_kwargs = self.backend.gateway_inference_client(trainer_state.weight_version)
+                    self._gateway.start(inference_client_cls, inference_client_kwargs)
+                else:
+                    assert self.backend.rollout_engine is not None
+                    self._gateway.start(self.backend.rollout_engine)
                     self._gateway.set_weight_version(trainer_state.weight_version)
 
             if self.rllm_config.trainer.get("val_before_train", True):
@@ -468,6 +483,9 @@ class UnifiedTrainer:
                     with simple_timer("step", trainer_state.timing_dict):
                         await self._train_batch_async(batch, trainer_state)
                     await self.backend.on_batch_end(trainer_state)
+                    if isinstance(self._gateway, GatewayManagerV2):
+                        update = self.backend.gateway_inference_client_update(trainer_state.weight_version)
+                        await self._gateway.update_inference_client(update)
 
                     print_metrics_table(trainer_state.metrics, trainer_state.global_step)
                     self.logger.log(
@@ -688,7 +706,7 @@ class UnifiedTrainer:
         fwd_bwd_group_size = self.async_config.fwd_bwd_group_size
         num_fwd_bwd_passes = mini_batch_size // fwd_bwd_group_size
         use_total_batches = self.rllm_config.trainer.get("total_batches", -1) > 0
-        rollout_engine = getattr(self.agent_workflow_engine, "rollout_engine", None)
+        rollout_engine = None if isinstance(self._gateway, GatewayManagerV2) else getattr(self.agent_workflow_engine, "rollout_engine", None)
 
         while True:
             trainer_state.reset_batch()
@@ -829,7 +847,10 @@ class UnifiedTrainer:
         await self.backend.on_policy_updated(trainer_state)
         if rollout_engine is not None:
             rollout_engine.weight_version = trainer_state.weight_version
-        if isinstance(self._gateway, GatewayManager):
+        if isinstance(self._gateway, GatewayManagerV2):
+            update = self.backend.gateway_inference_client_update(trainer_state.weight_version)
+            await self._gateway.update_inference_client(update)
+        elif isinstance(self._gateway, GatewayManager):
             await self._gateway.aset_weight_version(trainer_state.weight_version)
         coordinator.on_sync_complete()
 

@@ -72,10 +72,10 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Tinker service client
         self.service_client = tinker.ServiceClient(base_url=config.tinker_base_url)
 
-        # Initialize policy trainer (filled during init_rollout_engine)
+        # Initialized by initialize().
         self.policy_trainer: TinkerPolicyTrainer | None = None
         self.tokenizer: PreTrainedTokenizer | None = None
-        # Rollout engine - will be created in init_rollout_engine
+        # Created only for V1 gateways and direct workflows.
         self.rollout_engine: TinkerEngine | None = None
 
         # Sampling client - updated after each checkpoint save
@@ -96,15 +96,32 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
     # BackendProtocol interface methods
     # =========================================================================
 
-    def init_rollout_engine(self, **kwargs) -> RolloutEngine:
-        """Initialize the TinkerEngine rollout engine.
+    def gateway_inference_client(self, weight_version: int):
+        import pickle
 
-        Args:
-            **kwargs: Additional arguments, including the various configurations
+        from rllm.trainer.tinker.tinker_inference_client import TinkerInferenceClient
 
-        Returns:
-            TinkerEngine: The initialized rollout engine.
-        """
+        if self.sampling_client is None:
+            raise RuntimeError("Tinker sampling client is not initialized")
+        return TinkerInferenceClient, {
+            "sampling_client": pickle.dumps(self.sampling_client),
+            "weight_version": weight_version,
+            "max_prompt_length": self.full_config.data.max_prompt_length,
+            "max_response_length": self.full_config.data.max_response_length,
+            "max_model_length": int(self.full_config.training.max_length) - 1,
+        }
+
+    def gateway_inference_client_update(self, weight_version: int) -> dict[str, Any]:
+        import pickle
+
+        if self.sampling_client is None:
+            raise RuntimeError("Tinker sampling client is not initialized")
+        return {
+            "sampling_client": pickle.dumps(self.sampling_client),
+            "weight_version": weight_version,
+        }
+
+    def initialize(self, **kwargs) -> None:
         self.policy_trainer = TinkerPolicyTrainer(
             config=self.full_config,
             service_client=self.service_client,
@@ -112,6 +129,11 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             transform_config=kwargs.get("transform_config"),
             algorithm_config=kwargs.get("algorithm_config"),
         )
+
+    def init_rollout_engine(self) -> RolloutEngine:
+        if self.policy_trainer is None:
+            raise RuntimeError("Tinker backend is not initialized")
+
         # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been initialized yet
         self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)
 
@@ -198,8 +220,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         For Tinker backend, this function handles:
         1. Building an interleaved batch (each task repeated `group_size` times)
-        2. Setting the sampling client on the rollout engine
-        3. Executing tasks using the agent workflow engine
+        2. Executing tasks using the agent workflow engine
 
         Args:
             batch: Input batch (list of task dicts from dataloader).
@@ -210,11 +231,10 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         Returns:
             List of generated episodes.
         """
-        assert self.rollout_engine is not None, "rollout_engine is not initialized"
         assert self.sampling_client is not None, "sampling_client is not initialized"
 
-        # Set the sampling client on the rollout engine
-        self.rollout_engine.set_sampling_client(self.sampling_client)
+        if self.rollout_engine is not None:
+            self.rollout_engine.set_sampling_client(self.sampling_client)
 
         # Build interleaved batch
         if is_validation:
@@ -377,8 +397,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Resume per training.resume_mode: auto = latest global_step_<N>, resume_path = explicit folder, disable = fresh.
         start_batch, self.sampling_client, dataloader_state = await self.policy_trainer.initialize_async()
 
-        # Propagate sampling_client to rollout engine so it can make inference calls
-        self.rollout_engine.set_sampling_client(self.sampling_client)
+        if self.rollout_engine is not None:
+            self.rollout_engine.set_sampling_client(self.sampling_client)
 
         # Update trainer state with the start batch from checkpoint
         trainer_state.global_step = start_batch
@@ -406,8 +426,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         dataloader_state = trainer_state.train_dataloader.state_dict() if do_save and trainer_state.train_dataloader is not None else None
         self.sampling_client = await self.policy_trainer.save_checkpoint_and_get_sampling_client(global_step, do_save=do_save, dataloader_state=dataloader_state)
 
-        # Propagate updated sampling_client to rollout engine for async weight sync
-        self.rollout_engine.set_sampling_client(self.sampling_client)
+        if self.rollout_engine is not None:
+            self.rollout_engine.set_sampling_client(self.sampling_client)
 
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of each batch.

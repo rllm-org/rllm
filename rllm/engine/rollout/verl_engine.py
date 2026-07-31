@@ -1,9 +1,10 @@
 import base64
-import json
+import io
 import logging
 import uuid
 from typing import cast
 
+import numpy as np
 import torch
 from omegaconf import DictConfig
 from typing_extensions import override
@@ -140,12 +141,25 @@ class VerlEngine(RolloutEngine):
         # TODO: implement parse_completion for the standard parser
         parsed_output = self.chat_parser.parse_completion(completion_ids)
 
-        # R3 router replay: encode rollout-side routed_experts as [shape_header_json, base64_blob]
         routing_matrices = None
         if self.router_replay_mode == "R3" and token_output.routed_experts is not None:
-            arr = token_output.routed_experts  # (completion_len, num_layers, topk)
-            header = json.dumps({"shape": list(arr.shape[1:]), "dtype": str(arr.dtype)})
-            routing_matrices = [header, base64.b64encode(arr.tobytes()).decode("ascii")]
+            routed = token_output.routed_experts
+            if hasattr(routed, "detach"):
+                routed = routed.detach().cpu().numpy()
+            else:
+                routed = np.asarray(routed)
+
+            expected_length = max(len(completion_ids) - 1, 0)
+            if len(routed) != expected_length:
+                raise RuntimeError(f"Verl returned {len(routed)} routed-expert rows, expected {expected_length}")
+
+            routing_matrices = []
+            for row in routed:
+                buffer = io.BytesIO()
+                np.save(buffer, row)
+                routing_matrices.append(base64.b64encode(buffer.getvalue()).decode("ascii"))
+            if completion_ids:
+                routing_matrices.append("")
 
         return ModelOutput(
             text=completion_text,

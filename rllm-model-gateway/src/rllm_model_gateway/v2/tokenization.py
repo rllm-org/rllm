@@ -6,19 +6,17 @@ from typing import Any
 from renderers import ParsedToolCall, config_from_name, create_renderer
 from transformers import AutoTokenizer
 
-from rllm_model_gateway.v2.config import TokenizationConfig
-
 
 class TokenizationService:
-    def __init__(self, config: TokenizationConfig) -> None:
+    def __init__(self, tokenizer_model: str, renderer: str = "auto", renderer_kwargs: dict[str, Any] | None = None) -> None:
         self._tokenizer = AutoTokenizer.from_pretrained(
-            config.model,
+            tokenizer_model,
             trust_remote_code=False,
         )
         self._renderer = create_renderer(
             self._tokenizer,
-            config_from_name(config.renderer),
-            chat_template_kwargs=config.renderer_kwargs or None,
+            config_from_name(renderer),
+            chat_template_kwargs=renderer_kwargs or None,
         )
 
     def encode(self, prompt: str) -> list[int]:

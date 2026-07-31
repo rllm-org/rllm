@@ -1,5 +1,5 @@
 import base64
-import json
+import io
 import logging
 import uuid
 
@@ -8,7 +8,6 @@ import torch
 from verl.protocol import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
-from rllm.engine.rollout import VerlEngine
 from rllm.trainer.verl.dataclass import AccumulatedData, ProcessedStepData
 from rllm.types import Episode, Trajectory, TrajectoryGroup
 from rllm.workflows.workflow import TerminationReason
@@ -207,11 +206,7 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         rollout_logprobs_batch = _pad_sequence_batch(accumulated.rollout_logprobs, 0, max_response_length, left_pad=False)
         tensors["rollout_log_probs"] = rollout_logprobs_batch
 
-    # Routed experts for R3 router replay. Each routing tensor covers
-    # (prompt + response) tokens for its row (last step's routing in the
-    # cumulative segment). Place at [max_prompt_length - len(prompt) :
-    # max_prompt_length + len(response)] to match verl's agent_loop layout —
-    # left-padded prompt region, right-padded response region, zeros elsewhere.
+    # R3 routing is response-aligned, so it goes in the right-padded response region.
     if accumulated.routing_matrices and len(accumulated.routing_matrices) == len(accumulated.responses):
         _, num_layers, topk = accumulated.routing_matrices[0].shape
         ref_dtype = accumulated.routing_matrices[0].dtype
@@ -219,10 +214,8 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         total_length = max_prompt_length + max_response_length
         routed_experts = torch.zeros(bs, total_length, num_layers, topk, dtype=ref_dtype)
         for i, r in enumerate(accumulated.routing_matrices):
-            len_p = min(accumulated.prompts[i].shape[0], max_prompt_length)
-            start_pos = max_prompt_length - len_p
-            end_pos = min(start_pos + r.shape[0], total_length)
-            routed_experts[i, start_pos:end_pos] = r[: end_pos - start_pos]
+            end_pos = min(max_prompt_length + r.shape[0], total_length)
+            routed_experts[i, max_prompt_length:end_pos] = r[: end_pos - max_prompt_length]
         tensors["routed_experts"] = routed_experts
 
     return DataProto.from_dict(
@@ -235,14 +228,22 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
 
 
 def _decode_routing_matrices(encoded: list[str] | None) -> torch.Tensor | None:
-    """Decode the [shape_header_json, base64_blob] wire format into a (length, num_layers, topk) tensor."""
-    if not encoded or len(encoded) != 2:
+    """Decode per-token base64 ``.npy`` entries into a (length, num_layers, topk) tensor."""
+    if not encoded or not any(encoded):
         return None
-    header = json.loads(encoded[0])
-    num_layers, topk = header["shape"]
-    dtype = np.dtype(header["dtype"])
-    arr = np.frombuffer(base64.b64decode(encoded[1]), dtype=dtype).reshape(-1, num_layers, topk)
-    return torch.from_numpy(arr.copy())
+    reference = np.load(io.BytesIO(base64.b64decode(next(item for item in encoded if item))), allow_pickle=False)
+    zeros = np.zeros_like(reference)
+    rows = [np.load(io.BytesIO(base64.b64decode(item)), allow_pickle=False) if item else zeros for item in encoded]
+    return torch.from_numpy(np.stack(rows))
+
+
+def _step_routing(step, action_length: int) -> list[str]:
+    if not step.routing_matrices:
+        return [""] * action_length
+    if len(step.routing_matrices) != action_length:
+        logger.warning(f"Step has {len(step.routing_matrices)} routed-expert rows, expected {action_length}; dropping this step's routing")
+        return [""] * action_length
+    return list(step.routing_matrices)
 
 
 def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: AccumulatedData) -> int:
@@ -329,19 +330,14 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             "logprobs": list(action_lp),
             "full_seq": list(prompt) + list(action),
             "multi_modal": step.model_output.multi_modal_inputs or {},
-            # Hold the latest step that produced routing in this segment. Each step's
-            # routing covers (step.prompt + step.action), and the segment is cumulative
-            # by construction, so the last step's routing covers seg["full_seq"]. We
-            # decode at emit time rather than per-step.
-            "last_routing_step": step if step.routing_matrices else None,
+            "routing": _step_routing(step, len(action)),
         }
 
     def _emit(seg):
         prompt_t = torch.tensor(seg["prompt"], dtype=torch.long)
         response_t = torch.tensor(seg["response"], dtype=torch.long)
         mask_t = torch.tensor(seg["mask"], dtype=torch.long)
-        last_routing_step = seg["last_routing_step"]
-        routing_t = _decode_routing_matrices(last_routing_step.routing_matrices) if last_routing_step is not None else None
+        routing_t = _decode_routing_matrices(seg["routing"])
         # step_id is keyed by trajectory.uid (no per-segment suffix). All
         # segments of one trajectory share the same scalar advantage from
         # collect_reward_and_advantage_from_trajectory_groups (broadcast
@@ -388,9 +384,8 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             seg["logprobs"].extend(action_lp)
             seg["full_seq"].extend(delta_obs)
             seg["full_seq"].extend(action)
-
-            if step.routing_matrices is not None:
-                seg["last_routing_step"] = step
+            seg["routing"].extend([""] * len(delta_obs))
+            seg["routing"].extend(_step_routing(step, len(action)))
         else:
             # Non-cumulative — close out current segment, start a new one.
             _emit(seg)
@@ -512,16 +507,17 @@ def _compute_merge_metrics(accumulated: AccumulatedData, total_agent_steps: int)
 
 def transform_episodes_to_dataproto(
     episodes: list[Episode],
-    rollout_engine: VerlEngine,
+    tokenizer,
     max_prompt_length: int,
     max_response_length: int,
+    processor=None,
 ) -> DataProto:
     """
     Transforms a list of episodes (from running a rLLM workflow) into a verl-compatible DataProto.
 
     Args:
         episodes: List of episodes to transform.
-        rollout_engine: Rollout engine that contains the tokenizer and (optional) multimodal processor.
+        tokenizer: Tokenizer used to pad the batch.
         max_prompt_length: The maximum length of the prompts.
         max_response_length: The maximum length of the responses.
         stepwise_advantage_mode: The mode of stepwise advantage computation.
@@ -531,9 +527,6 @@ def transform_episodes_to_dataproto(
         stashed on ``meta_info["merge_metrics"]`` so the caller can lift
         them into trainer_state.metrics without a signature change.
     """
-    tokenizer = rollout_engine.tokenizer
-    processor = getattr(rollout_engine, "processor", None)
-
     accumulated = AccumulatedData()
     total_agent_steps = 0
     for episode in episodes:
@@ -552,16 +545,14 @@ def transform_episodes_to_dataproto(
 # TODO: extract common logic from transform_episodes_to_dataproto and transform_trajectory_groups_to_dataproto
 def transform_trajectory_groups_to_dataproto(
     trajectory_groups: list[TrajectoryGroup],
-    rollout_engine: VerlEngine,
+    tokenizer,
     max_prompt_length: int,
     max_response_length: int,
+    processor=None,
 ) -> DataProto:
     """
     Transforms a list of trajectory groups (from running a rLLM workflow) into a verl-compatible DataProto.
     """
-    tokenizer = rollout_engine.tokenizer
-    processor = getattr(rollout_engine, "processor", None)
-
     accumulated = AccumulatedData()
     for trajectory_group in trajectory_groups:
         task_id = trajectory_group.task_id

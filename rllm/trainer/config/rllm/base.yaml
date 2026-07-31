@@ -153,14 +153,17 @@ gateway:
   host: null          # Auto-detects routable IP; set explicitly to override
   num_workers: null   # v2 generation workers; null defaults to 1
   tunnel: null        # Existing public URL or managed backend, e.g. "cloudflared" or "ngrok"
-  worker_startup_timeout_seconds: 300
-  request_timeout_seconds: 3600
-  heartbeat_seconds: 10
+  worker_startup_timeout_seconds: 300  # v2 only
+  update_timeout_seconds: 300          # v2 only
+  request_timeout_seconds: 3600        # v2 only
+  heartbeat_initial_delay_seconds: 60  # v2 only: wait before the first heartbeat
+  heartbeat_interval_seconds: 10       # v2 only: delay between subsequent heartbeats
   cumulative_token_mode: false
+  tokenizer_model: null                # v2 only: set by the selected backend config
   renderer_family: auto
-  renderer_kwargs: {}
-  store: memory       # "memory" (non-persistent) | "sqlite" (writes traces to disk)
-  db_path: null       # Only used when store=sqlite; null → auto-resolved path (logged at startup)
+  renderer_kwargs: {}                  # v2 only
+  store: memory       # v1 only: "memory" (non-persistent) | "sqlite" (writes traces to disk)
+  db_path: null       # v1 only: used when store=sqlite; null → auto-resolved path (logged at startup)
   # Sampling params attached to a session overwrite those keys on every LLM call;
   # keys not set pass through untouched.
 

@@ -5,7 +5,6 @@ from typing import Any
 
 from rllm_model_gateway.v2.types import APIProtocol, GatewayError, GatewayRequest, GatewayResponse
 
-
 _HEAD_FIELDS = {"model", "stream", "stream_options", "prompt", "messages", "tools"}
 
 
@@ -134,10 +133,7 @@ def _chat_stream(output: GatewayResponse, model: str, created_at: int, include_u
     if output.content is not None:
         delta["content"] = output.content
     if output.tool_calls:
-        delta["tool_calls"] = [
-            {**tool_call, "index": tool_index}
-            for tool_index, tool_call in enumerate(output.tool_calls)
-        ]
+        delta["tool_calls"] = [{**tool_call, "index": tool_index} for tool_index, tool_call in enumerate(output.tool_calls)]
     yield _sse(_stream_payload({**base, "choices": [{"index": 0, "delta": delta, "logprobs": None, "finish_reason": None}]}, include_usage))
     yield _sse(_stream_payload({**base, "choices": [{"index": 0, "delta": {}, "logprobs": None, "finish_reason": output.finish_reason}]}, include_usage))
 
@@ -151,5 +147,5 @@ def _message(output: GatewayResponse) -> dict[str, Any]:
     return message
 
 
-def error_payload(message: str, error_type: str = "server_error") -> dict[str, Any]:
-    return {"error": {"message": message, "type": error_type, "param": None, "code": None}}
+def error_payload(message: str, error_type: str = "server_error", code: int | str | None = None) -> dict[str, Any]:
+    return {"error": {"message": message, "type": error_type, "param": None, "code": code}}

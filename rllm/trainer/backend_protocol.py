@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from omegaconf import DictConfig
+from rllm_model_gateway.v2 import InferenceClientClass
 
 from rllm.engine.rollout import RolloutEngine
 from rllm.trainer.algorithms.advantage import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
@@ -36,6 +37,7 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
 
     name: str = "base_backend"
     requires_loop: bool = False
+    rollout_engine: RolloutEngine | None = None
 
     def __init__(self, config: DictConfig, **kwargs):
         """Initialize the backend.
@@ -45,15 +47,23 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         """
         self.config = config
 
+    def gateway_inference_client(self, weight_version: int) -> tuple[InferenceClientClass, dict[str, Any]]:
+        raise NotImplementedError(f"{self.__class__.__name__} does not provide a gateway inference client")
+
+    def gateway_inference_client_update(self, weight_version: int) -> dict[str, Any]:
+        raise NotImplementedError(f"{self.__class__.__name__} does not provide gateway inference client updates")
+
     @abstractmethod
-    def init_rollout_engine(self, **kwargs) -> RolloutEngine:
-        """Initialize the workflow engine.
+    def initialize(self, **kwargs) -> None:
+        """Initialize backend training and inference infrastructure."""
+        raise NotImplementedError
 
-        Args:
-            **kwargs: Additional arguments, including the various configurations
+    @abstractmethod
+    def init_rollout_engine(self) -> RolloutEngine:
+        """Create the legacy rollout interface from initialized backend state.
 
-        Returns:
-            The rollout engine.
+        V1 gateways and direct workflows use this interface. V2 gateways create
+        inference clients directly and do not call this method.
         """
         raise NotImplementedError("Subclasses must implement this method to return a RolloutEngine.")
 

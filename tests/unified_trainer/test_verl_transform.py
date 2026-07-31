@@ -87,7 +87,7 @@ class TestRolloutLogProbsPropagation:
         ]
         engine = _make_mock_rollout_engine()
 
-        batch = transform_episodes_to_dataproto(episodes, engine, max_prompt_length=8, max_response_length=8)
+        batch = transform_episodes_to_dataproto(episodes, engine.tokenizer, max_prompt_length=8, max_response_length=8)
 
         assert "rollout_log_probs" in batch.batch, "rollout_log_probs should be present when logprobs are available"
         rollout_lp = batch.batch["rollout_log_probs"]
@@ -119,7 +119,7 @@ class TestRolloutLogProbsPropagation:
         ]
         engine = _make_mock_rollout_engine()
 
-        batch = transform_episodes_to_dataproto(episodes, engine, max_prompt_length=8, max_response_length=8)
+        batch = transform_episodes_to_dataproto(episodes, engine.tokenizer, max_prompt_length=8, max_response_length=8)
 
         assert "rollout_log_probs" not in batch.batch, "rollout_log_probs should be absent when logprobs are None"
 
@@ -134,7 +134,7 @@ class TestRolloutLogProbsPropagation:
         ]
         engine = _make_mock_rollout_engine()
 
-        batch = transform_episodes_to_dataproto(episodes, engine, max_prompt_length=8, max_response_length=8)
+        batch = transform_episodes_to_dataproto(episodes, engine.tokenizer, max_prompt_length=8, max_response_length=8)
 
         assert "rollout_log_probs" not in batch.batch, "rollout_log_probs should be absent when logprobs are empty"
 
@@ -154,7 +154,7 @@ class TestRolloutLogProbsPropagation:
         )
         engine = _make_mock_rollout_engine()
 
-        batch = transform_episodes_to_dataproto([ep_with, ep_without], engine, max_prompt_length=8, max_response_length=8)
+        batch = transform_episodes_to_dataproto([ep_with, ep_without], engine.tokenizer, max_prompt_length=8, max_response_length=8)
 
         # Length mismatch: 1 logprob tensor but 2 responses → should not include
         assert "rollout_log_probs" not in batch.batch
@@ -175,7 +175,7 @@ class TestRolloutLogProbsPropagation:
         episode = Episode(id="task_0:0", trajectories=[trajectory], is_correct=True)
 
         engine = _make_mock_rollout_engine()
-        batch = transform_episodes_to_dataproto([episode], engine, max_prompt_length=8, max_response_length=8)
+        batch = transform_episodes_to_dataproto([episode], engine.tokenizer, max_prompt_length=8, max_response_length=8)
 
         assert "rollout_log_probs" in batch.batch
         rollout_lp = batch.batch["rollout_log_probs"]
@@ -203,7 +203,7 @@ class TestRolloutLogProbsPropagation:
         ]
         engine = _make_mock_rollout_engine()
 
-        batch = transform_episodes_to_dataproto(episodes, engine, max_prompt_length=8, max_response_length=8)
+        batch = transform_episodes_to_dataproto(episodes, engine.tokenizer, max_prompt_length=8, max_response_length=8)
 
         # All standard fields should still be present
         for key in ["input_ids", "attention_mask", "position_ids", "prompts", "responses", "response_mask", "traj_rewards", "step_rewards"]:

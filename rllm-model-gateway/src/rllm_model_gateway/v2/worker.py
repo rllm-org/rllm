@@ -4,19 +4,19 @@ import traceback
 from multiprocessing.queues import Queue
 from typing import Any
 
-from rllm_model_gateway.v2.backend import build_backend
 from rllm_model_gateway.v2.config import WorkerProcessConfig
-from rllm_model_gateway.v2.types import GatewayError, GatewayRequest
+from rllm_model_gateway.v2.inference import InferenceClientClass
 from rllm_model_gateway.v2.service import GatewayService
 from rllm_model_gateway.v2.tokenization import TokenizationService
+from rllm_model_gateway.v2.types import GatewayError, GatewayRequest
 
 
 class WorkerRuntime:
-    def __init__(self, worker_id: int, config: WorkerProcessConfig) -> None:
+    def __init__(self, worker_id: int, config: WorkerProcessConfig, inference_client_cls: InferenceClientClass, inference_client_kwargs: dict[str, Any]) -> None:
         self.worker_id = worker_id
-        tokenization = TokenizationService(config.tokenization)
-        backend = build_backend(config.backend)
-        self._service = GatewayService(tokenization, backend, cumulative=config.cumulative)
+        tokenization = TokenizationService(config.tokenizer_model, config.renderer, config.renderer_kwargs)
+        self._inference_client = inference_client_cls(**inference_client_kwargs)
+        self._service = GatewayService(tokenization, self._inference_client, cumulative=config.cumulative)
 
     async def handle(self, operation: str, payload: dict[str, Any]) -> Any:
         if operation == "create_session":
@@ -32,16 +32,25 @@ class WorkerRuntime:
             return self._service.get_session_traces(payload["session_id"])
         if operation == "delete_session":
             return self._service.delete_session(payload["session_id"])
+        if operation == "update_inference_client":
+            return await self._inference_client.update(payload["update"])
         raise GatewayError(f"unknown worker operation: {operation}", 500, "server_error")
 
     async def close(self) -> None:
         await self._service.close()
 
 
-async def _serve(worker_id: int, config_data: dict[str, Any], request_queue: Queue, response_queue: Queue) -> None:
+async def _serve(
+    worker_id: int,
+    config_data: dict[str, Any],
+    inference_client_cls: InferenceClientClass,
+    inference_client_kwargs: dict[str, Any],
+    request_queue: Queue,
+    response_queue: Queue,
+) -> None:
     try:
         config = WorkerProcessConfig.model_validate(config_data)
-        runtime = WorkerRuntime(worker_id, config)
+        runtime = WorkerRuntime(worker_id, config, inference_client_cls, inference_client_kwargs)
     except Exception:
         response_queue.put({"type": "startup", "worker_id": worker_id, "ok": False, "error": traceback.format_exc()})
         return
@@ -89,9 +98,16 @@ async def _serve(worker_id: int, config_data: dict[str, Any], request_queue: Que
     await runtime.close()
 
 
-def worker_main(worker_id: int, config_data: dict[str, Any], request_queue: Queue, response_queue: Queue) -> None:
+def worker_main(
+    worker_id: int,
+    config_data: dict[str, Any],
+    inference_client_cls: InferenceClientClass,
+    inference_client_kwargs: dict[str, Any],
+    request_queue: Queue,
+    response_queue: Queue,
+) -> None:
     try:
-        asyncio.run(_serve(worker_id, config_data, request_queue, response_queue))
+        asyncio.run(_serve(worker_id, config_data, inference_client_cls, inference_client_kwargs, request_queue, response_queue))
     except BaseException:
         try:
             response_queue.put({"type": "fatal", "worker_id": worker_id, "error": traceback.format_exc()})

@@ -200,8 +200,6 @@ class GatewayManager:
         self._tunnel: Any = None  # CloudflaredTunnel when tunnel_backend is set
 
         # Per-mode sampling params (extracted from rollout engine in start())
-        self._train_sampling_params: dict[str, Any] = {}
-        self._val_sampling_params: dict[str, Any] = {}
 
     @property
     def gateway_url(self) -> str:
@@ -251,8 +249,6 @@ class GatewayManager:
             logger.warning("Unknown engine type %s — no workers registered", engine_cls)
 
         # Extract per-mode sampling params from the rollout engine
-        self._train_sampling_params = getattr(rollout_engine, "train_sampling_params", {})
-        self._val_sampling_params = getattr(rollout_engine, "val_sampling_params", {})
 
         if self.tunnel_backend and not self.public_url:
             self._start_tunnel()
@@ -297,9 +293,8 @@ class GatewayManager:
 
     # -- Session / trace API -------------------------------------------------
 
-    def create_session(self, session_id: str, is_validation: bool = False, sampling_params: dict[str, Any] | None = None) -> GatewaySession:
-        sp = sampling_params if sampling_params is not None else (self._val_sampling_params if is_validation else self._train_sampling_params)
-        created_session_id = self.client.create_session(session_id=session_id, sampling_params=sp or None)
+    def create_session(self, session_id: str, sampling_params: dict[str, Any] | None = None) -> GatewaySession:
+        created_session_id = self.client.create_session(session_id=session_id, sampling_params=sampling_params or None)
         return GatewaySession(session_id=created_session_id, api_key="EMPTY")
 
     def get_session_url(self, session_id: str, *, public: bool = True) -> str:
@@ -322,9 +317,8 @@ class GatewayManager:
 
     # -- Async session / trace API -------------------------------------------
 
-    async def acreate_session(self, session_id: str, is_validation: bool = False, sampling_params: dict[str, Any] | None = None) -> GatewaySession:
-        sp = sampling_params if sampling_params is not None else (self._val_sampling_params if is_validation else self._train_sampling_params)
-        created_session_id = await self.async_client.create_session(session_id=session_id, sampling_params=sp or None)
+    async def acreate_session(self, session_id: str, sampling_params: dict[str, Any] | None = None) -> GatewaySession:
+        created_session_id = await self.async_client.create_session(session_id=session_id, sampling_params=sampling_params or None)
         return GatewaySession(session_id=created_session_id, api_key="EMPTY")
 
     async def aget_traces(self, session_id: str) -> list[TraceRecord]:
@@ -542,5 +536,5 @@ def create_gateway_manager(config: DictConfig, mode: str = "thread") -> GatewayM
                 raise RuntimeError("gateway.version=v2 requires an rllm-model-gateway installation with V2 support") from exc
             raise
 
-        return GatewayManagerV2(config)
+        return GatewayManagerV2(config.rllm.gateway)
     raise ValueError(f"rllm.gateway.version must be 'v1' or 'v2', got {version!r}")

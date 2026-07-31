@@ -274,7 +274,13 @@ class AgentWorkflowEngine:
             else:
                 remaining_episodes.append(episode)
 
-        return transform_episodes_to_dataproto(remaining_episodes, self.rollout_engine, self.config.data.max_prompt_length, self.config.data.max_response_length)
+        return transform_episodes_to_dataproto(
+            remaining_episodes,
+            self.rollout_engine.tokenizer,
+            self.config.data.max_prompt_length,
+            self.config.data.max_response_length,
+            processor=getattr(self.rollout_engine, "processor", None),
+        )
 
     def shutdown(self):
         """Shutdown the workflow engine and cleanup resources."""

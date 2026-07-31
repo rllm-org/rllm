@@ -4,17 +4,17 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from rllm_model_gateway.v2.backend import GenerationBackend
+from rllm_model_gateway.v2.inference import InferenceClient
+from rllm_model_gateway.v2.tokenization import TokenizationService
 from rllm_model_gateway.v2.types import (
+    GatewayError,
     GatewayRequest,
     GatewayResponse,
-    GatewayError,
     SessionTraces,
     TokenInput,
     TokenOutput,
     TraceRecord,
 )
-from rllm_model_gateway.v2.tokenization import TokenizationService
 
 
 @dataclass
@@ -26,9 +26,9 @@ class SessionState:
 
 
 class GatewayService:
-    def __init__(self, tokenization: TokenizationService, backend: GenerationBackend, cumulative: bool = False) -> None:
+    def __init__(self, tokenization: TokenizationService, inference_client: InferenceClient, cumulative: bool = False) -> None:
         self._tokenization = tokenization
-        self._backend = backend
+        self._inference_client = inference_client
         self._cumulative = cumulative
         self._sessions: dict[str, SessionState] = {}
 
@@ -38,7 +38,7 @@ class GatewayService:
         sampling_params: dict[str, Any] | None = None,
     ) -> None:
         if session_id in self._sessions:
-            raise GatewayError(f"session {session_id!r} already exists", 409)
+            raise GatewayError(f"session {session_id!r} already exists", 409, "conflict_error")
         state = SessionState(
             traces=SessionTraces(session_id=session_id),
             sampling_params=dict(sampling_params or {}),
@@ -56,13 +56,18 @@ class GatewayService:
         stop_token_ids = self._tokenization.stop_token_ids()
         if stop_token_ids:
             sampling_params["stop_token_ids"] = stop_token_ids
-        prompt_token_ids = self._get_prompt_token_ids(state, request)
+        try:
+            prompt_token_ids = self._get_prompt_token_ids(state, request)
+        except GatewayError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise GatewayError(f"invalid request: {exc}") from exc
         token_input = TokenInput(
             session_id=request.session_id,
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
         )
-        token_output: TokenOutput = await self._backend.generate(token_input)
+        token_output: TokenOutput = await self._inference_client.generate(token_input)
         parsed = self._tokenization.parse_completion(token_output.completion_token_ids, request.tools)
         tool_calls = parsed["tool_calls"]
         finish_reason = "tool_calls" if tool_calls else token_output.finish_reason
@@ -99,10 +104,10 @@ class GatewayService:
 
     def delete_session(self, session_id: str) -> None:
         if self._sessions.pop(session_id, None) is None:
-            raise GatewayError(f"session {session_id!r} was not found", 404)
+            raise GatewayError(f"session {session_id!r} was not found", 404, "not_found_error")
 
     async def close(self) -> None:
-        await self._backend.close()
+        await self._inference_client.close()
 
     def _get_prompt_token_ids(self, state: SessionState, request: GatewayRequest) -> list[int]:
         if request.prompt_token_ids is not None:
@@ -112,11 +117,7 @@ class GatewayService:
 
         if self._cumulative and state.traces.traces:
             previous = state.traces.traces[-1]
-            if (
-                0 < state.message_count < len(request.messages)
-                and _fingerprint({"messages": request.messages[: state.message_count], "tools": request.tools})
-                == state.render_context_hash
-            ):
+            if 0 < state.message_count < len(request.messages) and _fingerprint({"messages": request.messages[: state.message_count], "tools": request.tools}) == state.render_context_hash:
                 new_messages = [message for message in request.messages[state.message_count :] if message.get("role") != "assistant"]
                 if new_messages:
                     bridged = self._tokenization.bridge(
@@ -133,7 +134,7 @@ class GatewayService:
     def _require_session(self, session_id: str) -> SessionState:
         state = self._sessions.get(session_id)
         if state is None:
-            raise GatewayError(f"session {session_id!r} was not found", 404)
+            raise GatewayError(f"session {session_id!r} was not found", 404, "not_found_error")
         return state
 
 

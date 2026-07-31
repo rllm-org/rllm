@@ -9,6 +9,7 @@ from multiprocessing.process import BaseProcess
 from typing import Any
 
 from rllm_model_gateway.v2.config import GatewayConfig
+from rllm_model_gateway.v2.inference import InferenceClientClass
 from rllm_model_gateway.v2.types import GatewayError, WorkerUnavailableError
 from rllm_model_gateway.v2.worker import worker_main
 
@@ -16,8 +17,10 @@ logger = logging.getLogger(__name__)
 
 
 class WorkerPool:
-    def __init__(self, config: GatewayConfig) -> None:
+    def __init__(self, config: GatewayConfig, inference_client_cls: InferenceClientClass, inference_client_kwargs: dict[str, Any]) -> None:
         self._config = config
+        self._inference_client_cls = inference_client_cls
+        self._inference_client_kwargs = inference_client_kwargs
         self._context = multiprocessing.get_context("spawn")
         self._request_queues: list[Any] = []
         self._response_queue: Any = None
@@ -41,7 +44,7 @@ class WorkerPool:
         with self._routing_lock:
             owner = self._session_owners.get(session_id)
         if owner is None:
-            raise GatewayError(f"session {session_id!r} was not found", 404)
+            raise GatewayError(f"session {session_id!r} was not found", 404, "not_found_error")
         return owner
 
     def start(self) -> None:
@@ -53,7 +56,14 @@ class WorkerPool:
             request_queue = self._context.Queue()
             process = self._context.Process(
                 target=worker_main,
-                args=(worker_id, config_data, request_queue, self._response_queue),
+                args=(
+                    worker_id,
+                    config_data,
+                    self._inference_client_cls,
+                    self._inference_client_kwargs,
+                    request_queue,
+                    self._response_queue,
+                ),
                 name=f"rllm-gateway-worker-{worker_id}",
             )
             process.start()
@@ -74,7 +84,7 @@ class WorkerPool:
     async def create_session(self, session_id: str, payload: dict[str, Any]) -> None:
         with self._routing_lock:
             if session_id in self._session_owners:
-                raise GatewayError(f"session {session_id!r} already exists", 409)
+                raise GatewayError(f"session {session_id!r} already exists", 409, "conflict_error")
             worker_id = min(
                 range(self.num_workers),
                 key=lambda candidate: (self._active_session_counts[candidate], self._in_flight_counts[candidate], candidate),
@@ -88,6 +98,19 @@ class WorkerPool:
             self._release_session(session_id)
             raise
 
+    async def update_inference_client(self, update: dict[str, Any]) -> None:
+        await asyncio.gather(
+            *[
+                self.call_worker(
+                    worker_id,
+                    "update_inference_client",
+                    {"update": update},
+                    timeout_seconds=self._config.update_timeout_seconds,
+                )
+                for worker_id in range(self.num_workers)
+            ]
+        )
+
     async def delete_session(self, session_id: str, payload: dict[str, Any]) -> None:
         worker_id = self.owner(session_id)
         self._release_session(session_id)
@@ -100,6 +123,7 @@ class WorkerPool:
         operation: str,
         payload: dict[str, Any],
         session_id: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> Any:
         if not self._started:
             raise GatewayError("worker pool is not running", 503, "server_error")
@@ -116,7 +140,8 @@ class WorkerPool:
             self._in_flight_counts[worker_id] += 1
         self._request_queues[worker_id].put_nowait(item)
         try:
-            return await asyncio.wait_for(future, timeout=self._config.request_timeout_seconds)
+            timeout = self._config.request_timeout_seconds if timeout_seconds is None else timeout_seconds
+            return await asyncio.wait_for(future, timeout=timeout)
         except TimeoutError as exc:
             with self._pending_lock:
                 self._pending.pop(call_id, None)
@@ -177,7 +202,7 @@ class WorkerPool:
                 dead = {worker_id for worker_id in waiting if not self._processes[worker_id].is_alive()}
                 if dead:
                     worker_id = min(dead)
-                    raise RuntimeError(f"gateway worker {worker_id} exited during startup with code {self._processes[worker_id].exitcode}")
+                    raise RuntimeError(f"gateway worker {worker_id} exited during startup with code {self._processes[worker_id].exitcode}") from None
                 continue
             if result.get("type") != "startup":
                 continue
@@ -248,7 +273,11 @@ class WorkerPool:
                     failures.append(pending)
                     self._pending.pop(call_id, None)
         for _, _, _, loop, future in failures:
-            loop.call_soon_threadsafe(_fail_future, future, GatewayError("session was deleted", 410))
+            loop.call_soon_threadsafe(
+                _fail_future,
+                future,
+                GatewayError("session was deleted", 410, "not_found_error"),
+            )
 
     def _release_session(self, session_id: str) -> None:
         with self._routing_lock:

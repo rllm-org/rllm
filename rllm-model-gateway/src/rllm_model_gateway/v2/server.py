@@ -1,22 +1,22 @@
-import argparse
 import asyncio
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
-import uvicorn
 from fastapi import FastAPI, Header, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from rllm_model_gateway.v2.auth import GatewayAuth
-from rllm_model_gateway.v2.config import BackendConfig, GatewayConfig, TokenizationConfig
-from rllm_model_gateway.v2.types import APIProtocol, GatewayError, GatewayResponse, SessionTraces
+from rllm_model_gateway.v2.config import GatewayConfig
+from rllm_model_gateway.v2.inference import InferenceClientClass
 from rllm_model_gateway.v2.pool import WorkerPool
 from rllm_model_gateway.v2.protocols import error_payload, normalize_request, response_payload, stream_events
+from rllm_model_gateway.v2.types import APIProtocol, GatewayError, GatewayResponse, SessionTraces
 
 
 class SessionCreateRequest(BaseModel):
@@ -24,23 +24,69 @@ class SessionCreateRequest(BaseModel):
     sampling_params: dict[str, Any] = Field(default_factory=dict)
 
 
-def create_app(config: GatewayConfig, pool: WorkerPool | None = None) -> FastAPI:
-    worker_pool = pool or WorkerPool(config)
+def create_app(
+    config: GatewayConfig,
+    inference_client_cls: InferenceClientClass,
+    inference_client_kwargs: dict[str, Any],
+    gateway_connection: Any,
+    shutdown: Callable[[], None],
+) -> FastAPI:
+    worker_pool = WorkerPool(config, inference_client_cls, inference_client_kwargs)
     auth = GatewayAuth(config.admin_key)
+
+    async def process_control_requests() -> None:
+        while True:
+            try:
+                if not await asyncio.to_thread(gateway_connection.poll, 0.5):
+                    continue
+                update = await asyncio.to_thread(gateway_connection.recv)
+            except EOFError:
+                return
+            if update is None:
+                shutdown()
+                return
+            try:
+                await worker_pool.update_inference_client(update)
+                response = {"ok": True}
+            except Exception as exc:
+                response = {"ok": False, "error": str(exc)}
+            try:
+                await asyncio.to_thread(gateway_connection.send, response)
+            except (BrokenPipeError, EOFError):
+                return
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         worker_pool.start()
+        control_task = asyncio.create_task(process_control_requests())
         try:
             yield
         finally:
+            control_task.cancel()
+            await asyncio.gather(control_task, return_exceptions=True)
+            gateway_connection.close()
             worker_pool.stop()
 
     app = FastAPI(title="rllm-model-gateway", version="0.1.0", lifespan=lifespan)
 
     @app.exception_handler(GatewayError)
     async def handle_gateway_error(_: Request, exc: GatewayError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content=error_payload(str(exc), exc.error_type))
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_payload(str(exc), exc.error_type, exc.status_code),
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_request_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content=error_payload(str(exc), "invalid_request_error", 400),
+        )
+
+    @app.exception_handler(Exception)
+    async def handle_unexpected_error(_: Request, exc: Exception) -> JSONResponse:
+        message = str(exc) or exc.__class__.__name__
+        return JSONResponse(status_code=500, content=error_payload(message, "server_error", 500))
 
     def require_admin(authorization: str | None) -> None:
         auth.require_admin(authorization)
@@ -114,23 +160,33 @@ def create_app(config: GatewayConfig, pool: WorkerPool | None = None) -> FastAPI
         if not stream:
             task = asyncio.create_task(run())
             try:
-                result = await asyncio.wait_for(asyncio.shield(task), timeout=config.heartbeat_seconds)
+                result = await asyncio.wait_for(
+                    asyncio.shield(task),
+                    timeout=config.heartbeat_initial_delay_seconds,
+                )
                 return JSONResponse(content=response_payload(protocol, result, response_model, created_at))
             except TimeoutError:
                 pass
 
             async def json_with_heartbeat() -> AsyncIterator[str]:
+                yield " "
                 while True:
                     try:
-                        result = await asyncio.wait_for(asyncio.shield(task), timeout=config.heartbeat_seconds)
+                        result = await asyncio.wait_for(
+                            asyncio.shield(task),
+                            timeout=config.heartbeat_interval_seconds,
+                        )
                         break
                     except TimeoutError:
                         yield " "
                     except GatewayError as exc:
-                        yield json.dumps(error_payload(str(exc), exc.error_type), separators=(",", ":"))
+                        yield json.dumps(
+                            error_payload(str(exc), exc.error_type, exc.status_code),
+                            separators=(",", ":"),
+                        )
                         return
                     except Exception as exc:
-                        yield json.dumps(error_payload(str(exc)), separators=(",", ":"))
+                        yield json.dumps(error_payload(str(exc), code=500), separators=(",", ":"))
                         return
                 yield json.dumps(response_payload(protocol, result, response_model, created_at), separators=(",", ":"))
 
@@ -142,18 +198,20 @@ def create_app(config: GatewayConfig, pool: WorkerPool | None = None) -> FastAPI
 
         async def fake_stream() -> AsyncIterator[str]:
             task = asyncio.create_task(run())
+            wait_seconds = config.heartbeat_initial_delay_seconds
             while True:
                 try:
-                    result = await asyncio.wait_for(asyncio.shield(task), timeout=config.heartbeat_seconds)
+                    result = await asyncio.wait_for(asyncio.shield(task), timeout=wait_seconds)
                     break
                 except TimeoutError:
                     yield ": keepalive\n\n"
+                    wait_seconds = config.heartbeat_interval_seconds
                 except GatewayError as exc:
-                    yield f"data: {json.dumps(error_payload(str(exc), exc.error_type), separators=(',', ':'))}\n\n"
+                    yield f"data: {json.dumps(error_payload(str(exc), exc.error_type, exc.status_code), separators=(',', ':'))}\n\n"
                     yield "data: [DONE]\n\n"
                     return
                 except Exception as exc:
-                    yield f"data: {json.dumps(error_payload(str(exc)), separators=(',', ':'))}\n\n"
+                    yield f"data: {json.dumps(error_payload(str(exc), code=500), separators=(',', ':'))}\n\n"
                     yield "data: [DONE]\n\n"
                     return
             for event in stream_events(protocol, result, response_model, created_at, include_usage):
@@ -172,55 +230,3 @@ def create_app(config: GatewayConfig, pool: WorkerPool | None = None) -> FastAPI
     app.state.config = config
     app.state.worker_pool = worker_pool
     return app
-
-
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the rLLM model gateway")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=9090)
-    parser.add_argument("--workers", type=int, default=1)
-    parser.add_argument("--worker-startup-timeout-seconds", type=float, default=300.0)
-    parser.add_argument("--admin-key", required=True)
-    parser.add_argument("--backend", required=True)
-    parser.add_argument("--backend-kwargs-json", default="{}")
-    parser.add_argument("--tokenizer-model", required=True)
-    parser.add_argument("--renderer", default="auto")
-    parser.add_argument("--renderer-kwargs-json", default="{}")
-    parser.add_argument("--cumulative", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--log-level", default="info")
-    return parser
-
-
-def main() -> None:
-    parser = _parser()
-    args = parser.parse_args()
-    try:
-        backend_kwargs = json.loads(args.backend_kwargs_json)
-    except json.JSONDecodeError as exc:
-        parser.error(f"--backend-kwargs-json must be valid JSON: {exc}")
-    if not isinstance(backend_kwargs, dict):
-        parser.error("--backend-kwargs-json must decode to an object")
-    try:
-        renderer_kwargs = json.loads(args.renderer_kwargs_json)
-    except json.JSONDecodeError as exc:
-        parser.error(f"--renderer-kwargs-json must be valid JSON: {exc}")
-    if not isinstance(renderer_kwargs, dict):
-        parser.error("--renderer-kwargs-json must decode to an object")
-    config = GatewayConfig(
-        host=args.host,
-        port=args.port,
-        num_workers=args.workers,
-        worker_startup_timeout_seconds=args.worker_startup_timeout_seconds,
-        admin_key=args.admin_key,
-        cumulative=args.cumulative,
-        tokenization=TokenizationConfig(
-            model=args.tokenizer_model,
-            renderer=args.renderer,
-            renderer_kwargs=renderer_kwargs,
-        ),
-        backend=BackendConfig(
-            name=args.backend,
-            kwargs=backend_kwargs,
-        ),
-    )
-    uvicorn.run(create_app(config), host=config.host, port=config.port, log_level=args.log_level)

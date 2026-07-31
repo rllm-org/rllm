@@ -3,21 +3,11 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 
-class TokenizationConfig(BaseModel):
-    model: str
-    renderer: str = "auto"
-    renderer_kwargs: dict[str, Any] = Field(default_factory=dict)
-
-
-class BackendConfig(BaseModel):
-    name: str
-    kwargs: dict[str, Any] = Field(default_factory=dict)
-
-
 class WorkerProcessConfig(BaseModel):
     cumulative: bool = False
-    tokenization: TokenizationConfig
-    backend: BackendConfig
+    tokenizer_model: str
+    renderer: str = "auto"
+    renderer_kwargs: dict[str, Any] = Field(default_factory=dict)
 
 
 class GatewayConfig(BaseModel):
@@ -26,11 +16,14 @@ class GatewayConfig(BaseModel):
     num_workers: int = Field(default=1, ge=1)
     worker_startup_timeout_seconds: float = Field(default=300.0, gt=0)
     request_timeout_seconds: float = Field(default=3600.0, gt=0)
-    heartbeat_seconds: float = Field(default=10.0, gt=0)
+    update_timeout_seconds: float = Field(default=300.0, gt=0)
+    heartbeat_initial_delay_seconds: float = Field(default=60.0, gt=0)
+    heartbeat_interval_seconds: float = Field(default=10.0, gt=0)
     admin_key: str
     cumulative: bool = False
-    tokenization: TokenizationConfig
-    backend: BackendConfig
+    tokenizer_model: str
+    renderer: str = "auto"
+    renderer_kwargs: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_required_fields(self) -> "GatewayConfig":
@@ -39,4 +32,9 @@ class GatewayConfig(BaseModel):
         return self
 
     def worker_config(self) -> WorkerProcessConfig:
-        return WorkerProcessConfig(cumulative=self.cumulative, tokenization=self.tokenization, backend=self.backend)
+        return WorkerProcessConfig(
+            cumulative=self.cumulative,
+            tokenizer_model=self.tokenizer_model,
+            renderer=self.renderer,
+            renderer_kwargs=self.renderer_kwargs,
+        )

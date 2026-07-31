@@ -35,7 +35,7 @@ class _Gateway:
         self.deleted = None
         self._traces = traces or []
 
-    async def acreate_session(self, session_id, is_validation=False, sampling_params=None):
+    async def acreate_session(self, session_id, sampling_params=None):
         self.created = (session_id, is_validation)
 
     def get_session_url(self, session_id, public=True):

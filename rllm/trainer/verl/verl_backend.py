@@ -138,6 +138,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         self.actor_rollout_wg = None
         self.ref_policy_wg = None
 
+        self.llm_server_manager = None
         self.async_rollout_manager = None
         self.checkpoint_manager: CheckpointEngineManager | None = None
         self.rollout_engine: VerlEngine | None = None
@@ -286,15 +287,24 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
     # =========================================================================
     # BackendProtocol interface methods
     # =========================================================================
-    def init_rollout_engine(self, **kwargs) -> RolloutEngine:
-        """Initialize the VerlEngine rollout engine.
 
-        Note: This should be called after init_workers() to ensure
-        async_rollout_manager is available.
+    def gateway_inference_client(self, weight_version: int):
+        import ray
 
-        Returns:
-            VerlEngine: The initialized rollout engine.
-        """
+        from rllm.trainer.verl.verl_inference_client import VerlInferenceClient
+
+        server_client = self._server_client()
+        return VerlInferenceClient, {
+            "sampling_client": ray.cloudpickle.dumps(server_client),
+            "weight_version": weight_version,
+            "max_prompt_length": self.config.data.max_prompt_length,
+            "max_response_length": self.config.data.max_response_length,
+        }
+
+    def gateway_inference_client_update(self, weight_version: int) -> dict[str, Any]:
+        return {"weight_version": weight_version}
+
+    def initialize(self, **kwargs) -> None:
         # Apply driver-side patches. Most verl monkey-patches only affect
         # worker code paths (FSDP / vLLM), so they live in the worker hook
         # at rllm.trainer.verl.patch:apply_all_verl_patches (wired via
@@ -329,25 +339,25 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         else:
             logger.warning("RayWorkerGroup.set_loss_fn not available — skipping custom loss injection")
 
-        # Both paths obtain the rollout client from the LLMServerManager; the separated
-        # path uses the partial-rollout-aware client so preempted rollouts can resume.
+        self.algorithm_config = kwargs.get("algorithm_config")
+
+    def _server_client(self):
+        if self.llm_server_manager is None:
+            raise RuntimeError("Verl backend is not initialized")
         if self.is_separated:
             from rllm.trainer.verl.async_agent_loop import FullyAsyncLLMServerClient
 
-            server_client = self.llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient)
-        else:
-            server_client = self.llm_server_manager.get_client()
+            return self.llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient)
+        return self.llm_server_manager.get_client()
 
+    def init_rollout_engine(self) -> RolloutEngine:
         self.rollout_engine = VerlEngine(
             config=self.config,
-            server_manager=server_client,
+            server_manager=self._server_client(),
             tokenizer=self.tokenizer,
             processor=self.processor,
         )
         self.rollout_engine.server_addresses = self.llm_server_manager.get_addresses()
-
-        self.algorithm_config = kwargs.get("algorithm_config")
-
         return self.rollout_engine
 
     def validate_config(self) -> None:
@@ -393,8 +403,8 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         router_replay_mode = self.config.rllm.algorithm.get("router_replay", "disabled")
         if router_replay_mode != "disabled":
             strategy = self.config.actor_rollout_ref.actor.strategy
-            if strategy != "megatron":
-                raise ValueError(f"router_replay={router_replay_mode!r} requires actor.strategy='megatron', got {strategy!r}")
+            if strategy not in ("megatron", "veomni"):
+                raise ValueError(f"router_replay={router_replay_mode!r} requires actor.strategy 'megatron' or 'veomni', got {strategy!r}")
 
     async def generate_episodes(self, batch: Any, agent_workflow_engine: UnifiedWorkflowEngine, is_validation: bool = False, **kwargs) -> list[Episode]:
         """Generate episodes using the workflow engine.
@@ -425,7 +435,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
     async def _execute_tasks_async(self, tasks: list, task_ids: list[str], agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
         """A Verl-specific helper function to execute tasks asynchronously."""
-        assert self.rollout_engine is not None, "rollout_engine is not initialized."
         episodes = await agent_workflow_engine.execute_tasks(tasks, task_ids, **kwargs)
         for episode, task in zip(episodes, tasks, strict=True):
             data_source = task.get("data_source") if isinstance(task, dict) else None
@@ -439,7 +448,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         Sync path receives ``episodes``; fully-async path (post-buffer) receives
         ``trajectory_groups``.
         """
-        assert self.rollout_engine is not None, "rollout_engine is not initialized."
         max_prompt_length = self.config.data.max_prompt_length
         # data.max_response_length is the per-turn generation cap at rollout
         # time, but merged multi-turn responses concatenate [A0, obs1, A1, ...]
@@ -448,7 +456,13 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         max_total_length = max_prompt_length + self.config.data.max_response_length
 
         if trainer_state.episodes is not None:
-            batch = transform_episodes_to_dataproto(trainer_state.episodes, self.rollout_engine, max_prompt_length, max_total_length)
+            batch = transform_episodes_to_dataproto(
+                trainer_state.episodes,
+                self.tokenizer,
+                max_prompt_length,
+                max_total_length,
+                processor=self.processor,
+            )
             # Lift per-batch merge metrics (batch/steps_per_traj,
             # batch/step_response_length) out of meta_info so they show up in
             # the standard trainer_state.metrics path. Same metric names the
@@ -459,7 +473,13 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             return batch
 
         assert trainer_state.trajectory_groups is not None, "Either episodes or trajectory_groups must be set"
-        batch = transform_trajectory_groups_to_dataproto(trainer_state.trajectory_groups, self.rollout_engine, max_prompt_length, max_total_length)
+        batch = transform_trajectory_groups_to_dataproto(
+            trainer_state.trajectory_groups,
+            self.tokenizer,
+            max_prompt_length,
+            max_total_length,
+            processor=self.processor,
+        )
         mode = self.algorithm_config.stepwise_advantage_mode if self.algorithm_config is not None else "broadcast"
         return update_dataproto_with_advantages(batch, trainer_state.trajectory_groups, mode=mode)
 
@@ -897,10 +917,12 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
     async def on_validation_start(self, trainer_state: TrainerState) -> bool:
         """Called at the start of validation."""
         trainer_state.is_training = False
-        self.rollout_engine.is_validation = True
+        if self.rollout_engine is not None:
+            self.rollout_engine.is_validation = True
         return True
 
     async def on_validation_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of validation."""
         trainer_state.is_training = True
-        self.rollout_engine.is_validation = False
+        if self.rollout_engine is not None:
+            self.rollout_engine.is_validation = False

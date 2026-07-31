@@ -10,7 +10,7 @@ rollout engine (FireworksEngine), and checkpoint lifecycle hooks
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fireworks.training.sdk import (
     DeploymentSampler,
@@ -109,6 +109,30 @@ class FireworksBackend(TinkerBackend):
     # Fireworks infrastructure setup
     # ------------------------------------------------------------------
 
+    def gateway_inference_client(self, weight_version: int):
+        from rllm.trainer.fireworks.fireworks_inference_client import FireworksInferenceClient
+
+        if self.sampling_client is None:
+            raise RuntimeError("Fireworks sampling client is not initialized")
+        cfg = self.full_config
+        return FireworksInferenceClient, {
+            "sampling_client_kwargs": {
+                "inference_url": self.sampling_client.base_url,
+                "model": self.sampling_client.model,
+                "api_key": self.sampling_client.api_key,
+                "additional_headers": self.sampling_client.additional_headers,
+            },
+            "weight_version": weight_version,
+            "max_prompt_length": cfg.data.max_prompt_length,
+            "max_response_length": cfg.data.max_response_length,
+            "max_model_length": int(cfg.training.max_length) - 1,
+            "sample_timeout": cfg.fireworks_infra.deployments.rollout.get("sample_timeout", 600),
+            "router_replay": cfg.rllm.algorithm.get("router_replay", "disabled") == "R3",
+        }
+
+    def gateway_inference_client_update(self, weight_version: int) -> dict[str, Any]:
+        return {"weight_version": weight_version}
+
     def _build_provision_config(self, algorithm_config: AlgorithmConfig):
         """Parse ``fireworks_infra`` (cookbook provision-document format) into
         the flat recipe config ``init_fireworks_infra`` expects.
@@ -197,11 +221,9 @@ class FireworksBackend(TinkerBackend):
     # BackendProtocol overrides
     # ------------------------------------------------------------------
 
-    def init_rollout_engine(self, **kwargs) -> RolloutEngine:
+    def initialize(self, **kwargs) -> None:
         self._init_fireworks_infra(**kwargs)
 
-        # Anything that fails past this point must tear down the provisioned
-        # trainer job and deployment, or they keep running (and billing).
         try:
             self.policy_trainer = FireworksPolicyTrainer(
                 config=self.full_config,
@@ -213,9 +235,16 @@ class FireworksBackend(TinkerBackend):
                 rlor_mgr=self._rlor_mgr,
                 policy_job_id=self._policy_job_id,
             )
+        except BaseException:
+            self.shutdown()
+            raise
 
-            cfg = self.full_config
-            rollout_extra = dict(cfg.get("rollout_engine", {}))
+    def init_rollout_engine(self) -> RolloutEngine:
+        if self.policy_trainer is None or self.sampling_client is None:
+            raise RuntimeError("Fireworks backend is not initialized")
+        cfg = self.full_config
+        rollout_extra = dict(cfg.get("rollout_engine", {}))
+        try:
             self.rollout_engine = FireworksEngine(
                 tokenizer=self.tokenizer,
                 sampler=self.sampling_client,

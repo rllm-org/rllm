@@ -30,6 +30,8 @@ async_training:
 
 rllm:
   backend: verl
+  gateway:
+    tokenizer_model: ${actor_rollout_ref.model.path}
   algorithm:
     rollout_correction:
       bypass_mode: false

@@ -21,14 +21,12 @@ class GatewayManagerProtocol(Protocol):
     def create_session(
         self,
         session_id: str,
-        is_validation: bool = False,
         sampling_params: dict[str, Any] | None = None,
     ) -> GatewaySession: ...
 
     async def acreate_session(
         self,
         session_id: str,
-        is_validation: bool = False,
         sampling_params: dict[str, Any] | None = None,
     ) -> GatewaySession: ...
 

@@ -34,12 +34,16 @@ class RemoteAgentFlowEngine:
         session_timeout: float = 900.0,
         n_parallel_tasks: int = 128,
         episode_logger: EpisodeLogger | None = None,
+        train_sampling_params: dict | None = None,
+        val_sampling_params: dict | None = None,
     ) -> None:
         self.runtime = runtime
         self.gateway = gateway
         self.session_timeout = session_timeout
         self.n_parallel_tasks = n_parallel_tasks
         self.episode_logger = episode_logger
+        self.train_sampling_params = train_sampling_params
+        self.val_sampling_params = val_sampling_params
         self._semaphore = asyncio.Semaphore(n_parallel_tasks)
 
         # Training step tracking (set by set_training_step)
@@ -108,7 +112,11 @@ class RemoteAgentFlowEngine:
             session_id = str(uuid.uuid4())
             is_validation = kwargs.get("is_validation", False)
 
-            created_session = await self.gateway.acreate_session(session_id, is_validation=is_validation)
+            sampling_params = (self.val_sampling_params if is_validation else self.train_sampling_params) or None
+            created_session = await self.gateway.acreate_session(
+                session_id,
+                sampling_params=sampling_params,
+            )
             session_url = self.gateway.get_session_url(created_session.session_id)
 
             submission = TaskSubmission(
