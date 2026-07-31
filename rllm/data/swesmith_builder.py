@@ -65,7 +65,7 @@ def bug_in_test_file(task_dir: Path) -> bool:
     return any(t in f2p_files for t in targets)
 
 
-def list_task_ids() -> list[str]:
+def list_task_ids(revision: str | None = None) -> list[str]:
     """List every task-dir name in the HF repo from one tree listing.
 
     A repo-tree listing is a handful of paginated API calls — unlike the
@@ -74,7 +74,11 @@ def list_task_ids() -> list[str]:
     """
     from huggingface_hub import HfApi
 
-    files = HfApi().list_repo_files(REPO_ID, repo_type="dataset")
+    files = HfApi().list_repo_files(
+        REPO_ID,
+        repo_type="dataset",
+        revision=revision,
+    )
     return sorted({f.split("/", 1)[0] for f in files if "/" in f})
 
 

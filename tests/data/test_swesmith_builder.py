@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import tomllib
 
+import rllm.data.swesmith_builder as swesmith_builder
 from rllm.data.swesmith_builder import _write_dataset_toml, bug_in_test_file, patch_task_toml
 
 _TASK_TOML = """\
@@ -34,6 +37,41 @@ def _make_task(tmp_path: Path, *, patch_target: str, f2p_file: str) -> Path:
     }
     (task_dir / "tests" / "config.json").write_text(json.dumps(cfg))
     return task_dir
+
+
+def test_list_task_ids_forwards_revision(monkeypatch):
+    calls = []
+
+    class FakeHfApi:
+        def list_repo_files(self, repo_id, *, repo_type, revision):
+            calls.append(
+                {
+                    "repo_id": repo_id,
+                    "repo_type": repo_type,
+                    "revision": revision,
+                }
+            )
+            return [
+                "repo_b/task.toml",
+                "repo_a/instruction.md",
+                "README.md",
+            ]
+
+    hub = ModuleType("huggingface_hub")
+    hub.HfApi = FakeHfApi
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+
+    assert swesmith_builder.list_task_ids(revision="dataset-sha") == [
+        "repo_a",
+        "repo_b",
+    ]
+    assert calls == [
+        {
+            "repo_id": swesmith_builder.REPO_ID,
+            "repo_type": "dataset",
+            "revision": "dataset-sha",
+        }
+    ]
 
 
 class TestBugInTestFile:
