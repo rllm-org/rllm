@@ -150,6 +150,7 @@ def enrich_episode_with_traces(
     # shrink GRPO groups; raise on real mismatches so retries can reissue.
     n_agent_steps = sum(len(t.steps) for t in episode.trajectories)
     agent_populates_steps = any(len(t.steps) > 0 for t in episode.trajectories)
+    all_trajectories_populate_steps = bool(episode.trajectories) and all(t.steps for t in episode.trajectories)
 
     # Common case: vLLM returns an empty body on the final call (e.g. prompt
     # hit max_model_len, or weight-sync disconnect). The agent breaks without
@@ -170,16 +171,16 @@ def enrich_episode_with_traces(
 
     empty_prompt = sum(1 for s in training_steps if not s.model_output.prompt_ids)
     empty_compl = sum(1 for s in training_steps if not s.model_output.completion_ids)
-    # Only enforce step-count parity when the agent actually populates steps.
-    # Trajectories with no agent steps absorb remaining traces wholesale
-    # (see branch below), and trajectories with steps consume traces 1:1.
+    # Enforce exact parity when every trajectory reports steps. A trajectory
+    # without agent steps absorbs remaining traces wholesale (see branch below).
     traces_short = agent_populates_steps and len(training_steps) < n_agent_steps
+    traces_long = all_trajectories_populate_steps and len(training_steps) > n_agent_steps
     # Empty token IDs are a hard error only in strict (training) mode.
     # Eval against external providers (OpenAI/Anthropic via LiteLLM proxy)
     # legitimately has empty token IDs and that's fine — the evaluator
     # reads `model_response` / `chat_completions`, not token IDs.
     token_ids_missing = strict and (empty_prompt or empty_compl)
-    if traces_short or token_ids_missing:
+    if traces_short or traces_long or token_ids_missing:
         raise EnrichMismatchError(f"[{uid}] enrich mismatch: traces={len(training_steps)} agent_steps={n_agent_steps} empty_prompt_ids={empty_prompt} empty_completion_ids={empty_compl}")
 
     # Build enriched trajectories
