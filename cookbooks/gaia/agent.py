@@ -20,9 +20,12 @@ Run:
 from __future__ import annotations
 
 import json
+import logging
 
 from rllm.tools.web_tools.tavily_tool import TavilyExtractTool, TavilySearchTool
 from rllm.types import Episode, Step, Trajectory
+
+logger = logging.getLogger(__name__)
 
 MAX_TURNS = 12
 _MAX_OBS_CHARS = 6000  # cap tool observations so browse output can't blow up context
@@ -44,8 +47,14 @@ AGENT_SYSTEM_PROMPT = (
 
 
 def _tool_observation(tool, args: dict) -> str:
-    """Run a tool and return a string observation (truncated)."""
-    out = tool.forward(**args)
+    """Run a tool and return a string observation (truncated). Never raises: a tool
+    failure (missing API key, bad model-emitted kwargs, network error) becomes an
+    error observation the model can react to, not a crashed rollout — matching
+    ToolCallingMixin's behavior (rllm/harnesses/tool_calling.py)."""
+    try:
+        out = tool.forward(**args)
+    except Exception as exc:
+        return f"Tool error: {type(exc).__name__}: {exc}"[:_MAX_OBS_CHARS]
     payload = out.error if out.error else out.output
     text = payload if isinstance(payload, str) else json.dumps(payload, default=str)
     return text[:_MAX_OBS_CHARS]
@@ -69,8 +78,10 @@ def run_tool_loop(client, model: str, tools: list, question: str, *, system_prom
     for turn in range(max_turns):
         try:
             resp = client.chat.completions.create(model=model, messages=messages, tools=schemas, temperature=0.0)
-        except Exception as exc:  # surface model errors as a terminal step, don't crash the run
-            steps.append(Step(input=f"turn_{turn}", output=f"LLM error: {exc}", done=True))
+        except Exception as exc:
+            # Don't record a Step for a failed call: no gateway trace exists for it, and
+            # the enricher requires step<->trace parity (rllm/engine/agentflow_engine.py).
+            logger.warning("LLM call failed on turn %d: %s", turn, exc)
             break
 
         msg = resp.choices[0].message
@@ -97,6 +108,13 @@ def run_tool_loop(client, model: str, tools: list, question: str, *, system_prom
             observations.append(f"{name}: {obs}")
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": obs})
         steps.append(Step(input=f"turn_{turn}", output="\n".join(observations)))
+
+    # max_turns exhausted without a final answer: mark the episode terminated on the
+    # LAST recorded step (flipping the flag keeps step<->trace parity; appending a new
+    # step would break it). `answer` stays "" and is scored as an empty answer via
+    # Episode.artifacts["answer"].
+    if steps and not steps[-1].done:
+        steps[-1].done = True
 
     return steps, answer
 

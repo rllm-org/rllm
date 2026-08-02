@@ -50,6 +50,24 @@ class TestQuestionScorer:
         assert question_scorer("1, two, 3", "1, two, 3") is True
         assert question_scorer("1, two, 4", "1, two, 3") is False
 
+    def test_semicolon_separated_list(self):
+        assert question_scorer("apple; banana", "apple; banana") is True
+        assert question_scorer("apple; cherry", "apple; banana") is False
+
+    def test_list_numeric_elements_strip_currency_and_percent(self):
+        assert question_scorer("$1000, 20%", "1000, 20") is True
+
+    def test_thousands_separator_inside_a_list_element_splits_it(self):
+        # Documented quirk of the official scorer: the list split happens BEFORE
+        # numeric normalization, so "$1,000" becomes two elements and the lengths
+        # no longer match. Encoded so a future refactor can't silently change it.
+        assert question_scorer("$1,000, 20%", "1000, 20") is False
+
+    def test_list_string_elements_keep_punctuation_but_ignore_case_space(self):
+        # element-wise string compare uses remove_punct=False (per the official scorer)
+        assert question_scorer("St. Louis, Paris", "st.louis , paris") is True
+        assert question_scorer("St Louis, Paris", "St. Louis, Paris") is False
+
 
 # ---------------------------------------------------------------------------
 # gaia_transform
@@ -95,6 +113,16 @@ class TestGaiaEvaluate:
         out = self._ev().evaluate({}, Episode(artifacts={"answer": "Paris"}))
         assert out.is_correct is False
         assert "error" in out.metadata
+
+    def test_answer_without_final_answer_prefix_is_used_whole(self):
+        out = self._ev().evaluate({"ground_truth": "Paris"}, Episode(artifacts={"answer": "  Paris  "}))
+        assert out.is_correct is True
+        assert out.metadata["model_answer"] == "Paris"
+
+    def test_empty_answer_scores_zero_without_crashing(self):
+        out = self._ev().evaluate({"ground_truth": "Paris"}, Episode(artifacts={"answer": ""}))
+        assert out.is_correct is False
+        assert out.reward == 0.0
 
 
 # ---------------------------------------------------------------------------
