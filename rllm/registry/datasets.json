@@ -736,17 +736,15 @@
       "instruction_field": "question"
     },
     "swebench_verified": {
-      "description": "SWE-bench Verified: 500 real-world GitHub issues for SWE agents",
-      "source": "princeton-nlp/SWE-bench_Verified",
+      "description": "SWE-bench Verified: 500 human-validated real-world GitHub issues across 12 Python repos (Harbor-sourced; per-task in-sandbox tests/test.sh verifier)",
+      "source": "harbor:swebench-verified",
       "category": "code",
       "splits": [
-        "test"
+        "default"
       ],
-      "default_agent": "swe",
-      "reward_fn": "swebench_reward_fn",
-      "eval_split": "test",
-      "transform": "rllm.data.transforms:swebench_transform",
-      "instruction_field": "question"
+      "eval_split": "default",
+      "default_agent": "mini-swe-agent",
+      "reward_fn": "harbor_reward_fn"
     },
     "swebench_pro": {
       "description": "SWE-bench Pro (Public): 731 enterprise-grade SWE tasks across 41 repos, evaluated against pre-built jefzda/sweap-images Docker images (Harbor format; F2P/P2P verifier)",
