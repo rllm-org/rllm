@@ -12,6 +12,40 @@ def _response(body):
     return httpx.Response(200, json=body, request=httpx.Request("POST", "http://worker/v1/completions"))
 
 
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        httpx.ReadError,
+        httpx.ConnectError,
+        httpx.RemoteProtocolError,
+        httpx.TimeoutException,
+    ],
+)
+@pytest.mark.asyncio
+async def test_send_with_retry_retries_transient_http_errors(error_type, monkeypatch):
+    request = httpx.Request("POST", "http://worker/v1/completions")
+    transient_error = error_type("transient failure", request=request)
+    expected = _response({"choices": []})
+    proxy = ReverseProxy(router=AsyncMock(), store=AsyncMock(), max_retries=1)
+    proxy._http = AsyncMock()
+    proxy._http.request = AsyncMock(side_effect=transient_error)
+    retry_client = AsyncMock()
+    retry_client.request = AsyncMock(return_value=expected)
+    monkeypatch.setattr("rllm_model_gateway.proxy.httpx.AsyncClient", lambda **_: retry_client)
+
+    response = await proxy._send_with_retry(
+        method="POST",
+        url=str(request.url),
+        content=b"{}",
+        headers={},
+    )
+
+    assert response is expected
+    proxy._http.request.assert_awaited_once()
+    retry_client.request.assert_awaited_once()
+    retry_client.aclose.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_non_streaming_abort_resumes_from_partial_token_ids(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())

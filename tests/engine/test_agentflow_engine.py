@@ -255,14 +255,36 @@ def test_no_usable_model_output_detects_dead_upstream():
     of a clean ENV_DONE."""
     from types import SimpleNamespace as NS
 
-    from rllm.engine.agentflow_engine import _no_usable_model_output, _step_returned_nothing
+    from rllm.engine.agentflow_engine import _all_steps_returned_nothing, _no_usable_model_output, _step_returned_nothing
 
-    def step(content, tool_calls=None):
-        return NS(model_output=NS(content=content), chat_completions=[{"role": "assistant", "content": content, "tool_calls": tool_calls}])
+    def step(content="", reasoning="", tool_calls=None, completion_ids=None):
+        return NS(
+            model_output=NS(
+                content=content,
+                text=None,
+                reasoning=reasoning,
+                tool_calls=tool_calls,
+                completion_ids=completion_ids,
+            ),
+            model_response=content,
+            thought=reasoning,
+            chat_completions=[
+                {
+                    "role": "assistant",
+                    "content": content,
+                    "reasoning": reasoning,
+                    "tool_calls": tool_calls,
+                }
+            ],
+        )
 
     assert _step_returned_nothing(step("")) is True
     assert _step_returned_nothing(step("ls -la")) is False
-    assert _step_returned_nothing(step("", tool_calls=[{"id": "1"}])) is False  # tool-only turn is real work
+    assert _step_returned_nothing(step(tool_calls=[{"id": "1"}])) is False
+    assert _step_returned_nothing(step(reasoning="thinking")) is False
+    assert _step_returned_nothing(step(completion_ids=[1])) is False
+    assert _all_steps_returned_nothing([step(""), step("")]) is True
+    assert _all_steps_returned_nothing([step(""), step(tool_calls=[{"id": "1"}])]) is False
 
     assert _no_usable_model_output(NS(trajectories=[NS(steps=[step(""), step("")])])) is True  # dead proxy
     assert _no_usable_model_output(NS(trajectories=[NS(steps=[])])) is True  # no LLM calls (the broken-eval case)

@@ -38,6 +38,7 @@ from rllm.eval.types import EvalOutput
 from rllm.gateway.manager import container_reachable_url
 from rllm.types import INFRA_ERROR_REASONS, AgentConfig, Episode, Step, Task, TerminationReason, Trajectory, flow_accepts_env, run_agent_flow, termination_reason_from_error
 from rllm.utils import colorful_print
+from rllm.utils.priority_semaphore import EVAL_PRIORITY, TRAIN_PRIORITY, PrioritySemaphore
 
 if TYPE_CHECKING:
     from rllm_model_gateway.models import TraceRecord
@@ -58,16 +59,32 @@ _TRACEBACK_LOG_REASONS = INFRA_ERROR_REASONS - {
 
 
 def _step_returned_nothing(step) -> bool:
-    """True when a model call produced no usable output — empty content AND no tool
-    calls. A dead/erroring upstream (proxy down, API failure) looks like this; a
-    legitimate tool-only turn does not (it carries ``tool_calls``)."""
-    content = (getattr(step.model_output, "content", None) or "").strip() if getattr(step, "model_output", None) else ""
-    if content:
+    """Return whether a model call produced no evidence of usable output."""
+    model_output = getattr(step, "model_output", None)
+    text_fields = (
+        getattr(model_output, "content", None),
+        getattr(model_output, "text", None),
+        getattr(model_output, "reasoning", None),
+        getattr(step, "model_response", None),
+        getattr(step, "thought", None),
+    )
+    if any(isinstance(value, str) and value.strip() for value in text_fields):
+        return False
+    if getattr(model_output, "tool_calls", None) or getattr(model_output, "completion_ids", None):
         return False
     msgs = getattr(step, "chat_completions", None)
     last = msgs[-1] if msgs else None
-    tool_calls = last.get("tool_calls") if isinstance(last, dict) else None
-    return not tool_calls
+    if isinstance(last, dict):
+        message_fields = (last.get("content"), last.get("reasoning"), last.get("reasoning_content"))
+        if any(isinstance(value, str) and value.strip() for value in message_fields):
+            return False
+        if last.get("tool_calls"):
+            return False
+    return True
+
+
+def _all_steps_returned_nothing(steps) -> bool:
+    return bool(steps) and all(_step_returned_nothing(step) for step in steps)
 
 
 def _no_usable_model_output(episode: Episode) -> bool:
@@ -77,7 +94,7 @@ def _no_usable_model_output(episode: Episode) -> bool:
     or tunnel failure) — which otherwise looks identical to a clean ENV_DONE with
     reward 0. A legit failed rollout has real completions, so it isn't flagged."""
     steps = [s for traj in episode.trajectories for s in traj.steps]
-    return not steps or all(_step_returned_nothing(s) for s in steps)
+    return not steps or _all_steps_returned_nothing(steps)
 
 
 class EnrichMismatchError(RuntimeError):
@@ -187,6 +204,15 @@ def enrich_episode_with_traces(
             artifacts=episode.artifacts,
         )
 
+    termination_reason = episode.termination_reason
+    final_trace = traces[-1]
+    if (
+        termination_reason == TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED
+        and final_trace.finish_reason == "length"
+        and final_trace.metadata.get("max_tokens_clamped") is True
+    ):
+        termination_reason = TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED
+
     # Convert all traces to training steps
     training_steps = [trace_record_to_step(t) for t in traces]
 
@@ -289,7 +315,7 @@ def enrich_episode_with_traces(
         trajectories=enriched_trajectories,
         metrics=metrics,
         metadata=episode.metadata,
-        termination_reason=episode.termination_reason,
+        termination_reason=termination_reason,
         artifacts=episode.artifacts,
     )
 
@@ -421,7 +447,7 @@ class AgentFlowEngine:
 
         self.n_parallel_tasks = n_parallel_tasks
         self.executor = ThreadPoolExecutor(max_workers=n_parallel_tasks)
-        self._semaphore = asyncio.Semaphore(n_parallel_tasks)
+        self._semaphore = PrioritySemaphore(n_parallel_tasks)
 
         # Raise the file descriptor limit to avoid "Too many open files" when
         # running many parallel agent flows with individual HTTP clients.
@@ -445,7 +471,7 @@ class AgentFlowEngine:
         the internal state can't be read.
         """
         try:
-            return max(0, self.n_parallel_tasks - self._semaphore._value)  # type: ignore[attr-defined]
+            return max(0, self.n_parallel_tasks - self._semaphore.available)
         except Exception:
             return -1
 
@@ -453,8 +479,7 @@ class AgentFlowEngine:
     def pending(self) -> int:
         """Best-effort count of rollout tasks queued waiting for a slot."""
         try:
-            waiters = self._semaphore._waiters  # type: ignore[attr-defined]
-            return len(waiters) if waiters else 0
+            return self._semaphore.waiting
         except Exception:
             return -1
 
@@ -536,11 +561,11 @@ class AgentFlowEngine:
 
                 if episode is not None:
                     _steps = [s for t in (episode.trajectories or []) for s in (t.steps or [])]
-                    if _steps and all(not (s.model_response or "").strip() for s in _steps):
+                    if _all_steps_returned_nothing(_steps):
                         n_empty_rollouts += 1
                         colorful_print(
                             f"[{task_id}:{rollout_idx}] ⚠️  EMPTY COMPLETIONS: all {len(_steps)} LLM calls "
-                            f"returned 0 tokens — upstream likely DOWN (dead litellm proxy :4000 / gateway "
+                            f"returned no usable model output — upstream likely DOWN (dead litellm proxy :4000 / gateway "
                             f"no-healthy-workers / model). [{n_empty_rollouts} empty rollouts so far]",
                             fg="red",
                         )
@@ -601,7 +626,8 @@ class AgentFlowEngine:
         task_for_episode = task.metadata if isinstance(task, Task) else task
         task_obj = task if isinstance(task, Task) else task_from_row(task, task_id)
 
-        async with self._semaphore:
+        priority = EVAL_PRIORITY if is_validation else TRAIN_PRIORITY
+        async with self._semaphore.slot(priority):
             for retry_attempt in range(1, self.retry_limit + 1):
                 uid = f"{task_id}:{rollout_idx}"
                 if retry_attempt > 1:

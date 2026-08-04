@@ -862,7 +862,7 @@ class UnifiedTrainer:
 
             # Periodic validation
             if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
-                await self._validate_async_with_pause(trainer_state, coordinator)
+                await self._validate_async(trainer_state)
 
             trainer_state.global_step += 1
 
@@ -884,15 +884,6 @@ class UnifiedTrainer:
         coordinator.on_sync_complete()
 
         if not self.async_config.partial_rollout:
-            coordinator.resume_generation()
-
-    async def _validate_async_with_pause(self, trainer_state: TrainerState, coordinator: SyncCoordinator) -> dict:
-        """Validation with dispatch-level pause. Waits for workflows to drain, then runs validation."""
-        coordinator.pause_generation()
-        await coordinator.wait_for_drain()
-        try:
-            return await self._validate_async(trainer_state)
-        finally:
             coordinator.resume_generation()
 
     async def _validate_async(self, trainer_state: TrainerState) -> dict:

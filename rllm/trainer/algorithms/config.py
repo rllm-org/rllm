@@ -132,6 +132,8 @@ class CompactFilteringConfig:
     """
 
     enable: bool = False
+    # When set, this list is authoritative and the legacy per-reason flags below are ignored.
+    mask_termination_reasons: list[str] | None = None
     mask_max_prompt_length_exceeded: bool = False
     mask_max_response_length_exceeded: bool = False
     mask_env_done: bool = False
@@ -148,6 +150,17 @@ class CompactFilteringConfig:
     mask_agent_setup_timeout: bool = False
     mask_env_start_timeout: bool = False
     mask_model_error: bool = False
+
+    def __post_init__(self) -> None:
+        if self.mask_termination_reasons is None:
+            return
+        valid = {reason.value for reason in TerminationReason}
+        unknown = sorted(set(self.mask_termination_reasons) - valid)
+        if unknown:
+            raise ValueError(
+                f"Unknown compact-filtering termination reason(s): {', '.join(unknown)}. "
+                f"Valid reasons: {', '.join(sorted(valid))}"
+            )
 
     @classmethod
     def from_config(cls, config: DictConfig) -> "CompactFilteringConfig":
@@ -170,6 +183,8 @@ class CompactFilteringConfig:
         """
         if not self.enable:
             return False
+        if self.mask_termination_reasons is not None:
+            return termination_reason.value in self.mask_termination_reasons
         return (
             (self.mask_max_prompt_length_exceeded and termination_reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
             or (self.mask_max_response_length_exceeded and termination_reason == TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED)

@@ -117,6 +117,8 @@ filter_token_mismatch: True
 # reward is not a real task score (verifier timed out/crashed, sandbox died).
 compact_filtering:
   enable: False
+  # Set to a list of TerminationReason values to replace the legacy flags below.
+  mask_termination_reasons: null
   mask_max_prompt_length_exceeded: True
   mask_max_response_length_exceeded: True
   mask_env_done: False

@@ -1,91 +1,131 @@
 #!/usr/bin/env bash
-# Train a terminal agent on a local terminal-agent task set with the verl
-# (distributed) backend.
-#
-# Prerequisites:
-#   1. Install rllm with verl + harbor extras:  uv pip install -e ".[verl,harbor]"
-#   2. Install megatron:                         bash scripts/install_megatron.sh <cu128|cu129|...>
-#   3. Install this cookbook:                    uv pip install --no-deps -e cookbooks/terminal-rl
-#   4. Pull the datasets:                        python cookbooks/terminal-rl/prepare_data.py
-#
-# Verl runs vLLM rollouts + FSDP/Megatron training across N GPUs. The terminus2
-# agent still executes inside per-task sandboxes via rLLM's own SandboxedAgentFlow
-# path (AgentFlowEngine, not the remote Harbor runtime); only the policy rollout
-# traffic flows through the gateway back to the verl-hosted vLLM engine.
-#
-# Sandbox backend is chosen by TERMINAL_SANDBOX_BACKEND (docker | local | modal |
-# daytona; default modal). modal needs `pip install modal` + `modal token new`;
-# daytona needs `pip install daytona` + DAYTONA_API_KEY. Per-rollout agent
-# timeout: RLLM_HARNESS_RUN_TIMEOUT_S.
-
 set -euo pipefail
-
-unset ROCR_VISIBLE_DEVICES 2>/dev/null || true
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
 export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-modal}"
-# Per-rollout turn cap for terminus2 (read by train.py). Empty = uncapped.
-export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
-# Disable Terminus-2 context compaction (summarization) so it doesn't fragment
-# the captured trajectory during training. Set to 1 to re-enable.
-export TERMINUS_ENABLE_SUMMARIZE="${TERMINUS_ENABLE_SUMMARIZE:-0}"
-export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
-# Modal sandbox LIFETIME (not idle time). Must exceed the agent run timeout
-# above plus setup/verify, or sandboxes get reaped mid-rollout — surfacing as
-# "Sandbox has already shut down" (NotFoundError) and exit-137 kills.
-export RLLM_MODAL_SANDBOX_TIMEOUT_S="${RLLM_MODAL_SANDBOX_TIMEOUT_S:-2400}"
+export TB_TRAIN_DATASET="${TB_TRAIN_DATASET:-tb-opus-pass}"
+export MINISWE_MAX_TURNS="${MINISWE_MAX_TURNS:-128}"
+export MINISWE_MAX_CONSECUTIVE_FORMAT_ERRORS="${MINISWE_MAX_CONSECUTIVE_FORMAT_ERRORS:-1}"
+export MINISWE_COMMAND_TIMEOUT="${MINISWE_COMMAND_TIMEOUT:-300}"
+export RLLM_SANDBOX_MAX_CPUS="${RLLM_SANDBOX_MAX_CPUS:-0.125}"
+export RLLM_SANDBOX_MAX_MEMORY_MB="${RLLM_SANDBOX_MAX_MEMORY_MB:-256}"
+export RLLM_MODAL_SANDBOX_CREATE_RPS="${RLLM_MODAL_SANDBOX_CREATE_RPS:-2}"
+export RLLM_HARNESS_INSTALL_TIMEOUT_S="${RLLM_HARNESS_INSTALL_TIMEOUT_S:-300}"
+export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-3000}"
+export RLLM_HARNESS_VERIFIER_TIMEOUT_S="${RLLM_HARNESS_VERIFIER_TIMEOUT_S:-300}"
+export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-3600}"
+export RLLM_MODAL_SANDBOX_TIMEOUT_S="${RLLM_MODAL_SANDBOX_TIMEOUT_S:-3600}"
 
-MODEL_PATH=Qwen/Qwen3.5-4B
+MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-35B-A3B}"
+PROJECT_NAME="${PROJECT_NAME:-terminal-rl}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen3p5-35b-a3b-terminal-rl-verl}"
+CKPT_DIR="${CKPT_DIR:-checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}}"
+
+N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-8}"
+TRAIN_NNODES="${TRAIN_NNODES:-2}"
+ROLLOUT_NNODES="${ROLLOUT_NNODES:-2}"
+ROLLOUT_N="${ROLLOUT_N:-16}"
+PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-16}"
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-100}"
+STALENESS_THRESHOLD="${STALENESS_THRESHOLD:-4.0}"
+TRIGGER_PARAMETER_SYNC_STEP="${TRIGGER_PARAMETER_SYNC_STEP:-1}"
+INFER_TP="${INFER_TP:-2}"
+SP_SIZE="${SP_SIZE:-4}"
+EP_SIZE="${EP_SIZE:-2}"
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-131072}"
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
+ACTOR_MAX_TOKEN_LEN_PER_GPU=$(( MAX_MODEL_LEN / SP_SIZE ))
 
 python -u train.py \
     rllm/backend=verl \
-    algorithm.adv_estimator=grpo \
-    algorithm.norm_adv_by_std_in_grpo=true \
-    rllm.algorithm.use_rllm=true \
-    data.train_batch_size=16 \
-    data.val_batch_size=-1 \
-    data.max_prompt_length=32768 \
-    data.max_response_length=8192 \
-    +model.name=$MODEL_PATH \
-    actor_rollout_ref.model.path=$MODEL_PATH \
-    +actor_rollout_ref.model.lora.rank=32 \
-    +actor_rollout_ref.model.lora.alpha=32 \
-    +actor_rollout_ref.model.lora.merge=true \
-    actor_rollout_ref.hybrid_engine=True \
+    +model.name="${MODEL_PATH}" \
+    model_engine=veomni \
+    actor_rollout_ref.model.path="${MODEL_PATH}" \
+    actor_rollout_ref.model.use_remove_padding=true \
+    actor_rollout_ref.model.use_fused_kernels=true \
+    actor_rollout_ref.model.enable_gradient_checkpointing=true \
+    actor_rollout_ref.actor.veomni.enable_fsdp_offload=true \
+    actor_rollout_ref.actor.veomni.enable_full_shard=true \
+    actor_rollout_ref.actor.veomni.ulysses_parallel_size="${SP_SIZE}" \
+    actor_rollout_ref.actor.veomni.expert_parallel_size="${EP_SIZE}" \
+    actor_rollout_ref.actor.veomni.attn_implementation=flash_attention_3 \
+    actor_rollout_ref.actor.veomni.moe_implementation=fused_triton \
+    actor_rollout_ref.actor.veomni.cross_entropy_loss_implementation=liger_kernel \
+    actor_rollout_ref.actor.optim.optimizer=adamw \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
-    actor_rollout_ref.actor.use_dynamic_bsz=True \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=40960 \
-    actor_rollout_ref.actor.fsdp_config.param_offload=true \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
-    actor_rollout_ref.actor.use_kl_loss=False \
-    actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
-    actor_rollout_ref.actor.clip_ratio_low=0.2 \
-    actor_rollout_ref.actor.clip_ratio_high=0.28 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.actor.optim.lr_scheduler_type=constant \
+    actor_rollout_ref.actor.optim.lr_warmup_steps=0 \
+    actor_rollout_ref.actor.optim.clip_grad=1.0 \
+    actor_rollout_ref.actor.ppo_epochs=1 \
+    actor_rollout_ref.actor.use_kl_loss=false \
+    actor_rollout_ref.actor.entropy_coeff=0.0 \
+    actor_rollout_ref.actor.use_rollout_log_probs=true \
+    actor_rollout_ref.actor.clip_ratio_c=1.0e9 \
+    actor_rollout_ref.actor.use_dynamic_bsz=true \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${ACTOR_MAX_TOKEN_LEN_PER_GPU}" \
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=true \
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="${ACTOR_MAX_TOKEN_LEN_PER_GPU}" \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode=async \
-    actor_rollout_ref.rollout.enforce_eager=False \
-    +actor_rollout_ref.rollout.max_model_len=40960 \
-    actor_rollout_ref.rollout.temperature=1.0 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
-    actor_rollout_ref.rollout.n=8 \
-    actor_rollout_ref.rollout.val_kwargs.n=1 \
-    actor_rollout_ref.rollout.val_kwargs.temperature=0.7 \
-    actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
-    rllm.workflow.n_parallel_tasks=64 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size="${INFER_TP}" \
+    actor_rollout_ref.rollout.gpu_memory_utilization="${GPU_MEM_UTIL}" \
+    actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}" \
+    actor_rollout_ref.rollout.calculate_log_probs=true \
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=true \
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="${ACTOR_MAX_TOKEN_LEN_PER_GPU}" \
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024 \
+    actor_rollout_ref.rollout.multi_turn.enable=true \
+    rllm.data.train_batch_size=1 \
+    rllm.data.val_batch_size=-1 \
+    rllm.data.max_prompt_length="${MAX_PROMPT_LENGTH}" \
+    rllm.data.max_response_length="${MAX_RESPONSE_LENGTH}" \
+    data.filter_overlong_prompts=true \
+    data.truncation=error \
+    rllm.rollout.n="${ROLLOUT_N}" \
+    rllm.rollout.train.temperature=1.0 \
+    rllm.rollout.train.top_p=1.0 \
+    rllm.compact_filtering.enable=true \
+    'rllm.compact_filtering.mask_termination_reasons=[max_prompt_length_exceeded,max_turns_exceeded,timeout,unknown,error,agent_setup_timeout,env_start_timeout,verifier_timeout,grading_error,sandbox_error,model_error]' \
+    rllm.algorithm.adv_estimator=grpo \
+    rllm.algorithm.norm_adv_by_std_in_grpo=false \
+    rllm.algorithm.kl_beta=0.0 \
+    rllm.algorithm.router_replay=R3 \
+    rllm.algorithm.loss_fn=dppo_tv \
+    rllm.algorithm.loss_agg_mode=token-mean \
+    rllm.algorithm.eps_clip=0.1 \
+    rllm.algorithm.eps_clip_high=0.1 \
+    rllm.algorithm.rollout_correction.bypass_mode=true \
+    rllm.algorithm.rollout_correction.tis_mode=null \
+    rllm.async_training.enable=true \
+    rllm.async_training.mini_batch_size="${PPO_MINI_BATCH_SIZE}" \
+    rllm.async_training.fwd_bwd_group_size="${PPO_MINI_BATCH_SIZE}" \
+    rllm.async_training.staleness_threshold="${STALENESS_THRESHOLD}" \
+    rllm.async_training.trigger_parameter_sync_step="${TRIGGER_PARAMETER_SYNC_STEP}" \
+    rllm.async_training.partial_rollout=true \
+    rllm.workflow.n_parallel_tasks=256 \
     rllm.workflow.raise_on_error=false \
-    rllm.gateway.port=9091 \
-    trainer.logger="['console','wandb']" \
-    trainer.project_name=terminal-rl \
-    trainer.experiment_name=terminal-rl-terminus2-qwen3.5-4b-verl \
-    trainer.val_before_train=true \
-    trainer.n_gpus_per_node=8 \
-    trainer.nnodes=1 \
-    trainer.save_freq=100 \
-    trainer.test_freq=20 \
-    trainer.total_epochs=1 \
+    rllm.rejection_sample.min_trajs_per_group=4 \
+    rllm.rejection_sample.filter_uniform_groups=true \
+    rllm.gateway.port=9200 \
+    rllm.gateway.num_workers=8 \
+    rllm.gateway.cumulative_token_mode=true \
+    rllm.gateway.renderer_family=qwen3.5 \
+    trainer.nnodes="${TRAIN_NNODES}" \
+    trainer.n_gpus_per_node="${N_GPUS_PER_NODE}" \
+    trainer.default_local_dir="${CKPT_DIR}" \
     trainer.default_hdfs_dir=null \
     trainer.resume_mode=disable \
+    rollout.nnodes="${ROLLOUT_NNODES}" \
+    rollout.n_gpus_per_node="${N_GPUS_PER_NODE}" \
+    rllm.trainer.total_epochs="${TOTAL_EPOCHS}" \
+    rllm.trainer.val_before_train=true \
+    rllm.trainer.test_freq=25 \
+    rllm.trainer.save_freq=25 \
+    rllm.episode_logging.log_episodes=false \
+    rllm.episode_logging.log_backend_batches=false \
+    rllm.trainer.logger='[console,wandb]' \
+    rllm.trainer.project_name="${PROJECT_NAME}" \
+    rllm.trainer.experiment_name="${EXPERIMENT_NAME}" \
     "$@"
