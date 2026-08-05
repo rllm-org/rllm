@@ -8,6 +8,7 @@ so that downstream importance sampling and bypass mode work.
 
 from unittest.mock import MagicMock
 
+import numpy as np
 import torch
 
 from rllm.agents.agent import Episode, Step, Trajectory
@@ -208,3 +209,81 @@ class TestRolloutLogProbsPropagation:
         # All standard fields should still be present
         for key in ["input_ids", "attention_mask", "position_ids", "prompts", "responses", "response_mask", "traj_rewards", "step_rewards"]:
             assert key in batch.batch, f"Standard field '{key}' should be present"
+
+
+class TestTaskIdsForGrpoGrouping:
+    """Regression tests for #605: GRPO needs the task-level id, not the per-trajectory one.
+
+    `interleave_tasks` gives every `rollout.n` repeat of one task a shared id and encodes it as
+    the `task_id:rollout_idx` prefix of `Episode.id` (see `Episode.task_id`). The transform must
+    carry that shared id through as its own field so the trainer can group repeats of the same
+    task for GRPO's baseline, instead of falling back to `step_ids` (== `Trajectory.uid`, a fresh
+    id per trajectory instance that never repeats even for two rollouts of the same task).
+    """
+
+    def test_task_ids_shared_across_rollout_repeats(self):
+        episodes = [
+            _make_episode(prompt_ids=[1, 2], completion_ids=[3, 4], reward=1.0, episode_id="task_0:0"),
+            _make_episode(prompt_ids=[1, 2], completion_ids=[3, 4], reward=0.0, episode_id="task_0:1"),
+            _make_episode(prompt_ids=[5, 6], completion_ids=[7, 8], reward=1.0, episode_id="task_1:0"),
+            _make_episode(prompt_ids=[5, 6], completion_ids=[7, 8], reward=0.0, episode_id="task_1:1"),
+        ]
+        engine = _make_mock_rollout_engine()
+
+        batch = transform_episodes_to_dataproto(episodes, engine, max_prompt_length=8, max_response_length=8)
+
+        assert "task_ids" in batch.non_tensor_batch
+        task_ids = list(batch.non_tensor_batch["task_ids"])
+        step_ids = list(batch.non_tensor_batch["step_ids"])
+
+        # The two rollouts of task_0 (rows 0, 1) share one task id, and likewise for task_1
+        # (rows 2, 3) -- that is what makes GRPO grouping possible.
+        assert task_ids[0] == task_ids[1] == "task_0"
+        assert task_ids[2] == task_ids[3] == "task_1"
+        assert task_ids[0] != task_ids[2]
+
+        # step_ids is Trajectory.uid: a fresh id per row, so it can never group repeats. If this
+        # assertion ever fails, step_ids stopped being trajectory-unique and the bug this test
+        # guards against may have changed shape.
+        assert len(set(step_ids)) == 4
+
+    def test_grpo_advantage_degenerates_on_step_ids_task_ids_fixes_it(self):
+        """Differential against verl's real compute_grpo_outcome_advantage (verl==0.8.0).
+
+        Two rollouts of the same task score 1.0 and 0.0. Grouped correctly, GRPO subtracts the
+        pair's own mean (0.5) so the two rollouts get opposite-signed advantages. Grouped by
+        step_ids (the pre-fix code), each rollout is alone in its group of one, and
+        compute_grpo_outcome_advantage's own size-1 branch hardcodes mean=0/std=1 -- so the
+        "advantage" collapses to the raw, unbaselined reward instead.
+        """
+        from verl.trainer.ppo.core_algos import compute_grpo_outcome_advantage
+
+        token_level_rewards = torch.tensor(
+            [
+                [0.0, 1.0],  # task_0 rollout 0, reward 1.0
+                [0.0, 0.0],  # task_0 rollout 1, reward 0.0
+            ]
+        )
+        response_mask = torch.ones(2, 2)
+
+        step_ids = np.array(["traj-aaa", "traj-bbb"])  # Trajectory.uid: unique per rollout
+        task_ids = np.array(["task_0", "task_0"])  # shared across the pair, as the fix produces
+
+        buggy_advantages, _ = compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=step_ids,
+        )
+        fixed_advantages, _ = compute_grpo_outcome_advantage(
+            token_level_rewards=token_level_rewards,
+            response_mask=response_mask,
+            index=task_ids,
+        )
+
+        # Pre-fix: each rollout is its own group of one -> mean=0, std=1 -> advantage == raw reward.
+        assert torch.allclose(buggy_advantages[:, 0], torch.tensor([1.0, 0.0]))
+
+        # Fixed: grouped by task -> mean=0.5, sample std=0.7071 (verl's default
+        # norm_adv_by_std_in_grpo=True divides by std) -> baselined, opposite-signed advantages,
+        # instead of collapsing to the raw, unbaselined reward.
+        assert torch.allclose(fixed_advantages[:, 0], torch.tensor([0.70710678, -0.70710678]))

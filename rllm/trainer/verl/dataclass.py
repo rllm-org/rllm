@@ -42,6 +42,7 @@ class AccumulatedData:
     # ID tracking (parallel to tensor lists)
     trajectory_ids: list[str] = field(default_factory=list)
     step_ids: list[str] = field(default_factory=list)
+    task_ids: list[str] = field(default_factory=list)  # shared across all rollout.n repeats of one task, for GRPO grouping
     episode_ids: list[str] = field(default_factory=list)  # unique identifier for each rollout
 
     # Metadata (parallel to tensor lists)
@@ -74,6 +75,7 @@ class AccumulatedData:
         self,
         step_data: ProcessedStepData,
         trajectory_id: str,
+        task_id: str,
         traj_reward: float,
         step_num: int,
         is_last: bool,
@@ -94,6 +96,7 @@ class AccumulatedData:
             self.advantages.append(step_data.advantage)
 
         self.trajectory_ids.append(trajectory_id)
+        self.task_ids.append(task_id)
         self.step_nums.append(step_num)
         self.is_last_step.append(is_last)
         self.multi_modal_inputs.append(step_data.multi_modal_inputs)
