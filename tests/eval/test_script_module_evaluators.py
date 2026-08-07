@@ -223,6 +223,116 @@ class TestShellScriptEvaluatorErrorTagging:
         assert out.reward == 0.0
         assert out.error is None
 
+    def test_crash_sentinel_tagged(self, tmp_path):
+        """A negative reward is a harness "no verdict" sentinel, not a score.
+
+        Harbor-style ``test.sh`` wrappers trap a crashed grader and write -1. Read
+        as a reward it would count as a task failure *and* drag mean reward below
+        the task's scale, so it is tagged and zeroed instead — with the raw value
+        kept for triage.
+        """
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "-1"})
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.error == "VerifierCrashError"
+        assert out.reward == 0.0
+        assert out.is_correct is False
+        assert out.metadata["reward_sentinel"] == -1.0
+        assert any(s.name == "verifier_crash" and s.value == 1.0 for s in out.signals)
+
+    def test_crash_sentinel_maps_to_grading_error(self):
+        from rllm.types import TerminationReason, termination_reason_from_error
+
+        assert termination_reason_from_error("VerifierCrashError") is TerminationReason.GRADING_ERROR
+
+
+class TestGraderStateCapture:
+    """Whatever a grader reports beside its verdict becomes a signal, so the
+    fine-grained state survives on the episode instead of being collapsed into
+    one number. Field names are grader-specific, so nothing is keyed to them."""
+
+    def test_extra_scalars_become_signals(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.json": ('{"reward": 0, "f2p_total": 3, "f2p_passed": 1, "p2p_failed": 0, "partial": 0.33, "apply_failed": true, "runner": "mocha"}')})
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+
+        signals = {s.name: s.value for s in out.signals}
+        assert signals["f2p_total"] == 3.0
+        assert signals["f2p_passed"] == 1.0
+        assert signals["p2p_failed"] == 0.0
+        assert signals["partial"] == pytest.approx(0.33)
+        assert signals["apply_failed"] == 1.0  # bools count
+        assert "runner" not in signals  # non-numeric detail is not a signal
+        assert "reward" not in signals  # the verdict itself is not duplicated
+
+
+class TestPreAgentGitHeadRestore:
+    """In-sandbox graders restore the task's official tests from ``HEAD``, so the
+    verifier has to see the image's commit — not the agent's. See
+    ShellScriptEvaluator._restore_git_heads."""
+
+    def test_soft_resets_each_repo_before_grading(self, tmp_path):
+        bench = _bench(tmp_path)
+        sha = "a" * 40
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+
+        ShellScriptEvaluator(sandbox=sb, git_heads={"/app": sha}).evaluate(task, _episode())
+
+        resets = [cmd for cmd, _ in sb.execs if "reset --soft" in cmd]
+        assert len(resets) == 1
+        assert f"-C /app reset --soft {sha}" in resets[0]
+        # Soft only: the agent's working tree is what gets graded.
+        assert "--hard" not in resets[0]
+        # And it happens before the verifier script runs.
+        order = [i for i, (cmd, _) in enumerate(sb.execs) if "reset --soft" in cmd or "/tests/test.sh" in cmd]
+        assert "reset --soft" in sb.execs[order[0]][0]
+
+    def test_no_repos_captured_is_a_noop(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+
+        ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert not [cmd for cmd, _ in sb.execs if "reset" in cmd]
+
+    def test_restore_failure_does_not_break_grading(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        base_exec = sb.exec
+
+        def exec_git_broken(cmd, timeout=None, user=None):
+            if "reset --soft" in cmd:
+                raise RuntimeError("no git in this image")
+            return base_exec(cmd, timeout=timeout, user=user)
+
+        sb.exec = exec_git_broken
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb, git_heads={"/app": "b" * 40}).evaluate(task, _episode())
+        assert out.reward == 1.0
+        assert out.error is None
+
+    def test_capture_skips_when_disabled(self, monkeypatch, tmp_path):
+        from rllm.eval._resolution import _capture_git_heads
+
+        sb = _FakeSandbox()
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=tmp_path)
+        monkeypatch.setenv("RLLM_VERIFIER_RESTORE_GIT_HEAD", "0")
+        assert _capture_git_heads(task, sb) == {}
+        assert sb.execs == []
+
+    def test_capture_parses_repo_roots(self, tmp_path):
+        from rllm.eval._resolution import _capture_git_heads
+
+        sha_a, sha_b = "a" * 40, "b" * 40
+        sb = _FakeSandbox()
+        sb.exec = lambda cmd, timeout=None, user=None: f"/app {sha_a}\n/testbed {sha_b}\nnot-a-repo\n"
+        task = Task(id="0", instruction="", metadata={"workdir": "/testbed"}, dataset_dir=tmp_path)
+
+        assert _capture_git_heads(task, sb) == {"/app": sha_a, "/testbed": sha_b}
+
 
 # ---------------------------------------------------------------------------
 # PythonModuleEvaluator
