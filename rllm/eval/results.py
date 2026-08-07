@@ -26,6 +26,7 @@ class EvalItem:
     # "verifier_timeout", "grading_error". Lets the report break failures down by
     # cause — agent timeouts vs infra/grading errors vs genuine wrong answers.
     termination_reason: str | None = None
+    task_id: str | None = None
 
 
 def _pass_at_k(per_task_counts: list[tuple[int, int]], k: int) -> float:
@@ -173,6 +174,7 @@ class EvalResult:
                 {
                     "idx": item.idx,
                     "attempt": item.attempt,
+                    "task_id": item.task_id,
                     "reward": item.reward,
                     "is_correct": item.is_correct,
                     "error": item.error,
@@ -203,6 +205,7 @@ class EvalResult:
                 signals=item.get("signals", {}),
                 attempt=item.get("attempt", 0),
                 termination_reason=item.get("termination_reason"),
+                task_id=item.get("task_id"),
             )
             for item in data["items"]
         ]
