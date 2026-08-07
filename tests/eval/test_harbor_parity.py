@@ -273,3 +273,15 @@ def test_hook_records_the_backend_the_task_actually_got(tmp_path):
     # What SandboxTaskHooks.setup writes once it has provisioned.
     task.metadata["sandbox_backend"] = "modal"
     assert _resolve_backend(task, None) == "modal"
+
+
+def test_separate_grading_is_driven_by_the_task_contract(monkeypatch):
+    """The task's declaration is the gate: only environment_mode="separate"
+    tasks grade in a fresh box, which today means harbor SWE benchmarks. The env
+    var is only an escape hatch back to in-place grading."""
+    from rllm.eval._resolution import _separate_verifier_enabled
+
+    monkeypatch.delenv("RLLM_SEPARATE_VERIFIER_ENV", raising=False)
+    assert _separate_verifier_enabled() is True
+    monkeypatch.setenv("RLLM_SEPARATE_VERIFIER_ENV", "0")
+    assert _separate_verifier_enabled() is False

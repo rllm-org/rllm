@@ -21,6 +21,7 @@ import shlex
 import tarfile
 import threading
 import time
+import uuid
 import weakref
 
 from rllm.env import env_float, env_int, rllm_run_id, sandbox_timeout_override_s
@@ -381,21 +382,29 @@ class ModalSandbox:
     def upload_file(self, local_path: str, remote_path: str) -> None:
         """Upload a single file into the Modal sandbox.
 
-        Uses exec to write file contents since Modal's file API is in alpha.
+        Uses the SDK's filesystem API, falling back to base64 over exec. The
+        fallback was the only path when Modal's file API was in alpha; it costs a
+        33% size inflation and holds the payload as a string on both ends, so it
+        is now just the safety net.
         """
         remote_dir = os.path.dirname(remote_path)
         if remote_dir:
             self._exec_unchecked(f"mkdir -p {remote_dir}")
 
-        with open(local_path, "rb") as f:
-            content = f.read()
+        try:
+            self._sandbox.filesystem.copy_from_local(local_path, remote_path)
+            logger.debug("Uploaded %s -> %s in sandbox %s", local_path, remote_path, self.name)
+            return
+        except Exception as e:
+            logger.debug("Modal filesystem write failed for %s (%s); falling back to base64", remote_path, e)
 
-        # Use base64 encoding for safe binary transfer
         import base64
 
+        with open(local_path, "rb") as f:
+            content = f.read()
         b64 = base64.b64encode(content).decode("ascii")
         self._push_b64(b64, f"base64 -d > {remote_path}")
-        logger.debug("Uploaded %s -> %s in sandbox %s", local_path, remote_path, self.name)
+        logger.debug("Uploaded %s -> %s in sandbox %s (base64 fallback)", local_path, remote_path, self.name)
 
     def download_file(self, remote_path: str) -> bytes:
         """Read a file out of the Modal sandbox.
@@ -434,21 +443,32 @@ class ModalSandbox:
         if remote_parent:
             self._exec_unchecked(f"mkdir -p {remote_parent}")
 
-        # Create tar in memory
+        # Tar, not per-file writes: it carries modes, symlinks and empty dirs, and
+        # a truncated archive fails loudly (gzip CRC) instead of dropping files
+        # silently. Ship the archive with the filesystem API and extract in place;
+        # base64 over exec is the fallback.
         tar_buf = io.BytesIO()
         with tarfile.open(fileobj=tar_buf, mode="w:gz") as tar:
             tar.add(local_path, arcname=remote_name)
-        tar_buf.seek(0)
+        archive = tar_buf.getvalue()
+
+        # --no-same-owner: don't restore the host's uid/gid (root extraction would
+        # otherwise chown to nonexistent ids and error); permissions are kept so
+        # executables stay +x.
+        staged = f"/tmp/.rllm-upload-{uuid.uuid4().hex[:8]}.tgz"
+        try:
+            self._sandbox.filesystem.write_bytes(archive, staged)
+            self._exec_unchecked(f"tar xzf {staged} --no-same-owner -C {remote_parent} && rm -f {staged}")
+            logger.debug("Uploaded dir %s -> %s in sandbox %s", local_path, remote_path, self.name)
+            return
+        except Exception as e:
+            logger.debug("Modal filesystem write failed for %s (%s); falling back to base64", staged, e)
 
         import base64
 
-        b64 = base64.b64encode(tar_buf.read()).decode("ascii")
-
-        # Write tar to sandbox and extract. --no-same-owner: don't restore the
-        # host's uid/gid (root extraction would otherwise chown to nonexistent
-        # ids and error); permissions are kept so executables stay +x.
+        b64 = base64.b64encode(archive).decode("ascii")
         self._push_b64(b64, f"base64 -d | tar xzf - --no-same-owner -C {remote_parent}")
-        logger.debug("Uploaded dir %s -> %s in sandbox %s", local_path, remote_path, self.name)
+        logger.debug("Uploaded dir %s -> %s in sandbox %s (base64 fallback)", local_path, remote_path, self.name)
 
     def is_alive(self) -> bool:
         """One API call: ``poll()`` returns ``None`` while the sandbox is still running.

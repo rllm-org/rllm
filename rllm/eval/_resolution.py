@@ -414,15 +414,19 @@ def _create_sandbox_for_task(
 def _separate_verifier_enabled() -> bool:
     """Whether to honour ``environment_mode = "separate"`` by grading in a fresh box.
 
-    Off by default while the in-place path is the one with a measured track
-    record: it is *more* permissive (it grades the working tree, where the
-    contract grades ``git diff <base> HEAD`` — committed work only), so turning
-    this on can lower a benchmark's score for agents that don't commit. Set
-    ``RLLM_SEPARATE_VERIFIER_ENV=1`` to grade the way the tasks declare.
+    The task's own declaration is the gate: only ``environment_mode = "separate"``
+    tasks grade in a fresh box, which today means harbor SWE benchmarks like
+    deepswe. Every other benchmark resolves to shared and never reaches this.
+
+    ``RLLM_SEPARATE_VERIFIER_ENV=0`` is an escape hatch back to in-place grading
+    for a task that declares separate — worth knowing about because the contract
+    is *stricter*: it carries the agent's work as ``git diff <base_commit> HEAD``,
+    so uncommitted edits don't count and a harness whose agent never commits
+    scores 0. Harbor tasks instruct the agent to commit for exactly this reason.
     """
     from rllm.env import env_int
 
-    return bool(env_int("RLLM_SEPARATE_VERIFIER_ENV", 0))
+    return bool(env_int("RLLM_SEPARATE_VERIFIER_ENV", 1))
 
 
 def _verifier_env_section(task: Task) -> dict:
