@@ -1,0 +1,6 @@
+{
+  "preflight": "strict",
+  "max_turns": 256,
+  "max_tool_calls": 100,
+  "task_timeout": 1800
+}

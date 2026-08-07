@@ -22,6 +22,7 @@ class EvalItem:
     error: str | None = None
     signals: dict[str, float] = field(default_factory=dict)
     attempt: int = 0
+    task_id: str | None = None
 
 
 def _pass_at_k(per_task_counts: list[tuple[int, int]], k: int) -> float:
@@ -150,7 +151,18 @@ class EvalResult:
             "signal_averages": self.signal_averages,
             "attempts": self.attempts,
             "pass_at": {str(k): v for k, v in self.pass_at.items()},
-            "items": [{"idx": item.idx, "attempt": item.attempt, "reward": item.reward, "is_correct": item.is_correct, "error": item.error, "signals": item.signals} for item in self.items],
+            "items": [
+                {
+                    "idx": item.idx,
+                    "attempt": item.attempt,
+                    "task_id": item.task_id,
+                    "reward": item.reward,
+                    "is_correct": item.is_correct,
+                    "error": item.error,
+                    "signals": item.signals,
+                }
+                for item in self.items
+            ],
         }
 
         with open(path, "w", encoding="utf-8") as f:
@@ -165,7 +177,15 @@ class EvalResult:
             data = json.load(f)
 
         items = [
-            EvalItem(idx=item["idx"], reward=item["reward"], is_correct=item["is_correct"], error=item.get("error"), signals=item.get("signals", {}), attempt=item.get("attempt", 0))
+            EvalItem(
+                idx=item["idx"],
+                reward=item["reward"],
+                is_correct=item["is_correct"],
+                error=item.get("error"),
+                signals=item.get("signals", {}),
+                attempt=item.get("attempt", 0),
+                task_id=item.get("task_id"),
+            )
             for item in data["items"]
         ]
 

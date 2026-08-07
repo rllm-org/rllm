@@ -9,8 +9,13 @@ configuration from ``rllm setup`` (stored in ``~/.rllm/config.json``).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import subprocess
+from collections.abc import Mapping
+from importlib.metadata import PackageNotFoundError, version
+from urllib.parse import urlsplit, urlunsplit
 
 import click
 from rich.status import Status
@@ -22,6 +27,63 @@ from rllm.cli._ui import console, fail, info_panel, not_found, parse_index_spec
 from rllm.types import Task
 
 logger = logging.getLogger(__name__)
+
+
+def _load_agent_config(source: str | None) -> dict:
+    if not source:
+        return {}
+    path = source[1:] if source.startswith("@") else source
+    expanded = os.path.expanduser(path)
+    if not os.path.isfile(expanded):
+        raise FileNotFoundError(f"agent-config file not found: {path}")
+    with open(expanded, encoding="utf-8") as fh:
+        text = fh.read()
+    try:
+        import yaml
+
+        value = yaml.safe_load(text)
+    except ImportError:
+        value = json.loads(text)
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("agent-config must contain a mapping at the top level")
+    return dict(value)
+
+
+def _redact_config(value):
+    if isinstance(value, dict):
+        return {key: ("<redacted>" if any(part in str(key).lower() for part in ("api_key", "token", "secret", "password")) else _redact_config(item)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_config(item) for item in value]
+    return value
+
+
+def _sanitize_endpoint(endpoint: str) -> str:
+    """Retain endpoint routing information without credentials or query data."""
+    parsed = urlsplit(endpoint)
+    hostname = parsed.hostname or ""
+    if parsed.port is not None:
+        hostname = f"{hostname}:{parsed.port}"
+    return urlunsplit((parsed.scheme, hostname, parsed.path, "", ""))
+
+
+def _rllm_build_metadata() -> dict[str, str | None]:
+    try:
+        package_version = version("rllm")
+    except PackageNotFoundError:
+        package_version = "unknown"
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        commit = None
+    return {"version": package_version, "commit": commit}
 
 
 def _suggest_benchmarks(name: str, catalog_names: list[str], max_suggestions: int = 3) -> list[str]:
@@ -77,6 +139,26 @@ def _dict_rows_to_tasks(rows: list[dict]) -> list[Task]:
     return tasks
 
 
+def _apply_agent_task_filter(dataset, agent):
+    """Apply an optional agent-owned task filter and return its metadata."""
+    filter_fn = getattr(agent, "filter_eval_tasks", None)
+    if not callable(filter_fn):
+        return dataset, {}
+    filtered = filter_fn(list(dataset.data))
+    if filtered is None:
+        filtered = list(dataset.data)
+    from rllm.data.dataset import Dataset
+
+    result = Dataset(data=list(filtered), name=dataset.name, split=dataset.split)
+    metadata_fn = getattr(agent, "eval_task_filter_metadata", None)
+    metadata = metadata_fn() if callable(metadata_fn) else {}
+    if metadata is None:
+        metadata = {}
+    if not isinstance(metadata, Mapping):
+        raise TypeError("eval_task_filter_metadata() must return a mapping")
+    return result, dict(metadata)
+
+
 def _run_eval(
     benchmark: str,
     agent_name: str,
@@ -96,6 +178,8 @@ def _run_eval(
     warm_queue_size: int = 0,
     sampling_config=None,
     attempts: int = 1,
+    resume_run: str | None = None,
+    provider_name: str = "direct",
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
@@ -337,7 +421,16 @@ def _run_eval(
             tasks = _dict_rows_to_tasks(list(dataset.data))
             dataset = Dataset(data=tasks, name=benchmark, split=split)
 
-    # Filter to specific task indices if requested
+    # Specialized agents may define a run cohort (for example MCP-Atlas's
+    # credential-free default-server tasks). This happens before explicit
+    # indices/max-examples and, critically, before lifecycle/model calls.
+    try:
+        dataset, task_filter_metadata = _apply_agent_task_filter(dataset, agent)
+    except (TypeError, ValueError, RuntimeError) as e:
+        fail(f"Could not apply agent task filter: {e}")
+
+    # Filter to specific task indices if requested. Indices address the
+    # agent-filtered cohort when a task filter is active.
     if task_indices is not None:
         out_of_range = [i for i in task_indices if i < 0 or i >= len(dataset)]
         if out_of_range:
@@ -345,6 +438,8 @@ def _run_eval(
         dataset = dataset.select(task_indices)
     elif max_examples is not None and max_examples < len(dataset):
         dataset = dataset.select(range(max_examples))
+    if task_filter_metadata:
+        task_filter_metadata["evaluated_task_count"] = len(dataset)
 
     # Resolve agent description
     agent_desc = ""
@@ -369,6 +464,8 @@ def _run_eval(
         rows.append(("Snapshots", "[dim]disabled (--no-snapshot, cold start)[/]"))
     if sampling_config is not None and not sampling_config.is_empty:
         rows.append(("Sampling", f"[dim]{sampling_config.as_dict()} (gateway-enforced)[/]"))
+    if task_filter_metadata:
+        rows.append(("Task filter", f"[dim]{task_filter_metadata.get('name', 'agent')} ({len(dataset)} selected)[/]"))
     console.print()
     console.print(info_panel(rows, border="brand"))
     console.print()
@@ -385,28 +482,67 @@ def _run_eval(
     #     episodes/        — populated only when save_episodes is True
     from rllm.eval.episode_store import EvalEpisodeStore
 
-    if episodes_dir is not None:
+    if resume_run is not None and episodes_dir is not None:
+        fail("--resume-run cannot be combined with --episodes-dir.")
+    if resume_run is not None:
+        run_dir = os.path.expanduser(resume_run)
+    elif episodes_dir is not None:
         run_dir = os.path.expanduser(episodes_dir)
     else:
         model_safe = model.replace("/", "_").replace("\\", "_")
         bench_safe = benchmark.replace("/", "_").replace("\\", "_")
         run_dir = paths.rllm_path("eval_results", f"{bench_safe}_{model_safe}_{timestamp}")
     run_store = EvalEpisodeStore(run_dir)
-    run_store.write_meta(
-        {
-            "benchmark": benchmark,
-            "model": model,
-            "agent": agent_name,
-            "split": split,
-            "timestamp": timestamp,
-            "attempts": attempts,
-        }
-    )
+    task_ids_for_manifest = [str(getattr(task, "id", None) or idx) for idx, task in enumerate(dataset.data)]
+    run_meta = {
+        "manifest_version": 1,
+        "benchmark": benchmark,
+        "model": model,
+        "provider": provider_name,
+        "agent": agent_name,
+        "split": split,
+        "timestamp": timestamp,
+        "attempts": attempts,
+        "concurrency": concurrency,
+        "upstream_endpoint": _sanitize_endpoint(base_url),
+        "rllm": _rllm_build_metadata(),
+        "sampling_params": _redact_config(sampling_config.as_dict() if sampling_config is not None else {}),
+        "agent_config": _redact_config(agent_metadata or {}),
+        "task_filter": _redact_config(task_filter_metadata),
+        "task_ids": task_ids_for_manifest,
+    }
+    resume_items = []
+    if resume_run is not None:
+        previous_meta = run_store.read_meta()
+        if not previous_meta:
+            fail(f"--resume-run has no meta.json: {run_dir}")
+        manifest_keys = (
+            "manifest_version",
+            "benchmark",
+            "model",
+            "provider",
+            "agent",
+            "split",
+            "attempts",
+            "rllm",
+            "sampling_params",
+            "agent_config",
+            "task_filter",
+            "task_ids",
+        )
+        mismatches = [key for key in manifest_keys if previous_meta.get(key) != run_meta.get(key)]
+        if mismatches:
+            fail(f"Resume manifest mismatch for: {', '.join(mismatches)}")
+        timestamp = str(previous_meta.get("timestamp") or timestamp)
+        run_meta = previous_meta
+        resume_items = run_store.load_completed_items(successful_only=True)
+        console.print(f"  [dim]Resuming {len(resume_items)} completed rollout(s) from {run_dir}[/]")
+    else:
+        run_store.write_meta(run_meta)
     episode_store = run_store if save_episodes else None
 
     # Create UI logger before run for progressive episode uploads
     ui_logger = None
-    on_episode_complete = None
     _flush_episode_buffer = None
     _ui_callback = None
     if enable_ui:
@@ -442,17 +578,20 @@ def _run_eval(
                 if batch:
                     ui_logger.log(data={}, step=0, episodes=batch)
 
-    # Wrap UI streaming and per-file dump into a single callback.
-    if episode_store is not None or _ui_callback is not None:
-
-        def on_episode_complete(idx, episode):
-            if episode_store is not None:
-                try:
-                    episode_store.write(idx, episode)
-                except Exception:
-                    logger.debug("episode_store.write failed", exc_info=True)
-            if _ui_callback is not None:
-                _ui_callback(episode)
+    # Progress is always written so --resume-run also works with
+    # --no-save-episodes and --no-ui.
+    def on_episode_complete(flat_idx, task_idx, attempt, episode):
+        try:
+            run_store.write_progress(flat_idx, task_idx, attempt, episode, task_id=task_ids_for_manifest[task_idx])
+        except Exception:
+            logger.debug("progress write failed", exc_info=True)
+        if episode_store is not None:
+            try:
+                episode_store.write(flat_idx, episode)
+            except Exception:
+                logger.debug("episode_store.write failed", exc_info=True)
+        if _ui_callback is not None:
+            _ui_callback(episode)
 
     # Single execution path: every Task goes through ``AgentFlowEngine``
     # via ``SandboxTaskHooks``. The engine fronts every LLM call with the rLLM
@@ -462,24 +601,37 @@ def _run_eval(
     # otherwise ``SandboxTaskHooks`` reads each Task's [verifier] config.
     from rllm.eval.runner import run_dataset
 
-    result, episodes = asyncio.run(
-        run_dataset(
-            tasks=list(dataset.data),
-            agent_flow=agent,
-            base_url=base_url,
-            model=model,
-            concurrency=concurrency,
-            sandbox_backend=(agent_metadata or {}).get("sandbox_backend"),
-            use_snapshot=use_snapshot,
-            warm_queue_size=warm_queue_size,
-            agent_name=agent_name,
-            dataset_name=getattr(dataset, "name", benchmark) or benchmark,
-            on_episode_complete=on_episode_complete,
-            evaluator=evaluator,
-            sampling_params=(sampling_config.as_dict() if sampling_config is not None else None),
-            attempts=attempts,
+    try:
+        result, episodes = asyncio.run(
+            run_dataset(
+                tasks=list(dataset.data),
+                agent_flow=agent,
+                base_url=base_url,
+                model=model,
+                concurrency=concurrency,
+                sandbox_backend=(agent_metadata or {}).get("sandbox_backend"),
+                use_snapshot=use_snapshot,
+                warm_queue_size=warm_queue_size,
+                agent_name=agent_name,
+                dataset_name=getattr(dataset, "name", benchmark) or benchmark,
+                on_episode_complete=on_episode_complete,
+                evaluator=evaluator,
+                sampling_params=(sampling_config.as_dict() if sampling_config is not None else None),
+                attempts=attempts,
+                run_dir=run_dir,
+                resume_items=resume_items,
+            )
         )
-    )
+    finally:
+        run_metadata_fn = getattr(agent, "eval_run_metadata", None)
+        if callable(run_metadata_fn):
+            try:
+                dynamic_meta = run_metadata_fn() or {}
+                if isinstance(dynamic_meta, dict):
+                    run_meta.update(_redact_config(dynamic_meta))
+                    run_store.write_meta(run_meta)
+            except Exception:
+                logger.warning("Could not collect agent eval metadata", exc_info=True)
 
     # Flush remaining buffered episodes BEFORE posting eval result / finishing
     # session.  The flush enqueues episodes onto the UILogger background
@@ -572,6 +724,8 @@ def _run_eval(
 @click.option("--save-episodes/--no-save-episodes", "save_episodes", default=True, help="Save each Episode as its own JSON file for later visualization (default: enabled).")
 @click.option("--episodes-dir", "episodes_dir", default=None, help="Directory to write the episode JSONs into. Default: ~/.rllm/eval_results/<bench>_<model>_<timestamp>/.")
 @click.option("--sampling-params", "sampling_params", default=None, help=_SAMPLING_PARAMS_HELP)
+@click.option("--agent-config", "agent_config", default=None, help="Agent-specific JSON/YAML mapping, as @file or file path.")
+@click.option("--resume-run", "resume_run", default=None, help="Resume a compatible run directory, rerunning only missing/error rollouts.")
 @click.option("--temperature", default=None, type=float, help="Sampling temperature (shortcut for --sampling-params temperature=...).")
 @click.option("--top-p", "top_p", default=None, type=float, help="Nucleus sampling top_p (shortcut for --sampling-params top_p=...).")
 @click.option("--max-tokens", "max_tokens", default=None, type=int, help="Max generated tokens per call (shortcut for --sampling-params max_tokens=...).")
@@ -595,6 +749,8 @@ def eval_cmd(
     save_episodes: bool,
     episodes_dir: str | None,
     sampling_params: str | None,
+    agent_config: str | None,
+    resume_run: str | None,
     temperature: float | None,
     top_p: float | None,
     max_tokens: int | None,
@@ -606,6 +762,10 @@ def eval_cmd(
         sampling_config = resolve_eval_sampling(sampling_params, temperature, top_p, max_tokens)
     except (ValueError, FileNotFoundError, TypeError) as e:
         fail(f"Invalid --sampling-params: {e}")
+    try:
+        agent_config_values = _load_agent_config(agent_config)
+    except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
+        fail(f"Invalid --agent-config: {e}")
     if attempts < 1:
         fail("--attempts must be >= 1.")
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
@@ -622,6 +782,7 @@ def eval_cmd(
         console.print("  [blue]Tip: Try rllm UI for live monitoring! Run [bold]rllm login[/bold] to get started.[/]")
 
     proxy_manager = None
+    provider_name = "direct"
 
     if base_url is not None:
         # Direct mode: user provided --base-url, require --model too
@@ -638,6 +799,7 @@ def eval_cmd(
         # --model overrides configured model
         if model is None:
             model = config.model
+        provider_name = config.provider
 
         if config.provider == "custom":
             # Custom provider: skip LiteLLM proxy, use base_url directly
@@ -666,7 +828,7 @@ def eval_cmd(
             console.print(f"  [success]Proxy ready[/] at [dim]{base_url}[/]")
 
     # Build agent metadata from CLI options
-    agent_metadata = {}
+    agent_metadata = dict(agent_config_values)
     if sandbox_backend:
         agent_metadata["sandbox_backend"] = sandbox_backend
     if sandbox_concurrency is not None:
@@ -694,6 +856,8 @@ def eval_cmd(
             warm_queue_size=warm_queue_size,
             sampling_config=sampling_config,
             attempts=attempts,
+            resume_run=resume_run,
+            provider_name=provider_name,
         )
     finally:
         if proxy_manager is not None:

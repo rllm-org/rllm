@@ -395,6 +395,7 @@ class AgentFlowEngine:
         tasks: list[dict | Task],
         task_ids: list[str] | None = None,
         is_validation: bool = False,
+        on_episode_complete=None,
         **kwargs,
     ) -> list[Episode]:
         """Run AgentFlows on a list of tasks; return enriched Episodes.
@@ -429,6 +430,11 @@ class AgentFlowEngine:
             for future in asyncio.as_completed(futures):
                 task_id, rollout_idx, result_idx, episode = await future
                 results[result_idx] = episode
+                if on_episode_complete is not None:
+                    try:
+                        on_episode_complete(result_idx, episode)
+                    except Exception:
+                        logger.exception("Episode completion callback failed")
                 pbar.update(1)
 
         ordered_results: list[Episode] = results  # type: ignore[assignment]
