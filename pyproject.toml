@@ -58,8 +58,17 @@ tools = [
     "mcp",
 ]
 
+mcp-atlas = [
+    "aiohttp>=3.12",
+    "httpx>=0.26",
+    "matplotlib",
+    "nest-asyncio",
+    "python-dotenv",
+    "tenacity",
+]
+
 all = [
-    "rllm[train,rewards,tools]",
+    "rllm[train,rewards,tools,mcp-atlas]",
 ]
 
 ui = [
@@ -213,6 +222,7 @@ include = ["rllm", "rllm.*"]
 
 [tool.setuptools.package-data]
 rllm = ["trainer/**/config/**/*.yaml", "registry/*.json"]
+"rllm.integrations.mcp_atlas" = ["*.patch"]
 
 [tool.mypy]
 plugins = ["pydantic.mypy"]

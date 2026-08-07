@@ -1,6 +1,11 @@
 {
   "version": 1,
   "agents": {
+    "mcp-atlas": {
+      "module": "rllm.integrations.mcp_atlas.harness",
+      "function": "MCPAtlasHarness",
+      "description": "Scale MCP-Atlas official TypeScript agent loop over the pinned Docker MCP environment."
+    },
     "react": {
       "module": "rllm.harnesses.react",
       "function": "ReActHarness",

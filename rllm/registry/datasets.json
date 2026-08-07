@@ -1,6 +1,18 @@
 {
   "version": 1,
   "datasets": {
+    "mcp_atlas": {
+      "description": "MCP-Atlas public 500-task benchmark over real MCP servers (official harness; claim-coverage judge)",
+      "source": "ScaleAI/MCP-Atlas",
+      "builder": "rllm.data.mcp_atlas_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "public"
+      ],
+      "eval_split": "public",
+      "default_agent": "mcp-atlas",
+      "reward_fn": "mcp_atlas_claims"
+    },
     "claw_eval": {
       "description": "Claw-Eval general split: 161 personal-assistant agent tasks (sandbox; LLM-judge graded)",
       "source": "claw-eval/Claw-Eval",
