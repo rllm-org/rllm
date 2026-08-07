@@ -52,6 +52,14 @@ class LocalSandbox:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         shutil.copy2(local_path, dest)
 
+    def download_file(self, remote_path: str) -> bytes:
+        """Read a file out of the sandbox working directory."""
+        src = self._translate_path(remote_path)
+        if not os.path.isfile(src):
+            raise FileNotFoundError(f"download_file: {remote_path} not found in sandbox")
+        with open(src, "rb") as f:
+            return f.read()
+
     def upload_dir(self, local_path: str, remote_path: str) -> None:
         """Copy a directory tree into the sandbox working directory."""
         dest = self._translate_path(remote_path)

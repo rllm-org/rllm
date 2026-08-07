@@ -93,6 +93,7 @@ _ERROR_TYPE_TO_REASON: dict[str, TerminationReason] = {
     "RewardFileNotFoundError": TerminationReason.GRADING_ERROR,
     "RewardFileEmptyError": TerminationReason.GRADING_ERROR,
     "VerifierOutputParseError": TerminationReason.GRADING_ERROR,
+    "VerifierCrashError": TerminationReason.GRADING_ERROR,  # grader died before a verdict (negative-reward sentinel)
     # Environment/sandbox (harbor.environments.base + rllm.sandbox.protocol + backends)
     "HealthcheckError": TerminationReason.SANDBOX_ERROR,
     "SandboxBuildFailedError": TerminationReason.SANDBOX_ERROR,

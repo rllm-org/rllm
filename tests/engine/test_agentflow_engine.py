@@ -269,6 +269,18 @@ def test_no_usable_model_output_detects_dead_upstream():
     assert _no_usable_model_output(NS(trajectories=[NS(steps=[step(""), step("echo hi")])])) is False  # partial — real work
 
 
+def test_llm_free_harness_opts_out_of_the_empty_completion_canary():
+    """The oracle has zero completions by construction, so the canary would
+    report its every failure — a task whose reference solution fails its own
+    verifier — as an upstream outage."""
+    from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
+    from rllm.harnesses.oracle import OracleHarness
+
+    assert OracleHarness.makes_llm_calls is False
+    # True default: model-driven harnesses keep the canary without declaring it.
+    assert getattr(MiniSweAgentHarness, "makes_llm_calls", True) is True
+
+
 def test_infra_taxonomy_membership_and_mapping():
     from rllm.types import INFRA_ERROR_REASONS, TerminationReason, termination_reason_from_error
 

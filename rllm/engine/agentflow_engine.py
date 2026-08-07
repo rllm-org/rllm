@@ -841,7 +841,11 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
-        if _no_usable_model_output(enriched) and not enriched.is_correct and enriched.termination_reason not in INFRA_ERROR_REASONS:
+        # A harness that drives no model (oracle) has zero completions by
+        # construction, so the canary below would report its every failure — i.e.
+        # a task whose reference solution fails its own verifier — as an outage.
+        _llm_driven = getattr(self.agent_flow, "makes_llm_calls", True)
+        if _llm_driven and _no_usable_model_output(enriched) and not enriched.is_correct and enriched.termination_reason not in INFRA_ERROR_REASONS:
             # The agent produced nothing usable — no LLM calls at all, or every
             # call came back empty: a downed/erroring upstream (proxy died, auth or
             # tunnel failure), NOT a clean rollout. The reward (0) is meaningless;

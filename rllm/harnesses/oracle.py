@@ -40,6 +40,10 @@ class OracleHarness(SandboxedAgentFlow):
     name = "oracle"
     sandbox_backend = "docker"
 
+    # No LLM, so every episode has zero completions: tells the engine not to read
+    # that as a downed upstream (see AgentFlowEngine._finish_episode).
+    makes_llm_calls = False
+
     # Mirror Harbor's ``env_paths.solution_dir`` convention so anyone
     # comparing the two implementations doesn't trip on path drift.
     _SOLUTION_DIR = "/solution"
