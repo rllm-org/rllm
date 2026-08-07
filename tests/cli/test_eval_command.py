@@ -110,9 +110,10 @@ def test_optional_agent_task_filter_preserves_dataset_identity():
     assert metadata == {"name": "test", "selected_task_count": 2}
 
 
-def test_eval_with_proxy_mode(runner, tmp_rllm_home, mock_dataset):
+def test_eval_with_proxy_mode(runner, tmp_rllm_home, mock_dataset, monkeypatch):
     """Eval without --base-url should auto-start proxy from config."""
-    config = RllmConfig(provider="openai", model="gpt-5-mini", api_keys={"openai": "sk-test"})
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    config = RllmConfig(provider="openrouter", model="z-ai/glm-5.2", api_keys={"openrouter": "sk-test"})
     mock_pm = MagicMock()
     mock_pm.get_proxy_url.return_value = "http://127.0.0.1:4000/v1"
     mock_pm.build_proxy_config.return_value = {"model_list": []}
@@ -133,6 +134,7 @@ def test_eval_with_proxy_mode(runner, tmp_rllm_home, mock_dataset):
         )
 
     assert result.exit_code == 0
+    assert os.environ["OPENROUTER_API_KEY"] == "sk-test"
     mock_pm.start_proxy_subprocess.assert_called_once()
     mock_pm.shutdown_proxy.assert_called_once()
 

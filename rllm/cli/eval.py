@@ -856,7 +856,7 @@ def eval_cmd(
         # Proxy mode: auto-start LiteLLM proxy from config
         import os as _os
 
-        from rllm.eval.config import load_config
+        from rllm.eval.config import PROVIDER_ENV_KEYS, load_config
 
         config = load_config()
 
@@ -867,6 +867,13 @@ def eval_cmd(
         # all — since the checkpoint path alone determines where it can run.
         resolved_model = model if model is not None else config.model
         is_tinker_checkpoint = bool(resolved_model) and resolved_model.startswith("tinker://")
+        # Evaluators run in this process rather than the LiteLLM proxy. Make a
+        # provider key saved by ``rllm model setup`` available to evaluators
+        # (notably MCP-Atlas's OpenRouter-default Gemini judge) without asking
+        # the user to enter or export the same secret twice.
+        provider_env_key = PROVIDER_ENV_KEYS.get(config.provider)
+        if config.api_key and provider_env_key:
+            os.environ.setdefault(provider_env_key, config.api_key)
 
         if is_tinker_checkpoint:
             api_key = _os.environ.get("TINKER_API_KEY", "")
