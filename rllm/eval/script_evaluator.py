@@ -37,6 +37,9 @@ _REWARD_PATHS = [
 # grader detail lifted to signals (see _parse_reward_json).
 _RESERVED_REWARD_KEYS = frozenset({"reward", "rewards", "is_correct", "signals", "metadata"})
 
+# Enough for a suite's failure summary without bloating results.json.
+_VERIFIER_STDOUT_TAIL_CHARS = 8000
+
 
 class ShellScriptEvaluator:
     """Run a verifier script inside the sandbox, parse the reward file.
@@ -114,8 +117,9 @@ class ShellScriptEvaluator:
 
         self._restore_git_heads(v_user)
 
+        verifier_stdout = ""
         try:
-            self.sandbox.exec(
+            verifier_stdout = self.sandbox.exec(
                 f"chmod +x /tests/{script_name} && {cd_prefix}/tests/{script_name}",
                 timeout=self.verifier_timeout,
                 user=v_user,
@@ -138,12 +142,22 @@ class ShellScriptEvaluator:
             # below) carries the signal. Log at debug so a benchmark of
             # 100 unsolved tasks doesn't spam 100 multi-KB stack traces.
             logger.debug("Verifier exited non-zero for %s: %s", task.id, e)
+            # The backend raises with the output attached — the only copy we get
+            # on the failure path, which is the one worth debugging.
+            verifier_stdout = str(e)
 
         # Read reward (as verifier — agent may not have read access)
         reward_paths = list(_REWARD_PATHS)
         if self.reward_file_override:
             reward_paths.insert(0, self.reward_file_override)
-        return _read_reward_from_sandbox(self.sandbox, reward_paths, user=v_user)
+        out = _read_reward_from_sandbox(self.sandbox, reward_paths, user=v_user)
+        # Harbor verifiers cat every suite's raw log to stdout so "the reason a
+        # test failed is never lost", and the sandbox dies at teardown — without
+        # this a failed task records only a bare count (f2p 42/43) with no way to
+        # tell which test failed. Tail, not head: the verdict is at the end.
+        if verifier_stdout:
+            out.metadata["verifier_stdout_tail"] = verifier_stdout[-_VERIFIER_STDOUT_TAIL_CHARS:]
+        return out
 
     def _restore_git_heads(self, user: str | None) -> None:
         """Move each repo's HEAD back to the commit it had before the agent ran.
