@@ -397,6 +397,31 @@ class ModalSandbox:
         self._push_b64(b64, f"base64 -d > {remote_path}")
         logger.debug("Uploaded %s -> %s in sandbox %s", local_path, remote_path, self.name)
 
+    def download_file(self, remote_path: str) -> bytes:
+        """Read a file out of the Modal sandbox.
+
+        Prefers the SDK's filesystem API (a real binary read) and falls back to
+        base64 over exec, which is how ``upload_file`` goes the other way. Not
+        ``Sandbox.open()``: deprecated as of 2026-03-09 in favour of
+        ``Sandbox.filesystem``.
+        """
+        try:
+            return self._sandbox.filesystem.read_bytes(remote_path)
+        except FileNotFoundError:
+            raise
+        except Exception as e:
+            logger.debug("Modal filesystem read failed for %s (%s); falling back to base64", remote_path, e)
+
+        import base64
+        import shlex as _shlex
+
+        quoted = _shlex.quote(remote_path)
+        probe = self._exec_unchecked(f"test -f {quoted} && echo yes || echo no").strip()
+        if not probe.endswith("yes"):
+            raise FileNotFoundError(f"download_file: {remote_path} not found in sandbox {self.name}")
+        encoded = self._exec_unchecked(f"base64 {quoted} | tr -d '\\n'")
+        return base64.b64decode(encoded.strip())
+
     def upload_dir(self, local_path: str, remote_path: str) -> None:
         """Upload a directory tree into the Modal sandbox.
 

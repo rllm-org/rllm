@@ -45,6 +45,17 @@ class Sandbox(Protocol):
         """Upload a directory tree into the sandbox."""
         ...
 
+    def download_file(self, remote_path: str) -> bytes:
+        """Read a file out of the sandbox.
+
+        The counterpart to :meth:`upload_file`, needed whenever something has to
+        leave a sandbox — collecting a separate-mode verifier's artifacts, for
+        one. Backends use their native transfer (Modal's filesystem API, Daytona's
+        ``fs``, ``docker cp``) rather than shelling out, so binary payloads survive
+        intact. Raises ``FileNotFoundError`` when the path isn't there.
+        """
+        ...
+
     def close(self) -> None:
         """Destroy the sandbox and release resources."""
         ...

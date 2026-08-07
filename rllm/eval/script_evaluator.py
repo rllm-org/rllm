@@ -11,10 +11,10 @@ Reward contract (Harbor-compatible): the script writes to one of
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import shlex
+import tempfile
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
@@ -245,7 +245,7 @@ class ShellScriptEvaluator:
         collected: dict[str, bytes] = {}
         for path in self.artifacts:
             try:
-                blob = _read_remote_file(self.sandbox, str(path), user=user)
+                blob = _read_remote_file(self.sandbox, str(path))
             except Exception as e:
                 logger.warning("Could not collect artifact %s for %s: %s", path, task.id, e)
                 continue
@@ -282,43 +282,35 @@ class ShellScriptEvaluator:
 # Artifact transfer between the agent's box and a separate verifier box
 # ---------------------------------------------------------------------------
 
-# Cap on a single collected artifact. The transfer rides on ``exec`` stdout
-# (base64), so an unbounded blob would be an unbounded string in memory; a SWE
-# patch is orders of magnitude under this.
-_MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
-
-
-def _read_remote_file(sandbox: Sandbox, path: str, user: str | None = None) -> bytes | None:
+def _read_remote_file(sandbox: Sandbox, path: str) -> bytes | None:
     """Read a file out of a sandbox, or ``None`` when it isn't there.
 
-    Base64 because the payload is binary: ``git diff --binary`` output is not
-    text-safe, and the ``Sandbox`` protocol has upload primitives but no
-    download, so ``exec`` stdout is the only channel out.
+    Uses the backend's native transfer (:meth:`Sandbox.download_file`) rather
+    than shelling out: ``git diff --binary`` output is not text-safe, and routing
+    binary through ``exec`` stdout costs a base64 round-trip and holds the whole
+    payload as a string on both ends.
     """
-    quoted = shlex.quote(path)
-    size = sandbox.exec(f"test -f {quoted} && wc -c < {quoted} || echo -1", timeout=30, user=user).strip()
     try:
-        n = int(size.split()[-1])
-    except (ValueError, IndexError):
+        return sandbox.download_file(path)
+    except FileNotFoundError:
         return None
-    if n < 0:
-        return None
-    if n > _MAX_ARTIFACT_BYTES:
-        raise ValueError(f"artifact {path} is {n} bytes, over the {_MAX_ARTIFACT_BYTES} transfer cap")
-    encoded = sandbox.exec(f"base64 {quoted} | tr -d '\\n'", timeout=300, user=user)
-    return base64.b64decode(encoded.strip())
 
 
 def _write_remote_file(sandbox: Sandbox, path: str, blob: bytes, user: str | None = None) -> None:
-    """Write bytes into a sandbox at *path*, creating parent directories."""
-    quoted = shlex.quote(path)
+    """Write bytes into a sandbox at *path*, creating parent directories.
+
+    Staged through a temp file so the backend's native ``upload_file`` carries
+    the bytes; the protocol has no "write these bytes" primitive.
+    """
     parent = shlex.quote(str(PurePosixPath(path).parent))
-    encoded = base64.b64encode(blob).decode("ascii")
-    sandbox.exec(
-        f"mkdir -p {parent} && printf '%s' {shlex.quote(encoded)} | base64 -d > {quoted}",
-        timeout=300,
-        user=user,
-    )
+    try:
+        sandbox.exec(f"mkdir -p {parent}", timeout=30, user=user)
+    except Exception:
+        pass
+    with tempfile.NamedTemporaryFile() as tmp:
+        tmp.write(blob)
+        tmp.flush()
+        sandbox.upload_file(tmp.name, path)
 
 
 # ---------------------------------------------------------------------------
