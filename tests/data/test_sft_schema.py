@@ -2,8 +2,7 @@
 
 Pure-pydantic — no tinker/verl. Covers message cleanup (str/None content
 coercion, arrow-None artifact stripping), trainable-flag derivation policies,
-validation errors, and the ``SFTRow`` record round-trip. RED today: the module
-does not exist yet, so the import below fails at collection.
+validation errors, and the ``SFTRow`` record round-trip.
 """
 
 from __future__ import annotations
@@ -118,6 +117,27 @@ def test_normalize_messages_content_is_parts_list():
     assert all(isinstance(m, SFTMessage) for m in msgs)
     assert all(isinstance(p, TextPart) for p in msgs[0].content)
     assert msgs[2].text() == "a1"
+
+
+def test_normalize_messages_rejects_unbridged_reasoning_field():
+    """A direct ``--train-file`` must not silently discard provider-style CoT.
+
+    Source-format bridges lift ``reasoning_content`` into a canonical thinking
+    part. Reaching the core schema with the sibling field still present means
+    that ingestion was skipped; failing is safer than training on visible text
+    while quietly deleting every reasoning trace.
+    """
+    with pytest.raises(SFTSchemaError, match="reasoning_content.*dataset import"):
+        normalize_messages(
+            [
+                {"role": "user", "content": "q"},
+                {
+                    "role": "assistant",
+                    "content": "a",
+                    "reasoning_content": "important hidden reasoning",
+                },
+            ]
+        )
 
 
 # --- validation errors (raised as SFTSchemaError by normalize_*) -------------

@@ -37,10 +37,12 @@ from tinker_cookbook.renderers import get_renderer  # noqa: E402
 
 from rllm.data import Dataset  # noqa: E402
 from rllm.trainer.sft import SFTSpec  # noqa: E402
+from rllm.trainer.sft.backend import SFTConfigError  # noqa: E402
 from rllm.trainer.sft.tinker_backend import TinkerSFTBackend, build_sft_data  # noqa: E402
 from rllm.trainer.sft.tinker_dataset import conversation_to_datum  # noqa: E402
 
 QWEN = "Qwen/Qwen3-0.6B"
+NEMOTRON = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
 
 
 @pytest.fixture(scope="module")
@@ -50,6 +52,16 @@ def qwen_tokenizer():
         return transformers.AutoTokenizer.from_pretrained(QWEN)
     except OSError as e:  # not cached / offline
         pytest.skip(f"Qwen3-0.6B tokenizer unavailable: {e}")
+
+
+@pytest.fixture(scope="module")
+def nemotron_tokenizer():
+    from tinker_cookbook.tokenizer_utils import get_tokenizer
+
+    try:
+        return get_tokenizer(NEMOTRON)
+    except Exception as e:  # noqa: BLE001 - optional offline integration asset
+        pytest.skip(f"Nemotron-3 tokenizer unavailable: {e}")
 
 
 # -- Datum introspection helpers ---------------------------------------------
@@ -75,18 +87,57 @@ def _trained_text(datum, tokenizer) -> str:
     return tokenizer.decode(trained)
 
 
+def _full_tokens(datum) -> list[int]:
+    """Reconstruct the pre-shift token stream from a Datum.
+
+    ``datum_from_model_input_weights`` stores right-shifted inputs
+    (``tokens[:-1]``) and left-shifted targets (``tokens[1:]``); the original
+    render is ``inputs + [last target]``.
+    """
+    return _input_ids(datum) + _targets(datum)[-1:]
+
+
 # -- F1: default renderer must not crash on reasoning rows -------------------
+
+
+def test_hf_template_config_override_is_rejected_before_tokenizer_load(
+    monkeypatch,
+):
+    from tinker_cookbook import tokenizer_utils
+
+    ds = Dataset(
+        data=[
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "a"},
+                ]
+            }
+        ],
+        name="hf-template-rejection",
+        split="train",
+    )
+    spec = SFTSpec(
+        model=QWEN,
+        train_dataset=ds,
+        overrides={"data": {"rllm": {"tokenize_and_mask_method": "hf_template"}}},
+    )
+    cfg = TinkerSFTBackend(spec).build_config()
+    monkeypatch.setattr(
+        tokenizer_utils,
+        "get_tokenizer",
+        lambda *_: pytest.fail("tokenizer should not load for a rejected mode"),
+    )
+
+    with pytest.raises(SFTConfigError, match="train/serve mismatch"):
+        build_sft_data(cfg, ds, None)
 
 
 def test_f1_reasoning_row_renders_through_build_sft_data(qwen_tokenizer):
     """A reasoning row (assistant ``thinking`` + ``text`` parts) must survive the
     full ``build_config`` -> ``build_sft_data`` -> ``get_batch`` path.
 
-    RED today: ``build_sft_data`` resolves the ``role_colon`` default renderer
-    (tinker.yaml), and ``get_batch(0)`` raises tinker's ``RendererError``
-    ("Expected text content, got multimodal content ...").
-
-    GREEN: the model's renderer resolves to a qwen thinking renderer, which
+    The model's renderer resolves to a qwen thinking renderer, which
     preserves the reasoning as a ``<think>...</think>`` block. (Qwen3-0.6B is
     absent from ``model_info``'s recommended-renderer map, but every qwen3-family
     thinking renderer emits the ``<think>`` tag, so we assert the literals.)
@@ -109,7 +160,7 @@ def test_f1_reasoning_row_renders_through_build_sft_data(qwen_tokenizer):
     cfg = TinkerSFTBackend(spec).build_config()
     tokenizer, train_ds, val_ds = build_sft_data(cfg, spec.train_dataset, None)
 
-    datums = train_ds.get_batch(0)  # RED: RendererError here on current code
+    datums = train_ds.get_batch(0)
     assert len(datums) == 1
     datum = datums[0]
     assert sum(_weights(datum)) > 0
@@ -125,10 +176,7 @@ def test_f1_reasoning_row_renders_through_build_sft_data(qwen_tokenizer):
 def test_f2_dict_tool_calls_render(qwen_tokenizer):
     """OpenAI dict-shaped ``tool_calls`` must render.
 
-    RED today: the qwen3 renderer does ``tool_call.function`` on a plain dict ->
-    ``AttributeError: 'dict' object has no attribute 'function'``.
-
-    GREEN: the dict is normalized to a structured ``ToolCall`` and the tool name
+    The dict is normalized to a structured ``ToolCall`` and the tool name
     lands in the rendered assistant turn.
     """
     renderer = get_renderer("qwen3", qwen_tokenizer)
@@ -142,7 +190,7 @@ def test_f2_dict_tool_calls_render(qwen_tokenizer):
         },
     ]
 
-    datum = conversation_to_datum(conversation, renderer, max_length=None)  # RED: AttributeError here
+    datum = conversation_to_datum(conversation, renderer, max_length=None)
     assert sum(_weights(datum)) > 0
     assert "bash" in qwen_tokenizer.decode(_input_ids(datum))
 
@@ -155,10 +203,7 @@ def test_f3_roundtrip_stamps_tool_calls_none(qwen_tokenizer, tmp_path):
     unifies the messages struct schema, so a message WITHOUT ``tool_calls`` gets
     the key stamped to ``None`` (here the user turn).
 
-    RED today: the qwen3 renderer iterates ``message["tool_calls"]`` on the user
-    turn -> ``TypeError: 'NoneType' object is not iterable``.
-
-    GREEN: a ``None`` ``tool_calls`` is treated as absent and every row renders.
+    A ``None`` ``tool_calls`` is treated as absent and every row renders.
     """
     renderer = get_renderer("qwen3", qwen_tokenizer)
     rows = [
@@ -181,7 +226,7 @@ def test_f3_roundtrip_stamps_tool_calls_none(qwen_tokenizer, tmp_path):
     # Root cause: the flag-less user turn now carries tool_calls=None.
     assert rt[0]["messages"][0]["tool_calls"] is None
 
-    datums = [conversation_to_datum(row["messages"], renderer, max_length=None) for row in rt]  # RED: TypeError here
+    datums = [conversation_to_datum(row["messages"], renderer, max_length=None) for row in rt]
     assert all(sum(_weights(d)) > 0 for d in datums)
     # The real tool call still renders once None is handled.
     assert "bash" in qwen_tokenizer.decode(_input_ids(datums[0]))
@@ -195,10 +240,7 @@ def test_f3_roundtrip_stamps_trainable_none(qwen_tokenizer, tmp_path):
     ``None``), so ``_ensure_trainable`` treats it as self-describing and passes
     it straight to the CUSTOMIZED renderer.
 
-    RED today: ``build_supervised_example`` does ``int(None)`` for the flag-less
-    row -> ``TypeError: int() argument must be a string ... not 'NoneType'``.
-
-    GREEN: a ``None`` flag is treated as absent; the flag-less row falls back to
+    A ``None`` flag is treated as absent; the flag-less row falls back to
     the derived default (train the assistant turn only).
 
     NOTE: both rows use list-of-parts ``content`` so the parquet ``messages``
@@ -243,17 +285,15 @@ def test_f3_roundtrip_stamps_trainable_none(qwen_tokenizer, tmp_path):
     assert "hi" not in trained
 
 
-# -- max_length truncation must be loud (vetting handoff item b) --------------
+# -- max_length truncation must be explicit ----------------------------------
 
 
-def test_truncation_past_max_length_warns_loudly(qwen_tokenizer, caplog):
-    """A row that renders past ``data.max_length`` must emit a loud warning.
+def test_overlength_row_errors_unless_truncation_is_explicit(qwen_tokenizer, caplog):
+    """A row past ``data.max_length`` must be rejected by default.
 
-    ``SFTSpec.max_length`` defaults to 2048, which silently truncated every
-    long trajectory row at datum build (the tail — including the final trainable
-    turn — dropped from training with zero signal to the user).
-
-    RED today: ``datum_from_model_input_weights`` truncates silently.
+    Right-truncating an agent trajectory preferentially deletes its final patch
+    and explanation, so rLLM must never mutate one unless the caller explicitly
+    selects the compatibility policy.
     """
     import logging
 
@@ -266,8 +306,17 @@ def test_truncation_past_max_length_warns_loudly(qwen_tokenizer, caplog):
     ]
 
     td._truncation_warn_count = 0
+    with pytest.raises(SFTConfigError, match="renders to .*max_length=64"):
+        conversation_to_datum(convo, renderer, max_length=64)
+
+    # The lossy compatibility path remains available only by explicit opt-in.
     with caplog.at_level(logging.WARNING, logger="rllm.trainer.sft.tinker_dataset"):
-        datum = conversation_to_datum(convo, renderer, max_length=64)
+        datum = conversation_to_datum(
+            convo,
+            renderer,
+            max_length=64,
+            overlength_policy="truncate",
+        )
     assert datum.model_input.length <= 64
     warned = [r for r in caplog.records if "max_length" in r.getMessage()]
     assert warned, "expected a loud truncation warning"
@@ -279,3 +328,202 @@ def test_truncation_past_max_length_warns_loudly(qwen_tokenizer, caplog):
     with caplog.at_level(logging.WARNING, logger="rllm.trainer.sft.tinker_dataset"):
         conversation_to_datum(convo, renderer, max_length=100_000)
     assert not [r for r in caplog.records if "max_length" in r.getMessage()]
+
+
+def test_tools_and_reasoning_match_unified_serving_renderer(qwen_tokenizer):
+    """Training and Tinker serving must render the same complete trajectory.
+
+    This covers the actual agentic boundary: sibling reasoning, structured tool
+    calls, tool-role observations, and row-level tool declarations. The serving
+    side is rLLM's unified ``TinkerRendererAdapter``; the training side is the
+    SFT ``conversation_to_datum`` path.
+    """
+    from rllm.data.sft_bridges import bridge_messages
+    from rllm.renderers.adapters import TinkerRendererAdapter
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": "Run a shell command.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+    wire_messages = [
+        {"role": "system", "content": "Solve the task."},
+        {"role": "user", "content": "Inspect the repository."},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "I should list the files first.",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command":"ls"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "a.py"},
+        {
+            "role": "assistant",
+            "content": "Done.",
+            "reasoning_content": "The repository has one file.",
+        },
+    ]
+    canonical = bridge_messages(
+        [{"messages": wire_messages, "tools": tools}],
+        train_on="all",
+    )[0].to_record()
+
+    ds = Dataset(data=[canonical], name="tool-parity", split="train")
+    spec = SFTSpec(
+        model=QWEN,
+        train_dataset=ds,
+        max_length=100_000,
+        overrides={"data": {"renderer_name": "qwen3"}},
+    )
+    cfg = TinkerSFTBackend(spec).build_config()
+    _, training_ds, _ = build_sft_data(cfg, ds, None)
+    datum = training_ds.get_batch(0)[0]
+    serving_renderer = TinkerRendererAdapter(get_renderer("qwen3", qwen_tokenizer))
+    serving_ids = serving_renderer.render_ids(
+        wire_messages,
+        tools=tools,
+        add_generation_prompt=False,
+    )
+
+    assert _full_tokens(datum) == serving_ids
+    trained = _trained_text(datum, qwen_tokenizer)
+    assert "list the files" in trained
+    assert "repository has one file" in trained
+    assert "Inspect the repository" not in trained
+
+
+def test_new_user_query_strips_prior_reasoning_in_training_and_serving(qwen_tokenizer):
+    """Qwen retains the active trace across tools but clears CoT before a new
+    genuine user query; SFT and serving must choose the same boundary."""
+    from tinker_cookbook.renderers import get_renderer
+
+    from rllm.data.sft_bridges import bridge_messages
+    from rllm.renderers.adapters import TinkerRendererAdapter
+
+    wire_messages = [
+        {"role": "user", "content": "First question."},
+        {
+            "role": "assistant",
+            "content": "First answer.",
+            "reasoning_content": "SECRET-OLD-REASONING",
+        },
+        {"role": "user", "content": "Second question."},
+        {
+            "role": "assistant",
+            "content": "Second answer.",
+            "reasoning_content": "CURRENT-REASONING",
+        },
+    ]
+    canonical = bridge_messages([{"messages": wire_messages}], train_on="all")[0]
+    renderer = get_renderer("qwen3", qwen_tokenizer)
+    renderer.strip_thinking_from_history = False
+    datum = conversation_to_datum(
+        canonical.to_record()["messages"],
+        renderer,
+        max_length=None,
+    )
+    serving_ids = TinkerRendererAdapter(get_renderer("qwen3", qwen_tokenizer)).render_ids(wire_messages, add_generation_prompt=False)
+
+    assert _full_tokens(datum) == serving_ids
+    rendered = qwen_tokenizer.decode(serving_ids)
+    assert "SECRET-OLD-REASONING" not in rendered
+    assert "CURRENT-REASONING" in rendered
+
+
+def test_invalid_row_tool_declaration_fails_with_dataset_error(qwen_tokenizer):
+    renderer = get_renderer("qwen3", qwen_tokenizer)
+    messages = [
+        {"role": "user", "content": "inspect", "trainable": False},
+        {"role": "assistant", "content": "done", "trainable": True},
+    ]
+
+    with pytest.raises(SFTConfigError, match="invalid tool declarations"):
+        conversation_to_datum(
+            messages,
+            renderer,
+            max_length=None,
+            tools=[{"type": "custom", "name": "not-supported"}],
+        )
+
+
+def test_nemotron_multiturn_training_matches_tinker_serving(nemotron_tokenizer):
+    """The Nemotron renderer preserves every post-user reasoning turn."""
+    from rllm.data.sft_bridges import bridge_messages
+    from rllm.renderers.adapters import TinkerRendererAdapter
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": "Execute a bash command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+    wire_messages = [
+        {"role": "system", "content": "Use the shell."},
+        {"role": "user", "content": "Inspect the repository."},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "First inspect the files.",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command":"ls"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "a.py"},
+        {
+            "role": "assistant",
+            "content": "Done.",
+            "reasoning_content": "The repository has one file.",
+        },
+    ]
+    canonical = bridge_messages(
+        [{"messages": wire_messages, "tools": tools}],
+        train_on="all",
+    )[0].to_record()
+    renderer = get_renderer(
+        "nemotron3",
+        nemotron_tokenizer,
+        model_name=NEMOTRON,
+    )
+    renderer.strip_thinking_from_history = False
+    datum = conversation_to_datum(
+        canonical["messages"],
+        renderer,
+        max_length=None,
+        tools=tools,
+    )
+    serving_ids = TinkerRendererAdapter(get_renderer("nemotron3", nemotron_tokenizer, model_name=NEMOTRON)).render_ids(
+        wire_messages,
+        tools=tools,
+        add_generation_prompt=False,
+    )
+
+    assert _full_tokens(datum) == serving_ids
+    trained = _trained_text(datum, nemotron_tokenizer)
+    assert "First inspect the files" in trained
+    assert "repository has one file" in trained

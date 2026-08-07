@@ -83,6 +83,14 @@ def test_validate_spec_accepts_messages():
     TinkerSFTBackend(_spec()).validate_spec()  # no raise
 
 
+def test_tinker_family_rejects_hf_template_without_native_serving_parity():
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    for cls in (TinkerSFTBackend, FireworksSFTBackend):
+        with pytest.raises(SFTConfigError, match="train/serve mismatch"):
+            cls(_spec(tokenize_method="hf_template")).validate_spec()
+
+
 def test_validate_spec_rejects_missing_messages():
     bad = Dataset(data=[{"prompt": "x", "response": "y"}], name="bad", split="train")
     with pytest.raises(SFTConfigError):
@@ -370,6 +378,19 @@ def test_fireworks_provision_doc_parses_sft(spec_kwargs, expect):
         assert pc.lora_rank == expect["lora_rank"]
 
 
+def test_fireworks_warmup_default_off_and_overridable():
+    """Warmup defaults OFF (the fireworks yaml knob was live-but-0), and both the
+    cosine schedule and an overrides warmup ratio reach the fireworks config the
+    fit loop reads."""
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    cfg = FireworksSFTBackend(_spec(lr_schedule="cosine")).build_config()
+    assert cfg.optim.lr_scheduler == "cosine"
+    assert cfg.optim.warmup_steps_ratio == 0.0
+    cfg2 = FireworksSFTBackend(_spec(lr_schedule="cosine", overrides={"optim": {"warmup_steps_ratio": 0.1}})).build_config()
+    assert cfg2.optim.warmup_steps_ratio == pytest.approx(0.1)
+
+
 def test_fireworks_inherits_validation():
     from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
 
@@ -403,11 +424,7 @@ def _structured_ds(n: int = 2):
 
 
 def test_verl_rejects_structured_rows():
-    """verl must reject structured (schema) rows and point at the tinker backend.
-
-    RED today: ``validate_spec`` only checks for role/content presence, and
-    structured rows have both (content is a parts list), so nothing is raised.
-    """
+    """verl must reject structured (schema) rows and point at the tinker backend."""
     from rllm.trainer.sft.verl_backend import VerlSFTBackend
 
     spec = _spec(train_dataset=_structured_ds())
