@@ -11,9 +11,12 @@ Reward contract (Harbor-compatible): the script writes to one of
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
-from pathlib import Path
+import shlex
+from collections.abc import Callable
+from pathlib import Path, PurePosixPath
 
 from rllm.eval.types import EvalOutput, Signal
 from rllm.sandbox.protocol import Sandbox, SandboxCommandTimeout
@@ -57,6 +60,9 @@ class ShellScriptEvaluator:
         verifier_timeout: float = 600.0,
         reward_file_override: str | None = None,
         git_heads: dict[str, str] | None = None,
+        verifier_sandbox_factory: Callable[[], Sandbox] | None = None,
+        collect_commands: list[dict] | None = None,
+        artifacts: list[str] | None = None,
     ):
         self.sandbox = sandbox
         self.script_path = script_path  # relative to the task's directory
@@ -65,6 +71,17 @@ class ShellScriptEvaluator:
         self.reward_file_override = reward_file_override
         # repo root -> HEAD sha as of before the agent ran (see _restore_git_heads).
         self.git_heads = git_heads or {}
+        # Set only for a task declaring [verifier].environment_mode = "separate":
+        # grading then runs in a container this builds, not the agent's. See
+        # :meth:`_grading_sandbox`.
+        self.verifier_sandbox_factory = verifier_sandbox_factory
+        self.collect_commands = collect_commands or []
+        self.artifacts = artifacts or []
+
+    @property
+    def separate_env(self) -> bool:
+        """Whether grading runs in its own container rather than the agent's."""
+        return self.verifier_sandbox_factory is not None
 
     def evaluate(self, task: Task, episode: Episode) -> EvalOutput:
         tests_dir = task.task_dir / Path(self.script_path).parent
@@ -79,9 +96,53 @@ class ShellScriptEvaluator:
 
         v_user = self.verifier_user
 
+        if not (tests_dir / script_name).exists():
+            return EvalOutput(
+                reward=0.0,
+                is_correct=False,
+                error="AddTestsDirError",
+                metadata={"error": f"verifier script {script_name} not found in {tests_dir}"},
+            )
+
+        # A separate-mode task grades in a fresh container; everything the agent
+        # produced reaches it as collected artifacts. Own it for the duration so
+        # the box can't outlive the grade.
+        grading_sandbox = self.sandbox
+        collected: dict[str, bytes] = {}
+        if self.separate_env:
+            collected = self._run_collect(task, v_user)
+            try:
+                grading_sandbox = self.verifier_sandbox_factory()  # type: ignore[misc]
+            except Exception as e:
+                logger.warning("Could not create verifier sandbox for %s: %s", task.id, e)
+                return EvalOutput(
+                    reward=0.0,
+                    is_correct=False,
+                    error="VerifierEnvironmentError",
+                    metadata={"error": f"failed to create separate verifier environment: {e}"},
+                )
+        try:
+            return self._grade_in(grading_sandbox, task, tests_dir, script_name, v_user, collected)
+        finally:
+            if grading_sandbox is not self.sandbox:
+                try:
+                    grading_sandbox.close()
+                except Exception:
+                    logger.debug("Verifier sandbox teardown failed for %s", task.id, exc_info=True)
+
+    def _grade_in(
+        self,
+        sandbox: Sandbox,
+        task: Task,
+        tests_dir: Path,
+        script_name: str,
+        v_user: str | None,
+        collected: dict[str, bytes],
+    ) -> EvalOutput:
+        """Upload the tests (and any collected artifacts), run the verifier, read the reward."""
         # Prepare reward directories
         try:
-            self.sandbox.exec("mkdir -p /tmp/rllm /logs/verifier", timeout=10, user=v_user)
+            sandbox.exec("mkdir -p /tmp/rllm /logs/verifier", timeout=10, user=v_user)
         except Exception:
             pass
 
@@ -89,7 +150,7 @@ class ShellScriptEvaluator:
         # A failed upload means the verifier can't run — a grading-infra failure,
         # not a task score; tag it so the engine doesn't read it as reward 0.
         try:
-            self.sandbox.upload_dir(str(tests_dir), "/tests")
+            sandbox.upload_dir(str(tests_dir), "/tests")
         except Exception as e:
             logger.warning("Failed to upload tests dir for %s: %s", task.id, e)
             return EvalOutput(
@@ -99,13 +160,13 @@ class ShellScriptEvaluator:
                 metadata={"error": f"failed to upload tests dir: {e}"},
             )
 
-        if not (tests_dir / script_name).exists():
-            return EvalOutput(
-                reward=0.0,
-                is_correct=False,
-                error="AddTestsDirError",
-                metadata={"error": f"verifier script {script_name} not found in {tests_dir}"},
-            )
+        # Re-materialise what the collect step snapshotted, at the same paths it
+        # wrote them to — the verifier image doesn't pre-create those dirs.
+        for path, blob in collected.items():
+            try:
+                _write_remote_file(sandbox, path, blob, user=v_user)
+            except Exception as e:
+                logger.warning("Could not upload artifact %s for %s: %s", path, task.id, e)
 
         # Only ``cd`` when the task explicitly declared a workdir.
         # Otherwise the Dockerfile's WORKDIR wins — required for swesmith
@@ -115,11 +176,14 @@ class ShellScriptEvaluator:
         workdir = task.metadata.get("workdir")
         cd_prefix = f"cd {workdir} && " if workdir else ""
 
-        self._restore_git_heads(v_user)
+        # Only meaningful in the agent's own container; a fresh verifier box is
+        # already at the image's commit.
+        if sandbox is self.sandbox:
+            self._restore_git_heads(v_user)
 
         verifier_stdout = ""
         try:
-            verifier_stdout = self.sandbox.exec(
+            verifier_stdout = sandbox.exec(
                 f"chmod +x /tests/{script_name} && {cd_prefix}/tests/{script_name}",
                 timeout=self.verifier_timeout,
                 user=v_user,
@@ -150,7 +214,7 @@ class ShellScriptEvaluator:
         reward_paths = list(_REWARD_PATHS)
         if self.reward_file_override:
             reward_paths.insert(0, self.reward_file_override)
-        out = _read_reward_from_sandbox(self.sandbox, reward_paths, user=v_user)
+        out = _read_reward_from_sandbox(sandbox, reward_paths, user=v_user)
         # Harbor verifiers cat every suite's raw log to stdout so "the reason a
         # test failed is never lost", and the sandbox dies at teardown — without
         # this a failed task records only a bare count (f2p 42/43) with no way to
@@ -158,6 +222,36 @@ class ShellScriptEvaluator:
         if verifier_stdout:
             out.metadata["verifier_stdout_tail"] = verifier_stdout[-_VERIFIER_STDOUT_TAIL_CHARS:]
         return out
+
+    def _run_collect(self, task: Task, user: str | None) -> dict[str, bytes]:
+        """Run ``[[verifier.collect]]`` in the agent's box and pull the artifacts out.
+
+        Harbor's separate-mode contract: the agent's container is the only place
+        the work exists, so it snapshots state into files (deepswe writes
+        ``git diff --binary <base_commit> HEAD`` to ``model.patch``) which are then
+        re-materialised in the verifier container. Best-effort per command — a
+        collect step that fails leaves that artifact missing, which the verifier
+        reports as an unsubmitted patch rather than a grading crash.
+        """
+        for entry in self.collect_commands:
+            command = entry.get("command") if isinstance(entry, dict) else str(entry)
+            if not command:
+                continue
+            try:
+                self.sandbox.exec(command, timeout=float((entry or {}).get("timeout_sec", 300.0)), user=user)
+            except Exception as e:
+                logger.warning("collect step failed for %s (%s): %s", task.id, command[:80], e)
+
+        collected: dict[str, bytes] = {}
+        for path in self.artifacts:
+            try:
+                blob = _read_remote_file(self.sandbox, str(path), user=user)
+            except Exception as e:
+                logger.warning("Could not collect artifact %s for %s: %s", path, task.id, e)
+                continue
+            if blob is not None:
+                collected[str(path)] = blob
+        return collected
 
     def _restore_git_heads(self, user: str | None) -> None:
         """Move each repo's HEAD back to the commit it had before the agent ran.
@@ -182,6 +276,49 @@ class ShellScriptEvaluator:
                     logger.info("Restored %s HEAD to pre-agent commit %s before grading", root, sha[:12])
             except Exception as e:
                 logger.warning("Could not restore %s HEAD to %s: %s", root, sha[:12], e)
+
+
+# ---------------------------------------------------------------------------
+# Artifact transfer between the agent's box and a separate verifier box
+# ---------------------------------------------------------------------------
+
+# Cap on a single collected artifact. The transfer rides on ``exec`` stdout
+# (base64), so an unbounded blob would be an unbounded string in memory; a SWE
+# patch is orders of magnitude under this.
+_MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
+
+
+def _read_remote_file(sandbox: Sandbox, path: str, user: str | None = None) -> bytes | None:
+    """Read a file out of a sandbox, or ``None`` when it isn't there.
+
+    Base64 because the payload is binary: ``git diff --binary`` output is not
+    text-safe, and the ``Sandbox`` protocol has upload primitives but no
+    download, so ``exec`` stdout is the only channel out.
+    """
+    quoted = shlex.quote(path)
+    size = sandbox.exec(f"test -f {quoted} && wc -c < {quoted} || echo -1", timeout=30, user=user).strip()
+    try:
+        n = int(size.split()[-1])
+    except (ValueError, IndexError):
+        return None
+    if n < 0:
+        return None
+    if n > _MAX_ARTIFACT_BYTES:
+        raise ValueError(f"artifact {path} is {n} bytes, over the {_MAX_ARTIFACT_BYTES} transfer cap")
+    encoded = sandbox.exec(f"base64 {quoted} | tr -d '\\n'", timeout=300, user=user)
+    return base64.b64decode(encoded.strip())
+
+
+def _write_remote_file(sandbox: Sandbox, path: str, blob: bytes, user: str | None = None) -> None:
+    """Write bytes into a sandbox at *path*, creating parent directories."""
+    quoted = shlex.quote(path)
+    parent = shlex.quote(str(PurePosixPath(path).parent))
+    encoded = base64.b64encode(blob).decode("ascii")
+    sandbox.exec(
+        f"mkdir -p {parent} && printf '%s' {shlex.quote(encoded)} | base64 -d > {quoted}",
+        timeout=300,
+        user=user,
+    )
 
 
 # ---------------------------------------------------------------------------
