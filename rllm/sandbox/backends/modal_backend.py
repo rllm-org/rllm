@@ -135,6 +135,24 @@ _CREATE_RATE_RPS = env_float("RLLM_MODAL_SANDBOX_CREATE_RPS", 4.0)
 _CREATE_BURST = env_float("RLLM_MODAL_SANDBOX_CREATE_BURST", 150.0)
 _CREATE_LIMITER = _CreateRateLimiter(_CREATE_RATE_RPS, _CREATE_BURST)
 
+# One App.lookup per app name per process. Modal rate-limits AppGetOrCreate
+# account-wide, and a run boots one sandbox per task (dozens concurrently), so
+# looking the app up in every constructor spends that quota re-fetching a value
+# that never changes — and the server-side throttle it triggers is retried with
+# an unbounded wait, which reads as a hung run during sandbox setup. The lock is
+# held across the RPC so a burst of constructors makes exactly one call.
+_APP_CACHE: dict[str, object] = {}
+_APP_CACHE_LOCK = threading.Lock()
+
+
+def _lookup_app(app_name: str):
+    import modal
+
+    with _APP_CACHE_LOCK:
+        if app_name not in _APP_CACHE:
+            _APP_CACHE[app_name] = modal.App.lookup(app_name, create_if_missing=True)
+        return _APP_CACHE[app_name]
+
 
 def _terminate_all_live() -> None:
     """atexit hook: terminate every still-alive ModalSandbox."""
@@ -217,7 +235,7 @@ class ModalSandbox:
         # A stored snapshot ref is a bare Modal image id ("im-…", no registry/tag);
         # the ":" / "/" guard keeps real docker images off the from_id path.
         from_snapshot = isinstance(image, str) and image.startswith("im-") and ":" not in image and "/" not in image
-        self._app = modal.App.lookup(self._app_name, create_if_missing=True)
+        self._app = _lookup_app(self._app_name)
 
         # A missing snapshot surfaces as NotFoundError either at from_id (if it
         # ever resolves eagerly) or at create; translate both so get_sandbox can
