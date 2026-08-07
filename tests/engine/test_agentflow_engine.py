@@ -270,17 +270,14 @@ def test_no_usable_model_output_detects_dead_upstream():
 
 
 def test_llm_free_harness_opts_out_of_the_empty_completion_canary():
-    """A harness that drives no model (oracle) has zero completions by
-    construction, so the canary would report every one of its failures as an
-    upstream outage — burying the one thing it exists to detect: a task whose
-    reference solution fails its own verifier."""
+    """The oracle has zero completions by construction, so the canary would
+    report its every failure — a task whose reference solution fails its own
+    verifier — as an upstream outage."""
+    from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
     from rllm.harnesses.oracle import OracleHarness
 
     assert OracleHarness.makes_llm_calls is False
-    # Anything that does drive a model keeps the canary (the engine reads the
-    # attribute with a True default, so harnesses need not declare it).
-    from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
-
+    # True default: model-driven harnesses keep the canary without declaring it.
     assert getattr(MiniSweAgentHarness, "makes_llm_calls", True) is True
 
 
