@@ -40,6 +40,12 @@ class OracleHarness(SandboxedAgentFlow):
     name = "oracle"
     sandbox_backend = "docker"
 
+    # No LLM is involved, so every episode has zero completions. Tells the engine
+    # not to read that as a downed upstream — for this harness a reward of 0 means
+    # the task's own reference solution failed its verifier, which is the signal
+    # the harness exists to produce.
+    makes_llm_calls = False
+
     # Mirror Harbor's ``env_paths.solution_dir`` convention so anyone
     # comparing the two implementations doesn't trip on path drift.
     _SOLUTION_DIR = "/solution"

@@ -247,6 +247,62 @@ class TestShellScriptEvaluatorErrorTagging:
         assert termination_reason_from_error("VerifierCrashError") is TerminationReason.GRADING_ERROR
 
 
+class TestVerifierStdoutCapture:
+    """The verifier's output is the only record of *why* a suite failed, and the
+    sandbox is torn down right after grading — what isn't lifted here is gone."""
+
+    def test_stdout_kept_on_pass(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        real_exec = sb.exec
+
+        def exec_(cmd: str, timeout: float | None = None, user: str | None = None) -> str:
+            if "/tests/test.sh" in cmd:
+                return "===== raw suite output =====\n7 passed"
+            return real_exec(cmd, timeout, user)
+
+        sb.exec = exec_  # type: ignore[method-assign]
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert "7 passed" in out.metadata["verifier_stdout_tail"]
+
+    def test_stdout_kept_when_verifier_exits_nonzero(self, tmp_path):
+        """The failure path is the one worth debugging, and there the backend
+        hands the output back on the exception rather than as a return value."""
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "0.0"})
+        real_exec = sb.exec
+
+        def exec_(cmd: str, timeout: float | None = None, user: str | None = None) -> str:
+            if "/tests/test.sh" in cmd:
+                raise RuntimeError("exit 1: FAILED tests/test_sort.py::test_natural_order")
+            return real_exec(cmd, timeout, user)
+
+        sb.exec = exec_  # type: ignore[method-assign]
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.reward == 0.0
+        assert out.error is None  # a real 0, not a grading failure
+        assert "test_natural_order" in out.metadata["verifier_stdout_tail"]
+
+    def test_stdout_tail_is_bounded(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "0.0"})
+        real_exec = sb.exec
+
+        def exec_(cmd: str, timeout: float | None = None, user: str | None = None) -> str:
+            if "/tests/test.sh" in cmd:
+                return "x" * 50_000 + "TAIL_MARKER"
+            return real_exec(cmd, timeout, user)
+
+        sb.exec = exec_  # type: ignore[method-assign]
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        tail = out.metadata["verifier_stdout_tail"]
+        assert len(tail) == 8000
+        assert tail.endswith("TAIL_MARKER")  # tail, not head
+
+
 class TestGraderStateCapture:
     """Whatever a grader reports beside its verdict becomes a signal, so the
     fine-grained state survives on the episode instead of being collapsed into
