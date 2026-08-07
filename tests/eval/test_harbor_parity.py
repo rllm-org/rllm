@@ -257,3 +257,19 @@ def test_verifier_resources_layer_over_the_task_environment(tmp_path):
     assert env["docker_image"] == "org/img:t"  # inherited
     assert env["cpus"] == 2  # verifier's own value wins
     assert env["memory_mb"] == 32768
+
+
+def test_hook_records_the_backend_the_task_actually_got(tmp_path):
+    """A separate verifier container re-resolves the backend when it provisions.
+    Without the effective one recorded on the task it falls back to docker and
+    tries a local build while the agent ran on Modal — which is exactly how the
+    first end-to-end run of separate mode failed.
+    """
+    from rllm.eval._resolution import _resolve_backend
+
+    task = _write_task(tmp_path, '[environment]\ndocker_image = "org/img:t"\n', "FROM org/img:t\n")
+    assert _resolve_backend(task, None) == "docker"  # no override, no record
+
+    # What SandboxTaskHooks.setup writes once it has provisioned.
+    task.metadata["sandbox_backend"] = "modal"
+    assert _resolve_backend(task, None) == "modal"

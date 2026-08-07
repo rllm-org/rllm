@@ -386,7 +386,13 @@ def _dockerfile_context_fingerprint(dockerfile: Path) -> str:
     return h.hexdigest()[:16]
 
 
-def _create_sandbox_for_task(task: Task, sandbox_backend: str | None) -> Sandbox:
+def _create_sandbox_for_task(
+    task: Task,
+    sandbox_backend: str | None,
+    *,
+    name: str | None = None,
+    env_override: dict | None = None,
+) -> Sandbox:
     """Cold-path sandbox creation.
 
     When a Dockerfile-based task runs on a remote backend that builds images itself
@@ -399,8 +405,8 @@ def _create_sandbox_for_task(task: Task, sandbox_backend: str | None) -> Sandbox
     backend = _resolve_backend(task, sandbox_backend)
     dockerfile = _builds_from_dockerfile(task, backend)
     if dockerfile is not None:
-        return _create_base_sandbox(task, backend, image=_dockerfile_image(backend, dockerfile))
-    sandbox = _create_base_sandbox(task, backend)
+        return _create_base_sandbox(task, backend, image=_dockerfile_image(backend, dockerfile), name=name, env_override=env_override)
+    sandbox = _create_base_sandbox(task, backend, name=name, env_override=env_override)
     _replay_dockerfile(task, sandbox, backend)
     return sandbox
 
@@ -440,11 +446,10 @@ def _create_verifier_sandbox(task: Task, sandbox_backend: str | None) -> Sandbox
     :class:`~rllm.eval.script_evaluator.ShellScriptEvaluator` uploads ``tests/``
     to ``/tests`` regardless. Resources come from the verifier's own section.
     """
-    backend = _resolve_backend(task, sandbox_backend)
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
-    return _create_base_sandbox(
+    return _create_sandbox_for_task(
         task,
-        backend,
+        sandbox_backend,
         name=f"rllm-verify-{safe_id}-{uuid.uuid4().hex[:6]}",
         env_override=_verifier_env_section(task),
     )
