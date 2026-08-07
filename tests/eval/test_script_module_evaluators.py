@@ -391,7 +391,7 @@ class TestPreAgentGitHeadRestore:
         assert sb.execs == []
 
     @staticmethod
-    def _sandbox_reporting(sha_a: str, sha_b: str) -> "_FakeSandbox":
+    def _sandbox_reporting(sha_a: str, sha_b: str) -> _FakeSandbox:
         sb = _FakeSandbox()
         sb.exec = lambda cmd, timeout=None, user=None: f"/app {sha_a}\n/testbed {sha_b}\nnot-a-repo\n"
         return sb

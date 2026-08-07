@@ -282,6 +282,7 @@ class ShellScriptEvaluator:
 # Artifact transfer between the agent's box and a separate verifier box
 # ---------------------------------------------------------------------------
 
+
 def _read_remote_file(sandbox: Sandbox, path: str) -> bytes | None:
     """Read a file out of a sandbox, or ``None`` when it isn't there.
 

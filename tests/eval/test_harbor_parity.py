@@ -196,6 +196,8 @@ def test_create_base_sandbox_explicit_timeout_overrides_resource_default(monkeyp
     task = _budget_task()
     _create_base_sandbox(task, "modal", image="img", name="n", timeout=12345)
     assert captured["timeout"] == 12345
+
+
 # ---------------------------------------------------------------------------
 # [verifier] environment contract (harbor schema >= 1.3)
 # ---------------------------------------------------------------------------
@@ -233,7 +235,7 @@ def test_collect_and_artifacts_are_lifted(tmp_path):
         # ``artifacts`` is top-level, ahead of any table header (as real
         # harbor task.toml files write it).
         'artifacts = ["/logs/artifacts/model.patch"]\n'
-        '[environment]\n'
+        "[environment]\n"
         '[verifier]\nenvironment_mode = "separate"\n'
         '[[verifier.collect]]\ncommand = "git diff --binary base HEAD > /logs/artifacts/model.patch"\n',
         "FROM org/img:t\n",
