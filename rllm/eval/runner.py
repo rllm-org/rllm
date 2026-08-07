@@ -12,7 +12,9 @@ traces, exactly as they do at training time.
 
 from __future__ import annotations
 
+import inspect
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rllm.eval.results import EvalItem, EvalResult
@@ -23,6 +25,16 @@ if TYPE_CHECKING:
     from rllm.gateway.manager import GatewayManager
 
 logger = logging.getLogger(__name__)
+
+
+def _notify_episode_complete(callback, flat_idx: int, task_idx: int, attempt: int, episode) -> None:
+    """Call the extended callback while preserving the historical two-arg API."""
+    try:
+        inspect.signature(callback).bind(flat_idx, task_idx, attempt, episode)
+    except (TypeError, ValueError):
+        callback(flat_idx, episode)
+    else:
+        callback(flat_idx, task_idx, attempt, episode)
 
 
 async def run_dataset(
@@ -42,6 +54,8 @@ async def run_dataset(
     gateway: GatewayManager | None = None,
     sampling_params: dict | None = None,
     attempts: int = 1,
+    run_dir: str | Path | None = None,
+    resume_items: list[EvalItem] | None = None,
 ) -> tuple[EvalResult, list]:
     """Run a list of :class:`rllm.types.Task` objects through :class:`AgentFlowEngine`.
 
@@ -74,13 +88,36 @@ async def run_dataset(
     # import (rllm.eval.__init__ → rllm.eval.runner → here). Importing
     # them inside the function breaks the cycle.
     from rllm.engine.agentflow_engine import AgentFlowEngine
+    from rllm.eval.lifecycle import EvalRunContext, call_eval_lifecycle
     from rllm.gateway.manager import EvalGatewayManager
     from rllm.gateway.tunnel import is_local_sandbox_backend
 
-    # pass@k: expose each task as `attempts` adjacent rollouts while reusing
-    # the same Task objects.
-    if attempts > 1:
-        tasks = [task for task in tasks for _ in range(attempts)]
+    original_tasks = list(tasks)
+    full_rollout_map = [(task_idx, attempt) for task_idx in range(len(original_tasks)) for attempt in range(attempts)]
+    valid_rollouts = set(full_rollout_map)
+    seen_resume_rollouts: set[tuple[int, int]] = set()
+    for item in resume_items or []:
+        key = (item.idx, item.attempt)
+        if key not in valid_rollouts:
+            raise ValueError(f"Resume item is outside this run manifest: task={item.idx}, attempt={item.attempt}")
+        if key in seen_resume_rollouts:
+            raise ValueError(f"Duplicate resume item: task={item.idx}, attempt={item.attempt}")
+        seen_resume_rollouts.add(key)
+        expected_task_id = str(getattr(original_tasks[item.idx], "id", None) or item.idx)
+        if item.task_id is not None and item.task_id != expected_task_id:
+            raise ValueError(f"Resume task ID mismatch at index {item.idx}: expected {expected_task_id}, got {item.task_id}")
+    successful_resume_items = [item for item in (resume_items or []) if item.error is None]
+    rollout_map = list(full_rollout_map)
+    if resume_items:
+        completed = {(item.idx, item.attempt) for item in successful_resume_items}
+        rollout_map = [key for key in rollout_map if key not in completed]
+        tasks = [original_tasks[task_idx] for task_idx, _attempt in rollout_map]
+    elif attempts > 1:
+        tasks = [task for task in original_tasks for _ in range(attempts)]
+
+    if not rollout_map:
+        items = sorted(successful_resume_items, key=lambda item: (item.idx, item.attempt))
+        return EvalResult.from_items(dataset_name, model, agent_name, items, attempts=attempts), []
 
     # Cap concurrency by the agent flow's hint, if any. The engine's
     # internal semaphore enforces this on the rollout side.
@@ -127,6 +164,28 @@ async def run_dataset(
         gateway = EvalGatewayManager(upstream_url=base_url, model=model, tunnel=gateway_tunnel, port=gateway_port)
         gateway.start()
 
+    lifecycle_context = EvalRunContext(
+        dataset_name=dataset_name,
+        agent_name=agent_name,
+        model=model,
+        base_url=base_url,
+        task_count=len(original_tasks) * attempts,
+        concurrency=effective_concurrency,
+        attempts=attempts,
+        sampling_params=dict(sampling_params or {}),
+        run_dir=Path(run_dir).expanduser() if run_dir is not None else None,
+        tasks=tuple(tasks),
+    )
+    try:
+        await call_eval_lifecycle(agent_flow, "prepare_eval", lifecycle_context)
+    except BaseException as exc:
+        try:
+            await call_eval_lifecycle(agent_flow, "finalize_eval", lifecycle_context, exc)
+        finally:
+            if owned_gateway:
+                gateway.stop()
+        raise
+
     hooks = SandboxTaskHooks(evaluation=FixedEvaluation(evaluator) if evaluator is not None else None, sandbox_backend=sandbox_backend, use_snapshot=use_snapshot)
 
     engine = AgentFlowEngine(
@@ -145,6 +204,7 @@ async def run_dataset(
     )
 
     warm_queue = None
+    run_error: BaseException | None = None
     try:
         # Warm queue: prefetch this run's next sandboxes ahead of consumption.
         # Negative size means "match concurrency"; it only helps when sandboxes
@@ -161,8 +221,29 @@ async def run_dataset(
         # task_ids carry the original Task.id so GRPO-style grouping (if a
         # downstream consumer wants it) is stable; the engine's session uid
         # becomes f"{task.id}:0" which matches training's convention.
-        task_ids = [getattr(t, "id", None) or str(idx) for idx, t in enumerate(tasks)]
-        episodes = await engine.execute_tasks(tasks, task_ids=task_ids, is_validation=True, on_episode_complete=on_episode_complete)
+        if resume_items:
+            task_ids = [
+                f"{getattr(task, 'id', None) or task_idx}~attempt-{attempt}"
+                for task, (task_idx, attempt) in zip(tasks, rollout_map, strict=True)
+            ]
+        else:
+            task_ids = [getattr(t, "id", None) or str(idx) for idx, t in enumerate(tasks)]
+
+        def _stream_episode(result_idx, episode):
+            if on_episode_complete is None:
+                return
+            task_idx, attempt = rollout_map[result_idx]
+            _notify_episode_complete(on_episode_complete, task_idx * attempts + attempt, task_idx, attempt, episode)
+
+        episodes = await engine.execute_tasks(
+            tasks,
+            task_ids=task_ids,
+            is_validation=True,
+            on_episode_complete=_stream_episode if on_episode_complete is not None else None,
+        )
+    except BaseException as exc:
+        run_error = exc
+        raise
     finally:
         if warm_queue is not None:
             warm_queue.shutdown()
@@ -172,15 +253,22 @@ async def run_dataset(
                 gateway.stop()
             except Exception:
                 logger.exception("gateway.stop() raised; suppressing")
+        try:
+            await call_eval_lifecycle(agent_flow, "finalize_eval", lifecycle_context, run_error)
+        except Exception:
+            if run_error is None:
+                raise
+            logger.exception("agent finalize_eval raised while handling another error; suppressing")
 
     # Aggregate per-rollout EvalItems for the report; with attempts > 1 the
     # expanded index folds back to (task index, attempt).
-    items: list[EvalItem] = []
+    items: list[EvalItem] = list(successful_resume_items)
     surviving_episodes: list = []
     for idx, episode in enumerate(episodes):
-        task_idx, attempt = divmod(idx, attempts) if attempts > 1 else (idx, 0)
+        task_idx, attempt = rollout_map[idx]
+        task_id = str(getattr(original_tasks[task_idx], "id", None) or task_idx)
         if episode is None:
-            items.append(EvalItem(idx=task_idx, attempt=attempt, reward=0.0, is_correct=False, error="missing episode"))
+            items.append(EvalItem(idx=task_idx, attempt=attempt, task_id=task_id, reward=0.0, is_correct=False, error="missing episode"))
             continue
 
         # An infra/grading failure (sandbox/setup/verifier/grading) means the
@@ -212,6 +300,7 @@ async def run_dataset(
             EvalItem(
                 idx=task_idx,
                 attempt=attempt,
+                task_id=task_id,
                 reward=reward,
                 is_correct=bool(episode.is_correct),
                 signals=signals,
@@ -222,4 +311,5 @@ async def run_dataset(
         if error_msg is None:
             surviving_episodes.append(episode)
 
+    items.sort(key=lambda item: (item.idx, item.attempt))
     return (EvalResult.from_items(dataset_name, model, agent_name, items, attempts=attempts), surviving_episodes)
