@@ -51,9 +51,16 @@ def _load_agent_config(source: str | None) -> dict:
     return dict(value)
 
 
+def _is_sensitive_config_key(key: object) -> bool:
+    normalized = str(key).lower().replace("-", "_")
+    return normalized in {"api_key", "token", "secret", "password"} or normalized.endswith(
+        ("_api_key", "_token", "_secret", "_password")
+    )
+
+
 def _redact_config(value):
     if isinstance(value, dict):
-        return {key: ("<redacted>" if any(part in str(key).lower() for part in ("api_key", "token", "secret", "password")) else _redact_config(item)) for key, item in value.items()}
+        return {key: ("<redacted>" if _is_sensitive_config_key(key) else _redact_config(item)) for key, item in value.items()}
     if isinstance(value, list):
         return [_redact_config(item) for item in value]
     return value
@@ -835,8 +842,6 @@ def eval_cmd(
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
     _ui_explicit = enable_ui is not None
     if enable_ui is None:
-        import os
-
         from rllm.eval.config import load_ui_config
 
         ui_config = load_ui_config()

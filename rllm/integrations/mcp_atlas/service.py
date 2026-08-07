@@ -19,7 +19,7 @@ from typing import Any
 
 import requests
 
-from rllm.integrations.mcp_atlas.constants import GATEWAY_API_KEY, IMAGE, SOURCE_REVISION
+from rllm.integrations.mcp_atlas.constants import GATEWAY_API_KEY, IMAGE, SOURCE_REVISION, UVX_MCP_VERSION
 from rllm.integrations.mcp_atlas.source import ensure_harness_build, ensure_source, patch_sha256
 
 logger = logging.getLogger(__name__)
@@ -120,6 +120,20 @@ class MCPAtlasServiceManager:
         path.chmod(0o600)
         return path
 
+    def _render_uvx_compatibility(self) -> tuple[Path, Path]:
+        """Keep the image's open-ended uvx dependencies on MCP SDK 1.x."""
+        assert self._tempdir is not None
+        tempdir = Path(self._tempdir.name)
+        constraints = tempdir / "uvx-constraints.txt"
+        constraints.write_text(f"mcp=={UVX_MCP_VERSION}\n", encoding="utf-8")
+        wrapper = tempdir / "uvx"
+        wrapper.write_text(
+            '#!/bin/sh\nexec uv tool run --constraints /tmp/rllm-mcp-atlas-constraints.txt "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        return constraints, wrapper
+
     def _ensure_image(self) -> None:
         inspect = subprocess.run(["docker", "image", "inspect", self.image], text=True, capture_output=True)
         if inspect.returncode != 0:
@@ -161,12 +175,19 @@ class MCPAtlasServiceManager:
 
         import asyncio
 
+        passed: list[str] = []
+        failed: list[str] = []
         for server in sorted(self.required_servers):
             try:
                 asyncio.run(module.main(timeout=self.health_timeout, concurrency=1, only_server=server))
             except SystemExit as exc:
-                raise RuntimeError(f"MCP-Atlas official health probe failed for {server}") from exc
-        self.server_health["official_probes"] = sorted(self.required_servers)
+                failed.append(server)
+                if self.preflight == "strict":
+                    raise RuntimeError(f"MCP-Atlas official health probe failed for {server}") from exc
+            else:
+                passed.append(server)
+        self.server_health["official_probes"] = passed
+        self.server_health["official_probe_failures"] = failed
 
     def start(self) -> None:
         self._check_programs()
@@ -205,6 +226,13 @@ class MCPAtlasServiceManager:
         rendered_env = self._render_container_env(source)
         if rendered_env is not None:
             docker_cmd += ["--env-file", str(rendered_env)]
+        constraints, uvx_wrapper = self._render_uvx_compatibility()
+        docker_cmd += [
+            "-v",
+            f"{constraints}:/tmp/rllm-mcp-atlas-constraints.txt:ro",
+            "-v",
+            f"{uvx_wrapper}:/usr/local/bin/uvx:ro",
+        ]
         docker_cmd.append(self.image)
         docker_process = subprocess.Popen(docker_cmd, stdout=self._docker_log, stderr=subprocess.STDOUT, text=True)
 
@@ -269,6 +297,7 @@ class MCPAtlasServiceManager:
             "external_harness": bool(self.external_harness_url),
             "server_health": self.server_health,
             "required_servers": sorted(self.required_servers),
+            "uvx_mcp_version": UVX_MCP_VERSION,
         }
 
 

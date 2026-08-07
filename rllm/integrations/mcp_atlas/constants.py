@@ -13,6 +13,10 @@ MAX_TOOL_CALLS = 100
 TASK_TIMEOUT_SECONDS = 1800
 DEFAULT_CONCURRENCY = 5
 GATEWAY_API_KEY = "sk-rllm-gateway"
+# Several official server packages declare an open-ended ``mcp>=`` dependency.
+# MCP 2.0 removed APIs they still import, so constrain uvx to the newest 1.x
+# release accepted by every package in image 1.2.7.
+UVX_MCP_VERSION = "1.26.0"
 
 # Servers in the pinned image that work without user-provided credentials.
 # Keep this explicit instead of using the upstream test_servers.py detector:

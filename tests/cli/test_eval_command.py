@@ -88,6 +88,7 @@ def test_agent_config_loading_redaction_and_endpoint_sanitization(tmp_path):
 
     assert config["preflight"] == "strict"
     assert _redact_config(config)["nested"]["api_key"] == "<redacted>"
+    assert _redact_config({"max_tokens": 16384})["max_tokens"] == 16384
     assert _sanitize_endpoint("https://user:pass@example.test/v1?token=secret") == "https://example.test/v1"
 
 
