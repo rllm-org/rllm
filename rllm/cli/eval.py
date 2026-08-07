@@ -790,7 +790,7 @@ def eval_cmd(
             fail("--model is required when --base-url is provided.")
     else:
         # Proxy mode: auto-start LiteLLM proxy from config
-        from rllm.eval.config import load_config
+        from rllm.eval.config import PROVIDER_ENV_KEYS, load_config
 
         config = load_config()
         if not config.is_configured():
@@ -800,6 +800,13 @@ def eval_cmd(
         if model is None:
             model = config.model
         provider_name = config.provider
+        # Evaluators run in this process rather than the LiteLLM proxy. Make a
+        # provider key saved by ``rllm model setup`` available to evaluators
+        # (notably MCP-Atlas's OpenRouter-default Gemini judge) without asking
+        # the user to enter or export the same secret twice.
+        provider_env_key = PROVIDER_ENV_KEYS.get(config.provider)
+        if config.api_key and provider_env_key:
+            os.environ.setdefault(provider_env_key, config.api_key)
 
         if config.provider == "custom":
             # Custom provider: skip LiteLLM proxy, use base_url directly
