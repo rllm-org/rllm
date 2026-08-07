@@ -21,6 +21,7 @@ import importlib
 import inspect
 import logging
 import re
+import shlex
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -108,6 +109,46 @@ def _effective_verifier_timeout(task: Task) -> float | None:
     return float(declared)
 
 
+def _capture_git_heads(task: Task, sandbox: Sandbox) -> dict[str, str]:
+    """Map ``repo root -> HEAD sha`` for the sandbox's git repos, before the agent runs.
+
+    Handed to :class:`ShellScriptEvaluator`, which puts HEAD back (soft) right
+    before grading — see :meth:`ShellScriptEvaluator._restore_git_heads` for why
+    an agent's commits break in-sandbox verifiers. Called at evaluator-resolution
+    time, which the hook does after environment setup and before the agent, so
+    what's recorded is the image's own commit.
+
+    Scans the declared ``workdir`` plus the top-level directories, so it covers
+    ``/app``, ``/testbed``, ``/workspace`` and friends without knowing which task
+    family it's looking at. Best-effort: a git-less environment yields an empty
+    map and the restore is a no-op. Set ``RLLM_VERIFIER_RESTORE_GIT_HEAD=0`` to
+    disable for a verifier that genuinely wants to grade the agent's commits.
+    """
+    from rllm.env import env_int
+    from rllm.eval.script_evaluator import _GIT
+
+    if not env_int("RLLM_VERIFIER_RESTORE_GIT_HEAD", 1):
+        return {}
+    roots = "/*"
+    workdir = task.metadata.get("workdir")
+    if workdir:
+        roots = f"{shlex.quote(str(workdir))} /*"
+    script = (
+        f'for d in {roots}; do [ -d "$d" ] || continue; '
+        f't=$({_GIT} -C "$d" rev-parse --show-toplevel 2>/dev/null) || continue; '
+        f'h=$({_GIT} -C "$t" rev-parse HEAD 2>/dev/null) || continue; '
+        f'printf "%s %s\\n" "$t" "$h"; done | sort -u'
+    )
+    heads: dict[str, str] = {}
+    for line in _safe_exec(sandbox, script, timeout=60).splitlines():
+        parts = line.split()
+        if len(parts) == 2 and len(parts[1]) == 40:
+            heads.setdefault(parts[0], parts[1])
+    if heads:
+        logger.debug("Captured pre-agent git HEADs for %s: %s", task.id, heads)
+    return heads
+
+
 def _resolve_evaluator(
     task: Task,
     sandbox: Sandbox | None,
@@ -124,6 +165,7 @@ def _resolve_evaluator(
             verifier_user=task.metadata.get("verifier_user"),
             verifier_timeout=(_effective_verifier_timeout(task) or 600.0),
             reward_file_override=verifier_config.get("reward_file"),
+            git_heads=_capture_git_heads(task, sandbox),
         )
 
     if kind in ("python-host", "python-hybrid"):

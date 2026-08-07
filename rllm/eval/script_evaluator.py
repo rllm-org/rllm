@@ -22,12 +22,20 @@ from rllm.types import Episode, Task
 logger = logging.getLogger(__name__)
 
 
+# Sandbox repos are root-owned but may be inspected as another user, which trips
+# git's dubious-ownership guard; every git call rLLM makes opts out of it.
+_GIT = "git -c safe.directory='*'"
+
 # Reward file search order (first existing file wins)
 _REWARD_PATHS = [
     "/tmp/rllm/reward.json",
     "/logs/verifier/reward.json",
     "/logs/verifier/reward.txt",
 ]
+
+# Keys of a reward file that carry the verdict itself; everything else in it is
+# grader detail lifted to signals (see _parse_reward_json).
+_RESERVED_REWARD_KEYS = frozenset({"reward", "rewards", "is_correct", "signals", "metadata"})
 
 
 class ShellScriptEvaluator:
@@ -45,12 +53,15 @@ class ShellScriptEvaluator:
         verifier_user: str | None = None,
         verifier_timeout: float = 600.0,
         reward_file_override: str | None = None,
+        git_heads: dict[str, str] | None = None,
     ):
         self.sandbox = sandbox
         self.script_path = script_path  # relative to the task's directory
         self.verifier_user = verifier_user
         self.verifier_timeout = verifier_timeout
         self.reward_file_override = reward_file_override
+        # repo root -> HEAD sha as of before the agent ran (see _restore_git_heads).
+        self.git_heads = git_heads or {}
 
     def evaluate(self, task: Task, episode: Episode) -> EvalOutput:
         tests_dir = task.task_dir / Path(self.script_path).parent
@@ -100,6 +111,9 @@ class ShellScriptEvaluator:
         # and silently collect zero tests when forced into ``/workspace``.
         workdir = task.metadata.get("workdir")
         cd_prefix = f"cd {workdir} && " if workdir else ""
+
+        self._restore_git_heads(v_user)
+
         try:
             self.sandbox.exec(
                 f"chmod +x /tests/{script_name} && {cd_prefix}/tests/{script_name}",
@@ -130,6 +144,30 @@ class ShellScriptEvaluator:
         if self.reward_file_override:
             reward_paths.insert(0, self.reward_file_override)
         return _read_reward_from_sandbox(self.sandbox, reward_paths, user=v_user)
+
+    def _restore_git_heads(self, user: str | None) -> None:
+        """Move each repo's HEAD back to the commit it had before the agent ran.
+
+        In-sandbox verifiers restore the task's official test files with
+        ``git checkout HEAD -- <path>`` before applying their test patch, which
+        assumes HEAD is still the *image's* commit. rLLM runs the verifier in the
+        agent's own sandbox, so an agent that commits its work (mini-swe-agent
+        and other git-oriented agents do) moves HEAD — and that "restore" then
+        resurrects the agent's own edited/added test files, making the official
+        test patch unappliable ("already exists in working directory" / "patch
+        does not apply") and crashing the verifier before it grades anything.
+
+        ``reset --soft`` moves the branch ref only: the working tree and index
+        keep the agent's edits, which is exactly what the verifier grades. No-op
+        when nothing was captured (``_capture_git_heads``) or HEAD never moved.
+        """
+        for root, sha in self.git_heads.items():
+            cmd = f'cur=$({_GIT} -C {root} rev-parse HEAD 2>/dev/null); [ "$cur" = {sha} ] || {{ {_GIT} -C {root} reset --soft {sha} && echo moved; }}'
+            try:
+                if "moved" in self.sandbox.exec(cmd, timeout=60, user=user):
+                    logger.info("Restored %s HEAD to pre-agent commit %s before grading", root, sha[:12])
+            except Exception as e:
+                logger.warning("Could not restore %s HEAD to %s: %s", root, sha[:12], e)
 
 
 # ---------------------------------------------------------------------------
@@ -162,8 +200,9 @@ def _read_reward_from_sandbox(sandbox: Sandbox, paths: list[str], user: str | No
         try:
             if path.endswith(".txt"):
                 reward = float(raw)
-                return EvalOutput(reward=reward, is_correct=reward >= 1.0)
-            return _parse_reward_json(raw)
+                out = EvalOutput(reward=reward, is_correct=reward >= 1.0)
+            else:
+                out = _parse_reward_json(raw)
         except Exception as e:
             logger.warning("Could not parse reward file %s: %s", path, e)
             return EvalOutput(
@@ -172,6 +211,22 @@ def _read_reward_from_sandbox(sandbox: Sandbox, paths: list[str], user: str | No
                 error="VerifierOutputParseError",
                 metadata={"error": f"could not parse reward file {path}: {e}"},
             )
+        # A negative reward is the harness's "no verdict" sentinel, not a score:
+        # harbor-style test.sh wrappers trap a crashed grader and write -1 so the
+        # failure stays visible instead of masquerading as a legitimate 0. Tag it
+        # as a grading error (and zero the reward, which is not on the task's
+        # scale and would otherwise skew mean reward); the raw sentinel is kept in
+        # metadata and a ``verifier_crash`` signal for triage.
+        if out.reward < 0:
+            logger.warning("Verifier wrote crash sentinel %s to %s", out.reward, path)
+            return EvalOutput(
+                reward=0.0,
+                is_correct=False,
+                error="VerifierCrashError",
+                signals=[*out.signals, Signal(name="verifier_crash", value=1.0)],
+                metadata={**out.metadata, "error": f"verifier wrote crash sentinel {out.reward} to {path}", "reward_sentinel": out.reward},
+            )
+        return out
 
     # A missing reward file means the verifier produced no verdict — a verifier/
     # infra failure, NOT a legitimate score of 0 (a correctly-failing verifier
@@ -189,6 +244,13 @@ def _parse_reward_json(raw: str) -> EvalOutput:
     """Parse a JSON reward file into an EvalOutput.
 
     Supports both ``{"reward": 0.5}`` and Harbor-style ``{"rewards": {...}}``.
+
+    Every other top-level scalar becomes a :class:`Signal`, so whatever
+    fine-grained state the grader reported alongside its verdict — SWE-bench
+    style ``f2p_passed``/``p2p_failed``/``apply_failed`` counts, a partial
+    score, per-suite tallies — lands on the episode (and in the eval report's
+    signal averages) instead of being collapsed into one number. Graders differ
+    per benchmark, so nothing here is keyed to a specific field name.
     """
     data = json.loads(raw)
 
@@ -206,6 +268,9 @@ def _parse_reward_json(raw: str) -> EvalOutput:
         signals.append(Signal(name=key, value=float(val)))
     for key, val in data.get("rewards", {}).items():
         if key != "reward":
+            signals.append(Signal(name=key, value=float(val)))
+    for key, val in data.items():
+        if key not in _RESERVED_REWARD_KEYS and isinstance(val, bool | int | float):
             signals.append(Signal(name=key, value=float(val)))
 
     return EvalOutput(
