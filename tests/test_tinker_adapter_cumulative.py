@@ -106,6 +106,12 @@ def test_to_openai_tool_calls_handles_all_producer_shapes():
     assert _to_openai_tool_calls([{"function": {"name": "bash", "arguments": {"command": "ls"}}}]) == [
         {"id": "call_0", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}}
     ]
+    # tinker/Fireworks-cookbook ToolCall: the same nesting as a pydantic object,
+    # which TinkerRendererAdapter.parse_response hands back verbatim.
+    from tinker_cookbook.renderers.base import ToolCall as CookbookToolCall
+
+    cookbook = CookbookToolCall(id="c1", function=CookbookToolCall.FunctionBody(name="bash", arguments='{"command": "ls"}'))
+    assert _to_openai_tool_calls([cookbook]) == [{"id": "call_0", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}}]
     # flat dict and ToolCall object still work.
     assert _to_openai_tool_calls([{"name": "edit", "arguments": {"p": 1}}])[0]["function"]["name"] == "edit"
     assert _to_openai_tool_calls([SimpleNamespace(name="read", arguments={"f": "x"})])[0]["function"]["name"] == "read"
