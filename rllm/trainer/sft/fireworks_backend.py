@@ -25,13 +25,18 @@ import os
 import re
 import tempfile
 import time
-from collections import deque
 from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
 
 from rllm.trainer.sft.backend import SFTConfigError
-from rllm.trainer.sft.tinker_backend import TinkerSFTBackend, build_sft_data
+from rllm.trainer.sft.tinker_backend import (
+    TinkerSFTBackend,
+    build_adam_params,
+    build_sft_data,
+    resolve_sft_optimizer_settings,
+    sft_lr_multiplier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -190,8 +195,6 @@ class FireworksSFTBackend(TinkerSFTBackend):
         config = self._config
 
         try:
-            import tinker
-            from tinker_cookbook.utils.lr_scheduling import compute_schedule_lr_multiplier
             from training.utils.checkpoints import TrainingCheckpoints
             from training.utils.client import DEFAULT_TIMEOUT_S
         except ImportError as e:
@@ -232,6 +235,24 @@ class FireworksSFTBackend(TinkerSFTBackend):
         try:
             _tokenizer, train_dataset, val_dataset = build_sft_data(config, self.spec.train_dataset, self.spec.val_dataset)
 
+            # Validate the complete loop before provisioning a paid trainer.
+            n_batches = len(train_dataset)
+            if n_batches <= 0:
+                raise SFTConfigError("The SFT training dataset contains no batches.")
+            total_epochs = int(config.trainer.get("total_epochs", 1))
+            if total_epochs <= 0:
+                raise SFTConfigError(f"trainer.total_epochs must be positive, got {total_epochs}.")
+            max_steps_value = config.trainer.get("max_steps")
+            max_steps = int(max_steps_value) if max_steps_value is not None else None
+            if max_steps is not None and max_steps <= 0:
+                raise SFTConfigError(f"trainer.max_steps must be positive when set, got {max_steps}.")
+            available_steps = n_batches * total_epochs
+            total_steps = min(available_steps, max_steps) if max_steps is not None else available_steps
+            optimizer = resolve_sft_optimizer_settings(
+                config.get("optim", {}),
+                total_steps=total_steps,
+            )
+
             infra = self._provision(config, api_key, base_url)
             try:
                 client = infra.policy
@@ -245,36 +266,62 @@ class FireworksSFTBackend(TinkerSFTBackend):
 
                 # Auto-resume from the newest resumable checkpoint, if any.
                 resume = ckpt.resume()
-                start_step = resume.step if resume else 0
+                if resume and resume.data_consumed:
+                    # The service can rename a requested checkpoint (e.g.
+                    # step-42 -> step-0), so its name-derived ``step`` is not a
+                    # reliable data cursor. TrainingCheckpoints persists the
+                    # raw-row cursor separately under the actual server name.
+                    start_step = train_dataset.step_for_data_cursor(resume.data_consumed)
+                else:
+                    # Legacy checkpoints lack dataloader.json; fall back to the
+                    # logical name's completed-step cursor.
+                    start_step = resume.step if resume else 0
 
-                # len(dataset) floors examples//batch_size; keep the final partial
-                # batch when the dataset is smaller than one batch (else 0 steps).
-                n_batches = max(1, len(train_dataset))
-                total_epochs = config.trainer.get("total_epochs", 1)
-                total_steps = n_batches * total_epochs
                 progress_denominator = total_steps if total_steps > 0 else 1
-                logger.info(f"Training for {n_batches} batches x {total_epochs} epochs = {total_steps} steps")
+                logger.info(
+                    "Training for %d batches x %d epochs = %d available steps; effective steps=%d",
+                    n_batches,
+                    total_epochs,
+                    available_steps,
+                    total_steps,
+                )
 
-                base_lr = config.optim.lr
-                lr_schedule = config.optim.get("lr_scheduler", "constant")
-                betas = config.optim.get("betas", [0.9, 0.95])
-                eps = config.optim.get("eps", 1e-8)
                 save_every = config.trainer.get("save_freq", 20)
                 eval_every = config.trainer.get("test_freq", 10)
 
-                # Pipelined sync loop: keep one (fwd_bwd, optim) pair in flight.
-                in_flight: deque = deque()
+                if val_dataset is not None and start_step == 0:
+                    tracking_logger.log(
+                        data=self._validate(client, val_dataset),
+                        step=0,
+                    )
 
-                def submit(step: int):
-                    lr = base_lr * compute_schedule_lr_multiplier(lr_schedule=lr_schedule, step=step, total_steps=total_steps)
-                    adam = tinker.AdamParams(learning_rate=lr, beta1=betas[0], beta2=betas[1], eps=eps)
-                    data = train_dataset.get_batch(step % n_batches)
+                current_epoch: int | None = None
+                for step in range(start_step, total_steps):
+                    epoch_idx, batch_idx = divmod(step, n_batches)
+                    if epoch_idx != current_epoch:
+                        logger.info("Starting epoch %d", epoch_idx)
+                        train_dataset.set_epoch(seed=epoch_idx)
+                        current_epoch = epoch_idx
+
+                    t0 = time.time()
+                    lr = optimizer.learning_rate * sft_lr_multiplier(
+                        optimizer.lr_schedule,
+                        step,
+                        total_steps,
+                        optimizer.warmup_steps_ratio,
+                        optimizer.warmup_steps,
+                        optimizer.min_lr_ratio,
+                    )
+                    adam = build_adam_params(
+                        learning_rate=lr,
+                        betas=optimizer.betas,
+                        eps=optimizer.eps,
+                        weight_decay=optimizer.weight_decay,
+                        grad_clip_norm=optimizer.grad_clip_norm,
+                    )
+                    data = train_dataset.get_batch(batch_idx)
                     fb_fut = client.submit_forward_backward(data, loss_fn="cross_entropy")
                     opt_fut = client.submit_optim_step(adam)
-                    in_flight.append((step, lr, data, fb_fut, opt_fut, time.time()))
-
-                def collect():
-                    step, lr, data, fb_fut, opt_fut, t0 = in_flight.popleft()
                     fb_result = fb_fut.result(timeout=DEFAULT_TIMEOUT_S)
                     opt_fut.result(timeout=DEFAULT_TIMEOUT_S)
                     # Fireworks' cross_entropy forward_backward returns aggregate
@@ -290,22 +337,19 @@ class FireworksSFTBackend(TinkerSFTBackend):
                         "train_loss": train_loss,
                         "time/total": time.time() - t0,
                     }
-                    if val_dataset and eval_every > 0 and step % eval_every == 0 and step > 0:
-                        metrics.update(self._validate(client, val_dataset, DEFAULT_TIMEOUT_S))
-                    tracking_logger.log(data=metrics, step=step)
-                    logger.info(f"Step {step}: train_loss={train_loss:.4f}, lr={lr:.2e}")
-                    if save_every > 0 and step % save_every == 0 and step > 0:
-                        logger.info(f"Saving checkpoint at step {step}")
-                        ckpt.save(f"step-{step}", resumable=True, promotable=False)
-
-                for step in range(start_step, total_steps):
-                    if step % n_batches == 0:
-                        train_dataset.set_epoch(seed=step // n_batches)
-                    submit(step)
-                    if len(in_flight) > 1:
-                        collect()
-                while in_flight:
-                    collect()
+                    completed_steps = step + 1
+                    if val_dataset is not None and eval_every > 0 and completed_steps % eval_every == 0:
+                        metrics.update(self._validate(client, val_dataset))
+                    if save_every > 0 and completed_steps % save_every == 0 and completed_steps < total_steps:
+                        logger.info("Saving checkpoint at step %d", completed_steps)
+                        ckpt.save(
+                            f"step-{completed_steps}",
+                            resumable=True,
+                            promotable=False,
+                            data_consumed=train_dataset.data_cursor_for_step(completed_steps),
+                        )
+                    tracking_logger.log(data=metrics, step=completed_steps)
+                    logger.info("Step %d: train_loss=%.4f, lr=%.2e", completed_steps, train_loss, lr)
 
                 if total_steps > start_step:
                     logger.info(f"Saving final checkpoint at step {total_steps}")
@@ -314,7 +358,12 @@ class FireworksSFTBackend(TinkerSFTBackend):
                     # resumable-only DCP blob, GC'd after the job's ~30-day retention
                     # window — so promote BEFORE ``finally: infra.close()`` deletes the
                     # trainer job. Mirrors the RL path and the SDK sft recipe.
-                    ckpt.save(f"step-{total_steps}", resumable=True, promotable=True)
+                    ckpt.save(
+                        f"step-{total_steps}",
+                        resumable=True,
+                        promotable=True,
+                        data_consumed=train_dataset.data_cursor_for_step(total_steps),
+                    )
                     artifact = "LoRA adapter" if lora_rank else "full-weight model"
                     experiment = config.trainer.get("experiment_name") or "default"
                     output_model_id = re.sub(r"[^a-z0-9-]+", "-", f"{config.trainer.get('project_name', 'rllm-sft')}-{experiment}".lower()).strip("-")[:63]
@@ -344,16 +393,38 @@ class FireworksSFTBackend(TinkerSFTBackend):
                 pass
 
     @staticmethod
-    def _validate(client, val_dataset, timeout) -> dict[str, float]:
+    def _validate(client, val_dataset) -> dict[str, float]:
+        """Token-weighted held-out NLL over the val set — same quantity as the
+        tinker path's ``test/mean_nll``, and as the ``loss:sum``/``response_tokens``
+        ratio the server reports for training batches.
+
+        Must stay forward-only: the trainer accumulates gradients server-side
+        across ``forward_backward`` calls until the next ``optim_step``, so a
+        backward pass here folds the val set into the following update — the
+        model would train on its own validation data. ``ReconnectableClient``
+        exposes no non-blocking ``forward``; the blocking one carries the
+        provision document's ``step_timeout``.
+        """
+        from tinker_cookbook.supervised.common import compute_mean_nll
+
         logger.info("Running validation...")
-        total_loss = 0.0
+        total_nll = 0.0
         total_tokens = 0
         for batch_idx in range(len(val_dataset)):
             data = val_dataset.get_batch(batch_idx)
-            fb_result = client.submit_forward_backward(data, loss_fn="cross_entropy").result(timeout=timeout)
-            m = getattr(fb_result, "metrics", {}) or {}
-            total_loss += m.get("loss:sum", 0.0)
-            total_tokens += m.get("response_tokens") or 0
-        val_loss = total_loss / total_tokens if total_tokens > 0 else 0.0
+            forward_result = client.forward(data, "cross_entropy")
+            weights = [datum.loss_fn_inputs["weights"] for datum in data]
+            batch_tokens = sum(sum(w.data) for w in weights)
+            # A batch whose rows are all loss-masked (e.g. every row truncated
+            # past its trainable tail) scores nan; skip it rather than let one
+            # such batch poison the whole metric.
+            if not batch_tokens:
+                continue
+            logprobs = [x["logprobs"] for x in forward_result.loss_fn_outputs]
+            total_nll += compute_mean_nll(logprobs, weights) * batch_tokens
+            total_tokens += batch_tokens
+        if total_tokens <= 0:
+            raise SFTConfigError("The validation dataset has no trainable tokens after rendering and masking.")
+        val_loss = total_nll / total_tokens
         logger.info(f"Validation loss: {val_loss:.4f}")
         return {"test/loss": val_loss}

@@ -22,16 +22,26 @@ data:
   renderer_name: null   # null = auto-detect from the model; set explicitly to override, e.g. qwen3 / qwen3_5 / deepseekv3 / role_colon
   rllm:
     tokenize_and_mask_method: cumulative  # cumulative -> ALL_ASSISTANT_MESSAGES; stepwise -> LAST_ASSISTANT_MESSAGE
+    group_by_length: false      # bucket similarly-sized rows into a batch (cuts padding waste on high-variance sets like exploded SFT); batch count/resume unchanged
+    length_group_factor: 50     # mega-window = train_batch_size * this; larger -> tighter length grouping, weaker shuffle
+    overlength_policy: error    # preserve whole trajectories; truncate is a lossy compatibility escape hatch
+    loss_reduction: none       # none preserves legacy token-sum behavior; token_mean and sequence_mean are explicit choices
+    strip_thinking_from_history: false  # preserve multi-turn CoT; matches the unified serving adapter
 
 optim:
   lr: 1e-5
   betas: [0.9, 0.95]
   eps: 1e-8
   lr_scheduler: constant  # constant | linear | cosine
-  warmup_steps_ratio: 0.1
+  warmup_steps_ratio: 0.0     # linear LR warmup as a fraction of total steps (0 = off)
+  warmup_steps: -1            # absolute warmup steps; <=0 falls back to warmup_steps_ratio
+  min_lr: 0.0                 # cosine/linear floor; e.g. 1e-5 with lr=1e-4
+  weight_decay: 0.0
+  grad_clip_norm: 0.0
 
 trainer:
   total_epochs: 1
+  max_steps: null             # cap optimizer steps even when stopping within an epoch
   logger: ['console']
   project_name: 'rllm-tinker-sft'
   experiment_name: 'default'
