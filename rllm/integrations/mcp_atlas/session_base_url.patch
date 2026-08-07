@@ -1,0 +1,49 @@
+diff --git a/services/agent-harness/src/mcp-agent/agent-evals/completion-strategy.ts b/services/agent-harness/src/mcp-agent/agent-evals/completion-strategy.ts
+index fa2ec20..f16afc5 100644
+--- a/services/agent-harness/src/mcp-agent/agent-evals/completion-strategy.ts
++++ b/services/agent-harness/src/mcp-agent/agent-evals/completion-strategy.ts
+@@ -31,7 +31,7 @@ export interface AgentCompletionStrategy<
+ export function getAgentCompletionStrategy(
+   _model: string,
+   _strategy?: string,
+-  _llmBaseUrl?: string,
++  llmBaseUrl?: string,
+ ): AgentCompletionStrategy<any, BaseCompletionResult> {
+-  return new LiteLLMAgentCompletionStrategy();
++  return new LiteLLMAgentCompletionStrategy(llmBaseUrl);
+ }
+diff --git a/services/agent-harness/src/mcp-agent/agent-evals/strategies/litellm-strategy.ts b/services/agent-harness/src/mcp-agent/agent-evals/strategies/litellm-strategy.ts
+index 9a9988b..8a59b37 100644
+--- a/services/agent-harness/src/mcp-agent/agent-evals/strategies/litellm-strategy.ts
++++ b/services/agent-harness/src/mcp-agent/agent-evals/strategies/litellm-strategy.ts
+@@ -25,5 +25,3 @@ function stripUnsupportedSchemaFields(tools: any[], model: string): any[] {
+ const CHAT_LLM_API_KEY = config.llmApiKey;
+-const LLM_BASE_URL = config.llmBaseUrl;
+-const LLM_ENDPOINT = `${LLM_BASE_URL}/v1/chat/completions`;
+ const MAX_BODY_SIZE = 100_000_000;
+ const LLM_TIMEOUT = config.llmTimeoutMs; // configurable via LLM_TIMEOUT_MS — raise for heavy reasoning
+@@ -40,5 +38,14 @@ type LiteLLMCompletionRequest = BaseCompletionRequest;
+ export class LiteLLMAgentCompletionStrategy
+   implements AgentCompletionStrategy<BaseCompletionRequest, BaseCompletionResult>
+ {
++  private readonly llmEndpoint: string;
++
++  constructor(llmBaseUrl?: string) {
++    const baseUrl = (llmBaseUrl || config.llmBaseUrl).replace(/\/$/, '');
++    this.llmEndpoint = baseUrl.endsWith('/v1')
++      ? `${baseUrl}/chat/completions`
++      : `${baseUrl}/v1/chat/completions`;
++  }
++
+   async createCompletion(request: LiteLLMCompletionRequest): Promise<LiteLLMCompletionResult> {
+     // Per-request API key override. Pulled out of extraLlmParams so it's not
+@@ -61,3 +68,3 @@ export class LiteLLMAgentCompletionStrategy
+     logger.info('LiteLLM Strategy - Sending payload to LLM', {
+-      endpoint: LLM_ENDPOINT,
++      endpoint: this.llmEndpoint,
+       model: payload.model,
+@@ -72,3 +79,3 @@ export class LiteLLMAgentCompletionStrategy
+       try {
+-        const response = await axios.post(LLM_ENDPOINT, payload, {
++        const response = await axios.post(this.llmEndpoint, payload, {
+           headers: {
