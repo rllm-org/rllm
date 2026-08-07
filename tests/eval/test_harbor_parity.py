@@ -196,3 +196,64 @@ def test_create_base_sandbox_explicit_timeout_overrides_resource_default(monkeyp
     task = _budget_task()
     _create_base_sandbox(task, "modal", image="img", name="n", timeout=12345)
     assert captured["timeout"] == 12345
+# ---------------------------------------------------------------------------
+# [verifier] environment contract (harbor schema >= 1.3)
+# ---------------------------------------------------------------------------
+
+
+def test_verifier_mode_defaults_to_shared(tmp_path):
+    """A task declaring nothing keeps the legacy in-place behaviour, so reading
+    the contract can never change an existing benchmark's outcome."""
+    task = _write_task(tmp_path, "[environment]\n", "FROM org/img:t\n")
+    assert task.metadata["verifier_mode"] == "shared"
+    assert task.metadata["verifier_collect"] == []
+    assert task.metadata["artifacts"] == []
+
+
+def test_declaring_a_verifier_environment_implies_separate(tmp_path):
+    """Harbor infers separate from the presence of [verifier.environment]."""
+    task = _write_task(tmp_path, "[environment]\n[verifier.environment]\ncpus = 2\n", "FROM org/img:t\n")
+    assert task.metadata["verifier_mode"] == "separate"
+
+
+def test_explicit_mode_wins_over_inference(tmp_path):
+    task = _write_task(
+        tmp_path,
+        '[environment]\n[verifier]\nenvironment_mode = "shared"\n',
+        "FROM org/img:t\n",
+    )
+    assert task.metadata["verifier_mode"] == "shared"
+
+
+def test_collect_and_artifacts_are_lifted(tmp_path):
+    """The collect commands and the artifact paths they produce — what a separate
+    verifier container needs to see the agent's work at all."""
+    task = _write_task(
+        tmp_path,
+        # ``artifacts`` is top-level, ahead of any table header (as real
+        # harbor task.toml files write it).
+        'artifacts = ["/logs/artifacts/model.patch"]\n'
+        '[environment]\n'
+        '[verifier]\nenvironment_mode = "separate"\n'
+        '[[verifier.collect]]\ncommand = "git diff --binary base HEAD > /logs/artifacts/model.patch"\n',
+        "FROM org/img:t\n",
+    )
+    assert task.metadata["verifier_mode"] == "separate"
+    assert task.metadata["artifacts"] == ["/logs/artifacts/model.patch"]
+    assert task.metadata["verifier_collect"][0]["command"].startswith("git diff --binary")
+
+
+def test_verifier_resources_layer_over_the_task_environment(tmp_path):
+    """deepswe declares cpus/memory under [verifier.environment] and no image, so
+    the verifier box must inherit the task's image rather than boot nothing."""
+    from rllm.eval._resolution import _verifier_env_section
+
+    task = _write_task(
+        tmp_path,
+        '[environment]\ndocker_image = "org/img:t"\ncpus = 8\nmemory_mb = 32768\n[verifier.environment]\ncpus = 2\n',
+        "FROM org/img:t\n",
+    )
+    env = _verifier_env_section(task)
+    assert env["docker_image"] == "org/img:t"  # inherited
+    assert env["cpus"] == 2  # verifier's own value wins
+    assert env["memory_mb"] == 32768

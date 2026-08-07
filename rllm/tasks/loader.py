@@ -244,6 +244,41 @@ def _normalize_env_section(env_section: dict, explicit_docker_image: bool) -> No
             env_section["storage_mb"] = mb
 
 
+# Harbor's ``[verifier]`` environment contract (schema >= 1.3). A task declares
+# whether its verifier runs in the agent's container or a dedicated one; a task
+# that declares nothing keeps the legacy shared behaviour, so reading this can
+# never change an existing benchmark's outcome.
+VERIFIER_MODE_SHARED = "shared"
+VERIFIER_MODE_SEPARATE = "separate"
+
+
+def _resolve_verifier_mode(verifier_section: dict) -> str:
+    """The verifier's environment mode, resolved the way harbor resolves it.
+
+    Explicit ``environment_mode`` wins; declaring a ``[verifier.environment]``
+    implies ``separate`` (that is how harbor infers it); everything else is
+    ``shared``. Mirrors ``harbor.models.task.verifier_mode._resolve_mode``.
+    """
+    declared = verifier_section.get("environment_mode")
+    if declared:
+        return str(declared)
+    if verifier_section.get("environment"):
+        return VERIFIER_MODE_SEPARATE
+    return VERIFIER_MODE_SHARED
+
+
+def _lift_verifier_contract(raw: dict, into: dict) -> None:
+    """Copy the task's declared verifier contract onto a metadata dict."""
+    verifier_section = raw.get("verifier", {}) or {}
+    into["verifier_mode"] = _resolve_verifier_mode(verifier_section)
+    into["verifier_environment"] = verifier_section.get("environment")
+    into["verifier_collect"] = verifier_section.get("collect", []) or []
+    into["verifier_network_mode"] = verifier_section.get("network_mode")
+    # Top-level ``artifacts``: paths the collect step produces, which a separate
+    # verifier container needs re-materialised at their original locations.
+    into["artifacts"] = raw.get("artifacts", []) or []
+
+
 def _merge_task_toml_metadata(task_dir: Path, base: dict) -> dict:
     """Merge per-task ``task.toml`` metadata into *base*.
 
@@ -289,6 +324,7 @@ def _merge_task_toml_metadata(task_dir: Path, base: dict) -> dict:
     _agent_timeout = raw.get("agent", {}).get("timeout_sec")
     if _agent_timeout is not None:
         merged["agent_timeout"] = _agent_timeout
+    _lift_verifier_contract(raw, merged)
     rllm_section = raw.get("rllm", {}) or {}
     merged["setup_commands"] = rllm_section.get("setup_commands", merged.get("setup_commands", [])) or []
     return merged
@@ -618,6 +654,7 @@ def _load_task_from_dir(
     _agent_timeout = raw.get("agent", {}).get("timeout_sec")
     if _agent_timeout is not None:
         metadata["agent_timeout"] = _agent_timeout
+    _lift_verifier_contract(raw, metadata)
     rllm_section = raw.get("rllm", {}) or {}
     metadata["setup_commands"] = rllm_section.get("setup_commands", []) or []
 

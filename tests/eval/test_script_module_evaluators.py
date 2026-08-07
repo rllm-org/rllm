@@ -379,14 +379,44 @@ class TestPreAgentGitHeadRestore:
         assert _capture_git_heads(task, sb) == {}
         assert sb.execs == []
 
+    @staticmethod
+    def _sandbox_reporting(sha_a: str, sha_b: str) -> "_FakeSandbox":
+        sb = _FakeSandbox()
+        sb.exec = lambda cmd, timeout=None, user=None: f"/app {sha_a}\n/testbed {sha_b}\nnot-a-repo\n"
+        return sb
+
     def test_capture_parses_repo_roots(self, tmp_path):
         from rllm.eval._resolution import _capture_git_heads
 
         sha_a, sha_b = "a" * 40, "b" * 40
-        sb = _FakeSandbox()
-        sb.exec = lambda cmd, timeout=None, user=None: f"/app {sha_a}\n/testbed {sha_b}\nnot-a-repo\n"
-        task = Task(id="0", instruction="", metadata={"workdir": "/testbed"}, dataset_dir=tmp_path)
+        sb = self._sandbox_reporting(sha_a, sha_b)
+        task = Task(id="0", instruction="", metadata={"workdir": "/testbed", "verifier_mode": "separate"}, dataset_dir=tmp_path)
 
+        assert _capture_git_heads(task, sb) == {"/app": sha_a, "/testbed": sha_b}
+
+    def test_shared_mode_tasks_are_left_alone(self, tmp_path):
+        """Moving HEAD is only right where we grade a separate-mode task in the
+        agent's box anyway. A shared-mode task's agent may be *supposed* to move
+        HEAD — terminal-bench's git-object-builder is scored on refs/heads/main
+        and `git ls-tree HEAD` — so resetting it would destroy the deliverable."""
+        from rllm.eval._resolution import _capture_git_heads
+
+        sb = self._sandbox_reporting("a" * 40, "b" * 40)
+        task = Task(id="0", instruction="", metadata={"verifier_mode": "shared"}, dataset_dir=tmp_path)
+        assert _capture_git_heads(task, sb) == {}
+        assert sb.execs == []  # not even probed
+
+        # A task that declares nothing at all is shared by default.
+        assert _capture_git_heads(Task(id="0", instruction="", metadata={}, dataset_dir=tmp_path), sb) == {}
+
+    def test_env_var_forces_it_on_for_a_shared_task(self, tmp_path, monkeypatch):
+        """Escape hatch for a shared-mode verifier that does assume pristine HEAD."""
+        from rllm.eval._resolution import _capture_git_heads
+
+        monkeypatch.setenv("RLLM_VERIFIER_RESTORE_GIT_HEAD", "1")
+        sha_a, sha_b = "a" * 40, "b" * 40
+        sb = self._sandbox_reporting(sha_a, sha_b)
+        task = Task(id="0", instruction="", metadata={"verifier_mode": "shared"}, dataset_dir=tmp_path)
         assert _capture_git_heads(task, sb) == {"/app": sha_a, "/testbed": sha_b}
 
 
@@ -520,3 +550,5 @@ class TestCoerceEvalResult:
         out = _coerce_eval_result(object())
         assert out.reward == 0.0
         assert "Cannot coerce" in out.metadata["error"]
+
+
