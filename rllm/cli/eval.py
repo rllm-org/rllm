@@ -53,9 +53,7 @@ def _load_agent_config(source: str | None) -> dict:
 
 def _is_sensitive_config_key(key: object) -> bool:
     normalized = str(key).lower().replace("-", "_")
-    return normalized in {"api_key", "token", "secret", "password"} or normalized.endswith(
-        ("_api_key", "_token", "_secret", "_password")
-    )
+    return normalized in {"api_key", "token", "secret", "password"} or normalized.endswith(("_api_key", "_token", "_secret", "_password"))
 
 
 def _redact_config(value):

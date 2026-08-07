@@ -11,11 +11,7 @@ from pathlib import Path
 
 def load_rllm(path: Path) -> dict[str, float]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    return {
-        str(item["task_id"]): float(item.get("signals", {}).get("coverage", 0.0))
-        for item in data["items"]
-        if item.get("task_id") is not None and item.get("error") is None
-    }
+    return {str(item["task_id"]): float(item.get("signals", {}).get("coverage", 0.0)) for item in data["items"] if item.get("task_id") is not None and item.get("error") is None}
 
 
 def load_official(path: Path) -> dict[str, float]:
@@ -56,10 +52,7 @@ def compare(rllm: dict[str, float], official: dict[str, float], threshold: float
     official_coverage = [official[task_id] for task_id in task_ids]
     rllm_passes = [float(score >= threshold) for score in rllm_coverage]
     official_passes = [float(score >= threshold) for score in official_coverage]
-    pass_differences = [
-        float(rllm[task_id] >= threshold) - float(official[task_id] >= threshold)
-        for task_id in task_ids
-    ]
+    pass_differences = [float(rllm[task_id] >= threshold) - float(official[task_id] >= threshold) for task_id in task_ids]
     ci_low, ci_high = paired_bootstrap_ci(pass_differences)
     rllm_pass_rate = sum(rllm_passes) / len(task_ids)
     official_pass_rate = sum(official_passes) / len(task_ids)
