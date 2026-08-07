@@ -550,6 +550,13 @@ class DaytonaSandbox:
         self._sandbox.fs.upload_file(local_path, remote_path)
         logger.debug("Uploaded %s -> %s in sandbox %s", local_path, remote_path, self.name)
 
+    def download_file(self, remote_path: str) -> bytes:
+        """Read a file out via Daytona's native ``fs.download_file``."""
+        try:
+            return self._sandbox.fs.download_file(remote_path)
+        except Exception as e:
+            raise FileNotFoundError(f"download_file: {remote_path} not readable in sandbox {self.name}: {e}") from e
+
     def upload_dir(self, local_path: str, remote_path: str) -> None:
         """Upload a directory tree.
 

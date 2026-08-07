@@ -31,8 +31,10 @@ class _FakeSandbox:
     ``test -f``/``cat`` shell commands the evaluator runs.
     """
 
-    def __init__(self, files: dict[str, str] | None = None):
+    def __init__(self, files: dict[str, str] | None = None, blobs: dict[str, bytes] | None = None):
         self.files: dict[str, str] = dict(files or {})
+        # Binary payloads reachable via upload_file/download_file (artifacts).
+        self.blobs: dict[str, bytes] = dict(blobs or {})
         self.execs: list[tuple[str, str | None]] = []
         self.uploads: list[tuple[str, str]] = []
 
@@ -50,6 +52,15 @@ class _FakeSandbox:
 
     def upload_dir(self, src: str, dst: str) -> None:
         self.uploads.append((src, dst))
+
+    def upload_file(self, local_path: str, remote_path: str) -> None:
+        with open(local_path, "rb") as f:
+            self.blobs[remote_path] = f.read()
+
+    def download_file(self, remote_path: str) -> bytes:
+        if remote_path not in self.blobs:
+            raise FileNotFoundError(remote_path)
+        return self.blobs[remote_path]
 
 
 def _episode() -> Episode:
@@ -552,3 +563,92 @@ class TestCoerceEvalResult:
         assert "Cannot coerce" in out.metadata["error"]
 
 
+class TestSeparateVerifierEnvironment:
+    """Harbor's `[verifier].environment_mode = "separate"`: the agent's work
+    reaches a fresh container as collected artifacts, so the verifier never sees
+    the box the agent mutated."""
+
+    @staticmethod
+    def _task(tmp_path: Path) -> Task:
+        return Task(
+            id="0",
+            instruction="",
+            metadata={"verifier_mode": "separate"},
+            dataset_dir=_bench(tmp_path),
+        )
+
+    def test_grades_in_the_fresh_box_and_tears_it_down(self, tmp_path):
+        agent = _FakeSandbox(files={"/logs/verifier/reward.txt": "0.0"})  # stale: agent's box
+        verifier = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        verifier.closed = False
+        verifier.close = lambda: setattr(verifier, "closed", True)
+
+        ev = ShellScriptEvaluator(sandbox=agent, verifier_sandbox_factory=lambda: verifier)
+        out = ev.evaluate(self._task(tmp_path), _episode())
+
+        assert out.reward == 1.0  # read from the verifier box, not the agent's
+        assert any(dst == "/tests" for _, dst in verifier.uploads)
+        assert verifier.closed, "the verifier box must not outlive the grade"
+
+    def test_collect_runs_in_the_agent_box_and_artifact_lands_in_the_verifier(self, tmp_path):
+        # Binary, and not valid UTF-8: `git diff --binary` output is why the
+        # transfer uses the backend's native primitive rather than exec stdout.
+        patch = b"diff --git a/x b/x\n\x00\xff\x01binary"
+        agent = _FakeSandbox(files={}, blobs={"/logs/artifacts/model.patch": patch})
+        verifier = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        verifier.close = lambda: None
+
+        ev = ShellScriptEvaluator(
+            sandbox=agent,
+            verifier_sandbox_factory=lambda: verifier,
+            collect_commands=[{"command": "git diff --binary base HEAD > /logs/artifacts/model.patch"}],
+            artifacts=["/logs/artifacts/model.patch"],
+        )
+        ev.evaluate(self._task(tmp_path), _episode())
+
+        assert any("git diff --binary" in c for c, _ in agent.execs), "collect must run in the agent's box"
+        assert verifier.blobs.get("/logs/artifacts/model.patch") == patch, "artifact must arrive byte-identical"
+
+    def test_a_missing_artifact_is_not_fatal(self, tmp_path):
+        """A collect step that produced nothing leaves the artifact absent; the
+        verifier reports that as an unsubmitted patch, not a grading crash."""
+        agent = _FakeSandbox(files={})  # no blobs -> download_file raises FileNotFoundError
+        verifier = _FakeSandbox(files={"/logs/verifier/reward.txt": "0.0"})
+        verifier.close = lambda: None
+
+        ev = ShellScriptEvaluator(
+            sandbox=agent,
+            verifier_sandbox_factory=lambda: verifier,
+            collect_commands=[{"command": "true"}],
+            artifacts=["/logs/artifacts/model.patch"],
+        )
+        out = ev.evaluate(self._task(tmp_path), _episode())
+        assert out.reward == 0.0
+        assert out.error is None  # a real 0, not an infra failure
+        assert "/logs/artifacts/model.patch" not in verifier.blobs
+
+    def test_head_is_not_touched_when_grading_elsewhere(self, tmp_path):
+        """A fresh box is already at the image's commit; the reset exists only to
+        undo an agent's commits in its own container."""
+        agent = _FakeSandbox(files={})
+        verifier = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        verifier.close = lambda: None
+
+        ev = ShellScriptEvaluator(
+            sandbox=agent,
+            verifier_sandbox_factory=lambda: verifier,
+            git_heads={"/app": "a" * 40},
+        )
+        ev.evaluate(self._task(tmp_path), _episode())
+
+        assert not any("reset --soft" in c for c, _ in agent.execs + verifier.execs)
+
+    def test_unbuildable_verifier_env_is_an_infra_error_not_a_zero(self, tmp_path):
+        def boom():
+            raise RuntimeError("no capacity")
+
+        ev = ShellScriptEvaluator(sandbox=_FakeSandbox(files={}), verifier_sandbox_factory=boom)
+        out = ev.evaluate(self._task(tmp_path), _episode())
+
+        assert out.error == "VerifierEnvironmentError"
+        assert out.reward == 0.0
