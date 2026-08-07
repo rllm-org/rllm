@@ -935,8 +935,6 @@ def eval_cmd(
         # Also publish it as the canonical env knob so the Modal backend derives
         # a sandbox lifetime with headroom over it (else a raised timeout would
         # still be reaped at the default lifetime).
-        import os
-
         os.environ["RLLM_HARNESS_RUN_TIMEOUT_S"] = str(agent_timeout)
 
     parsed_indices = parse_index_spec(task_indices) if task_indices is not None else None
