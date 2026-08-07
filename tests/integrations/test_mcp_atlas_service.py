@@ -53,6 +53,67 @@ def test_invalid_preflight_is_rejected():
         MCPAtlasServiceManager(preflight="skip")
 
 
+def test_uvx_compatibility_files_pin_mcp_1x(tmp_path):
+    manager = MCPAtlasServiceManager()
+    manager._tempdir = tempfile.TemporaryDirectory(dir=tmp_path)
+    try:
+        constraints, wrapper = manager._render_uvx_compatibility()
+        assert constraints.read_text() == "mcp==1.26.0\n"
+        assert "uv tool run --constraints" in wrapper.read_text()
+        assert stat.S_IMODE(wrapper.stat().st_mode) == 0o755
+        assert manager.metadata()["uvx_mcp_version"] == "1.26.0"
+    finally:
+        manager._tempdir.cleanup()
+
+
+def test_smoke_preflight_records_official_probe_failure(tmp_path):
+    script = tmp_path / "services" / "mcp_eval" / "test_servers.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        """
+BASE_URL = None
+ENV_PATH = None
+TEST_CALLS = {"fetch": ("fetch_fetch", {})}
+
+def load_servers():
+    return {"fetch": []}, {}
+
+async def main(timeout, concurrency, only_server):
+    raise SystemExit(1)
+"""
+    )
+    manager = MCPAtlasServiceManager(preflight="smoke", required_servers={"fetch"})
+    manager.sandbox_url = "http://sandbox.test"
+
+    manager._official_health_check(tmp_path)
+
+    assert manager.server_health["official_probes"] == []
+    assert manager.server_health["official_probe_failures"] == ["fetch"]
+
+
+def test_strict_preflight_rejects_official_probe_failure(tmp_path):
+    script = tmp_path / "services" / "mcp_eval" / "test_servers.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        """
+BASE_URL = None
+ENV_PATH = None
+TEST_CALLS = {"fetch": ("fetch_fetch", {})}
+
+def load_servers():
+    return {"fetch": []}, {}
+
+async def main(timeout, concurrency, only_server):
+    raise SystemExit(1)
+"""
+    )
+    manager = MCPAtlasServiceManager(preflight="strict", required_servers={"fetch"})
+    manager.sandbox_url = "http://sandbox.test"
+
+    with pytest.raises(RuntimeError, match="official health probe failed for fetch"):
+        manager._official_health_check(tmp_path)
+
+
 def test_missing_env_file_is_rejected(tmp_path):
     manager = MCPAtlasServiceManager(env_file=str(tmp_path / "missing.env"), external_harness_url="http://external")
     with pytest.raises(FileNotFoundError, match="env file"):
