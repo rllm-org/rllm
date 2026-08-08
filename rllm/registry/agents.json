@@ -26,6 +26,11 @@
       "function": "MiniSweAgentHarness",
       "description": "Run mini-swe-agent inside the sandbox."
     },
+    "swebench-pro-openhands-glm52": {
+      "module": "rllm.harnesses.swebench_pro_openhands_glm52",
+      "function": "SwebenchProOpenHandsGLM52Harness",
+      "description": "Best-effort OpenHands reproduction profile for llm-stats' GLM-5.2 SWE-bench Pro score (0.621)."
+    },
     "terminus2": {
       "module": "rllm.harnesses.terminus2",
       "function": "Terminus2Harness",
