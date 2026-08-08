@@ -16,6 +16,8 @@ from rllm.harnesses.swebench_pro_openhands_glm52 import (
     OPENHANDS_BENCHMARKS_REVISION,
     OPENHANDS_EXTENSIONS_REVISION,
     OPENHANDS_SDK_REVISION,
+    OPENROUTER_MODEL_ID,
+    OPENROUTER_PROVIDER_SLUG,
     REPRODUCTION_PROFILE,
     SwebenchProOpenHandsGLM52Harness,
     _render_prompt,
@@ -63,6 +65,11 @@ def test_profile_records_public_baseline_and_disclosure_gap():
     assert REPRODUCTION_PROFILE["score_status"] == "self_reported_unverified"
     assert "undisclosed" in REPRODUCTION_PROFILE["prompt_provenance"]
     assert REPRODUCTION_PROFILE["max_iterations"] == 500
+    assert REPRODUCTION_PROFILE["openrouter_provider_route"] == {
+        "only": [OPENROUTER_PROVIDER_SLUG],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+    }
 
 
 def test_install_script_pins_sdk_and_uses_minimal_tool_dependencies():
@@ -88,6 +95,8 @@ def test_driver_is_valid_and_encodes_disclosed_sampling_settings():
     assert "LLMSummarizingCondenser" in _DRIVER_SCRIPT
     assert "load_public_skills()" in _DRIVER_SCRIPT
     assert "agent_context=agent_context" in _DRIVER_SCRIPT
+    assert 'model.startswith("openrouter/")' in _DRIVER_SCRIPT
+    assert '"allow_fallbacks": False' in _DRIVER_SCRIPT
 
 
 def test_build_env_routes_openhands_through_the_rllm_gateway():
@@ -105,6 +114,12 @@ def test_build_env_routes_openhands_through_the_rllm_gateway():
 def test_profile_rejects_non_glm52_models():
     with pytest.raises(ValueError, match="requires a GLM-5.2 model"):
         SwebenchProOpenHandsGLM52Harness().build_env(_task(), _config("openai/gpt-5.4"))
+
+
+def test_build_env_preserves_openrouter_model_alias():
+    env = SwebenchProOpenHandsGLM52Harness().build_env(_task(), _config(OPENROUTER_MODEL_ID))
+
+    assert env["LLM_MODEL"] == f"openrouter/{OPENROUTER_MODEL_ID}"
 
 
 def test_write_configs_materializes_driver_and_public_prompt():

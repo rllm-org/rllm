@@ -25,6 +25,8 @@ from rllm.types import AgentConfig, Episode, Task, TerminationReason
 LLM_STATS_REFERENCE_URL = "https://llm-stats.com/benchmarks/swe-bench-pro"
 LLM_STATS_TARGET_SCORE = 0.621
 TARGET_MODEL = "GLM-5.2"
+OPENROUTER_MODEL_ID = "z-ai/glm-5.2"
+OPENROUTER_PROVIDER_SLUG = "z-ai"
 
 # Public baseline inspected on 2026-08-08. The benchmark repo pins the Agent
 # SDK through a git submodule; both revisions are kept here so an old rLLM run
@@ -67,6 +69,11 @@ REPRODUCTION_PROFILE = {
     "prompt_provenance": "public OpenHands SWE-bench Pro baseline; Z.ai tailored prompt undisclosed",
     "prompt_input": "rLLM official task instruction wrapped by the public OpenHands prompt",
     "workspace": "official task image /app exposed through OpenHands LocalWorkspace",
+    "openrouter_provider_route": {
+        "only": [OPENROUTER_PROVIDER_SLUG],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+    },
 }
 
 _INSTALL_SCRIPT = rf"""
@@ -218,9 +225,19 @@ def _fake_response(conversation):
 
 
 def main():
+    model = os.environ["LLM_MODEL"]
+    provider_route = None
+    if model.startswith("openrouter/"):
+        provider_route = {{
+            "provider": {{
+                "only": ["{OPENROUTER_PROVIDER_SLUG}"],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+            }}
+        }}
     llm = LLM(
         usage_id="agent",
-        model=os.environ["LLM_MODEL"],
+        model=model,
         api_key=os.environ["LLM_API_KEY"],
         base_url=os.environ["LLM_BASE_URL"],
         temperature={TEMPERATURE},
@@ -228,6 +245,7 @@ def main():
         max_input_tokens={CONTEXT_WINDOW_TOKENS},
         max_output_tokens={MAX_OUTPUT_TOKENS},
         disable_vision=True,
+        litellm_extra_body=provider_route or {{}},
     )
     condenser_llm = llm.model_copy(deep=True, update={{"usage_id": "condenser"}})
     public_skills = load_public_skills()
@@ -300,7 +318,13 @@ class SwebenchProOpenHandsGLM52Harness(BaseCliHarness):
     def build_env(self, task: Task, config: AgentConfig) -> dict[str, str]:
         if "glm-5.2" not in config.model.lower():
             raise ValueError(f"{self.name} requires a GLM-5.2 model, got {config.model!r}")
-        _, _, qualified = self.ensure_provider_prefix(config.model)
+        if config.model.lower().startswith("z-ai/"):
+            # rLLM's OpenRouter proxy exposes the exact OpenRouter model ID as
+            # its alias. Tell OpenHands/LiteLLM which provider syntax to use,
+            # while preserving that alias in the forwarded request body.
+            qualified = f"openrouter/{config.model}"
+        else:
+            _, _, qualified = self.ensure_provider_prefix(config.model)
         api_key = self.gateway_api_key(config, "OPENAI_API_KEY")
         timeout = int(float(task.metadata.get("agent_timeout") or self.run_timeout))
         workdir = str(task.metadata.get("workdir") or "/app")
