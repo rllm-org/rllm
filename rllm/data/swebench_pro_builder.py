@@ -19,6 +19,7 @@ On-disk output (``<out_dir>/``)::
 
     swebench_pro/
     ├── dataset.toml                       # type="sandbox"
+    ├── source_manifest.json                # resolved current-release provenance
     ├── <instance_id>/
     │   ├── task.toml                      # docker_image=jefzda/sweap-images:<tag>, workdir=/app
     │   ├── instruction.md                 # problem_statement [+ requirements / interface]
@@ -32,11 +33,14 @@ On-disk output (``<out_dir>/``)::
     └── ...
 
 The verifier replicates the upstream ``swe_bench_pro_eval.py`` flow:
-capture the agent's ``git diff`` at ``/app``, hard-reset to base_commit,
-re-apply the diff, run the last line of ``before_repo_set_cmd`` (which
-brings in the hidden test files), invoke ``run_script.sh``, parse
-results via ``parser.py``, and reward 1.0 iff every name in
-``fail_to_pass ∪ pass_to_pass`` is in the parser's PASSED set.
+collect the agent's patch at ``/app``, transfer it into a fresh verifier
+container through Harbor's separate-environment contract, hard-reset to
+base_commit, re-apply the diff, run the last line of
+``before_repo_set_cmd`` (which brings in the hidden test files), invoke
+``run_script.sh``, parse results via ``parser.py``, and reward 1.0 iff
+every name in ``fail_to_pass ∪ pass_to_pass`` is in the parser's PASSED
+set. A fresh verifier prevents agent-side dependency or process changes
+from contaminating the official test environment.
 
 Invoked from ``rllm dataset pull swebench_pro`` via the ``builder`` field
 in ``rllm/registry/datasets.json`` → :func:`rllm.cli._pull.pull_dataset`.
@@ -44,9 +48,11 @@ in ``rllm/registry/datasets.json`` → :func:`rllm.cli._pull.pull_dataset`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -58,6 +64,7 @@ logger = logging.getLogger(__name__)
 HF_REPO_ID = "ScaleAI/SWE-bench_Pro"
 SCRIPTS_REPO_URL = "https://github.com/scaleapi/SWE-bench_Pro-os.git"
 DOCKERHUB_NAMESPACE = "jefzda/sweap-images"
+OFFICIAL_MINI_SWE_AGENT_REVISION = "d74716a3c8104a113f77cc9ab94cf407ecdcf1e9"
 
 # Per-instance resource defaults. SWE-bench Pro instances ship full JS / Go /
 # Python test suites — the upstream eval allocates 1–4 CPU and 5–30 GiB. We
@@ -71,7 +78,10 @@ _DEFAULT_RESOURCES = {
 }
 
 _DEFAULT_TIMEOUTS = {
-    "agent_timeout_sec": 1800.0,
+    # The official SWE-agent wrapper allows one hour per instance. Keep the
+    # same wall-clock budget so the 250-turn reproduction profile is not cut
+    # off early by rLLM.
+    "agent_timeout_sec": 3600.0,
     "verifier_timeout_sec": 1800.0,
 }
 
@@ -98,6 +108,53 @@ def _shallow_clone_scripts_repo() -> Path:
         out = e.stdout.decode("utf-8", errors="replace") if e.stdout else ""
         raise RuntimeError(f"git clone of {SCRIPTS_REPO_URL} failed:\n{out}") from e
     return tmp
+
+
+def _git_revision(repo: Path) -> str:
+    """Return the resolved HEAD for a freshly cloned upstream repository."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        logger.warning("[swebench_pro] could not resolve scripts repository HEAD", exc_info=True)
+        return ""
+
+
+def _git_submodule_revision(repo: Path, submodule: str) -> str:
+    """Return the gitlink revision selected by the current official release."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", f"HEAD:{submodule}"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        logger.warning("[swebench_pro] could not resolve %s submodule revision", submodule, exc_info=True)
+        return ""
+
+
+def _strip_binary_hunks(patch: str) -> str:
+    """Remove the binary diff sections ignored by the official evaluator."""
+    if not patch:
+        return patch
+    sections = re.split(r"(?=^diff --git )", patch, flags=re.MULTILINE)
+    kept = []
+    for section in sections:
+        if not section.strip():
+            continue
+        if re.search(r"^Binary files .* differ$", section, re.MULTILINE):
+            continue
+        if re.search(r"^GIT binary patch$", section, re.MULTILINE):
+            continue
+        kept.append(section)
+    return "".join(kept)
 
 
 def _decode_json_list(value: Any) -> list[str]:
@@ -162,26 +219,11 @@ def _scripts_dir_for(scripts_root: Path, instance_id: str) -> Path | None:
 
 
 def _build_instruction(row: dict) -> str:
-    """Compose the agent instruction from problem_statement + extras.
-
-    SWE-bench Pro splits the brief into three fields:
-    - ``problem_statement``: the issue / bug report
-    - ``requirements``: explicit deliverables (sometimes null)
-    - ``interface``: API / interface spec the fix must conform to
-    Both extras are optional. We surface them as labeled sections so the
-    agent gets the same context the upstream eval gives.
-    """
-    parts: list[str] = []
-    problem = (row.get("problem_statement") or "").strip()
-    if problem:
-        parts.append(problem)
-    requirements = (row.get("requirements") or "").strip()
-    if requirements:
-        parts.append("## Requirements\n\n" + requirements)
-    interface = (row.get("interface") or "").strip()
-    if interface:
-        parts.append("## Interface\n\n" + interface)
-    return "\n\n".join(parts).rstrip() + "\n"
+    """Mirror the official ``create_problem_statement`` prompt exactly."""
+    problem = row.get("problem_statement") or ""
+    requirements = row.get("requirements") or ""
+    interface = row.get("interface") or ""
+    return f"{problem}\n\nRequirements:\n{requirements}\n\nNew interfaces introduced:\n{interface}"
 
 
 def _build_dockerfile(dockerhub_tag: str) -> str:
@@ -210,15 +252,21 @@ def _build_task_toml(
     repo_language: str,
     base_commit: str,
     dockerhub_tag: str,
+    dataset_revision: str,
+    dataset_fingerprint: str,
+    scripts_revision: str,
+    official_mini_swe_agent_revision: str,
 ) -> str:
     """Synthesize a Harbor-format ``task.toml``.
 
     The loader lifts ``[environment].docker_image`` / ``workdir`` /
     resources into ``task.metadata`` so non-docker backends pull the image
-    rather than rebuilding the Dockerfile.
+    rather than rebuilding the Dockerfile. The separate verifier contract
+    follows the same fresh-container boundary as the official evaluator.
     """
     lines = [
         'schema_version = "1.1"',
+        'artifacts = ["/tmp/rllm/model_patch.diff"]',
         "",
         "[task]",
         f'name = "swebench_pro/{instance_id}"',
@@ -231,6 +279,10 @@ def _build_task_toml(
         f'repo_language = "{repo_language}"',
         f'base_commit = "{base_commit}"',
         f'dockerhub_tag = "{dockerhub_tag}"',
+        f'dataset_revision = "{dataset_revision}"',
+        f'dataset_fingerprint = "{dataset_fingerprint}"',
+        f'scripts_revision = "{scripts_revision}"',
+        f'official_mini_swe_agent_revision = "{official_mini_swe_agent_revision}"',
         "",
         "[environment]",
         f'docker_image = "{DOCKERHUB_NAMESPACE}:{dockerhub_tag}"',
@@ -245,7 +297,12 @@ def _build_task_toml(
         f"timeout_sec = {_DEFAULT_TIMEOUTS['agent_timeout_sec']}",
         "",
         "[verifier]",
+        'environment_mode = "separate"',
         f"timeout_sec = {_DEFAULT_TIMEOUTS['verifier_timeout_sec']}",
+        "",
+        "[[verifier.collect]]",
+        f'command = "cd /app && mkdir -p /tmp/rllm && git add -A . && git diff --cached --binary {base_commit} > /tmp/rllm/model_patch.diff && git reset --quiet"',
+        "timeout_sec = 300.0",
         "",
     ]
     return "\n".join(lines)
@@ -255,8 +312,9 @@ def _build_task_toml(
 # jq is not) for JSON parsing and reward computation. Logic mirrors the
 # upstream entryscript in ``swe_bench_pro_eval.py:create_entryscript``:
 #
-#   1. ``git diff`` at /app captures the agent's edits as a patch (binary
-#      hunks included so png/icon edits don't break apply).
+#   1. ``[[verifier.collect]]`` captures the agent's edits as a patch and
+#      rLLM transfers it into a fresh task-image container. The script has
+#      a shared-mode capture fallback for the explicit escape hatch.
 #   2. ``git reset --hard {base_commit}`` + ``git checkout {base_commit}``
 #      reset the worktree to the pre-fix baseline.
 #   3. ``git apply`` re-applies the agent's patch on top of the reset.
@@ -309,10 +367,39 @@ fi
 # captured patch is always the right "agent's edits vs base_commit"
 # regardless of what the harness or the image left HEAD pointing at.
 log "Capturing agent diff vs base_commit ($BASE_COMMIT)"
-MODEL_PATCH=/tmp/model_patch.diff
-git add -A . >/dev/null 2>&1 || true
-git diff --cached --binary "$BASE_COMMIT" > "$MODEL_PATCH" 2>/dev/null || true
-git reset >/dev/null 2>&1 || true
+MODEL_PATCH=/tmp/rllm/model_patch.diff
+if [ -s "$MODEL_PATCH" ]; then
+    # Harbor-faithful separate verification: rLLM's collect contract copied
+    # this patch out of the agent container and into a fresh task image.
+    # That prevents agent-installed packages, background services, ignored
+    # files, or other environment mutations from affecting the grader.
+    log "Using collected agent patch from separate verifier contract"
+else
+    # Compatibility path for RLLM_SEPARATE_VERIFIER_ENV=0: the verifier is
+    # running in the agent container, so capture the worktree here instead.
+    log "No collected patch found; capturing in shared verifier environment"
+    git add -A . >/dev/null 2>&1 || true
+    git diff --cached --binary "$BASE_COMMIT" > "$MODEL_PATCH" 2>/dev/null || true
+    git reset >/dev/null 2>&1 || true
+fi
+
+# Match the official evaluator's ``strip_binary_hunks`` preprocessing.
+python3 - "$MODEL_PATCH" <<'PY'
+import re, sys
+path = sys.argv[1]
+patch = open(path, encoding="utf-8", errors="replace").read()
+sections = re.split(r"(?=^diff --git )", patch, flags=re.MULTILINE)
+kept = []
+for section in sections:
+    if not section.strip():
+        continue
+    if re.search(r"^Binary files .* differ$", section, re.MULTILINE):
+        continue
+    if re.search(r"^GIT binary patch$", section, re.MULTILINE):
+        continue
+    kept.append(section)
+open(path, "w", encoding="utf-8").write("".join(kept))
+PY
 
 PATCH_BYTES=$(wc -c < "$MODEL_PATCH" 2>/dev/null || echo 0)
 log "Captured patch: $PATCH_BYTES bytes"
@@ -608,6 +695,10 @@ def _materialize_task(
             repo_language=repo_language,
             base_commit=base_commit,
             dockerhub_tag=dockerhub_tag,
+            dataset_revision=row.get("_dataset_revision", ""),
+            dataset_fingerprint=row.get("_dataset_fingerprint", ""),
+            scripts_revision=row.get("_scripts_revision", ""),
+            official_mini_swe_agent_revision=row.get("_official_mini_swe_agent_revision") or OFFICIAL_MINI_SWE_AGENT_REVISION,
         ),
         encoding="utf-8",
     )
@@ -648,7 +739,7 @@ def _materialize_task(
     # solution/ (gold patch + apply script for the oracle harness)
     sol_dst = task_dir / "solution"
     sol_dst.mkdir(parents=True, exist_ok=True)
-    patch = row.get("patch") or ""
+    patch = _strip_binary_hunks(row.get("patch") or "")
     (sol_dst / "gold.patch").write_text(patch, encoding="utf-8")
     (sol_dst / "solve.sh").write_text(_build_solution_script(base_commit), encoding="utf-8")
     (sol_dst / "solve.sh").chmod(0o755)
@@ -656,12 +747,44 @@ def _materialize_task(
     return {"f2p": len(instance_data["fail_to_pass"]), "p2p": len(instance_data["pass_to_pass"])}
 
 
-def _load_rows(hf_split: str) -> list[dict]:
-    """Load the HF dataset rows as a list of plain dicts."""
+def _resolve_hf_revision() -> str:
+    """Resolve the current official HF dataset HEAD to an immutable commit."""
+    try:
+        from huggingface_hub import HfApi
+
+        return str(HfApi().dataset_info(HF_REPO_ID).sha or "")
+    except Exception:
+        logger.warning("[swebench_pro] could not resolve Hugging Face dataset revision", exc_info=True)
+        return ""
+
+
+def _load_rows(hf_split: str, revision: str | None = None) -> tuple[list[dict], str]:
+    """Load HF rows at the resolved revision and return their fingerprint."""
     from datasets import load_dataset
 
-    ds = load_dataset(HF_REPO_ID, split=hf_split)
-    return [dict(r) for r in ds]
+    kwargs = {"split": hf_split}
+    if revision:
+        kwargs["revision"] = revision
+    ds = load_dataset(HF_REPO_ID, **kwargs)
+    return [dict(r) for r in ds], str(getattr(ds, "_fingerprint", "") or "")
+
+
+def _task_ids_sha256(task_ids: list[str]) -> str:
+    """Hash the ordered task identity list recorded in the source manifest."""
+    return hashlib.sha256(("\n".join(task_ids) + "\n").encode()).hexdigest()
+
+
+def _prune_stale_task_dirs(out: Path, active_ids: set[str]) -> int:
+    """Remove materialized task directories no longer in a full upstream pull."""
+    pruned = 0
+    for child in out.iterdir():
+        if not child.is_dir() or not (child / "task.toml").is_file():
+            continue
+        if child.name in active_ids:
+            continue
+        shutil.rmtree(child)
+        pruned += 1
+    return pruned
 
 
 def build_benchmark(
@@ -672,7 +795,7 @@ def build_benchmark(
     catalog_entry: dict | None = None,
     task_ids: list[str] | None = None,
     limit: int | None = None,
-    default_agent: str = "mini-swe-agent",
+    default_agent: str = "swebench-pro-mini",
     hf_split: str = "test",
     clean: bool = False,
     register: bool = True,
@@ -685,7 +808,7 @@ def build_benchmark(
         out_dir: Output benchmark directory.
         catalog_entry: Optional catalog entry (datasets.json); ``description``
             and ``default_agent`` are read from it when present.
-        task_ids: Build only these ``instance_id`` values. Default: all 731.
+        task_ids: Build only these ``instance_id`` values. Default: all current rows.
         limit: Keep only the first N rows (after the ``task_ids`` filter).
         default_agent: ``default_agent`` written into dataset.toml.
         hf_split: HF split to load (defaults to ``test`` — the only split
@@ -714,7 +837,9 @@ def build_benchmark(
         logger.info("[swebench_pro] refreshed test.sh + solve.sh in %d existing task dirs", refreshed)
 
     logger.info("[swebench_pro] loading HF dataset %s split=%s ...", HF_REPO_ID, hf_split)
-    rows = _load_rows(hf_split)
+    dataset_revision = _resolve_hf_revision()
+    rows, dataset_fingerprint = _load_rows(hf_split, revision=dataset_revision or None)
+    upstream_row_count = len(rows)
     if task_ids is not None:
         keep = set(task_ids)
         rows = [r for r in rows if r.get("instance_id") in keep]
@@ -724,29 +849,51 @@ def build_benchmark(
 
     scripts_root = _shallow_clone_scripts_repo()
     try:
+        scripts_revision = _git_revision(scripts_root)
+        official_mini_revision = _git_submodule_revision(scripts_root, "mini-swe-agent") or OFFICIAL_MINI_SWE_AGENT_REVISION
+        for row in rows:
+            row["_dataset_revision"] = dataset_revision
+            row["_dataset_fingerprint"] = dataset_fingerprint
+            row["_scripts_revision"] = scripts_revision
+            row["_official_mini_swe_agent_revision"] = official_mini_revision
+        if task_ids is None and limit is None:
+            active_ids = {str(row["instance_id"]) for row in rows if row.get("instance_id")}
+            pruned = _prune_stale_task_dirs(out, active_ids)
+            if pruned:
+                logger.info("[swebench_pro] pruned %d task dirs removed from the current upstream release", pruned)
+
         written = 0
         skipped = 0
+        materialized_ids: list[str] = []
+        skipped_ids: list[str] = []
         for row in rows:
             instance_id = row.get("instance_id")
             if not instance_id:
                 logger.warning("[swebench_pro] row missing instance_id, skipping")
                 skipped += 1
                 continue
+            task_dst = out / instance_id
             scripts_dir = _scripts_dir_for(scripts_root, instance_id)
             if scripts_dir is None:
                 logger.warning("[swebench_pro] no run_scripts/ entry for %s, skipping", instance_id)
+                if task_dst.exists():
+                    shutil.rmtree(task_dst)
                 skipped += 1
+                skipped_ids.append(instance_id)
                 continue
             if not (scripts_dir / "run_script.sh").is_file() or not (scripts_dir / "parser.py").is_file():
                 logger.warning("[swebench_pro] %s missing run_script.sh or parser.py, skipping", instance_id)
+                if task_dst.exists():
+                    shutil.rmtree(task_dst)
                 skipped += 1
+                skipped_ids.append(instance_id)
                 continue
 
-            task_dst = out / instance_id
             if task_dst.exists():
                 shutil.rmtree(task_dst)
             _materialize_task(task_dst, row, scripts_dir)
             written += 1
+            materialized_ids.append(instance_id)
 
         description = (catalog_entry or {}).get("description") or "SWE-bench Pro (Public): 731 enterprise-grade SWE tasks across 41 repos, pre-built Docker images, F2P/P2P pytest-style grading."
         _write_dataset_toml(
@@ -756,6 +903,21 @@ def build_benchmark(
             description=description,
             default_agent=default_agent,
         )
+        source_manifest = {
+            "dataset_source": HF_REPO_ID,
+            "dataset_revision": dataset_revision,
+            "dataset_fingerprint": dataset_fingerprint,
+            "dataset_split": hf_split,
+            "upstream_task_count": upstream_row_count,
+            "scripts_source": SCRIPTS_REPO_URL,
+            "scripts_revision": scripts_revision,
+            "official_mini_swe_agent_revision": official_mini_revision,
+            "materialized_task_count": len(materialized_ids),
+            "materialized_task_ids_sha256": _task_ids_sha256(materialized_ids),
+            "materialized_task_ids": materialized_ids,
+            "skipped_task_ids": skipped_ids,
+        }
+        (out / "source_manifest.json").write_text(json.dumps(source_manifest, indent=2) + "\n", encoding="utf-8")
         logger.info("[swebench_pro] wrote %d task dirs to %s (skipped %d)", written, out, skipped)
 
         if register:
@@ -779,6 +941,10 @@ def build_benchmark(
                             "repo": row.get("repo", ""),
                             "repo_language": row.get("repo_language", ""),
                             "dockerhub_tag": row.get("dockerhub_tag", ""),
+                            "dataset_revision": dataset_revision,
+                            "dataset_fingerprint": dataset_fingerprint,
+                            "scripts_revision": scripts_revision,
+                            "official_mini_swe_agent_revision": official_mini_revision,
                         }
                     )
                 DatasetRegistry.register_dataset(
@@ -808,7 +974,7 @@ def main() -> None:
     parser.add_argument("--hf-split", default="test")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--task-ids", nargs="*", default=None)
-    parser.add_argument("--default-agent", default="mini-swe-agent")
+    parser.add_argument("--default-agent", default="swebench-pro-mini")
     parser.add_argument("--clean", action="store_true")
     args = parser.parse_args()
 
