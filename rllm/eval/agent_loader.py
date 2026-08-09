@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import os
 from importlib.metadata import entry_points
 
 from rllm import paths
 from rllm.types import AgentFlow
+
+logger = logging.getLogger(__name__)
 
 _USER_AGENTS_FILE = paths.rllm_path("agents.json")
 
@@ -104,16 +107,40 @@ def _validate_agent_class(cls: type, name: str) -> None:
         raise TypeError(f"Agent '{name}' must be an AgentFlow class with a .run() method, got {cls.__name__}")
 
 
-def _load_and_instantiate(import_path: str, name: str) -> AgentFlow:
-    """Import an agent from a path, auto-instantiate classes, and validate."""
-    obj = _import_from_path(import_path)
+def _finalize_agent(obj: object, name: str, agent_args: dict | None = None) -> AgentFlow:
+    """Instantiate a resolved agent object and apply ``agent_args``.
+
+    A class is constructed with ``agent_args`` as keyword arguments. An
+    already-instantiated object receives ``agent_args`` through its
+    ``configure()`` method when it exposes one (unconsumed keys warn); with no
+    ``configure()`` and ``agent_args`` given, they are ignored with a warning.
+    """
+    args = dict(agent_args or {})
     if isinstance(obj, type):
-        obj = obj()
+        obj = obj(**args)
+        args = {}
     _validate_agent(obj, name)
+    if args:
+        configure = getattr(obj, "configure", None)
+        if callable(configure):
+            leftovers = dict(configure(dict(args)) or {})
+            for key in leftovers:
+                logger.warning("agent_args %r had no effect for agent %s", key, type(obj).__name__)
+        else:
+            logger.warning(
+                "agent %s exposes no configure(); ignoring agent_args %s (use a module:Class import path to pass constructor kwargs)",
+                type(obj).__name__,
+                sorted(args),
+            )
     return obj
 
 
-def load_agent(name_or_path: str) -> AgentFlow:
+def _load_and_instantiate(import_path: str, name: str, agent_args: dict | None = None) -> AgentFlow:
+    """Import an agent from a path, instantiate (with ``agent_args``), and validate."""
+    return _finalize_agent(_import_from_path(import_path), name, agent_args)
+
+
+def load_agent(name_or_path: str, agent_args: dict | None = None) -> AgentFlow:
     """Load an agent by registry name, import path, or entry point.
 
     Lookup order: user registry (``~/.rllm/agents.json``) → colon import path
@@ -124,6 +151,9 @@ def load_agent(name_or_path: str) -> AgentFlow:
         name_or_path: A registry name (e.g., ``"math"``), a colon-separated
             import path (e.g., ``"my_module:my_agent"``), or a plugin name
             registered via the ``rllm.agents`` entry-point group.
+        agent_args: Optional kwargs applied to the resolved flow — constructor
+            kwargs when it resolves to a class, else forwarded to the instance's
+            ``configure()``. Defaults to no args (unchanged behavior).
 
     Returns:
         An AgentFlow instance with a ``.run()`` method.
@@ -133,16 +163,16 @@ def load_agent(name_or_path: str) -> AgentFlow:
         harbor_agent_name = name_or_path.removeprefix("harbor:")
         from rllm.integrations.harbor.runtime import HarborRuntime
 
-        return HarborRuntime(agent_name=harbor_agent_name)
+        return HarborRuntime(agent_name=harbor_agent_name, **(agent_args or {}))
 
     # 1. User-registered agents (persistent, from register_agent())
     user_agents = _load_user_agents()
     if name_or_path in user_agents:
-        return _load_and_instantiate(user_agents[name_or_path]["import_path"], name_or_path)
+        return _load_and_instantiate(user_agents[name_or_path]["import_path"], name_or_path, agent_args)
 
     # 2. Explicit import path: "my_module:my_agent"
     if ":" in name_or_path:
-        return _load_and_instantiate(name_or_path, name_or_path)
+        return _load_and_instantiate(name_or_path, name_or_path, agent_args)
 
     # 3. Built-in catalog
     catalog = _load_agent_catalog()
@@ -151,20 +181,14 @@ def load_agent(name_or_path: str) -> AgentFlow:
         entry = agents[name_or_path]
         module = importlib.import_module(entry["module"])
         obj = getattr(module, entry["function"])
-        if isinstance(obj, type):
-            obj = obj()
-        _validate_agent(obj, name_or_path)
-        return obj
+        return _finalize_agent(obj, name_or_path, agent_args)
 
     # 4. Plugin discovery via entry points
     eps = entry_points(group="rllm.agents")
     for ep in eps:
         if ep.name == name_or_path:
             obj = ep.load()
-            if isinstance(obj, type):
-                obj = obj()
-            _validate_agent(obj, name_or_path)
-            return obj
+            return _finalize_agent(obj, name_or_path, agent_args)
 
     available = ", ".join(sorted(agents.keys()))
     raise KeyError(f"Agent '{name_or_path}' not found in registry. Available built-in: {available}")

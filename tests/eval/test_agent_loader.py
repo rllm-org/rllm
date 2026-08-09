@@ -27,6 +27,20 @@ class TestLoadAgent:
         assert isinstance(agent, ReActHarness)
         assert not isinstance(agent, type)
 
+    def test_agent_args_as_constructor_kwargs_import_path(self):
+        """agent_args are passed to the class constructor (import-path form)."""
+        agent = load_agent("rllm.harnesses.react:ReActHarness", {"system_prompt": "custom-sp"})
+        assert agent.system_prompt == "custom-sp"
+
+    def test_agent_args_as_constructor_kwargs_catalog_name(self):
+        """agent_args reach the constructor for a catalog-resolved name too."""
+        agent = load_agent("react", {"system_prompt": "sp2"})
+        assert agent.system_prompt == "sp2"
+
+    def test_agent_args_none_is_unchanged_behavior(self):
+        agent = load_agent("rllm.harnesses.react:ReActHarness")
+        assert agent.system_prompt is not None  # default applied, no kwargs
+
     def test_load_bad_import_path_raises(self):
         with pytest.raises(ImportError):
             load_agent("nonexistent.module:my_agent")
