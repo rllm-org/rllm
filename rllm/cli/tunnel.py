@@ -29,14 +29,17 @@ def tunnel():
 
 @tunnel.command("setup")
 def tunnel_setup():
-    """Configure a stable tunnel backend (ngrok or cloudflared) for this machine."""
+    """Configure a stable tunnel backend (ngrok, cloudflare, or cloudflared) for this machine."""
+    import os
+
     from rllm.cli._ui import _select_from_menu, abort, console, fail
     from rllm.eval.config import load_tunnel_config, save_tunnel_config
-    from rllm.gateway.tunnel import CloudflaredTunnel, NgrokTunnel
+    from rllm.gateway.tunnel import ENV_CF_TUNNEL_TOKEN, CloudflaredTunnel, CloudflareNamedTunnel, NgrokTunnel
 
     existing = load_tunnel_config()
     backends = [
         ("ngrok", "ngrok — stable reserved domain, needs a (free) account  [recommended]"),
+        ("cloudflare", "cloudflare — named (production) tunnel on your own domain, needs a Cloudflare account"),
         ("cloudflared", "cloudflared — free quick tunnel, zero setup, shared & rate-limited"),
     ]
     cursor = next((i for i, (b, _) in enumerate(backends) if b == existing.get("backend")), 0)
@@ -46,6 +49,7 @@ def tunnel_setup():
     backend = backends[idx][0]
 
     domain: str | None = None
+    name: str | None = None
     if backend == "ngrok":
         if not NgrokTunnel.is_available():
             fail(f"ngrok not found on PATH. {NgrokTunnel.install_hint}")
@@ -69,6 +73,31 @@ def tunnel_setup():
             ).strip()
             or None
         )
+    elif backend == "cloudflare":
+        if not CloudflareNamedTunnel.is_available():
+            fail(f"cloudflared not found on PATH. {CloudflareNamedTunnel.install_hint}")
+        domain = click.prompt(
+            "  Public hostname routed to the tunnel (e.g. rllm.example.com)",
+            default=existing.get("domain", ""),
+            show_default=bool(existing.get("domain")),
+        ).strip()
+        if not domain:
+            fail("A public hostname is required for a Cloudflare named tunnel.")
+        name = (
+            click.prompt(
+                "  Locally-managed tunnel name from `cloudflared tunnel create` (blank if dashboard-managed via a token)",
+                default=existing.get("name", ""),
+                show_default=bool(existing.get("name")),
+            ).strip()
+            or None
+        )
+        if name:
+            console.print(f"  [muted]Requires `cloudflared tunnel login`, `cloudflared tunnel create {name}` and `cloudflared tunnel route dns {name} {domain}` once.[/]")
+        else:
+            console.print(f"  [muted]Dashboard-managed: export the connector token as TUNNEL_TOKEN (or {ENV_CF_TUNNEL_TOKEN}) before `rllm tunnel up`,[/]")
+            console.print("  [muted]and point the tunnel's public hostname at http://localhost:<gateway port> in Zero Trust → Networks → Tunnels.[/]")
+            if not (os.getenv("TUNNEL_TOKEN") or os.getenv(ENV_CF_TUNNEL_TOKEN)):
+                console.print("  [yellow]![/] [muted]No TUNNEL_TOKEN in this shell yet.[/]")
     else:
         if not CloudflaredTunnel.is_available():
             fail(f"cloudflared not found on PATH. {CloudflaredTunnel.install_hint}")
@@ -80,8 +109,8 @@ def tunnel_setup():
         type=int,
     )
 
-    save_tunnel_config(backend, domain=domain, port=int(port))
-    summary = backend + (f":{domain}" if domain else "")
+    save_tunnel_config(backend, domain=domain, name=name, port=int(port))
+    summary = backend + (f":{domain}" if domain else "") + (f"@{name}" if name else "")
     console.print(f"\n  [success]✓ Tunnel configured:[/] [val]{summary}[/] [muted](gateway port {port})[/]")
     console.print("  Start it with [key]rllm tunnel up[/]; training picks up the URL automatically.")
 
@@ -112,9 +141,11 @@ def tunnel_up(backend, port):
 
     cfg = load_tunnel_config()
     resolved_backend = backend or cfg.get("backend") or "cloudflared"
-    # Fold a configured reserved domain into a bare "ngrok" spec.
+    # Fold configured details into a bare backend spec.
     if resolved_backend == "ngrok" and cfg.get("domain"):
         resolved_backend = f"ngrok:{cfg['domain']}"
+    elif resolved_backend == "cloudflare" and cfg.get("domain"):
+        resolved_backend = f"cloudflare:{cfg['domain']}" + (f"@{cfg['name']}" if cfg.get("name") else "")
     resolved_port = port or cfg.get("port") or DEFAULT_PORT
     upstream = f"http://127.0.0.1:{resolved_port}"
 
