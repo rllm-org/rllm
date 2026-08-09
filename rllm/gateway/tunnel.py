@@ -1,12 +1,15 @@
 """Public-URL tunneling for the rLLM gateway.
 
 Tunnels expose the local gateway at a public URL so agents in *remote*
-sandboxes (Daytona, Modal, Fireworks-driven runtimes) can reach it. Two
+sandboxes (Daytona, Modal, Fireworks-driven runtimes) can reach it. Three
 backends ship:
 
 * :class:`CloudflaredTunnel` — ``cloudflared tunnel --url`` →
   ``*.trycloudflare.com``. Zero-setup, but a shared, rate-limited (HTTP 429)
   quick tunnel; fine for smoke tests, not for high-concurrency training.
+* :class:`CloudflareNamedTunnel` — ``cloudflared tunnel run`` against a
+  *named* (production) tunnel tied to a Cloudflare account, serving a stable
+  hostname on your own domain with none of the quick-tunnel limits.
 * :class:`NgrokTunnel` — ``ngrok http`` → ``*.ngrok-free.app`` or your own
   reserved domain. Needs a one-time ``rllm tunnel setup`` (authtoken) but is
   stable across restarts.
@@ -48,8 +51,14 @@ LOCAL_SANDBOX_BACKENDS: frozenset[str] = frozenset({"docker", "local", "apple-co
 
 # Environment override consulted before the daemon state file (see
 # :func:`resolve_auto_tunnel`). Either a backend name ("cloudflared",
-# "ngrok", "ngrok:<domain>") or an explicit http(s):// URL.
+# "ngrok", "ngrok:<domain>", "cloudflare:<hostname>[@<tunnel-name>]") or an
+# explicit http(s):// URL.
 ENV_TUNNEL = "RLLM_GATEWAY_TUNNEL"
+
+# Connector token for a dashboard-managed Cloudflare named tunnel.
+# ``TUNNEL_TOKEN`` is cloudflared's own env var; the rLLM-prefixed alias
+# exists so the token can live next to other RLLM_* settings.
+ENV_CF_TUNNEL_TOKEN = "CLOUDFLARE_TUNNEL_TOKEN"
 
 
 def is_local_sandbox_backend(name: str | None) -> bool:
@@ -64,13 +73,16 @@ def parse_tunnel(value: str | None) -> tuple[str | None, str | None]:
 
     URLs (``http(s)://...``) pass through as ``public_url``; anything else is
     treated as a backend spec to spawn (e.g. ``"cloudflared"``, ``"ngrok"``,
-    ``"ngrok:rllm.ngrok.dev"``) — see :func:`create_tunnel`.
+    ``"ngrok:rllm.ngrok.dev"``, ``"cloudflare:rllm.example.com@my-tunnel"``) —
+    see :func:`create_tunnel`. The spec is passed through verbatim (Cloudflare
+    tunnel names are case-sensitive); :func:`create_tunnel` normalizes the
+    backend-name part itself.
     """
     if not value:
         return None, None
     if value.startswith(("http://", "https://")):
         return value, None
-    return None, value.lower()
+    return None, value
 
 
 _TRYCF_URL_RE = re.compile(r"https?://[a-zA-Z0-9.-]+\.trycloudflare\.com")
@@ -141,6 +153,10 @@ class _Tunnel:
 
     def _command(self) -> list[str]:
         raise NotImplementedError
+
+    def _popen_env(self) -> dict[str, str] | None:
+        """Environment for the tunnel subprocess (``None`` = inherit the caller's)."""
+        return None
 
     def _extract_url(self, line: str) -> str | None:
         """Return the public URL if this log line announces it, else ``None``."""
@@ -243,7 +259,7 @@ class _Tunnel:
         else:
             stdout, stderr = subprocess.PIPE, subprocess.STDOUT
 
-        self._proc = subprocess.Popen(cmd, stdout=stdout, stderr=stderr, text=True, bufsize=1)
+        self._proc = subprocess.Popen(cmd, stdout=stdout, stderr=stderr, text=True, bufsize=1, env=self._popen_env())
         self._reader = threading.Thread(target=self._scan_stream, daemon=True)
         self._reader.start()
 
@@ -366,17 +382,103 @@ class NgrokTunnel(_Tunnel):
         return None
 
 
+class CloudflareNamedTunnel(_Tunnel):
+    """Run a *named* (production) Cloudflare tunnel serving a stable hostname.
+
+    Unlike :class:`CloudflaredTunnel` quick tunnels, named tunnels are tied to
+    a Cloudflare account and serve a hostname on your own domain, with no
+    shared-infra rate limits or 120s origin read timeout. Two modes:
+
+    * **Dashboard-managed (token)** — create the tunnel in Zero Trust
+      (Networks → Tunnels), point its public hostname at
+      ``http://localhost:<gateway port>``, and export the connector token as
+      ``TUNNEL_TOKEN`` (or ``CLOUDFLARE_TUNNEL_TOKEN``). Spec:
+      ``cloudflare:<hostname>``. Ingress lives in the dashboard, so the
+      hostname → port mapping there must match the gateway port.
+    * **Locally-managed (name)** — after ``cloudflared tunnel login``,
+      ``cloudflared tunnel create <name>`` and
+      ``cloudflared tunnel route dns <name> <hostname>``, we run
+      ``cloudflared tunnel run --url <upstream> <name>`` so ingress follows the
+      gateway port automatically. Spec: ``cloudflare:<hostname>@<name>``.
+
+    Named tunnels never log their public URL (the hostname is DNS-routed), so
+    the URL is derived from ``hostname`` once cloudflared registers its first
+    connection to the Cloudflare edge.
+    """
+
+    name = "cloudflare"
+    binary = "cloudflared"
+    install_hint = "Install: brew install cloudflared"
+    log_stream = "stderr"
+
+    _REGISTERED_RE = re.compile(r"Registered tunnel connection")
+
+    def __init__(self, upstream_url: str, *, hostname: str, tunnel_ref: str | None = None, **kwargs) -> None:
+        super().__init__(upstream_url, **kwargs)
+        self.hostname = hostname.strip().split("://", 1)[-1].rstrip("/")
+        self.tunnel_ref = tunnel_ref.strip() if tunnel_ref else None
+
+    @staticmethod
+    def _token() -> str | None:
+        return os.getenv("TUNNEL_TOKEN") or os.getenv(ENV_CF_TUNNEL_TOKEN)
+
+    def _command(self) -> list[str]:
+        if self.tunnel_ref:
+            return ["cloudflared", "tunnel", "run", "--url", self.upstream_url, self.tunnel_ref]
+        if not self._token():
+            raise TunnelStartError(
+                f"Cloudflare named tunnel for {self.hostname!r} needs credentials: export the connector "
+                f"token as TUNNEL_TOKEN or {ENV_CF_TUNNEL_TOKEN} (Zero Trust → Networks → Tunnels), or use a "
+                "locally-managed tunnel via 'cloudflare:<hostname>@<tunnel-name>'.",
+            )
+        # Dashboard-managed: ingress (hostname → local port) lives in Zero
+        # Trust, so no --url here; the token travels via the TUNNEL_TOKEN env
+        # var (see _popen_env) to keep it out of `ps` output.
+        return ["cloudflared", "tunnel", "run"]
+
+    def _popen_env(self) -> dict[str, str] | None:
+        if self.tunnel_ref:
+            return None
+        return {**os.environ, "TUNNEL_TOKEN": self._token() or ""}
+
+    def _extract_url(self, line: str) -> str | None:
+        # Named tunnels never announce a public URL; the first edge
+        # registration means "serving", and the hostname is known up front.
+        if self._REGISTERED_RE.search(line):
+            return f"https://{self.hostname}"
+        return None
+
+    def _is_transient(self, log_tail: str) -> bool:
+        return any(p.search(log_tail) for p in _CF_TRANSIENT_PATTERNS)
+
+    def _classify_fatal(self, log_tail: str) -> str | None:
+        low = log_tail.lower()
+        if "token is not valid" in low or "invalid tunnel token" in low:
+            return "Cloudflare rejected the tunnel token. Re-copy it from Zero Trust → Networks → Tunnels → your tunnel, then re-export TUNNEL_TOKEN."
+        if "cert.pem" in low or "origincert" in low:
+            return f"cloudflared has no origin certificate for locally-managed tunnels. Run `cloudflared tunnel login`, then `cloudflared tunnel create {self.tunnel_ref or '<name>'}`."
+        if "credentials file" in low or ("tunnel" in low and "not found" in low):
+            return f"cloudflared could not load tunnel {self.tunnel_ref!r}. Check `cloudflared tunnel list` and the credentials JSON in ~/.cloudflared/."
+        return None
+
+
 # Registry of spawnable backends keyed by the name in ``rllm.gateway.tunnel``.
 _BACKENDS: dict[str, type[_Tunnel]] = {
     "cloudflared": CloudflaredTunnel,
+    "cloudflare": CloudflareNamedTunnel,
     "ngrok": NgrokTunnel,
 }
 
 
 def create_tunnel(spec: str, upstream_url: str) -> _Tunnel:
-    """Build a tunnel from a backend spec (``"cloudflared"``, ``"ngrok"``, ``"ngrok:<domain>"``).
+    """Build a tunnel from a backend spec.
 
-    Raises :class:`ValueError` for an unknown backend.
+    Accepted specs: ``"cloudflared"`` (quick tunnel), ``"ngrok"``,
+    ``"ngrok:<domain>"``, ``"cloudflare:<hostname>"`` (dashboard-managed named
+    tunnel, token from ``$TUNNEL_TOKEN``), or
+    ``"cloudflare:<hostname>@<tunnel-name>"`` (locally-managed named tunnel).
+
+    Raises :class:`ValueError` for an unknown backend or a malformed spec.
     """
     name, _, opt = spec.partition(":")
     name = name.strip().lower()
@@ -384,10 +486,17 @@ def create_tunnel(spec: str, upstream_url: str) -> _Tunnel:
     if cls is None:
         supported = "', '".join(sorted(_BACKENDS))
         raise ValueError(
-            f"Unsupported gateway tunnel backend: {spec!r}. Supported: '{supported}', 'ngrok:<domain>', or an http(s):// URL.",
+            f"Unsupported gateway tunnel backend: {spec!r}. Supported: '{supported}', 'ngrok:<domain>', 'cloudflare:<hostname>[@<tunnel-name>]', or an http(s):// URL.",
         )
     if cls is NgrokTunnel:
         return NgrokTunnel(upstream_url, domain=opt or None)
+    if cls is CloudflareNamedTunnel:
+        hostname, _, tunnel_ref = opt.partition("@")
+        if not hostname.strip():
+            raise ValueError(
+                f"Cloudflare named tunnels need a public hostname: use 'cloudflare:<hostname>' or 'cloudflare:<hostname>@<tunnel-name>' (got {spec!r}).",
+            )
+        return CloudflareNamedTunnel(upstream_url, hostname=hostname, tunnel_ref=tunnel_ref or None)
     return cls(upstream_url)
 
 
@@ -423,6 +532,7 @@ def spawn_detached(tunnel: _Tunnel, *, ready_timeout: float = _DEFAULT_READY_TIM
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=True,
+            env=tunnel._popen_env(),
         )
     finally:
         log.close()

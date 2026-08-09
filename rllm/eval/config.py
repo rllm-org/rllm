@@ -518,7 +518,7 @@ def save_ui_config(ui_api_key: str | None) -> None:
 
 
 def load_tunnel_config() -> dict:
-    """Return the gateway-tunnel config (``backend``/``domain``/``port``) from ``~/.rllm/config.json``.
+    """Return the gateway-tunnel config (``backend``/``domain``/``name``/``port``) from ``~/.rllm/config.json``.
 
     Written by ``rllm tunnel setup``; consumed by ``rllm tunnel up`` and the
     quick-tunnel fallback warning. Empty dict if unset or unreadable.
@@ -535,11 +535,13 @@ def load_tunnel_config() -> dict:
         return {}
 
 
-def save_tunnel_config(backend: str | None, *, domain: str | None = None, port: int | None = None) -> None:
+def save_tunnel_config(backend: str | None, *, domain: str | None = None, name: str | None = None, port: int | None = None) -> None:
     """Merge or remove the ``tunnel`` block in ``~/.rllm/config.json``.
 
     ``backend=None`` removes the block. Merges into the existing file so the
-    provider/model and ``ui_api_key`` entries survive.
+    provider/model and ``ui_api_key`` entries survive. ``domain`` is the ngrok
+    reserved domain or Cloudflare public hostname; ``name`` is the
+    locally-managed Cloudflare tunnel name (blank = dashboard-managed token).
     """
     path = _config_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -556,6 +558,8 @@ def save_tunnel_config(backend: str | None, *, domain: str | None = None, port: 
         entry: dict = {"backend": backend}
         if domain:
             entry["domain"] = domain
+        if name:
+            entry["name"] = name
         if port:
             entry["port"] = port
         data["tunnel"] = entry
