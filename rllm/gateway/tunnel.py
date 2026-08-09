@@ -227,9 +227,13 @@ class _Tunnel:
         import urllib.request
 
         deadline = time.monotonic() + timeout
+        # Identify as a real client: Cloudflare bot protection 403s urllib's
+        # default "Python-urllib/x.y" UA at the edge, which would make this
+        # probe "pass" without ever traversing the tunnel.
+        headers = {"User-Agent": "rllm-tunnel-healthcheck"}
         while True:
             try:
-                with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=5) as resp:
+                with urllib.request.urlopen(urllib.request.Request(url, method="GET", headers=headers), timeout=5) as resp:
                     if resp.status < 500:
                         return
             except urllib.error.HTTPError as e:
