@@ -556,14 +556,18 @@ def judge(metadata: dict, candidate: list[Path], reference: list[Path]) -> tuple
     content.extend({"type": "image_url", "image_url": {"url": image}} for image in candidate_images)
     content.append({"type": "text", "text": reference_text})
     content.extend({"type": "image_url", "image_url": {"url": image}} for image in reference_images)
+    base_url = os.environ.get("GDPVAL_JUDGE_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+    judge_model = os.environ["GDPVAL_JUDGE_MODEL"]
+    if "openrouter.ai" in base_url and judge_model.startswith("openrouter/"):
+        judge_model = judge_model.removeprefix("openrouter/")
     payload = {
-        "model": os.environ["GDPVAL_JUDGE_MODEL"],
+        "model": judge_model,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0,
         "max_tokens": 2048,
     }
     request = urllib.request.Request(
-        os.environ.get("GDPVAL_JUDGE_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/") + "/chat/completions",
+        base_url + "/chat/completions",
         data=json.dumps(payload).encode(),
         headers={"Authorization": f"Bearer {os.environ['GDPVAL_JUDGE_API_KEY']}", "Content-Type": "application/json"},
         method="POST",

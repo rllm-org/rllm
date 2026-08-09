@@ -29,6 +29,8 @@ dependencies = [
     "openai",
     "tqdm",
     "requests",
+    # Required by the first-party ``--sandbox-backend docker`` implementation.
+    "docker>=7.1",
     # Data
     "datasets>=2.20.0",
     "pillow",
@@ -114,7 +116,6 @@ langgraph = [
 ]
 
 swe = [
-    "docker",
     "kubernetes",
     "swebench",
 ]

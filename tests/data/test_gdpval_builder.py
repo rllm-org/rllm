@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import types
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -149,3 +151,45 @@ def test_dataset_catalog_entry_points_to_builder():
     entry = catalog["datasets"]["gdpval"]
     assert entry["builder"] == "rllm.data.gdpval_builder:build_benchmark"
     assert entry["default_agent"] == "stirrup"
+
+
+def test_generated_judge_normalizes_rllm_openrouter_model_prefix():
+    assert 'judge_model.startswith("openrouter/")' in gb._VERIFIER_SOURCE
+    assert 'judge_model = judge_model.removeprefix("openrouter/")' in gb._VERIFIER_SOURCE
+
+
+def test_generated_judge_sends_normalized_model_to_openrouter(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "fitz", types.SimpleNamespace())
+    namespace = {"__name__": "gdpval_verifier_test"}
+    exec(gb._VERIFIER_SOURCE, namespace)
+    candidate = tmp_path / "candidate.txt"
+    reference = tmp_path / "reference.txt"
+    candidate.write_text("candidate")
+    reference.write_text("reference")
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"choices":[{"message":{"content":"{\\"winner\\":\\"tie\\"}"}}]}'
+
+    def urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["payload"] = json.loads(request.data)
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setenv("GDPVAL_JUDGE_API_KEY", "secret")
+    monkeypatch.setenv("GDPVAL_JUDGE_MODEL", "openrouter/google/gemini-3.1-pro-preview")
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", urlopen)
+
+    namespace["judge"]({"task_id": "task", "prompt": "prompt", "rubric": "rubric"}, [candidate], [reference])
+
+    assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert captured["payload"]["model"] == "google/gemini-3.1-pro-preview"
+    assert captured["timeout"] == 600

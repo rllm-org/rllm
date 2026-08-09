@@ -22,6 +22,7 @@ import threading
 import weakref
 
 from rllm.env import env_int
+from rllm.sandbox.artifacts import extract_regular_files
 from rllm.sandbox.protocol import SnapshotNotFound
 
 logger = logging.getLogger(__name__)
@@ -224,6 +225,31 @@ class ModalSandbox:
         # ids and error); permissions are kept so executables stay +x.
         self._push_b64(b64, f"base64 -d | tar xzf - --no-same-owner -C {remote_parent}")
         logger.debug("Uploaded dir %s -> %s in sandbox %s", local_path, remote_path, self.name)
+
+    def download_dir(self, remote_path: str, local_path: str) -> list[str]:
+        """Download regular files from a Modal sandbox directory.
+
+        Modal's binary exec mode keeps the tar stream byte-for-byte intact.
+        Files are extracted through the shared sandbox artifact helper, which
+        rejects links and paths that could escape ``local_path``.
+        """
+        normalized = remote_path.rstrip("/")
+        remote_parent = os.path.dirname(normalized) or "/"
+        remote_name = os.path.basename(normalized)
+        if not remote_name:
+            raise ValueError("download_dir requires a directory other than the filesystem root")
+
+        process = self._sandbox.exec("tar", "czf", "-", "-C", remote_parent, remote_name, text=False)
+        archive_bytes = process.stdout.read()
+        stderr = process.stderr.read()
+        process.wait()
+        if process.returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"Failed to download {remote_path} from Modal sandbox {self.name}: {detail}")
+
+        downloaded = extract_regular_files(io.BytesIO(archive_bytes), local_path, root_name=remote_name)
+        logger.debug("Downloaded %d file(s) from %s in sandbox %s", len(downloaded), remote_path, self.name)
+        return downloaded
 
     def is_alive(self) -> bool:
         """One API call: ``poll()`` returns ``None`` while the sandbox is still running.

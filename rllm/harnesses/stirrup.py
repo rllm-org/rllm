@@ -11,15 +11,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
+from pathlib import Path
+from typing import Any
 
+from rllm import paths
 from rllm.harnesses.cli_harness import BaseCliHarness
 from rllm.sandbox.protocol import Sandbox
-from rllm.types import AgentConfig, Task
+from rllm.types import AgentConfig, Episode, Task, Trajectory
 
 _VENV_DIR = "/opt/stirrup-venv"
 _DRIVER_PATH = "/opt/stirrup/driver.py"
 _INSTRUCTION_PATH = "/tmp/stirrup/instruction.txt"
+_RUN_METADATA_PATH = "/tmp/stirrup/run.json"
 
 _INSTALL_SCRIPT = rf"""
 set -e
@@ -105,6 +110,85 @@ class StirrupHarness(BaseCliHarness):
         del instruction, task, config
         return f"{_VENV_DIR}/bin/python {_DRIVER_PATH} 2>&1 | tee {shlex.quote(self.stdout_log_path)}"
 
+    def run(self, task: Task, config: AgentConfig, *, env: Sandbox) -> Episode:
+        """Run Stirrup, preserve deliverables, and expose its usage metadata."""
+        super().run(task, config, env=env)
+        run_data = self._read_run_data(env)
+        metrics = _usage_metrics(run_data, config.model)
+        artifacts = self._collect_deliverables(env, task, config, run_data)
+        return Episode(task=task.metadata, trajectories=[Trajectory(name=self.name, steps=[])], metrics=metrics, artifacts=artifacts)
+
+    @staticmethod
+    def _read_run_data(sandbox: Sandbox) -> dict[str, Any]:
+        try:
+            raw = sandbox.exec(f"cat {shlex.quote(_RUN_METADATA_PATH)}", user="root")
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _collect_deliverables(
+        sandbox: Sandbox,
+        task: Task,
+        config: AgentConfig,
+        run_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        workdir = str(task.metadata.get("workdir") or "/workspace")
+        remote_dir = f"{workdir.rstrip('/')}/deliverables"
+        safe_uid = re.sub(r"[^A-Za-z0-9_.-]+", "_", config.session_uid).strip("._") or "run"
+        local_dir = Path(paths.rllm_path("agent_outputs", safe_uid))
+        download = getattr(sandbox, "download_dir", None)
+        downloaded: list[str] = []
+        if callable(download):
+            try:
+                downloaded = [str(path) for path in download(remote_dir, str(local_dir))]
+            except Exception:
+                downloaded = []
+
+        finish = run_data.get("finish") if isinstance(run_data.get("finish"), dict) else {}
+        submitted = [str(path) for path in finish.get("paths") or []]
+        return {
+            "deliverable_dir": str(local_dir) if downloaded else None,
+            "deliverables": downloaded,
+            "submitted_paths": submitted,
+            "remote_deliverable_dir": remote_dir,
+        }
+
+
+def _usage_metrics(run_data: dict[str, Any], model: str) -> dict[str, Any]:
+    metadata = run_data.get("metadata") if isinstance(run_data.get("metadata"), dict) else {}
+    raw_usage = metadata.get("token_usage")
+    usage_entries = raw_usage if isinstance(raw_usage, list) else [raw_usage]
+    usage = [entry for entry in usage_entries if isinstance(entry, dict)]
+    input_tokens = sum(int(entry.get("input") or 0) for entry in usage)
+    answer_tokens = sum(int(entry.get("answer") or 0) for entry in usage)
+    reasoning_tokens = sum(int(entry.get("reasoning") or 0) for entry in usage)
+    output_tokens = answer_tokens + reasoning_tokens
+    metrics: dict[str, Any] = {
+        "input_tokens": input_tokens,
+        "answer_tokens": answer_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+    pricing_path = os.environ.get("RLLM_PRICING_FILE") or os.environ.get("GDPVAL_PRICING_FILE")
+    if pricing_path:
+        try:
+            pricing = json.loads(Path(pricing_path).expanduser().read_text(encoding="utf-8"))
+            models = pricing.get("models") if isinstance(pricing, dict) else {}
+            rates = models.get(model) or models.get(model.removeprefix("openrouter/"))
+            if isinstance(rates, dict):
+                metrics["cost_usd"] = (
+                    input_tokens * float(rates.get("input") or 0)
+                    + answer_tokens * float(rates.get("answer") or rates.get("output") or 0)
+                    + reasoning_tokens * float(rates.get("reasoning") or rates.get("answer") or rates.get("output") or 0)
+                ) / 1_000_000
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return metrics
+
 
 _DRIVER_SCRIPT = r'''
 import asyncio
@@ -112,7 +196,7 @@ import json
 import os
 from pathlib import Path
 
-from stirrup import Agent
+from stirrup import Agent, aggregate_metadata
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
 from stirrup.tools.view_image import ViewImageToolProvider
@@ -161,7 +245,14 @@ async def main() -> None:
     )
     inputs = _input_files(workdir)
     async with agent.session(output_dir=output_dir, input_files=inputs or None) as session:
-        await session.run(prompt)
+        finish_params, _history, metadata = await session.run(prompt)
+    run_data = {
+        "finish": finish_params.model_dump(mode="json") if finish_params is not None else None,
+        "metadata": aggregate_metadata(metadata, return_json_serializable=True),
+    }
+    metadata_path = Path("/tmp/stirrup/run.json")
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(json.dumps(run_data), encoding="utf-8")
 
 
 if __name__ == "__main__":
