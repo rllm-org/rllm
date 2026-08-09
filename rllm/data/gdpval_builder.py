@@ -220,14 +220,14 @@ def _repair_staged_files(paths: list[Path], *, task_id: str, role: str, backup_r
 def _write_instruction(task_dir: Path, row: dict, input_names: list[str]) -> None:
     lines = [str(row.get("prompt") or "").strip(), ""]
     if input_names:
-        lines.extend(["## Input files", *[f"- /home/user/{name}" for name in input_names], ""])
+        lines.extend(["## Input files", "These files are available in the code-execution working directory:", *[f"- {name}" for name in input_names], ""])
     expected = _basenames(row, "deliverable_files")
     if expected:
         lines.extend(["## Expected deliverable filename(s)", *[f"- {name}" for name in expected], ""])
     lines.extend(
         [
             "## Submission",
-            "Save final deliverables in /home/user/deliverables and submit those files with the finish tool.",
+            "Create final deliverables in the code-execution working directory, then submit their relative paths with the finish tool.",
             "",
         ]
     )

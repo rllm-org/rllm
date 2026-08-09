@@ -85,6 +85,11 @@ def test_task_config_uses_stirrup_and_verifier_only_judge_credentials(tmp_path):
     assert 'GDPVAL_JUDGE_MODEL = "${GDPVAL_JUDGE_MODEL}"' in task_toml
     assert "[environment.env]" not in task_toml
 
+    instruction = (out / "task-one" / "instruction.md").read_text()
+    assert "- source.xlsx" in instruction
+    assert "/home/user/source.xlsx" not in instruction
+    assert "relative paths" in instruction
+
 
 def test_builder_output_round_trips_through_benchmark_loader(tmp_path):
     out = _build(tmp_path)
