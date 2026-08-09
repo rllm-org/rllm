@@ -37,3 +37,18 @@ def test_vlm_instruction_encodes_images_lazily(tmp_path, monkeypatch):
         {"type": "text", "text": "what?"},
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,ZmFrZQ=="}},
     ]
+
+
+def test_harbor_verifier_env_is_lifted_into_task_metadata(tmp_path):
+    bench = tmp_path / "bench"
+    task_dir = bench / "task-1"
+    task_dir.mkdir(parents=True)
+    (bench / "dataset.toml").write_text('[dataset]\nname = "bench"\ntype = "sandbox"\n')
+    (task_dir / "instruction.md").write_text("do work")
+    (task_dir / "task.toml").write_text(
+        '[task]\nname = "task-1"\n\n[verifier]\nscript = "tests/test.sh"\n\n[verifier.env]\nOPENAI_API_KEY = "${OPENAI_API_KEY}"\n'
+    )
+
+    result = BenchmarkLoader.load(str(bench))
+
+    assert result.tasks[0].metadata["verifier_env"] == {"OPENAI_API_KEY": "${OPENAI_API_KEY}"}

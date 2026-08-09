@@ -13,6 +13,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
+import shlex
+import tempfile
 from pathlib import Path
 
 from rllm.eval.types import EvalOutput, Signal
@@ -28,6 +32,10 @@ _REWARD_PATHS = [
     "/logs/verifier/reward.json",
     "/logs/verifier/reward.txt",
 ]
+
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_REMOTE_ENV_PATH = "/tmp/rllm/verifier.env"
 
 
 class ShellScriptEvaluator:
@@ -45,12 +53,14 @@ class ShellScriptEvaluator:
         verifier_user: str | None = None,
         verifier_timeout: float = 600.0,
         reward_file_override: str | None = None,
+        verifier_env: dict[str, str] | None = None,
     ):
         self.sandbox = sandbox
         self.script_path = script_path  # relative to the task's directory
         self.verifier_user = verifier_user
         self.verifier_timeout = verifier_timeout
         self.reward_file_override = reward_file_override
+        self.verifier_env = dict(verifier_env or {})
 
     def evaluate(self, task: Task, episode: Episode) -> EvalOutput:
         tests_dir = task.task_dir / Path(self.script_path).parent
@@ -88,8 +98,21 @@ class ShellScriptEvaluator:
         workdir = task.metadata.get("workdir")
         cd_prefix = f"cd {workdir} && " if workdir else ""
         try:
+            resolved_env = _resolve_verifier_env(self.verifier_env)
+        except ValueError as e:
+            return EvalOutput(
+                reward=0.0,
+                is_correct=False,
+                metadata={"error": str(e), "ungraded": True},
+            )
+
+        env_prefix = ""
+        try:
+            if resolved_env:
+                self._upload_verifier_env(resolved_env, v_user)
+                env_prefix = f"set -a && . {_REMOTE_ENV_PATH} && set +a && "
             self.sandbox.exec(
-                f"chmod +x /tests/{script_name} && {cd_prefix}/tests/{script_name}",
+                f"chmod +x /tests/{script_name} && {env_prefix}{cd_prefix}/tests/{script_name}",
                 timeout=self.verifier_timeout,
                 user=v_user,
             )
@@ -99,12 +122,55 @@ class ShellScriptEvaluator:
             # below) carries the signal. Log at debug so a benchmark of
             # 100 unsolved tasks doesn't spam 100 multi-KB stack traces.
             logger.debug("Verifier exited non-zero for %s: %s", task.id, e)
+        finally:
+            if resolved_env:
+                try:
+                    self.sandbox.exec(f"rm -f {_REMOTE_ENV_PATH}", timeout=10, user=v_user)
+                except Exception:
+                    logger.debug("Could not remove verifier environment file for %s", task.id)
 
         # Read reward (as verifier — agent may not have read access)
         reward_paths = list(_REWARD_PATHS)
         if self.reward_file_override:
             reward_paths.insert(0, self.reward_file_override)
         return _read_reward_from_sandbox(self.sandbox, reward_paths, user=v_user)
+
+    def _upload_verifier_env(self, env: dict[str, str], verifier_user: str | None) -> None:
+        body = "\n".join(f"export {key}={shlex.quote(value)}" for key, value in env.items()) + "\n"
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="rllm-verifier-", suffix=".env") as handle:
+            handle.write(body)
+            handle.flush()
+            self.sandbox.upload_file(handle.name, _REMOTE_ENV_PATH)
+
+        owner = shlex.quote(verifier_user) if verifier_user else None
+        ownership = f"chown {owner} {_REMOTE_ENV_PATH} && " if owner else ""
+        self.sandbox.exec(f"{ownership}chmod 600 {_REMOTE_ENV_PATH}", timeout=10)
+
+
+def _resolve_verifier_env(config: dict[str, str]) -> dict[str, str]:
+    """Resolve ``${HOST_VAR}`` references without exposing values to the agent."""
+    resolved: dict[str, str] = {}
+    missing: set[str] = set()
+    for key, raw_value in config.items():
+        if not _ENV_NAME.fullmatch(key):
+            raise ValueError(f"invalid verifier environment variable name: {key!r}")
+        if not isinstance(raw_value, str):
+            raise ValueError(f"verifier environment value for {key} must be a string")
+
+        def replace(match: re.Match[str]) -> str:
+            name = match.group(1)
+            value = os.environ.get(name)
+            if value is None:
+                missing.add(name)
+                return ""
+            return value
+
+        resolved[key] = _ENV_REFERENCE.sub(replace, raw_value)
+
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise ValueError(f"missing required verifier environment variable(s): {names}")
+    return resolved
 
 
 # ---------------------------------------------------------------------------

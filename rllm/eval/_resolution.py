@@ -109,6 +109,7 @@ def _resolve_evaluator(
             verifier_user=task.metadata.get("verifier_user"),
             verifier_timeout=float(task.metadata.get("verifier_timeout", 600.0)),
             reward_file_override=verifier_config.get("reward_file"),
+            verifier_env=task.metadata.get("verifier_env", {}),
         )
 
     if kind in ("python-host", "python-hybrid"):

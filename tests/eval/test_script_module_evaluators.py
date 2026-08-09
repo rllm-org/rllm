@@ -51,6 +51,10 @@ class _FakeSandbox:
     def upload_dir(self, src: str, dst: str) -> None:
         self.uploads.append((src, dst))
 
+    def upload_file(self, src: str, dst: str) -> None:
+        self.uploads.append((src, dst))
+        self.files[dst] = Path(src).read_text()
+
 
 def _episode() -> Episode:
     """A minimal episode that the script evaluator can score."""
@@ -154,6 +158,35 @@ class TestShellScriptEvaluator:
         out = ev.evaluate(task, _episode())
         assert out.reward == 0.0
         assert "no" in out.metadata.get("error", "")
+
+    def test_verifier_env_is_resolved_uploaded_and_removed(self, tmp_path, monkeypatch):
+        bench = _bench(tmp_path)
+        monkeypatch.setenv("JUDGE_SECRET", "secret with spaces")
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        ev = ShellScriptEvaluator(
+            sandbox=sb,
+            verifier_env={"OPENAI_API_KEY": "${JUDGE_SECRET}", "JUDGE_MODEL": "openai/example"},
+        )
+
+        out = ev.evaluate(Task(id="0", instruction="", metadata={}, dataset_dir=bench), _episode())
+
+        assert out.reward == 1.0
+        assert any(dst == "/tmp/rllm/verifier.env" for _, dst in sb.uploads)
+        invocation = next(cmd for cmd, _ in sb.execs if ". /tmp/rllm/verifier.env" in cmd)
+        assert "secret with spaces" not in invocation
+        assert any(cmd == "rm -f /tmp/rllm/verifier.env" for cmd, _ in sb.execs)
+
+    def test_missing_verifier_env_marks_task_ungraded(self, tmp_path, monkeypatch):
+        bench = _bench(tmp_path)
+        monkeypatch.delenv("MISSING_JUDGE_SECRET", raising=False)
+        sb = _FakeSandbox()
+        ev = ShellScriptEvaluator(sandbox=sb, verifier_env={"OPENAI_API_KEY": "${MISSING_JUDGE_SECRET}"})
+
+        out = ev.evaluate(Task(id="0", instruction="", metadata={}, dataset_dir=bench), _episode())
+
+        assert out.reward == 0.0
+        assert out.metadata["ungraded"] is True
+        assert "MISSING_JUDGE_SECRET" in out.metadata["error"]
 
 
 # ---------------------------------------------------------------------------

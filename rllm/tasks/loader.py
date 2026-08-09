@@ -230,6 +230,7 @@ def _merge_task_toml_metadata(task_dir: Path, base: dict) -> dict:
     merged["agent_user"] = raw.get("agent", {}).get("user", merged.get("agent_user"))
     merged["verifier_user"] = raw.get("verifier", {}).get("user", merged.get("verifier_user"))
     merged["verifier_timeout"] = raw.get("verifier", {}).get("timeout_sec", merged.get("verifier_timeout", 600.0))
+    merged["verifier_env"] = raw.get("verifier", {}).get("env", merged.get("verifier_env", {})) or {}
     merged["agent_timeout"] = raw.get("agent", {}).get("timeout_sec", merged.get("agent_timeout", 600.0))
     rllm_section = raw.get("rllm", {}) or {}
     merged["setup_commands"] = rllm_section.get("setup_commands", merged.get("setup_commands", [])) or []
@@ -554,6 +555,7 @@ def _load_task_from_dir(
     metadata["agent_user"] = raw.get("agent", {}).get("user")
     metadata["verifier_user"] = raw.get("verifier", {}).get("user")
     metadata["verifier_timeout"] = raw.get("verifier", {}).get("timeout_sec", 600.0)
+    metadata["verifier_env"] = raw.get("verifier", {}).get("env", {}) or {}
     metadata["agent_timeout"] = raw.get("agent", {}).get("timeout_sec", 600.0)
     rllm_section = raw.get("rllm", {}) or {}
     metadata["setup_commands"] = rllm_section.get("setup_commands", []) or []
