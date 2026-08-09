@@ -1,6 +1,17 @@
 {
   "version": 1,
   "datasets": {
+    "gdpval": {
+      "description": "GDPval: 220 economically valuable knowledge-work tasks with expert deliverables (sandbox; pairwise LLM-judge graded)",
+      "source": "openai/gdpval",
+      "builder": "rllm.data.gdpval_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "train"
+      ],
+      "eval_split": "train",
+      "default_agent": "stirrup"
+    },
     "claw_eval": {
       "description": "Claw-Eval general split: 161 personal-assistant agent tasks (sandbox; LLM-judge graded)",
       "source": "claw-eval/Claw-Eval",
