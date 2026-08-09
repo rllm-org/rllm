@@ -582,14 +582,16 @@ def judge(metadata: dict, candidate: list[Path], reference: list[Path]) -> tuple
     return score, {"winner": winner, "positions_swapped": swapped, "judge_model": payload["model"]}
 
 
-def write_reward(reward: float, *, ungraded: bool = False, metadata: dict | None = None) -> None:
+def write_reward(reward: float, *, ungraded: bool = False, metadata: dict | None = None, signals: dict | None = None) -> None:
+    all_signals = {"pairwise_win": reward, "ungraded": 1.0 if ungraded else 0.0}
+    all_signals.update(signals or {})
     REWARD_PATH.parent.mkdir(parents=True, exist_ok=True)
     REWARD_PATH.write_text(
         json.dumps(
             {
                 "reward": reward,
                 "is_correct": reward > 0.5,
-                "signals": {"pairwise_win": reward, "ungraded": 1.0 if ungraded else 0.0},
+                "signals": all_signals,
                 "metadata": metadata or {},
             }
         )
@@ -601,20 +603,20 @@ def main() -> None:
     candidate = sorted(path for path in CANDIDATE_DIR.rglob("*") if path.is_file()) if CANDIDATE_DIR.exists() else []
     reference = sorted(path for path in REFERENCE_DIR.rglob("*") if path.is_file()) if REFERENCE_DIR.exists() else []
     if not candidate:
-        write_reward(0.0, metadata={"reason": "no_deliverable"})
+        write_reward(0.0, metadata={"reason": "no_deliverable"}, signals={"deliverable_present": 0.0})
         return
     if not reference:
-        write_reward(0.0, ungraded=True, metadata={"reason": "no_expert_reference"})
+        write_reward(0.0, ungraded=True, metadata={"reason": "no_expert_reference"}, signals={"deliverable_present": 1.0, "expert_reference_present": 0.0})
         return
     if all(path.suffix.lower() in MEDIA_EXTENSIONS for path in [*candidate, *reference]):
-        write_reward(0.0, ungraded=True, metadata={"reason": "media_requires_files_api"})
+        write_reward(0.0, ungraded=True, metadata={"reason": "media_requires_files_api"}, signals={"deliverable_present": 1.0, "expert_reference_present": 1.0})
         return
     try:
         score, decision = judge(metadata, candidate, reference)
     except Exception as exc:
-        write_reward(0.0, ungraded=True, metadata={"reason": "judge_failed", "error": str(exc)})
+        write_reward(0.0, ungraded=True, metadata={"reason": "judge_failed", "error": str(exc)}, signals={"deliverable_present": 1.0, "expert_reference_present": 1.0})
         return
-    write_reward(score, metadata=decision)
+    write_reward(score, metadata=decision, signals={"deliverable_present": 1.0, "expert_reference_present": 1.0})
 
 
 if __name__ == "__main__":
