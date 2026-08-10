@@ -120,6 +120,13 @@ class TestTraceRecordToStep:
         assert step.weight_version == 7
         assert step.model_output.weight_version == 7
 
+    def test_token_count_fallback_when_no_token_ids(self):
+        """Anthropic-protocol traces carry usage counts instead of token ids."""
+        trace = self._make_trace(prompt_token_ids=[], completion_token_ids=[], logprobs=[], token_counts={"prompt": 1234, "completion": 56})
+        step = trace_record_to_step(trace)
+        assert step.model_output.prompt_length == 1234
+        assert step.model_output.completion_length == 56
+
     def test_weight_version_defaults_none(self):
         step = trace_record_to_step(self._make_trace())
         assert step.weight_version is None
