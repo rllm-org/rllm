@@ -99,12 +99,12 @@ def install_script_for(agent_flow: object) -> str:
 
 def keys_for_tasks(tasks: list[Task], backend: str | None, install_script: str = "") -> dict[str, Task]:
     """Map distinct env_keys to a representative task (used by ``rllm snapshot create``)."""
-    from rllm.eval._resolution import _resolve_backend
+    from rllm.eval._resolution import _resolve_backend, _task_compose_file
 
     out: dict[str, Task] = {}
     for task in tasks:
         eff = _resolve_backend(task, backend)
-        if eff in _NO_SNAPSHOT_BACKENDS:
+        if eff in _NO_SNAPSHOT_BACKENDS or _task_compose_file(task) is not None:
             continue
         out.setdefault(env_key_for(task, eff, install_script), task)
     return out
@@ -145,10 +145,14 @@ def get_sandbox(task: Task, backend: str | None, registry: SnapshotRegistry | No
     but the caller must still install at runtime). Cold sandboxes leave the
     attribute unset.
     """
-    from rllm.eval._resolution import _create_base_sandbox, _create_sandbox_for_task, _resolve_backend
+    from rllm.eval._resolution import _create_base_sandbox, _create_sandbox_for_task, _resolve_backend, _task_compose_file
     from rllm.sandbox.protocol import SnapshotNotFound
 
     backend = _resolve_backend(task, backend)
+    # A Compose task is a VM plus a set of nested images, networks, and volumes;
+    # a normal single-image backend snapshot cannot represent that topology.
+    if _task_compose_file(task) is not None:
+        return _create_sandbox_for_task(task, backend)
     if registry is not None and backend not in _NO_SNAPSHOT_BACKENDS:
         key = env_key_for(task, backend, install_script)
         candidates = [key]

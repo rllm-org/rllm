@@ -244,7 +244,7 @@ class SandboxTaskHooks:
 
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext:
         from rllm.engine.agentflow_engine import TaskContext
-        from rllm.eval._resolution import _resolve_backend, _run_healthcheck, _setup_task_environment
+        from rllm.eval._resolution import _resolve_backend, _run_healthcheck, _setup_task_environment, _validate_task_runtime
 
         plan = resolve_rollout_plan(task, agent_flow, self.evaluation)
 
@@ -256,6 +256,7 @@ class SandboxTaskHooks:
                 from rllm.sandbox.snapshot import get_sandbox, install_script_for
 
                 install = install_script_for(agent_flow)
+                _validate_task_runtime(task, _resolve_backend(task, self.sandbox_backend))
                 sandbox = self.warm_queue.pop(task) if self.warm_queue is not None else get_sandbox(task, self.sandbox_backend, self._registry, install)
                 env_backend = _resolve_backend(task, self.sandbox_backend)
                 # Record the backend this task actually got, so anything resolved
