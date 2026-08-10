@@ -6,6 +6,11 @@
       "function": "MCPAtlasHarness",
       "description": "Scale MCP-Atlas official TypeScript agent loop over the pinned Docker MCP environment."
     },
+    "exploitgym": {
+      "module": "rllm.integrations.exploitgym.harness",
+      "function": "ExploitGymHarness",
+      "description": "ExploitGym official cybergym agent CLIs against controller-managed exploit targets."
+    },
     "react": {
       "module": "rllm.harnesses.react",
       "function": "ReActHarness",
