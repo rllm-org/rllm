@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from rllm.eval.results import EvalItem
-from rllm.types import Episode
+from rllm.types import INFRA_ERROR_REASONS, Episode
 from rllm.workflows.workflow import TerminationReason
 
 
@@ -123,7 +123,10 @@ class EvalEpisodeStore:
     @staticmethod
     def item_from_episode(idx: int, attempt: int, episode: Episode, *, task_id: str | None = None) -> EvalItem:
         error = None
-        if episode.termination_reason in {TerminationReason.ERROR, TerminationReason.TIMEOUT}:
+        # Infra failures (model/proxy/sandbox/grading breakdowns) are not real
+        # attempts: mark them as errors so a resumed run re-executes them instead
+        # of treating the empty rollout as a completed result.
+        if episode.termination_reason in INFRA_ERROR_REASONS or episode.termination_reason == TerminationReason.TIMEOUT:
             raw_error = (episode.metadata or {}).get("error") or {}
             error = raw_error.get("message") if isinstance(raw_error, dict) else str(raw_error)
             error = error or "episode terminated with an error"
