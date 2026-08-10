@@ -62,6 +62,16 @@
       "train_split": "train",
       "default_agent": "terminus-2"
     },
+    "terminal-bench-3": {
+      "description": "Terminal-Bench 3.0: 74 frontier-level terminal-agent tasks across software engineering, scientific computing, cybersecurity, data science, infrastructure, build systems, and games.",
+      "source": "harbor:terminal-bench/terminal-bench@3.0.0",
+      "category": "agentic",
+      "splits": [
+        "default"
+      ],
+      "eval_split": "default",
+      "default_agent": "claude-code"
+    },
     "gsm8k": {
       "description": "Grade school math word problems (8.5K train, 1.3K test)",
       "source": "openai/gsm8k",

@@ -273,6 +273,7 @@ def _lift_verifier_contract(raw: dict, into: dict) -> None:
     into["verifier_mode"] = _resolve_verifier_mode(verifier_section)
     into["verifier_environment"] = verifier_section.get("environment")
     into["verifier_collect"] = verifier_section.get("collect", []) or []
+    into["verifier_env_vars"] = verifier_section.get("env", {}) or {}
     into["verifier_network_mode"] = verifier_section.get("network_mode")
     # Top-level ``artifacts``: paths the collect step produces, which a separate
     # verifier container needs re-materialised at their original locations.

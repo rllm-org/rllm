@@ -22,6 +22,7 @@ Two facts are load-bearing:
 
 from __future__ import annotations
 
+import json
 import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
@@ -144,6 +145,45 @@ class ClaudeCodeHarness(BaseCliHarness):
             "CLAUDE_CODE_SUBAGENT_MODEL": model,
         }
         return env
+
+    def write_configs(
+        self,
+        sandbox,
+        task: Task,
+        config: AgentConfig,  # noqa: ARG002
+        env: dict[str, str],  # noqa: ARG002
+    ) -> None:
+        """Register task-declared MCP servers and skills with Claude Code."""
+        environment = task.metadata.get("environment", {}) or {}
+        mcp_servers = environment.get("mcp_servers") or []
+        skills_dir = environment.get("skills_dir")
+        commands = [f"mkdir -p {shlex.quote(_CLAUDE_CONFIG_DIR)}/skills"]
+
+        if skills_dir:
+            commands.append(f"cp -r {shlex.quote(str(skills_dir))}/. {shlex.quote(_CLAUDE_CONFIG_DIR)}/skills/ 2>/dev/null || true")
+
+        if mcp_servers:
+            servers: dict[str, dict] = {}
+            for server in mcp_servers:
+                name = str(server["name"])
+                transport = str(server.get("transport") or "stdio")
+                if transport == "stdio":
+                    servers[name] = {
+                        "type": "stdio",
+                        "command": server["command"],
+                        "args": server.get("args") or [],
+                        **({"env": server["env"]} if server.get("env") else {}),
+                    }
+                else:
+                    servers[name] = {
+                        "type": "http" if transport == "streamable-http" else transport,
+                        "url": server["url"],
+                    }
+            payload = shlex.quote(json.dumps({"mcpServers": servers}))
+            commands.append(f"printf '%s' {payload} > {shlex.quote(_CLAUDE_CONFIG_DIR)}/.claude.json")
+
+        if len(commands) > 1:
+            sandbox.exec(" && ".join(commands), timeout=60, user=self.agent_user)
 
     def build_invocation(
         self,

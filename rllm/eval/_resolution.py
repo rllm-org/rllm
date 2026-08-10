@@ -185,6 +185,7 @@ def _resolve_evaluator(
             reward_file_override=verifier_config.get("reward_file"),
             git_heads=_capture_git_heads(task, sandbox),
             verifier_sandbox_factory=(lambda: _create_verifier_sandbox(task, task.metadata.get("sandbox_backend"))) if separate else None,
+            verifier_tests_baked=bool(separate and _verifier_dockerfile(task)),
             collect_commands=task.metadata.get("verifier_collect") if separate else None,
             artifacts=task.metadata.get("artifacts") if separate else None,
         )
@@ -403,6 +404,28 @@ def _create_sandbox_for_task(
     prebuilt-image tasks that set ``replay_dockerfile = false``).
     """
     backend = _resolve_backend(task, sandbox_backend)
+    compose_file = _task_compose_file(task)
+    if compose_file is not None:
+        if name is None:
+            safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
+            name = f"rllm-{safe_id}-{uuid.uuid4().hex[:6]}"
+        env = env_override if env_override is not None else (task.metadata.get("environment", {}) or {})
+        compose_kwargs = {
+            "name": name,
+            "environment_dir": compose_file.parent,
+            "compose_file": compose_file,
+            "resources": env,
+            "build_timeout": float(env.get("build_timeout_sec") or 600.0),
+        }
+        if backend == "docker":
+            from rllm.sandbox.backends.docker_compose import DockerComposeSandbox
+
+            return DockerComposeSandbox(**compose_kwargs)
+        if backend == "modal":
+            from rllm.sandbox.backends.modal_compose import ModalComposeSandbox
+
+            return ModalComposeSandbox(**compose_kwargs, **_sandbox_resource_kwargs(task, "modal", env_override))
+        raise RuntimeError(f"task {task.id!r} requires Docker Compose, which rLLM supports with --sandbox-backend docker or modal")
     dockerfile = _builds_from_dockerfile(task, backend)
     if dockerfile is not None:
         return _create_base_sandbox(task, backend, image=_dockerfile_image(backend, dockerfile), name=name, env_override=env_override)
@@ -441,22 +464,60 @@ def _verifier_env_section(task: Task) -> dict:
     return {**(task.metadata.get("environment") or {}), **(task.metadata.get("verifier_environment") or {})}
 
 
+def _verifier_dockerfile(task: Task) -> Path | None:
+    """Locate the Dockerfile whose build context is the task's tests directory."""
+    for base in (task.task_dir, task.dataset_dir):
+        dockerfile = base / "tests" / "Dockerfile"
+        if dockerfile.exists():
+            return dockerfile
+    return None
+
+
 def _create_verifier_sandbox(task: Task, sandbox_backend: str | None) -> Sandbox:
     """A fresh container to grade a separate-mode task in.
 
-    Harbor builds this image from ``tests/`` as the build context — deepswe's
-    ``tests/Dockerfile`` is "the pinned task image with the hidden tests baked
-    in". Creating from the task's own image reproduces it, because
-    :class:`~rllm.eval.script_evaluator.ShellScriptEvaluator` uploads ``tests/``
-    to ``/tests`` regardless. Resources come from the verifier's own section.
+    Harbor builds this image from ``tests/`` as the build context. The verifier
+    Dockerfile may install dependencies or transform files, so uploading the
+    raw tests into the agent image is not equivalent.
     """
+    backend = _resolve_backend(task, sandbox_backend)
+    dockerfile = _verifier_dockerfile(task)
+    if dockerfile is None:
+        # Preserve legacy separate-verifier tasks that predate Harbor's
+        # tests/Dockerfile contract.
+        safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
+        return _create_sandbox_for_task(
+            task,
+            backend,
+            name=f"rllm-verify-{safe_id}-{uuid.uuid4().hex[:6]}",
+            env_override=_verifier_env_section(task),
+        )
+    if backend == "docker":
+        image = _build_docker_image(dockerfile.parent, f"{task.id}-verifier")
+    elif backend == "daytona":
+        image = _dockerfile_image(backend, dockerfile)
+    elif backend == "modal":
+        import modal
+
+        image = modal.Image.from_dockerfile(str(dockerfile), context_dir=str(dockerfile.parent))
+    else:
+        raise RuntimeError(f"building tests/Dockerfile is not supported by the {backend!r} sandbox backend")
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
-    return _create_sandbox_for_task(
+    sandbox = _create_base_sandbox(
         task,
-        sandbox_backend,
+        backend,
+        image=image,
         name=f"rllm-verify-{safe_id}-{uuid.uuid4().hex[:6]}",
         env_override=_verifier_env_section(task),
     )
+    verifier_env = {
+        **(_verifier_env_section(task).get("env") or {}),
+        **(task.metadata.get("verifier_env_vars") or {}),
+    }
+    set_env = getattr(sandbox, "set_env", None)
+    if verifier_env and callable(set_env):
+        set_env(verifier_env)
+    return sandbox
 
 
 def _sandbox_resource_kwargs(task: Task, backend: str, env_override: dict | None = None) -> dict:
@@ -465,7 +526,8 @@ def _sandbox_resource_kwargs(task: Task, backend: str, env_override: dict | None
     Harbor task.toml declares ``cpus`` / ``memory_mb`` / ``storage_mb``; without
     these a remote sandbox runs at the backend default (Daytona: 1 GiB), which
     OOM-kills compile-heavy graders (e.g. ``go test ./...``). Modal takes memory
-    in MB; Daytona takes memory/disk in GB. Docker/local ignore the values.
+    in MB; Daytona takes memory/disk in GB. Docker applies CPU and memory
+    limits directly; local has no resource-isolation primitive.
 
     Those per-task values are baked into ``task.toml`` at dataset-build time, so
     an over-provisioned default can only be shrunk by rebuilding the dataset.
@@ -498,6 +560,8 @@ def _sandbox_resource_kwargs(task: Task, backend: str, env_override: dict | None
 
     env = env_override if env_override is not None else (task.metadata.get("environment", {}) or {})
     cpus, mem_mb, disk_mb = env.get("cpus"), env.get("memory_mb"), env.get("storage_mb")
+    gpus = env.get("gpus")
+    gpu_types = env.get("gpu_types") or []
 
     # Operator caps clamp the baked-in task.toml values down (see docstring):
     # shrink an over-provisioned sandbox at runtime without rebuilding. A cap
@@ -538,11 +602,21 @@ def _sandbox_resource_kwargs(task: Task, backend: str, env_override: dict | None
     lifetime_s = max(lifetime_s, sandbox_timeout_override_s())
 
     kw: dict = {}
-    if backend == "modal":
+    if backend == "docker":
+        if cpus:
+            kw["cpus"] = float(cpus)
+        if mem_mb:
+            kw["memory"] = int(mem_mb) * 1024 * 1024
+        if gpus:
+            kw["gpus"] = int(gpus)
+    elif backend == "modal":
         if cpus:
             kw["cpu"] = float(cpus)
         if mem_mb:
             kw["memory"] = int(mem_mb)
+        if gpus:
+            gpu_type = str(gpu_types[0]) if gpu_types else "any"
+            kw["gpu"] = f"{gpu_type}:{int(gpus)}" if int(gpus) > 1 else gpu_type
         kw["timeout"] = lifetime_s  # Modal's hard lifetime, in seconds
     elif backend == "daytona":
         if cpus:
@@ -551,6 +625,8 @@ def _sandbox_resource_kwargs(task: Task, backend: str, env_override: dict | None
             kw["memory"] = max(1, round(mem_mb / 1024))
         if disk_mb:
             kw["disk"] = max(1, round(disk_mb / 1024))
+        if gpus:
+            kw["gpu"] = int(gpus)
         # First boot of a from-image sandbox includes the registry pull, which
         # for multi-GB SWE images routinely exceeds the SDK's 120s default.
         # Honor the task's declared build timeout, with a pull-friendly floor.
@@ -625,6 +701,24 @@ def _resolve_image(task: Task, backend: str) -> str:
     if dockerfile.exists() and backend == "docker":
         return _build_docker_image(dockerfile.parent, task.id)
     return configured
+
+
+def _task_compose_file(task: Task) -> Path | None:
+    """Locate a Harbor-style Docker Compose overlay for the task environment."""
+    for base in (task.task_dir, task.dataset_dir):
+        for name in ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml"):
+            path = base / "environment" / name
+            if path.exists():
+                return path
+    return None
+
+
+def _validate_task_runtime(task: Task, backend: str) -> None:
+    """Fail before agent execution when a task needs an unsupported capability."""
+    if _task_compose_file(task) is not None and backend not in {"docker", "modal"}:
+        raise RuntimeError(f"task {task.id!r} requires Docker Compose; select --sandbox-backend docker or modal")
+    if task.metadata.get("verifier_mode") == "separate" and _verifier_dockerfile(task) is not None and backend not in {"docker", "daytona", "modal"}:
+        raise RuntimeError(f"task {task.id!r} requires a verifier image build unsupported by backend {backend!r}")
 
 
 def _build_docker_image(context_dir: Path, task_id: str) -> str:

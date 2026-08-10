@@ -135,7 +135,8 @@ code-tools = [
 ]
 
 harbor = [
-    "harbor==0.3.0 ; python_version >= '3.12'",
+    "harbor==0.20.0 ; python_version >= '3.12'",
+    "docker>=7.0.0 ; python_version >= '3.12'",
 ]
 
 [tool.uv.sources]
