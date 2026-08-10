@@ -93,6 +93,8 @@ Most agentic datasets are sandboxed — they ship per-task Dockerfiles and shell
 | `rllm-swesmith` | SWE-smith filtered: solvable bug-fixing tasks across 105 Python repos (in-sandbox pytest grading) | ~4.7K train | [kylemontgomery/swesmith-filtered](https://huggingface.co/datasets/kylemontgomery/swesmith-filtered) | `mini-swe-agent` |
 | `skillsbench` | SkillsBench: 91 expert-curated agentic tasks measuring skill use (per-task `tests/test.sh` verifier) | 91 train | [benchflow/skillsbench](https://huggingface.co/datasets/benchflow/skillsbench) | `claude-code` |
 | `skillsbench-no-skills` | SkillsBench baseline without the per-task `skills/` tree, for measuring skills-augmentation gain | 91 train | [benchflow/skillsbench](https://huggingface.co/datasets/benchflow/skillsbench) | `claude-code` |
+| `exploitgym` | ExploitGym v1.0: real-world exploitation tasks (userspace / V8 / Linux kernel) via the official cybergym harness, host-side flag verification | 869 public | [sunblaze-ucb/exploitgym](https://github.com/sunblaze-ucb/exploitgym) | `exploitgym` |
+| `exploitgym-sample` | ExploitGym 20-task smoke subset (`data/task_ids/sample.txt`) | 20 public | [sunblaze-ucb/exploitgym](https://github.com/sunblaze-ucb/exploitgym) | `exploitgym` |
 
 ### Harbor packages (no registry entry)
 
