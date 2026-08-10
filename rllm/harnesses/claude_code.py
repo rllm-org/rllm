@@ -23,10 +23,19 @@ Two facts are load-bearing:
 from __future__ import annotations
 
 import json
+import os
 import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
 from rllm.types import AgentConfig, Task
+
+# Claude Code's own reasoning-effort levels (``claude --effort``). This is a
+# harness knob, not a model or sampling parameter — it never reaches the request
+# body, so it can only be set on the CLI invocation. Harbor's claude-code agent
+# exposes the identical flag and env fallback, so a leaderboard config recorded
+# as ``reasoning_effort: max`` reproduces here by exporting
+# ``CLAUDE_CODE_EFFORT_LEVEL=max``.
+_EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max", "ultracode")
 
 # Install strategy mirrors harbor: Alpine → npm (the install script's
 # musl-linked binary fails on Alpine), everyone else → official curl
@@ -104,6 +113,19 @@ class ClaudeCodeHarness(BaseCliHarness):
     name = "claude-code"
     sandbox_backend = "docker"
     stdout_log_path = "/tmp/claude-code.log"
+    # ``None`` leaves the flag off, matching both the CLI's own default and
+    # harbor's (its CliFlag declares no default). Env fallback mirrors harbor's.
+    reasoning_effort: str | None = os.environ.get("CLAUDE_CODE_EFFORT_LEVEL") or None
+
+    def configure(self, overrides: dict) -> dict:
+        """Consume ``reasoning_effort`` (``claude --effort``), then defer to the base."""
+        leftovers = super().configure(overrides)
+        effort = leftovers.pop("reasoning_effort", None)
+        if effort is not None:
+            self.reasoning_effort = str(effort)
+        if self.reasoning_effort and self.reasoning_effort not in _EFFORT_CHOICES:
+            raise ValueError(f"reasoning_effort must be one of {', '.join(_EFFORT_CHOICES)} (got {self.reasoning_effort!r})")
+        return leftovers
 
     def install_script(self) -> str:
         return _INSTALL_SCRIPT
@@ -201,12 +223,14 @@ class ClaudeCodeHarness(BaseCliHarness):
         # ``mkdir -p $CLAUDE_CONFIG_DIR`` matches harbor's pre-run setup —
         # the CLI ENOENTs trying to write its debug log if the dir is
         # missing.
+        effort = f"--effort {shlex.quote(self.reasoning_effort)} " if self.reasoning_effort else ""
         return (
             f"{self._cd_prefix(task)}"
             f'export PATH="$HOME/.local/bin:$PATH"; '
             f"mkdir -p {shlex.quote(_CLAUDE_CONFIG_DIR)}; "
             f"claude --verbose --output-format=stream-json "
             f"--permission-mode=bypassPermissions "
+            f"{effort}"
             f"--print -- {shlex.quote(instruction)} "
             f"</dev/null 2>&1 | tee {shlex.quote(self.stdout_log_path)}"
         )

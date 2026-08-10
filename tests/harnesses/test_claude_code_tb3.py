@@ -45,3 +45,31 @@ def test_task_mcp_and_skills_are_registered_for_claude_code():
     assert '"mcpServers"' in command
     assert '"playwright"' in command
     assert '"type": "sse"' in command
+
+
+def _invocation(harness: ClaudeCodeHarness) -> str:
+    task = Task(id="tb3", instruction="do the thing", dataset_dir=Path("."), metadata={})
+    return harness.build_invocation("do the thing", task, AgentConfig(base_url="http://x/v1", model="m", session_uid="s"))
+
+
+def test_reasoning_effort_omitted_by_default():
+    # Matches both the CLI's own default and harbor's (its CliFlag has no default).
+    assert "--effort" not in _invocation(ClaudeCodeHarness())
+
+
+def test_reasoning_effort_is_passed_as_cli_flag():
+    # The leaderboard config (`--ak reasoning_effort=max`) is a harness flag, not
+    # a sampling param — it must land on the invocation, never in the request body.
+    harness = ClaudeCodeHarness()
+    assert harness.configure({"reasoning_effort": "max"}) == {}
+    assert "--effort max " in _invocation(harness)
+
+
+def test_reasoning_effort_rejects_unknown_level():
+    harness = ClaudeCodeHarness()
+    try:
+        harness.configure({"reasoning_effort": "turbo"})
+    except ValueError as e:
+        assert "turbo" in str(e)
+    else:
+        raise AssertionError("expected ValueError for an unknown effort level")
