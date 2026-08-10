@@ -52,6 +52,15 @@ class _Runtime:
                     litellm.router = None
                 litellm.callbacks = []
 
+            # EvalProxyManager sets this for providers whose downstream rejects
+            # Anthropic thinking blocks (e.g. Fireworks). Registered here rather
+            # than via the config's litellm_settings.callbacks because the proxy
+            # resolves those paths relative to the config file, not sys.path.
+            if os.environ.get("RLLM_EVAL_PROXY_STRIP_THINKING") == "1":
+                from rllm.eval._litellm_callbacks import strip_thinking_blocks
+
+                litellm.callbacks = [strip_thinking_blocks]
+
             os.environ["LITELLM_CONFIG"] = str(target)
             litellm.drop_params = True
             await initialize(config=str(target), telemetry=False)
