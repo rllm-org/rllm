@@ -42,6 +42,29 @@ def test_progress_records_are_atomic_and_errors_are_rerun(tmp_path):
     assert not list(store.progress_dir.glob("*.tmp"))
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        TerminationReason.MODEL_ERROR,
+        TerminationReason.SANDBOX_ERROR,
+        TerminationReason.GRADING_ERROR,
+        TerminationReason.AGENT_SETUP_TIMEOUT,
+        TerminationReason.ENV_START_TIMEOUT,
+        TerminationReason.VERIFIER_TIMEOUT,
+    ],
+)
+def test_infra_terminated_rollouts_are_rerun_on_resume(tmp_path, reason):
+    store = EvalEpisodeStore(tmp_path / "run")
+    store.write_progress(0, 0, 0, _episode(_task("a")))
+    broken = _episode(_task("b"), reward=0.0)
+    broken.termination_reason = reason
+    store.write_progress(1, 1, 0, broken)
+
+    successful = store.load_completed_items(successful_only=True)
+
+    assert [(item.idx, item.attempt, item.task_id) for item in successful] == [(0, 0, "a")]
+
+
 def test_fully_resumed_run_does_not_start_agent_lifecycle():
     class Agent:
         def prepare_eval(self, context):
