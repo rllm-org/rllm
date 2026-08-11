@@ -10,7 +10,6 @@ Requires FIREWORKS_API_KEY.
 
 import json
 import os
-import time
 import urllib.request
 
 import pytest
@@ -37,16 +36,10 @@ def _reasoning_chars(effort: str) -> int:
     try:
         url = pm.get_proxy_url().rstrip("/") + "/chat/completions"
         body = json.dumps({"model": MODEL, "messages": [{"role": "user", "content": PROMPT}], "max_tokens": 6000}).encode()
-        deadline = time.time() + 180
-        while True:
-            try:
-                req = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json", "Authorization": "Bearer sk-placeholder"})
-                payload = json.loads(urllib.request.urlopen(req, timeout=300).read())
-                return len(payload["choices"][0]["message"].get("reasoning_content") or "")
-            except Exception:
-                if time.time() > deadline:
-                    raise
-                time.sleep(3)  # proxy still booting
+        req = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json", "Authorization": "Bearer sk-placeholder"})
+        with urllib.request.urlopen(req, timeout=300) as response:
+            payload = json.loads(response.read())
+        return len(payload["choices"][0]["message"].get("reasoning_content") or "")
     finally:
         pm.shutdown_proxy()
 
