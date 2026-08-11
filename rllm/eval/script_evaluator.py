@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from rllm.eval.types import EvalOutput, Signal
-from rllm.sandbox.protocol import Sandbox, SandboxCommandTimeout
+from rllm.sandbox.protocol import ComposeSandbox, Sandbox, SandboxCommandTimeout
 from rllm.types import Episode, Task
 
 logger = logging.getLogger(__name__)
@@ -297,10 +297,9 @@ class ShellScriptEvaluator:
         collected = self._collect_artifacts(task, main_artifacts, staging, user)
 
         if sidecar_hooks or sidecar_artifacts:
-            stop_service = getattr(self.sandbox, "stop_service", None)
-            if not callable(stop_service):
+            if not isinstance(self.sandbox, ComposeSandbox):
                 raise RuntimeError(f"task {task.id!r} declares sidecar artifacts but its sandbox is not service-capable")
-            stop_service("main")
+            self.sandbox.stop_service("main")
             self._run_collect_hooks(task, sidecar_hooks, user)
             collected.extend(self._collect_artifacts(task, sidecar_artifacts, staging, user, offset=len(collected)))
         return collected
@@ -402,20 +401,19 @@ def _service_exec(
     user: str | None = None,
 ) -> str:
     if service == "main":
+        # Any Sandbox can serve "main" — it is the sandbox itself.
         return sandbox.exec(command, timeout=timeout, user=user)
-    execute = getattr(sandbox, "service_exec", None)
-    if not callable(execute):
+    if not isinstance(sandbox, ComposeSandbox):
         raise RuntimeError(f"sandbox cannot execute in sidecar service {service!r}")
-    return execute(service, command, timeout=timeout, user=user)
+    return sandbox.service_exec(service, command, timeout=timeout, user=user)
 
 
 def _service_download_file(sandbox: Sandbox, service: str, path: str) -> bytes:
     if service == "main":
         return sandbox.download_file(path)
-    download = getattr(sandbox, "service_download_file", None)
-    if not callable(download):
+    if not isinstance(sandbox, ComposeSandbox):
         raise RuntimeError(f"sandbox cannot download from sidecar service {service!r}")
-    return download(service, path)
+    return sandbox.service_download_file(service, path)
 
 
 def _remote_file_mode(

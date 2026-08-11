@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from rllm.sandbox.backends.docker_compose import _compose_project_name
+from rllm.sandbox.backends.compose_sandbox import BaseComposeSandbox
 from rllm.sandbox.backends.modal_backend import ModalSandbox
 
 logger = logging.getLogger(__name__)
@@ -21,13 +21,14 @@ _REMOTE_ENVIRONMENT = f"{_REMOTE_ROOT}/environment"
 _REMOTE_COMPOSE = f"{_REMOTE_ROOT}/compose"
 
 
-class ModalComposeSandbox:
+class ModalComposeSandbox(BaseComposeSandbox):
     """Expose a nested Compose project's ``main`` service as an rLLM Sandbox.
 
     One Modal VM Sandbox runs Docker-in-Docker; the task's ``main`` container
     and sidecars live in a normal Compose bridge network inside that VM. This
     follows Harbor's Modal DinD topology while retaining rLLM's small Sandbox
-    interface.
+    interface; satisfies :class:`rllm.sandbox.protocol.ComposeSandbox`
+    structurally.
     """
 
     def __init__(
@@ -45,7 +46,12 @@ class ModalComposeSandbox:
         self.image = "<modal-compose>"
         self._environment_dir = environment_dir.resolve()
         self._compose_file = compose_file.resolve()
-        self._project = _compose_project_name(name)
+        self._project = self._compose_project_name(name)
+        # Invocation-view paths for the shared spec (in-VM paths: compose runs
+        # inside the DinD VM, against the staged copy of the project).
+        self._compose_env_dir = _REMOTE_ENVIRONMENT
+        self._compose_base_file = f"{_REMOTE_COMPOSE}/compose.base.yaml"
+        self._compose_task_file = f"{_REMOTE_ENVIRONMENT}/{self._compose_file.name}"
         self._persistent_env: dict[str, str] = {}
         self._closed = False
 
@@ -91,41 +97,10 @@ class ModalComposeSandbox:
 
     def _stage_project(self, resources: dict) -> None:
         self._outer.upload_dir(str(self._environment_dir), _REMOTE_ENVIRONMENT)
-        base = {
-            "services": {
-                "main": {
-                    "build": {"context": _REMOTE_ENVIRONMENT, "dockerfile": "Dockerfile"},
-                    "command": ["sleep", "infinity"],
-                }
-            }
-        }
-        main = base["services"]["main"]
-        if resources.get("cpus"):
-            main["cpus"] = float(resources["cpus"])
-        if resources.get("memory_mb"):
-            main["mem_limit"] = f"{int(resources['memory_mb'])}m"
-        if resources.get("env"):
-            main["environment"] = {str(k): str(v) for k, v in resources["env"].items()}
-
         with tempfile.TemporaryDirectory(prefix="rllm-modal-compose-") as tempdir:
             base_file = Path(tempdir) / "compose.base.yaml"
-            base_file.write_text(yaml.safe_dump(base, sort_keys=False))
-            self._outer.upload_file(str(base_file), f"{_REMOTE_COMPOSE}/compose.base.yaml")
-
-    def _compose_parts(self, *args: str) -> list[str]:
-        return [
-            "docker",
-            "compose",
-            "--project-name",
-            self._project,
-            "--project-directory",
-            _REMOTE_ENVIRONMENT,
-            "-f",
-            f"{_REMOTE_COMPOSE}/compose.base.yaml",
-            "-f",
-            f"{_REMOTE_ENVIRONMENT}/{self._compose_file.name}",
-            *args,
-        ]
+            base_file.write_text(yaml.safe_dump(self._base_overlay(resources), sort_keys=False))
+            self._outer.upload_file(str(base_file), self._compose_base_file)
 
     def _compose_command(self, *args: str) -> str:
         return shlex.join(self._compose_parts(*args))

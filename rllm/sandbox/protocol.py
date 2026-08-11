@@ -72,6 +72,39 @@ class Sandbox(Protocol):
         ...
 
 
+@runtime_checkable
+class ComposeSandbox(Sandbox, Protocol):
+    """A :class:`Sandbox` backed by a Docker Compose project.
+
+    The ``Sandbox`` methods address the project's ``main`` service; these
+    extensions reach the task's sidecar services (databases, APIs, event
+    feeds) by Compose service name. Like ``Sandbox`` itself this is a
+    structural contract — implementations (``DockerComposeSandbox``,
+    ``ModalComposeSandbox``) satisfy it without inheriting it.
+
+    The contract describes *methods*, not interchangeability: implementations
+    may differ in capability (e.g. Modal's DinD VM runtime cannot pass a GPU
+    through, so ``ModalComposeSandbox`` rejects ``gpu`` at construction while
+    ``DockerComposeSandbox`` accepts it).
+    """
+
+    def set_env(self, env: dict[str, str]) -> None:
+        """Persist environment variables for subsequent ``exec`` calls on ``main``."""
+        ...
+
+    def service_exec(self, service: str, command: str, timeout: float | None = None, user: str | None = None) -> str:
+        """Run *command* inside a named Compose service and return stdout."""
+        ...
+
+    def service_download_file(self, service: str, remote_path: str) -> bytes:
+        """Read a file out of a named Compose service."""
+        ...
+
+    def stop_service(self, service: str) -> None:
+        """Stop one Compose service (e.g. freeze ``main`` before sidecar collection)."""
+        ...
+
+
 def _safe_exec(sandbox: Sandbox, command: str, timeout: float | None = None) -> str:
     """Execute command, returning stderr on non-zero exit instead of raising."""
     try:

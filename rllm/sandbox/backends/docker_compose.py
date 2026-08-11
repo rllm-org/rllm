@@ -3,24 +3,27 @@
 from __future__ import annotations
 
 import logging
-import re
 import subprocess
 import tempfile
 from pathlib import Path
 
 import yaml
 
+from rllm.sandbox.backends.compose_sandbox import BaseComposeSandbox
 from rllm.sandbox.backends.docker import DockerSandbox
 
 logger = logging.getLogger(__name__)
 
 
-class DockerComposeSandbox:
+class DockerComposeSandbox(BaseComposeSandbox):
     """Expose a Compose project's ``main`` service through the Sandbox API.
 
     Task-authored Compose files are overlays: rLLM supplies the base ``main``
     build and keepalive command, while the task adds sidecars, networking,
     healthchecks, volumes, and any main-service overrides.
+
+    Runs ``docker compose`` on the host against the local daemon; satisfies
+    :class:`rllm.sandbox.protocol.ComposeSandbox` structurally.
     """
 
     def __init__(
@@ -43,7 +46,11 @@ class DockerComposeSandbox:
         self._closed = False
         self._tempdir = tempfile.TemporaryDirectory(prefix="rllm-compose-")
         self._base_file = Path(self._tempdir.name) / "compose.base.yaml"
-        self._project = _compose_project_name(name)
+        self._project = self._compose_project_name(name)
+        # Invocation-view paths for the shared spec (host paths: compose runs here).
+        self._compose_env_dir = str(self._environment_dir)
+        self._compose_base_file = str(self._base_file)
+        self._compose_task_file = str(self._compose_file)
         self._write_base(resources or {})
         try:
             self._run_compose(
@@ -60,39 +67,11 @@ class DockerComposeSandbox:
             raise
 
     def _write_base(self, resources: dict) -> None:
-        main: dict = {
-            "build": {"context": str(self._environment_dir), "dockerfile": "Dockerfile"},
-            "command": ["sleep", "infinity"],
-        }
-        cpus = resources.get("cpus")
-        memory_mb = resources.get("memory_mb")
-        env = resources.get("env")
-        if cpus:
-            main["cpus"] = float(cpus)
-        if memory_mb:
-            main["mem_limit"] = f"{int(memory_mb)}m"
-        if env:
-            main["environment"] = {str(k): str(v) for k, v in env.items()}
-        self._base_file.write_text(yaml.safe_dump({"services": {"main": main}}, sort_keys=False))
-
-    def _command(self, *args: str) -> list[str]:
-        return [
-            "docker",
-            "compose",
-            "--project-name",
-            self._project,
-            "--project-directory",
-            str(self._environment_dir),
-            "-f",
-            str(self._base_file),
-            "-f",
-            str(self._compose_file),
-            *args,
-        ]
+        self._base_file.write_text(yaml.safe_dump(self._base_overlay(resources), sort_keys=False))
 
     def _run_compose(self, *args: str, timeout: float | None = None, check: bool = True) -> str:
         result = subprocess.run(
-            self._command(*args),
+            self._compose_parts(*args),
             cwd=str(self._environment_dir),
             capture_output=True,
             text=True,
@@ -166,7 +145,5 @@ class DockerComposeSandbox:
         logger.info("DockerComposeSandbox %s closed", self.name)
 
 
-def _compose_project_name(name: str) -> str:
-    """Return an isolated, Compose-safe project name."""
-    normalized = re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-_")
-    return (normalized or "rllm")[:63]
+# Back-compat alias: the sanitizer moved to the shared spec base.
+_compose_project_name = BaseComposeSandbox._compose_project_name

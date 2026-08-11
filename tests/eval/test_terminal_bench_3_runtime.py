@@ -44,9 +44,17 @@ class _Sandbox:
 
 
 class _ComposeSandbox(_Sandbox):
+    """Fake satisfying the full ComposeSandbox protocol (isinstance-checked at runtime)."""
+
     def __init__(self):
         super().__init__()
         self.events: list[tuple[str, str]] = []
+
+    def is_alive(self) -> bool:
+        return not self.closed
+
+    def set_env(self, env):  # noqa: ARG002
+        pass
 
     def service_exec(self, service, command, timeout=None, user=None):  # noqa: ARG002
         self.events.append(("exec", service))
