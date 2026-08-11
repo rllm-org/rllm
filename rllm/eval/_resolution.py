@@ -543,6 +543,17 @@ def _sandbox_resource_kwargs(task: Task, backend: str, env_override: dict | None
             kw["cpu"] = float(cpus)
         if mem_mb:
             kw["memory"] = int(mem_mb)
+        # Harbor's ``allow_internet = false`` is a runtime isolation contract,
+        # not documentation. A remote CLI agent still needs to call rLLM's
+        # public model gateway, so an explicit domain allowlist takes priority;
+        # without one Modal blocks all outbound traffic. Leave absent/true
+        # declarations unchanged for backward compatibility.
+        if env.get("allow_internet") is False:
+            domain_allowlist = env.get("outbound_domain_allowlist") or []
+            if domain_allowlist:
+                kw["outbound_domain_allowlist"] = [str(value) for value in domain_allowlist]
+            else:
+                kw["block_network"] = True
         kw["timeout"] = lifetime_s  # Modal's hard lifetime, in seconds
     elif backend == "daytona":
         if cpus:

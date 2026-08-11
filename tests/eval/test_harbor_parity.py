@@ -117,6 +117,42 @@ def test_modal_resource_kwargs_apply_memory_from_string_form():
     assert "timeout" in kw  # lifetime is always sized for modal
 
 
+def test_modal_resource_kwargs_honor_explicit_offline_environment():
+    def task_with(allow_internet_marker):
+        environment = {}
+        if allow_internet_marker is not None:
+            environment["allow_internet"] = allow_internet_marker
+        return Task(
+            id="t",
+            instruction="",
+            metadata={"environment": environment},
+            dataset_dir=Path("."),
+        )
+
+    offline = task_with(False)
+    online = task_with(True)
+    unspecified = task_with(None)
+
+    assert _sandbox_resource_kwargs(offline, "modal")["block_network"] is True
+    assert "block_network" not in _sandbox_resource_kwargs(online, "modal")
+    assert "block_network" not in _sandbox_resource_kwargs(unspecified, "modal")
+
+    allowlisted = Task(
+        id="t",
+        instruction="",
+        metadata={
+            "environment": {
+                "allow_internet": False,
+                "outbound_domain_allowlist": ["rllm-eval.example.com"],
+            }
+        },
+        dataset_dir=Path("."),
+    )
+    allowlisted_kwargs = _sandbox_resource_kwargs(allowlisted, "modal")
+    assert allowlisted_kwargs["outbound_domain_allowlist"] == ["rllm-eval.example.com"]
+    assert "block_network" not in allowlisted_kwargs
+
+
 def test_daytona_resource_kwargs_convert_mb_to_gb():
     task = Task(
         id="t",
