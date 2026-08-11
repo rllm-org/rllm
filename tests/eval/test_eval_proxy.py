@@ -94,3 +94,33 @@ class TestEvalProxyManager:
         r = repr(pm)
         assert "minimax" in r
         assert "MiniMax-M2.7" in r
+
+
+class TestSamplingExtraPassthrough:
+    """``drop_params`` deletes params outside litellm's per-provider allowlist,
+    even ones the provider honours (fireworks_ai has no ``reasoning_effort``
+    entry). Those must ride in ``extra_body``, which litellm forwards verbatim,
+    or the run silently uses the model's default and still looks valid."""
+
+    FIREWORKS_MODEL = "accounts/fireworks/models/deepseek-v4-flash-0731"
+
+    def test_unsupported_param_moves_to_extra_body(self):
+        pm = EvalProxyManager(provider="fireworks", model_name=self.FIREWORKS_MODEL, api_key="fw-key", sampling_extra={"reasoning_effort": "max"})
+
+        params = pm.build_proxy_config()["model_list"][0]["litellm_params"]
+        assert params["extra_body"] == {"reasoning_effort": "max"}
+
+    def test_supported_param_stays_top_level(self):
+        """litellm knows ``top_k`` for fireworks_ai, so it must not be diverted —
+        top-level params still get validated and translated per provider."""
+        pm = EvalProxyManager(provider="fireworks", model_name=self.FIREWORKS_MODEL, api_key="fw-key", sampling_extra={"top_k": 20, "reasoning_effort": "max"})
+
+        params = pm.build_proxy_config()["model_list"][0]["litellm_params"]
+        assert params["extra_body"] == {"reasoning_effort": "max"}
+        assert "top_k" not in params["extra_body"]
+
+    def test_no_extra_body_key_without_extras(self):
+        """Runs that pass no extras must generate the same config as before."""
+        pm = EvalProxyManager(provider="fireworks", model_name=self.FIREWORKS_MODEL, api_key="fw-key")
+
+        assert "extra_body" not in pm.build_proxy_config()["model_list"][0]["litellm_params"]
