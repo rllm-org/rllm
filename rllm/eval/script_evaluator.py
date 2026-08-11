@@ -182,9 +182,14 @@ class ShellScriptEvaluator:
         collected: list[CollectedArtifact],
     ) -> EvalOutput:
         """Upload the tests (and any collected artifacts), run the verifier, read the reward."""
-        # Prepare reward directories
+        # Prepare reward directories. Harbor mounts /logs as a writable volume, so
+        # task verifiers assume any user can write under it — e.g. a test.sh that
+        # runs ``su postgres -c "pg_ctl -l /logs/verifier/pg.log"`` after creating
+        # the dir as root. A bare mkdir leaves 755 root:root and that write fails
+        # with EACCES; 1777 (like /tmp) restores harbor's contract. Grading always
+        # runs after the agent has finished, so this widens nothing the agent sees.
         try:
-            sandbox.exec("mkdir -p /tmp/rllm /logs/verifier", timeout=10, user=v_user)
+            sandbox.exec("mkdir -p /tmp/rllm /logs/verifier && chmod 1777 /logs/verifier", timeout=10, user=v_user)
         except Exception:
             pass
 
