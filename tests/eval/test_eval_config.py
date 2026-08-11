@@ -171,7 +171,7 @@ class TestConstants:
         assert "openai" in DEFAULT_MODELS
 
     def test_new_providers_in_supported(self):
-        for pid in ["openrouter", "deepseek", "together", "fireworks", "groq", "cerebras", "xai", "zhipu", "kimi", "minimax", "custom"]:
+        for pid in ["openrouter", "deepseek", "together", "fireworks", "groq", "cerebras", "xai", "zhipu", "kimi", "minimax", "nvidia_nim", "custom"]:
             assert pid in SUPPORTED_PROVIDERS, f"{pid} not in SUPPORTED_PROVIDERS"
 
     def test_original_providers_first(self):
@@ -251,3 +251,10 @@ class TestConstants:
         """MiniMax should have an entry in DEFAULT_MODELS."""
         assert "minimax" in DEFAULT_MODELS
         assert DEFAULT_MODELS["minimax"] == "MiniMax-M3"
+
+    def test_nvidia_nim_provider_info(self):
+        info = get_provider_info("nvidia_nim")
+        assert info is not None
+        assert info.litellm_prefix == "nvidia_nim"
+        assert info.env_key == "NVIDIA_NIM_API_KEY"
+        assert info.default_model == "nvidia/nemotron-3-super-120b-a12b"

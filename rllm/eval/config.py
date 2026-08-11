@@ -250,6 +250,17 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
             "MiniMax-M2.7-highspeed",
         ],
     ),
+    ProviderInfo(
+        id="nvidia_nim",
+        label="NVIDIA NIM",
+        litellm_prefix="nvidia_nim",
+        env_key="NVIDIA_NIM_API_KEY",
+        default_model="nvidia/nemotron-3-super-120b-a12b",
+        models=[
+            "nvidia/nemotron-3-super-120b-a12b",
+            "nvidia/nemotron-3-nano-30b-a3b",
+        ],
+    ),
     # --- Tinker (Thinking Machines) — beta OpenAI-compatible endpoint ---
     ProviderInfo(
         id="tinker",

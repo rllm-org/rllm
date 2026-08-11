@@ -94,3 +94,18 @@ class TestEvalProxyManager:
         r = repr(pm)
         assert "minimax" in r
         assert "MiniMax-M2.7" in r
+
+    def test_build_proxy_config_nvidia_nemotron(self):
+        pm = EvalProxyManager(
+            provider="nvidia_nim",
+            model_name="nvidia/nemotron-3-super-120b-a12b",
+            api_key="nim-key",
+        )
+
+        entry = pm.build_proxy_config()["model_list"][0]
+
+        assert entry["model_name"] == "nvidia/nemotron-3-super-120b-a12b"
+        assert entry["litellm_params"] == {
+            "model": "nvidia_nim/nvidia/nemotron-3-super-120b-a12b",
+            "api_key": "nim-key",
+        }
