@@ -16,17 +16,21 @@ been recovered.
 from __future__ import annotations
 
 import json
+import logging
 import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
 from rllm.sandbox.protocol import Sandbox
 from rllm.types import AgentConfig, Episode, Task, TerminationReason
 
+logger = logging.getLogger(__name__)
+
 LLM_STATS_REFERENCE_URL = "https://llm-stats.com/benchmarks/swe-bench-pro"
 LLM_STATS_TARGET_SCORE = 0.621
 TARGET_MODEL = "GLM-5.2"
 OPENROUTER_MODEL_ID = "z-ai/glm-5.2"
 OPENROUTER_PROVIDER_SLUG = "z-ai"
+FIREWORKS_MODEL_ID = "accounts/fireworks/models/glm-5p2"
 
 # Public baseline inspected on 2026-08-08. The benchmark repo pins the Agent
 # SDK through a git submodule; both revisions are kept here so an old rLLM run
@@ -34,6 +38,12 @@ OPENROUTER_PROVIDER_SLUG = "z-ai"
 OPENHANDS_BENCHMARKS_REVISION = "1411fe96666e2c00b958cd30055ad232e2a64ca1"
 OPENHANDS_SDK_REVISION = "43376f1868ffd702746080714a59c16d3f69ec12"
 OPENHANDS_EXTENSIONS_REVISION = "2cfd75e2396ad5111f0e1670a5534a79bbf97a3e"
+# Resolved by the SDK repository's uv.lock at OPENHANDS_SDK_REVISION. The
+# tools package only declares ``libtmux>=0.53.0``; installing that range today
+# selects newer releases whose tmux parser is incompatible with some official
+# SWE-bench Pro images (notably internetarchive/openlibrary).
+OPENHANDS_LIBTMUX_VERSION = "0.53.0"
+OPENHANDS_LOCALE = "C.UTF-8"
 
 TEMPERATURE = 1.0
 TOP_P = 1.0
@@ -47,7 +57,9 @@ _VENV_DIR = "/opt/rllm/swebench-pro-openhands-glm52"
 _DRIVER_PATH = "/tmp/rllm-swebench-pro-openhands.py"
 _PROMPT_PATH = "/tmp/rllm-swebench-pro-openhands-prompt.txt"
 _SUMMARY_PATH = "/tmp/rllm-swebench-pro-openhands-summary.json"
+_OUTCOME_PATH = "/tmp/rllm-swebench-pro-openhands-outcome.json"
 _REVISION_FILE = f"{_VENV_DIR}/.sdk-revision"
+_INSTALL_REVISION = f"{OPENHANDS_SDK_REVISION}:libtmux=={OPENHANDS_LIBTMUX_VERSION}"
 _SDK_ARCHIVE = f"https://github.com/OpenHands/software-agent-sdk/archive/{OPENHANDS_SDK_REVISION}.tar.gz"
 _SDK_REQUIREMENT = f"openhands-sdk @ {_SDK_ARCHIVE}#subdirectory=openhands-sdk"
 _TOOLS_REQUIREMENT = f"openhands-tools @ {_SDK_ARCHIVE}#subdirectory=openhands-tools"
@@ -61,6 +73,8 @@ REPRODUCTION_PROFILE = {
     "openhands_benchmarks_revision": OPENHANDS_BENCHMARKS_REVISION,
     "openhands_sdk_revision": OPENHANDS_SDK_REVISION,
     "openhands_extensions_revision": OPENHANDS_EXTENSIONS_REVISION,
+    "libtmux_version": OPENHANDS_LIBTMUX_VERSION,
+    "locale": OPENHANDS_LOCALE,
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "max_output_tokens": MAX_OUTPUT_TOKENS,
@@ -72,7 +86,12 @@ REPRODUCTION_PROFILE = {
     "openrouter_provider_route": {
         "only": [OPENROUTER_PROVIDER_SLUG],
         "allow_fallbacks": False,
-        "require_parameters": True,
+        # OpenHands/LiteLLM includes auxiliary request fields that Z.AI does
+        # not advertise even though it supports the disclosed benchmark
+        # settings and tools.  Requiring every field would exclude Z.AI before
+        # the request reaches it; with this false, unsupported extras are
+        # ignored while routing remains pinned to Z.AI.
+        "require_parameters": False,
     },
 }
 
@@ -103,12 +122,12 @@ fi
 export PATH="$HOME/.local/bin:$PATH"
 
 installed_revision="$(cat {_REVISION_FILE} 2>/dev/null || true)"
-if [ "$installed_revision" != "{OPENHANDS_SDK_REVISION}" ]; then
+if [ "$installed_revision" != "{_INSTALL_REVISION}" ]; then
     uv venv --python 3.12 --clear {_VENV_DIR}
     uv pip install --python {_VENV_DIR}/bin/python {shlex.quote(_SDK_REQUIREMENT)}
     uv pip install --python {_VENV_DIR}/bin/python --no-deps {shlex.quote(_TOOLS_REQUIREMENT)}
-    uv pip install --python {_VENV_DIR}/bin/python binaryornot cachetools libtmux func-timeout
-    printf '%s\n' "{OPENHANDS_SDK_REVISION}" > {_REVISION_FILE}
+    uv pip install --python {_VENV_DIR}/bin/python binaryornot cachetools libtmux=={OPENHANDS_LIBTMUX_VERSION} func-timeout
+    printf '%s\n' "{_INSTALL_REVISION}" > {_REVISION_FILE}
 fi
 """
 
@@ -180,6 +199,7 @@ _DRIVER_SCRIPT = rf'''"""Pinned local-workspace OpenHands driver for rLLM."""
 
 import json
 import os
+import traceback
 
 from openhands.sdk import Agent, Conversation, LLM
 from openhands.sdk.context import AgentContext
@@ -224,72 +244,118 @@ def _fake_response(conversation):
     return message
 
 
-def main():
-    model = os.environ["LLM_MODEL"]
-    provider_route = None
-    if model.startswith("openrouter/"):
-        provider_route = {{
-            "provider": {{
-                "only": ["{OPENROUTER_PROVIDER_SLUG}"],
-                "allow_fallbacks": False,
-                "require_parameters": True,
-            }}
-        }}
-    llm = LLM(
-        usage_id="agent",
-        model=model,
-        api_key=os.environ["LLM_API_KEY"],
-        base_url=os.environ["LLM_BASE_URL"],
-        temperature={TEMPERATURE},
-        top_p={TOP_P},
-        max_input_tokens={CONTEXT_WINDOW_TOKENS},
-        max_output_tokens={MAX_OUTPUT_TOKENS},
-        disable_vision=True,
-        litellm_extra_body=provider_route or {{}},
-    )
-    condenser_llm = llm.model_copy(deep=True, update={{"usage_id": "condenser"}})
-    public_skills = load_public_skills()
-    agent_context = AgentContext(skills=public_skills) if public_skills else None
-    agent = Agent(
-        llm=llm,
-        tools=get_default_tools(enable_browser=False),
-        system_prompt_kwargs={{"cli_mode": True}},
-        condenser=LLMSummarizingCondenser(
-            llm=condenser_llm,
-            max_size={CONDENSER_MAX_SIZE},
-            keep_first={CONDENSER_KEEP_FIRST},
-        ),
-        agent_context=agent_context,
-    )
-    conversation = Conversation(
-        agent=agent,
-        workspace=os.environ["RLLM_OPENHANDS_WORKDIR"],
-        max_iteration_per_run={MAX_ITERATIONS},
-        delete_on_close=True,
-    )
-    instruction = open(os.environ["RLLM_OPENHANDS_PROMPT_PATH"], encoding="utf-8").read()
-    conversation.send_message(instruction)
+class ConversationIncompleteError(RuntimeError):
+    pass
 
+
+def _write_json(path, data):
+    temporary = f"{{path}}.tmp.{{os.getpid()}}"
+    with open(temporary, "w", encoding="utf-8") as stream:
+        json.dump(data, stream, indent=2, sort_keys=True)
+    os.replace(temporary, path)
+
+
+def main():
+    conversation = None
+    failure = None
+    failure_traceback = None
     fake_responses = 0
-    timeout = int(os.environ.get("CONVERSATION_TIMEOUT", "3600"))
-    while True:
-        conversation.run(timeout=timeout)
-        events = list(conversation.state.events)
-        if conversation.state.execution_status != ConversationExecutionStatus.FINISHED:
-            break
-        if _finished(events) or not _sent_message(events) or fake_responses >= 10:
-            break
-        conversation.send_message(_fake_response(conversation))
-        fake_responses += 1
+    try:
+        model = os.environ["LLM_MODEL"]
+        provider_route = None
+        if model.startswith("openrouter/"):
+            provider_route = {{
+                "provider": {{
+                    "only": ["{OPENROUTER_PROVIDER_SLUG}"],
+                    "allow_fallbacks": False,
+                    "require_parameters": False,
+                }}
+            }}
+        llm = LLM(
+            usage_id="agent",
+            model=model,
+            api_key=os.environ["LLM_API_KEY"],
+            base_url=os.environ["LLM_BASE_URL"],
+            temperature={TEMPERATURE},
+            top_p={TOP_P},
+            max_input_tokens={CONTEXT_WINDOW_TOKENS},
+            max_output_tokens={MAX_OUTPUT_TOKENS},
+            disable_vision=True,
+            litellm_extra_body=provider_route or {{}},
+        )
+        condenser_llm = llm.model_copy(deep=True, update={{"usage_id": "condenser"}})
+        public_skills = load_public_skills()
+        agent_context = AgentContext(skills=public_skills) if public_skills else None
+        agent = Agent(
+            llm=llm,
+            tools=get_default_tools(enable_browser=False),
+            system_prompt_kwargs={{"cli_mode": True}},
+            condenser=LLMSummarizingCondenser(
+                llm=condenser_llm,
+                max_size={CONDENSER_MAX_SIZE},
+                keep_first={CONDENSER_KEEP_FIRST},
+            ),
+            agent_context=agent_context,
+        )
+        conversation = Conversation(
+            agent=agent,
+            workspace=os.environ["RLLM_OPENHANDS_WORKDIR"],
+            max_iteration_per_run={MAX_ITERATIONS},
+            delete_on_close=True,
+        )
+        instruction = open(os.environ["RLLM_OPENHANDS_PROMPT_PATH"], encoding="utf-8").read()
+        conversation.send_message(instruction)
+
+        while True:
+            conversation.run()
+            events = list(conversation.state.events)
+            if conversation.state.execution_status != ConversationExecutionStatus.FINISHED:
+                break
+            if _finished(events) or not _sent_message(events) or fake_responses >= 10:
+                break
+            conversation.send_message(_fake_response(conversation))
+            fake_responses += 1
+    except BaseException as exc:
+        # OpenHands can raise while processing the terminal FinishAction. Keep
+        # the typed event authoritative, but record every pre-finish failure.
+        failure = exc
+        failure_traceback = traceback.format_exc()
+
+    events = list(conversation.state.events) if conversation is not None else []
+    finished = _finished(events)
+    execution_status = None
+    if conversation is not None:
+        status = conversation.state.execution_status
+        execution_status = getattr(status, "value", str(status))
+    if not finished and failure is None:
+        failure = ConversationIncompleteError(
+            f"OpenHands stopped without FinishAction (execution_status={{execution_status}})"
+        )
 
     summary = {{
-        "execution_status": conversation.state.execution_status.value,
-        "events": len(list(conversation.state.events)),
+        "execution_status": execution_status,
+        "events": len(events),
         "fake_responses": fake_responses,
-        "profile": {json.dumps(REPRODUCTION_PROFILE, sort_keys=True)},
+        "finished": finished,
+        "profile": {REPRODUCTION_PROFILE!r},
     }}
-    with open(os.environ["RLLM_OPENHANDS_SUMMARY_PATH"], "w", encoding="utf-8") as stream:
-        json.dump(summary, stream, indent=2, sort_keys=True)
+    try:
+        _write_json(os.environ["RLLM_OPENHANDS_SUMMARY_PATH"], summary)
+    except BaseException as exc:
+        if failure is None:
+            failure = exc
+            failure_traceback = traceback.format_exc()
+
+    outcome = {{
+        "finished": finished,
+        "execution_status": execution_status,
+        "exception_type": None if finished else type(failure).__name__,
+        "message": "" if failure is None else str(failure),
+        "traceback": None if finished else failure_traceback,
+    }}
+    # Write the authoritative sentinel last. Once it exists, the harness can
+    # classify the run even when the backend loses the exec completion.
+    _write_json(os.environ["RLLM_OPENHANDS_OUTCOME_PATH"], outcome)
     print(json.dumps(summary, sort_keys=True))
 
 
@@ -316,17 +382,26 @@ class SwebenchProOpenHandsGLM52Harness(BaseCliHarness):
         return _INSTALL_SCRIPT
 
     def build_env(self, task: Task, config: AgentConfig) -> dict[str, str]:
-        if "glm-5.2" not in config.model.lower():
+        model_lower = config.model.lower()
+        if "glm-5.2" not in model_lower and model_lower != FIREWORKS_MODEL_ID:
             raise ValueError(f"{self.name} requires a GLM-5.2 model, got {config.model!r}")
-        if config.model.lower().startswith("z-ai/"):
+        if model_lower.startswith("z-ai/"):
             # rLLM's OpenRouter proxy exposes the exact OpenRouter model ID as
             # its alias. Tell OpenHands/LiteLLM which provider syntax to use,
             # while preserving that alias in the forwarded request body.
             qualified = f"openrouter/{config.model}"
+        elif model_lower == FIREWORKS_MODEL_ID:
+            # The sandbox talks to rLLM's OpenAI-compatible gateway, not
+            # Fireworks directly. Preserve Fireworks' full account-scoped model
+            # alias in the forwarded request body while using LiteLLM's OpenAI
+            # adapter for the gateway hop.
+            qualified = f"openai/{config.model}"
         else:
             _, _, qualified = self.ensure_provider_prefix(config.model)
-        api_key = self.gateway_api_key(config, "OPENAI_API_KEY")
-        timeout = int(float(task.metadata.get("agent_timeout") or self.run_timeout))
+        # The sandbox talks only to rLLM's gateway; the real OpenRouter key
+        # remains in the host-side proxy.  Use a harness-specific fallback so
+        # an unrelated host OPENAI_API_KEY is never copied into the sandbox.
+        api_key = self.gateway_api_key(config, "RLLM_GATEWAY_API_KEY")
         workdir = str(task.metadata.get("workdir") or "/app")
         return {
             "LLM_MODEL": qualified,
@@ -338,10 +413,43 @@ class SwebenchProOpenHandsGLM52Harness(BaseCliHarness):
             "OPENHANDS_SUPPRESS_BANNER": "1",
             "EXTENSIONS_REF": OPENHANDS_EXTENSIONS_REVISION,
             "LITELLM_LOCAL_MODEL_COST_MAP": "True",
-            "CONVERSATION_TIMEOUT": str(timeout),
+            # The pinned OpenHands agent-layer Dockerfile requires this UTF-8
+            # locale so tmux preserves libtmux's Unicode field separator.
+            "LC_ALL": OPENHANDS_LOCALE,
+            "LANG": OPENHANDS_LOCALE,
             "RLLM_OPENHANDS_WORKDIR": workdir,
             "RLLM_OPENHANDS_PROMPT_PATH": _PROMPT_PATH,
             "RLLM_OPENHANDS_SUMMARY_PATH": _SUMMARY_PATH,
+            "RLLM_OPENHANDS_OUTCOME_PATH": _OUTCOME_PATH,
+        }
+
+    def _read_outcome(self, sandbox: Sandbox) -> dict | None:
+        try:
+            raw = sandbox.exec(
+                f"cat {shlex.quote(_OUTCOME_PATH)} 2>/dev/null || true",
+                timeout=15,
+                user=self.agent_user,
+            ).strip()
+        except Exception as exc:
+            logger.debug("SWE-bench Pro OpenHands outcome read failed: %s", exc)
+            return None
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except Exception as exc:
+            logger.debug("SWE-bench Pro OpenHands outcome parse failed: %s", exc)
+            return None
+        if data.get("finished") is True:
+            return {}
+        message = data.get("message", "")
+        failure_traceback = data.get("traceback")
+        if failure_traceback:
+            message = f"{message}\n\n{failure_traceback}" if message else failure_traceback
+        return {
+            "exception_type": data.get("exception_type") or "ConversationIncompleteError",
+            "message": message,
+            "traceback": failure_traceback,
         }
 
     def write_configs(self, sandbox: Sandbox, task: Task, config: AgentConfig, env: dict[str, str]) -> None:
@@ -354,7 +462,8 @@ class SwebenchProOpenHandsGLM52Harness(BaseCliHarness):
 
     def build_invocation(self, instruction: str, task: Task, config: AgentConfig) -> str:
         del instruction, task, config
-        return f"set -o pipefail; {_VENV_DIR}/bin/python {shlex.quote(_DRIVER_PATH)} 2>&1 | tee {shlex.quote(self.stdout_log_path)}"
+        log = shlex.quote(self.stdout_log_path)
+        return f"set -o pipefail; {_VENV_DIR}/bin/python {shlex.quote(_DRIVER_PATH)} 2>&1 | tee {log}"
 
     def _outcome_episode(
         self,
