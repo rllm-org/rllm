@@ -355,6 +355,13 @@ def test_opencode_invocation_uses_custom_provider_prefix_and_detaches_stdin():
         ("gemini-1.5-pro", "google", "google/gemini-1.5-pro"),
         ("deepseek-coder", "deepseek", "deepseek/deepseek-coder"),
         ("mistral-large", "mistral", "mistral/mistral-large"),
+        # A Fireworks id names the model's author, not its host. The host wins:
+        # anything else routes the sandbox to that vendor's own endpoint
+        # instead of the gateway (litellm ignores OPENAI_API_BASE for a
+        # non-openai slug), which zeroes the whole run.
+        ("accounts/fireworks/models/deepseek-v4-pro", "openai", "openai/fireworks/models/deepseek-v4-pro"),
+        ("accounts/fireworks/models/kimi-k3", "openai", "openai/fireworks/models/kimi-k3"),
+        ("accounts/fireworks/routers/kimi-k3-fast", "openai", "openai/fireworks/routers/kimi-k3-fast"),
         # Pre-qualified names round-trip unchanged.
         ("openai/gpt-4o", "openai", "openai/gpt-4o"),
         ("anthropic/claude-opus-4-1", "anthropic", "anthropic/claude-opus-4-1"),

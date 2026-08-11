@@ -159,8 +159,18 @@ class BaseCliHarness(SandboxedAgentFlow):
         Returns the lowercase provider slug. Defaults to ``openai`` for
         unknown patterns — works for ``gpt-*``/``o1``/``o3`` and routes
         cleanly through any OpenAI-compatible proxy.
+
+        A Fireworks model id names its *author*, not its host
+        (``accounts/fireworks/models/deepseek-v4-pro``), so the vendor
+        keywords below would match the wrong thing: litellm would resolve
+        ``deepseek/`` against api.deepseek.com and ignore the
+        ``OPENAI_API_BASE`` the harness points at the gateway, sending every
+        call out of the sandbox. Match the host first — Fireworks is
+        OpenAI-shaped.
         """
         name = model_name.lower()
+        if "fireworks" in name:
+            return "openai"
         if any(k in name for k in ("claude", "haiku", "sonnet", "opus")):
             return "anthropic"
         if "gemini" in name or "gemma" in name:
