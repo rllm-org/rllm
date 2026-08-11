@@ -320,8 +320,19 @@ def _replay_dockerfile(task: Task, sandbox: Sandbox, backend: str) -> None:
         return
     if not _should_replay_dockerfile(task):
         return
+    # Each RUN step gets the task's own declared build budget, not a flat cap:
+    # apt-heavy steps (build-essential, g++, python3-venv) routinely exceed 900s
+    # when many sandboxes contend for mirrors and CPU, and the install then fails
+    # for infra reasons that read as capability failures. Tasks that declare a
+    # larger ``build_timeout_sec`` were previously killed at 900s regardless.
+    # ``RLLM_DOCKERFILE_REPLAY_TIMEOUT_S`` overrides both (0 = unset).
+    from rllm.env import env_int
+
+    env = task.metadata.get("environment", {}) or {}
+    declared = env.get("build_timeout_sec")
+    timeout = float(env_int("RLLM_DOCKERFILE_REPLAY_TIMEOUT_S", 0)) or float(declared or 900)
     for cmd in _dockerfile_run_commands(task):
-        _safe_exec(sandbox, cmd, timeout=900)
+        _safe_exec(sandbox, cmd, timeout=timeout)
 
 
 def _task_dockerfile(task: Task) -> Path | None:
@@ -336,9 +347,11 @@ def _task_dockerfile(task: Task) -> Path | None:
 # Remote backends that build images themselves and so can build the *real* Dockerfile
 # (COPY/ENV/WORKDIR/RUN) instead of pulling FROM + replaying RUN. ``docker`` is excluded
 # because it already builds via ``docker build``; ``local`` cannot build. ``modal`` is a
-# tracked follow-up (it accepts a ``modal.Image`` and already keepalive-overrides the
-# entrypoint, but the from_dockerfile path there is untested — see _dockerfile_image).
-_FROM_DOCKERFILE_BACKENDS = ("daytona",)
+# entrypoint. ``modal`` builds the real image too: replaying RUN alone drops the COPY /
+# WORKDIR steps every harbor task relies on, so the agent lands in a sandbox missing the
+# task's own files (all 74 Terminal-Bench 3 tasks use COPY and/or WORKDIR, and none ship
+# an ``environment/files/`` or ``setup.sh`` fallback to compensate).
+_FROM_DOCKERFILE_BACKENDS = ("daytona", "modal")
 
 
 def _builds_from_dockerfile(task: Task, backend: str) -> Path | None:
@@ -361,6 +374,10 @@ def _dockerfile_image(backend: str, dockerfile: Path):
         from daytona import Image  # daytona.Image.from_dockerfile bundles the Dockerfile dir as context
 
         return Image.from_dockerfile(str(dockerfile))
+    if backend == "modal":
+        import modal  # same call _create_verifier_sandbox already uses for tests/Dockerfile
+
+        return modal.Image.from_dockerfile(str(dockerfile), context_dir=str(dockerfile.parent))
     raise ValueError(f"from_dockerfile build unsupported for backend {backend!r}")
 
 
