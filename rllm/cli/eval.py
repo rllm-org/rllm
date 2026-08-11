@@ -737,6 +737,10 @@ def eval_cmd(
                 model_name=model,
                 api_key=api_key,
                 proxy_port=proxy_port,
+                # Non-core sampling params (reasoning_effort, …) the proxy must
+                # forward instead of dropping. The gateway enforces them per
+                # call; this keeps litellm from deleting them en route.
+                sampling_extra=sampling_config.extra if sampling_config else None,
             )
             with Status(f"[dim]Starting LiteLLM proxy for [bold]{provider}/{model}[/bold]...[/]", console=console):
                 try:
