@@ -78,3 +78,17 @@ def test_attach_run_tags_swallows_set_tags_failure():
 
     _attach_run_tags(Ok(), {"rllm_run_id": "x"}, "sb")
     assert seen == {"rllm_run_id": "x"}
+
+
+def test_command_error_redaction_hides_exported_credentials():
+    from rllm.sandbox.backends.modal_backend import _redact_command_secrets
+
+    command = "export LLM_API_KEY=secret-one; export ACCESS_TOKEN='secret two'; export SAFE=value; run-agent"
+
+    redacted = _redact_command_secrets(command)
+
+    assert "secret-one" not in redacted
+    assert "secret two" not in redacted
+    assert "export LLM_API_KEY=[REDACTED];" in redacted
+    assert "export ACCESS_TOKEN=[REDACTED];" in redacted
+    assert "export SAFE=value; run-agent" in redacted

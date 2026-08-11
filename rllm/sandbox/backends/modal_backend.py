@@ -17,6 +17,7 @@ import atexit
 import io
 import logging
 import os
+import re
 import shlex
 import tarfile
 import threading
@@ -28,6 +29,11 @@ from rllm.env import env_float, env_int, rllm_run_id, sandbox_timeout_override_s
 from rllm.sandbox.protocol import SandboxCommandTimeout, SnapshotNotFound
 
 logger = logging.getLogger(__name__)
+
+_SECRET_EXPORT_RE = re.compile(
+    r"(?i)(\bexport\s+[A-Za-z_][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)\s*=\s*)"
+    r"(?:'[^']*'|\"[^\"]*\"|[^;]*)(?=;)",
+)
 
 # Headroom the sandbox lifetime keeps *beyond* the agent run timeout + install,
 # to cover the post-run verifier, teardown, and scheduling slack.
@@ -68,6 +74,11 @@ def _attach_run_tags(sandbox, tags: dict[str, str], name: str) -> None:
         sandbox.set_tags(tags)
     except Exception:
         logger.debug("could not tag sandbox %s", name, exc_info=True)
+
+
+def _redact_command_secrets(command: str) -> str:
+    """Redact exported credentials before a shell command reaches logs/errors."""
+    return _SECRET_EXPORT_RE.sub(r"\1[REDACTED]", command)
 
 
 # Modal caps an exec's total argv at 64 KiB (ARG_MAX); payloads above this go
@@ -333,6 +344,7 @@ class ModalSandbox:
         elapsed = time.monotonic() - start
 
         if exit_code != 0:
+            safe_command = _redact_command_secrets(command)
             # A timeout SIGKILL surfaces as a negative returncode; flag it so an
             # agent that simply spent its time budget isn't reported as a failure.
             timed_out = timeout is not None and exit_code < 0 and elapsed >= timeout * 0.95
@@ -342,16 +354,16 @@ class ModalSandbox:
                     int(timeout),
                     self.name,
                     elapsed,
-                    command[:200],
+                    safe_command[:200],
                 )
                 raise SandboxCommandTimeout(f"Command hit its {int(timeout)}s timeout in sandbox {self.name} (killed after {elapsed:.0f}s)")
             logger.debug(
                 "Command failed in sandbox %s: %s\nstderr: %s",
                 self.name,
-                command,
+                safe_command,
                 stderr[:500],
             )
-            raise RuntimeError(f"Command failed (exit {exit_code}) in sandbox {self.name}: {command}\n{stderr[:500]}")
+            raise RuntimeError(f"Command failed (exit {exit_code}) in sandbox {self.name}: {safe_command}\n{stderr[:500]}")
         return stdout
 
     def _push_b64(self, b64: str, consume: str) -> None:
