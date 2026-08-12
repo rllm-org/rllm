@@ -97,7 +97,10 @@ def tunnel_setup():
             except subprocess.CalledProcessError as e:
                 detail = (e.stderr or e.stdout or "").strip() or f"ngrok exited with status {e.returncode}"
                 detail = detail.replace(api_key, "***") if api_key else detail
-                fail(f"ngrok could not reserve {domain}: {detail}")
+                if "ERR_NGROK_413" in detail:
+                    console.print(f"  [success]✓[/] [val]{domain}[/] is already reserved on this account.")
+                else:
+                    fail(f"ngrok could not reserve {domain}: {detail}")
     else:
         if not CloudflaredTunnel.is_available():
             fail(f"cloudflared not found on PATH. {CloudflaredTunnel.install_hint}")

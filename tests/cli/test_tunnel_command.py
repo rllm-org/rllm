@@ -49,6 +49,17 @@ def test_setup_can_use_existing_wildcard_without_api_call(monkeypatch):
     assert load_tunnel_config() == {"backend": "ngrok", "domain": "*.existing.ngrok.app"}
 
 
+def test_setup_accepts_already_reserved_wildcard(monkeypatch):
+    error = subprocess.CalledProcessError(1, ["ngrok"], stderr="This domain is already reserved. [ERR_NGROK_413]")
+    monkeypatch.setattr("rllm.cli.tunnel.subprocess.run", lambda *args, **kwargs: (_ for _ in ()).throw(error))
+
+    result = CliRunner().invoke(cli, ["tunnel", "setup"], input="1\n\n*.existing.ngrok.app\ny\n\n")
+
+    assert result.exit_code == 0, result.output
+    assert "already reserved" in result.output
+    assert load_tunnel_config() == {"backend": "ngrok", "domain": "*.existing.ngrok.app"}
+
+
 def test_fixed_domain_keeps_configured_port(monkeypatch):
     monkeypatch.setattr("rllm.cli.tunnel.subprocess.run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected ngrok call")))
 
