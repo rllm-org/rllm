@@ -92,12 +92,8 @@ async def run_dataset(
     # and tear down one ourselves (single-shot).
     owned_gateway = gateway is None
     if owned_gateway:
-        # Auto-tunnel for off-host sandboxes (same predicate AgentTrainer uses).
-        # Resolve like training does: $RLLM_GATEWAY_TUNNEL → a running
-        # `rllm tunnel up` daemon → cloudflared quick-tunnel fallback. Quick
-        # tunnels enforce a 120s origin read timeout, which kills slow
-        # non-streaming LLM calls (CF 524) — a configured ngrok tunnel avoids
-        # that, so eval must honor it, not just training.
+        # Each remote eval owns its tunnel instead of reusing the singleton
+        # `rllm tunnel up` daemon and its fixed origin port.
         gateway_tunnel: str | None = None
         gateway_port: int | None = None
         if not is_local_sandbox_backend(sandbox_backend):

@@ -191,16 +191,17 @@ class GatewayManager:
         gw_cfg = config.rllm.get("gateway", {})
         configured_host = gw_cfg.get("host", None)
         self.host: str = configured_host if configured_host else _get_routable_ip()
-        self.port: int = gw_cfg.get("port", DEFAULT_GATEWAY_PORT)
+        from rllm.gateway.tunnel import parse_tunnel
+
+        self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
+        configured_port = gw_cfg.get("port", None)
+        self.port: int = int(configured_port) if configured_port is not None else (_find_free_port() if self.tunnel_backend else DEFAULT_GATEWAY_PORT)
         self.store: str = gw_cfg.get("store", "memory")
         self.db_path: str | None = gw_cfg.get("db_path", None)
         if self.store not in ("memory", "sqlite"):
             raise ValueError(f"rllm.gateway.store must be 'memory' or 'sqlite', got {self.store!r}")
         if self.store == "memory" and self.db_path:
             raise ValueError("rllm.gateway.db_path is set but store='memory'; set store='sqlite' or clear db_path")
-        from rllm.gateway.tunnel import parse_tunnel
-
-        self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
         _model_cfg = config.get("model", {})
         self.model: str | None = _model_cfg.get("tokenizer_model") or _model_cfg.get("name", None)
 

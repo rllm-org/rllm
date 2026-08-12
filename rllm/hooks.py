@@ -344,7 +344,7 @@ def enable_gateway_tunnel(config: DictConfig) -> DictConfig:
     Callers decide *when* (sandboxes run off-host — see
     :func:`scan_env_requirements`); this helper resolves *what*. An explicit
     ``rllm.gateway.tunnel`` always wins; otherwise resolution falls to
-    ``$RLLM_GATEWAY_TUNNEL`` → a running ``rllm tunnel up`` daemon → a free
+    ``$RLLM_GATEWAY_TUNNEL`` → a configured ngrok wildcard → a fresh
     Cloudflare quick tunnel (with a warning) — see
     :func:`rllm.gateway.tunnel.resolve_auto_tunnel`.
     """
