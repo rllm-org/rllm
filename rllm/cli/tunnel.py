@@ -167,8 +167,8 @@ def tunnel_up(backend, port):
     write_tunnel_state(backend=resolved_backend, url=url, pid=pid, upstream=upstream, log_path=log_path)
     console.print(f"  [success]✓ Tunnel up:[/] [val]{url}[/] [muted](pid {pid})[/]")
     console.print(f"  [label]logs[/] {log_path}")
-        console.print(f"  To reuse it, set [key]RLLM_GATEWAY_TUNNEL[/] to this URL and [key]rllm.gateway.port={resolved_port}[/].")
-        console.print("  Stop it with [key]rllm tunnel down[/].")
+    console.print(f"  To reuse it, set [key]RLLM_GATEWAY_TUNNEL[/] to this URL and [key]rllm.gateway.port={resolved_port}[/].")
+    console.print("  Stop it with [key]rllm tunnel down[/].")
 
 
 @tunnel.command("status")
