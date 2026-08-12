@@ -22,23 +22,30 @@ def test_explicit_environment_override_wins(monkeypatch, override):
     assert runner_mod._resolve_eval_tunnel() == override
 
 
-def test_default_is_cloudflared_even_when_ngrok_is_configured(monkeypatch):
+def test_configured_ngrok_wildcard_is_owned_by_eval(monkeypatch):
     import rllm.eval.config as config_mod
 
-    def _unexpected_config_lookup():
-        raise AssertionError("eval must not reuse persistent tunnel configuration")
+    monkeypatch.setattr(config_mod, "load_tunnel_config", lambda: {"backend": "ngrok", "domain": "*.rllm.example.ngrok.app"})
 
-    monkeypatch.setattr(config_mod, "load_tunnel_config", _unexpected_config_lookup)
+    assert runner_mod._resolve_eval_tunnel() == "ngrok:*.rllm.example.ngrok.app"
+
+
+def test_fixed_ngrok_domain_is_not_reused_by_eval(monkeypatch):
+    import rllm.eval.config as config_mod
+
+    monkeypatch.setattr(config_mod, "load_tunnel_config", lambda: {"backend": "ngrok", "domain": "gateway.example.ngrok.app"})
 
     assert runner_mod._resolve_eval_tunnel() == "cloudflared"
 
 
 def test_persistent_daemon_is_not_consulted(monkeypatch):
+    import rllm.eval.config as config_mod
     import rllm.gateway.tunnel as tunnel_mod
 
     def _unexpected_daemon_lookup():
         raise AssertionError("eval tunnel resolution must not inspect the persistent daemon")
 
+    monkeypatch.setattr(config_mod, "load_tunnel_config", lambda: {})
     monkeypatch.setattr(tunnel_mod, "live_tunnel_url", _unexpected_daemon_lookup)
 
     assert runner_mod._resolve_eval_tunnel() == "cloudflared"

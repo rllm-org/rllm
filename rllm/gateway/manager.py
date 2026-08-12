@@ -191,7 +191,8 @@ class GatewayManager:
         gw_cfg = config.rllm.get("gateway", {})
         configured_host = gw_cfg.get("host", None)
         self.host: str = configured_host if configured_host else _get_routable_ip()
-        self.port: int = gw_cfg.get("port", DEFAULT_GATEWAY_PORT)
+        configured_port = gw_cfg.get("port", None)
+        self.port: int = int(configured_port) if configured_port is not None else DEFAULT_GATEWAY_PORT
         self.store: str = gw_cfg.get("store", "memory")
         self.db_path: str | None = gw_cfg.get("db_path", None)
         if self.store not in ("memory", "sqlite"):

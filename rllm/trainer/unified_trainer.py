@@ -170,7 +170,8 @@ class UnifiedTrainer:
             # check the port here so a conflict fails before any of that.
             from rllm.gateway.manager import DEFAULT_GATEWAY_PORT, preflight_gateway_port
 
-            preflight_gateway_port((config.rllm.get("gateway", {}) or {}).get("port", DEFAULT_GATEWAY_PORT))
+            configured_port = (config.rllm.get("gateway", {}) or {}).get("port", None)
+            preflight_gateway_port(int(configured_port) if configured_port is not None else DEFAULT_GATEWAY_PORT)
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}

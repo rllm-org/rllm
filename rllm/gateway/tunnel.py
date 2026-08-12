@@ -7,19 +7,19 @@ backends ship:
 * :class:`CloudflaredTunnel` — ``cloudflared tunnel --url`` →
   ``*.trycloudflare.com``. Zero-setup, but a shared, rate-limited (HTTP 429)
   quick tunnel; fine for smoke tests, not for high-concurrency training.
-* :class:`NgrokTunnel` — ``ngrok http`` → ``*.ngrok-free.app`` or your own
-  reserved domain. Needs a one-time ``rllm tunnel setup`` (authtoken) but is
-  stable across restarts.
+* :class:`NgrokTunnel` — ``ngrok http`` using an account endpoint, a fixed
+  reserved domain, or a unique child of a configured wildcard. Needs a one-time
+  ``rllm tunnel setup`` (authtoken).
 
 :class:`GatewayManager` plumbs the chosen tunnel's :attr:`public_url` into
 :class:`AgentConfig.base_url`. It builds a tunnel from the
 ``rllm.gateway.tunnel`` config via :func:`create_tunnel`.
 
-The ``rllm tunnel`` CLI runs a backend as a *detached daemon*
+The ``rllm tunnel`` CLI can run a fixed backend as a *detached daemon*
 (:func:`spawn_detached`) whose live URL is written to a state file
-(:func:`write_tunnel_state`). Training then auto-discovers that URL via
-:func:`resolve_auto_tunnel` with no per-run config — set
-``rllm.gateway.tunnel`` explicitly only to override.
+(:func:`write_tunnel_state`). Configured ngrok wildcards instead resolve to an
+owned backend per run. Training selects either path via
+:func:`resolve_auto_tunnel`; set ``rllm.gateway.tunnel`` explicitly to override.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ import signal
 import subprocess
 import threading
 import time
+import uuid
 
 from rich.console import Console
 
@@ -50,6 +51,24 @@ LOCAL_SANDBOX_BACKENDS: frozenset[str] = frozenset({"docker", "local", "apple-co
 # :func:`resolve_auto_tunnel`). Either a backend name ("cloudflared",
 # "ngrok", "ngrok:<domain>") or an explicit http(s):// URL.
 ENV_TUNNEL = "RLLM_GATEWAY_TUNNEL"
+
+
+def is_ngrok_wildcard_domain(domain: str | None) -> bool:
+    """Whether ``domain`` is a valid wildcard hostname template."""
+    if not domain or len(domain) > 253 or not domain.startswith("*."):
+        return False
+    labels = domain[2:].split(".")
+    if len(labels) < 2:
+        return False
+    return all(1 <= len(label) <= 63 and label[0].isalnum() and label[-1].isalnum() and all(char.isascii() and (char.isalnum() or char == "-") for char in label) for label in labels)
+
+
+def is_ngrok_wildcard_spec(value: str | None) -> bool:
+    """Whether a tunnel backend spec requests a per-run ngrok wildcard child."""
+    if not value:
+        return False
+    name, sep, domain = value.partition(":")
+    return bool(sep and name.strip().lower() == "ngrok" and is_ngrok_wildcard_domain(domain.strip()))
 
 
 def is_local_sandbox_backend(name: str | None) -> bool:
@@ -321,9 +340,11 @@ class CloudflaredTunnel(_Tunnel):
 class NgrokTunnel(_Tunnel):
     """Run ``ngrok http <upstream>`` and surface the assigned ngrok URL.
 
-    Pass ``domain`` to pin a reserved domain (e.g. ``rllm.ngrok.dev``);
-    otherwise ngrok assigns an ephemeral ``*.ngrok-free.app`` URL. ngrok needs
-    an authtoken — run ``rllm tunnel setup`` or ``ngrok config add-authtoken``.
+    Pass a fixed ``domain`` to pin one reserved endpoint, or a wildcard template
+    (for example ``*.rllm.example.ngrok.app``) to allocate a unique child
+    hostname for this tunnel instance. Without a domain, ngrok uses the
+    account-assigned endpoint. ngrok needs an authtoken — run
+    ``rllm tunnel setup`` or ``ngrok config add-authtoken``.
     """
 
     name = "ngrok"
@@ -333,7 +354,10 @@ class NgrokTunnel(_Tunnel):
 
     def __init__(self, upstream_url: str, *, domain: str | None = None, **kwargs) -> None:
         super().__init__(upstream_url, **kwargs)
-        self.domain = domain.strip() if domain else None
+        configured_domain = domain.strip() if domain else None
+        if is_ngrok_wildcard_domain(configured_domain):
+            configured_domain = f"rllm-{uuid.uuid4().hex}.{configured_domain[2:]}"
+        self.domain = configured_domain
 
     def _command(self) -> list[str]:
         # ngrok http takes a local addr/port; strip the scheme so we pass
@@ -550,17 +574,15 @@ def live_tunnel_url() -> str | None:
 def resolve_auto_tunnel() -> tuple[str, str | None]:
     """Decide ``rllm.gateway.tunnel`` when it is unset.
 
-    Resolution order: ``$RLLM_GATEWAY_TUNNEL`` → a running ``rllm tunnel up``
-    daemon → a free Cloudflare quick tunnel. Returns ``(value, warning)`` where
-    ``warning`` is a ready-to-log message when falling back to the quick tunnel
-    (and ``None`` otherwise).
+    Resolution order: ``$RLLM_GATEWAY_TUNNEL`` → a configured ngrok wildcard
+    (owned by this run) → a running ``rllm tunnel up`` daemon → a free
+    Cloudflare quick tunnel. Returns ``(value, warning)`` where ``warning`` is a
+    ready-to-log message when falling back to the quick tunnel (and ``None``
+    otherwise).
     """
     env = os.getenv(ENV_TUNNEL)
     if env:
         return env, None
-    live = live_tunnel_url()
-    if live:
-        return live, None
 
     try:
         from rllm.eval.config import load_tunnel_config
@@ -568,6 +590,14 @@ def resolve_auto_tunnel() -> tuple[str, str | None]:
         cfg = load_tunnel_config()
     except Exception:
         cfg = {}
+    configured_domain = cfg.get("domain")
+    if cfg.get("backend") == "ngrok" and is_ngrok_wildcard_domain(configured_domain):
+        return f"ngrok:{configured_domain}", None
+
+    live = live_tunnel_url()
+    if live:
+        return live, None
+
     if cfg.get("backend"):
         warning = (
             f"Tunnel backend {cfg['backend']!r} is configured but no tunnel is running — "

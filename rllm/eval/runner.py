@@ -32,16 +32,25 @@ def _resolve_eval_tunnel() -> str:
     Eval gateways are single-run services, so their tunnels must be single-run
     too: reusing the ``rllm tunnel up`` daemon would force every concurrent eval
     onto that daemon's one fixed origin port. An explicit environment override
-    still wins; otherwise use a Cloudflare quick tunnel, whose URL is unique per
-    process. Configured persistent backends are deliberately ignored because
-    they may own a singleton endpoint (for example, an ngrok reserved or
-    account-assigned domain). A backend spec makes the gateway choose a free
-    port and own the tunnel lifecycle.
+    still wins. A configured ngrok wildcard is safe because each process expands
+    it to a unique child hostname; fixed configured domains remain ignored.
+    Otherwise use a Cloudflare quick tunnel, whose URL is unique per process. A
+    backend spec makes the gateway choose a free port and own the tunnel
+    lifecycle.
     """
-    from rllm.gateway.tunnel import ENV_TUNNEL
+    from rllm.gateway.tunnel import ENV_TUNNEL, is_ngrok_wildcard_domain
 
     explicit = os.getenv(ENV_TUNNEL)
-    return explicit if explicit else "cloudflared"
+    if explicit:
+        return explicit
+
+    from rllm.eval.config import load_tunnel_config
+
+    configured = load_tunnel_config()
+    domain = configured.get("domain")
+    if configured.get("backend") == "ngrok" and is_ngrok_wildcard_domain(domain):
+        return f"ngrok:{domain}"
+    return "cloudflared"
 
 
 async def run_dataset(
