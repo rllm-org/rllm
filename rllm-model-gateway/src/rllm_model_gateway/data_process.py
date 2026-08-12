@@ -1,10 +1,11 @@
-"""Token ID / logprob extraction from OpenAI-style responses.
+"""Token ID / logprob extraction and trace construction for model responses.
 
 Extracted from ``rllm/sdk/data_process.py``.  No dependency on rLLM's
 ``ModelOutput``, ``Step``, or ``Trajectory`` types — only operates on plain
 dicts and produces ``TraceRecord`` instances.
 """
 
+import json
 import logging
 import time
 import uuid
@@ -179,6 +180,44 @@ def strip_vllm_fields(response: dict[str, Any]) -> dict[str, Any]:
 # ------------------------------------------------------------------
 
 
+_ANTHROPIC_STOP_REASONS = {
+    "end_turn": "stop",
+    "max_tokens": "length",
+    "stop_sequence": "stop",
+    "tool_use": "tool_calls",
+}
+
+
+def _anthropic_response_fields(response: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """Convert an Anthropic message response to the gateway's OpenAI-like trace shape."""
+    message: dict[str, Any] = {"role": response.get("role") or "assistant"}
+    text_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+
+    for block in response.get("content") or []:
+        if block.get("type") == "text" and block.get("text"):
+            text_parts.append(block["text"])
+        elif block.get("type") == "tool_use":
+            tool_calls.append(
+                {
+                    "id": block.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name", ""),
+                        "arguments": json.dumps(block.get("input") or {}),
+                    },
+                }
+            )
+
+    if text_parts:
+        message["content"] = "".join(text_parts)
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+
+    stop_reason = response.get("stop_reason")
+    return message, _ANTHROPIC_STOP_REASONS.get(stop_reason, stop_reason)
+
+
 def build_trace_record(
     session_id: str,
     request_body: dict[str, Any],
@@ -202,6 +241,12 @@ def build_trace_record(
     """
     choices = response_body.get("choices") or []
     first_choice = choices[0] if choices else {}
+    is_anthropic = response_body.get("type") == "message" and isinstance(response_body.get("content"), list)
+    if is_anthropic:
+        response_message, finish_reason = _anthropic_response_fields(response_body)
+    else:
+        response_message = first_choice.get("message") or first_choice.get("delta") or {}
+        finish_reason = first_choice.get("finish_reason")
 
     usage = response_body.get("usage") or {}
     token_counts = {}
@@ -209,6 +254,10 @@ def build_trace_record(
         token_counts["prompt"] = usage["prompt_tokens"]
     if "completion_tokens" in usage:
         token_counts["completion"] = usage["completion_tokens"]
+    if "input_tokens" in usage:
+        token_counts["prompt"] = usage["input_tokens"]
+    if "output_tokens" in usage:
+        token_counts["completion"] = usage["output_tokens"]
 
     # Proxy's fanned-out version wins; the engine-stamped response value is only a fallback.
     # (A multi-worker subprocess's rebuilt engine stamps a stale version that must not override it.)
@@ -222,11 +271,11 @@ def build_trace_record(
         model=request_body.get("model", response_body.get("model", "")),
         messages=request_body.get("messages", []),
         prompt_token_ids=extract_prompt_token_ids(response_body),
-        response_message=first_choice.get("message") or first_choice.get("delta") or {},
+        response_message=response_message,
         completion_token_ids=extract_completion_token_ids(response_body),
         logprobs=extract_logprobs(response_body) or None,
         routing_matrices=extract_routing_matrices(response_body),
-        finish_reason=first_choice.get("finish_reason"),
+        finish_reason=finish_reason,
         weight_version=weight_version,
         latency_ms=latency_ms,
         token_counts=token_counts,
@@ -249,7 +298,7 @@ def build_trace_record_from_chunks(
     trace_id: str | None = None,
     capture_raw: bool = False,
 ) -> TraceRecord:
-    """Assemble a ``TraceRecord`` from accumulated streaming SSE chunks.
+    """Assemble a ``TraceRecord`` from accumulated OpenAI or Anthropic SSE chunks.
 
     - ``prompt_token_ids`` comes from the *first* chunk.
     - ``completion_token_ids`` are accumulated deltas across all chunks.
@@ -265,6 +314,7 @@ def build_trace_record_from_chunks(
     finish_reason: str | None = None
     model = request_body.get("model", "")
     usage: dict[str, Any] = {}
+    anthropic_tools: dict[int, dict[str, Any]] = {}
 
     for i, chunk in enumerate(chunks):
         if i == 0:
@@ -291,7 +341,49 @@ def build_trace_record_from_chunks(
                 finish_reason = c["finish_reason"]
 
         if chunk.get("usage"):
-            usage = chunk["usage"]
+            usage.update(chunk["usage"])
+
+        event_type = chunk.get("type")
+        if event_type == "message_start":
+            message = chunk.get("message") or {}
+            role = message.get("role", role)
+            model = message.get("model", model)
+            usage.update(message.get("usage") or {})
+        elif event_type == "content_block_start":
+            index = chunk.get("index", 0)
+            block = chunk.get("content_block") or {}
+            if block.get("type") == "text" and block.get("text"):
+                content_parts.append(block["text"])
+            elif block.get("type") == "tool_use":
+                anthropic_tools[index] = {
+                    "id": block.get("id", ""),
+                    "name": block.get("name", ""),
+                    "input": block.get("input") or {},
+                    "partial_json": "",
+                }
+        elif event_type == "content_block_delta":
+            index = chunk.get("index", 0)
+            delta = chunk.get("delta") or {}
+            if delta.get("type") == "text_delta":
+                content_parts.append(delta.get("text", ""))
+            elif delta.get("type") == "input_json_delta":
+                tool = anthropic_tools.setdefault(index, {"id": "", "name": "", "input": {}, "partial_json": ""})
+                tool["partial_json"] += delta.get("partial_json", "")
+        elif event_type == "message_delta":
+            delta = chunk.get("delta") or {}
+            if delta.get("stop_reason"):
+                stop_reason = delta["stop_reason"]
+                finish_reason = _ANTHROPIC_STOP_REASONS.get(stop_reason, stop_reason)
+
+    for tool in anthropic_tools.values():
+        arguments = tool["partial_json"] or json.dumps(tool["input"])
+        tool_calls_parts.append(
+            {
+                "id": tool["id"],
+                "type": "function",
+                "function": {"name": tool["name"], "arguments": arguments},
+            }
+        )
 
     response_message: dict[str, Any] = {"role": role or "assistant"}
     content = "".join(content_parts)
@@ -305,6 +397,10 @@ def build_trace_record_from_chunks(
         token_counts["prompt"] = usage["prompt_tokens"]
     if "completion_tokens" in usage:
         token_counts["completion"] = usage["completion_tokens"]
+    if "input_tokens" in usage:
+        token_counts["prompt"] = usage["input_tokens"]
+    if "output_tokens" in usage:
+        token_counts["completion"] = usage["output_tokens"]
 
     return TraceRecord(
         trace_id=trace_id or str(uuid.uuid4()),

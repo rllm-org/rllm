@@ -26,14 +26,45 @@ class DockerSandbox:
         self.name = name
         self.image = image
         self._client = docker.from_env()
+        self._persistent_env: dict[str, str] = {}
+        self._owns_container = True
+        run_kwargs: dict = {}
+        cpus = kwargs.pop("cpus", None)
+        memory = kwargs.pop("memory", None)
+        gpus = kwargs.pop("gpus", None)
+        if cpus:
+            run_kwargs["nano_cpus"] = int(float(cpus) * 1_000_000_000)
+        if memory:
+            run_kwargs["mem_limit"] = int(memory)
+        if gpus:
+            run_kwargs["device_requests"] = [docker.types.DeviceRequest(count=int(gpus), capabilities=[["gpu"]])]
         self._container = self._client.containers.run(
             image,
             command="sleep infinity",
             name=f"rllm-sandbox-{name}",
             detach=True,
             remove=False,
+            **run_kwargs,
         )
         logger.info("DockerSandbox %s created (container: %s, image: %s)", name, self._container.short_id, image)
+
+    @classmethod
+    def from_container(cls, name: str, container, client=None) -> DockerSandbox:
+        """Attach the Sandbox file/exec API to a Compose-owned container."""
+        import docker
+
+        instance = cls.__new__(cls)
+        instance.name = name
+        instance.image = container.image.tags[0] if getattr(container.image, "tags", None) else "<compose>"
+        instance._client = client or docker.from_env()
+        instance._container = container
+        instance._persistent_env = {}
+        instance._owns_container = False
+        return instance
+
+    def set_env(self, env: dict[str, str]) -> None:
+        """Inject task environment variables into every subsequent exec."""
+        self._persistent_env.update({str(k): str(v) for k, v in env.items()})
 
     def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:
         """Execute a command inside the container.
@@ -45,11 +76,24 @@ class DockerSandbox:
                 Maps to ``docker exec --user``. If ``None``, runs as the
                 container's default user.
         """
+        return self.exec_with_shell(command, shell="bash", timeout=timeout, user=user)
+
+    def exec_with_shell(
+        self,
+        command: str,
+        *,
+        shell: str,
+        timeout: float | None = None,  # noqa: ARG002
+        user: str | None = None,
+    ) -> str:
+        """Execute with an explicit shell; sidecars commonly provide only ``sh``."""
         kwargs: dict = {"demux": True}
         if user is not None:
             kwargs["user"] = user
+        if self._persistent_env:
+            kwargs["environment"] = self._persistent_env
         exit_code, output = self._container.exec_run(
-            ["bash", "-c", command],
+            [shell, "-c", command],
             **kwargs,
         )
         stdout = (output[0] or b"").decode("utf-8", errors="replace")
@@ -125,6 +169,8 @@ class DockerSandbox:
 
     def close(self) -> None:
         """Stop and remove the container."""
+        if not self._owns_container:
+            return
         try:
             self._container.stop(timeout=5)
         except Exception:

@@ -135,7 +135,8 @@ code-tools = [
 ]
 
 harbor = [
-    "harbor==0.3.0 ; python_version >= '3.12'",
+    "harbor==0.20.0 ; python_version >= '3.12'",
+    "docker>=7.0.0 ; python_version >= '3.12'",
 ]
 
 [tool.uv.sources]
@@ -143,7 +144,12 @@ rllm-model-gateway = { path = "./rllm-model-gateway", editable = true }
 
 [tool.uv]
 override-dependencies = [
-    "litellm[proxy]==1.83.0",
+    # >=1.88.0: 1.83.0 forwards its own ``thinking_blocks`` field to the
+    # upstream provider on the Anthropic /v1/messages path. Providers that
+    # reject unknown message fields (Fireworks) 400 the *second* request of
+    # every CLI-harness rollout — the one echoing the assistant's reasoning
+    # back with the tool result — so agents die at turn 2 on every task.
+    "litellm[proxy]>=1.88.0",
     "numpy>=1.26.0",
     "rich>=14.1.0",
 ]

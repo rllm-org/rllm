@@ -15,6 +15,24 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def get_harbor_dataset_client(identifier: str):
+    """Return the Harbor registry client appropriate for a dataset identifier.
+
+    Harbor 0.20 uses ``org/name@ref`` for Hub packages and ``name@version``
+    for datasets in the legacy registry. This mirrors Harbor's own CLI
+    dispatch so both forms remain supported by rLLM.
+    """
+    dataset_name = identifier.split("@", 1)[0]
+    if "/" in dataset_name:
+        from harbor.registry.client.package import PackageDatasetClient
+
+        return PackageDatasetClient()
+
+    from harbor.registry.client.factory import RegistryClientFactory
+
+    return RegistryClientFactory.create()
+
+
 def harbor_task_to_row(task_dir: Path, task_name: str | None = None, task_digest: str | None = None) -> dict | None:
     """Convert a single Harbor task directory into a flat dict row.
 
@@ -121,10 +139,9 @@ def load_harbor_dataset_from_registry(identifier: str) -> list[dict]:
     Returns:
         List of task row dicts.
     """
-    from harbor.registry.client.factory import RegistryClientFactory
 
     async def _download():
-        client = RegistryClientFactory.create()
+        client = get_harbor_dataset_client(identifier)
         items = await client.download_dataset(identifier)
         return items
 

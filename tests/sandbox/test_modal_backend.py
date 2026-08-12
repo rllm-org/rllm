@@ -8,6 +8,9 @@ needing a live Modal sandbox.
 
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 from rllm.sandbox.backends.modal_backend import _build_exec_command
 
 
@@ -78,3 +81,54 @@ def test_attach_run_tags_swallows_set_tags_failure():
 
     _attach_run_tags(Ok(), {"rllm_run_id": "x"}, "sb")
     assert seen == {"rllm_run_id": "x"}
+
+
+def test_constructor_forwards_vm_options_and_inherits_image_entrypoint(monkeypatch):
+    import rllm.sandbox.backends.modal_backend as module
+
+    created = {}
+
+    class Container:
+        object_id = "sb-1"
+
+        def set_tags(self, tags):  # noqa: ARG002
+            return None
+
+        def terminate(self):
+            return None
+
+        def detach(self):
+            return None
+
+    class SandboxApi:
+        @staticmethod
+        def create(*args, tags=None, **kwargs):
+            created.update(args=args, tags=tags, kwargs=kwargs)
+            return Container()
+
+    fake_modal = SimpleNamespace(
+        App=SimpleNamespace(lookup=lambda *args, **kwargs: object()),
+        Image=SimpleNamespace(from_registry=lambda image: f"modal:{image}"),
+        Sandbox=SandboxApi,
+        exception=SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {})),
+    )
+    monkeypatch.setitem(sys.modules, "modal", fake_modal)
+    monkeypatch.setattr(module._CREATE_LIMITER, "acquire", lambda: None)
+    module._APP_CACHE.clear()
+
+    sandbox = module.ModalSandbox(
+        name="compose",
+        image="docker:28.3.3-dind",
+        entrypoint=None,
+        shell="sh",
+        experimental_options={"vm_runtime": True},
+        block_network=False,
+    )
+    try:
+        assert created["args"] == ()
+        assert created["kwargs"]["experimental_options"] == {"vm_runtime": True}
+        assert created["kwargs"]["block_network"] is False
+        assert sandbox._shell == "sh"
+    finally:
+        sandbox.close()
+        module._APP_CACHE.clear()

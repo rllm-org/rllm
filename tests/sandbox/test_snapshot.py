@@ -85,6 +85,21 @@ def test_keys_for_tasks_dedups_envs_and_skips_local_backends():
     assert keys_for_tasks([_task(backend="docker")], "docker") == {}  # no snapshots for docker
 
 
+def test_compose_tasks_skip_single_image_snapshots(tmp_path, monkeypatch):
+    import rllm.eval._resolution as res
+
+    environment = tmp_path / "environment"
+    environment.mkdir()
+    (environment / "docker-compose.yaml").write_text("services:\n  main:\n    image: python:3.12\n")
+    task = Task(id="compose", instruction="", metadata={}, dataset_dir=tmp_path)
+    registry = SnapshotRegistry(str(tmp_path / "snapshots.json"))
+
+    assert keys_for_tasks([task], "modal") == {}
+    monkeypatch.setattr(res, "_create_base_sandbox", lambda *a, **k: pytest.fail("compose attempted a single-image snapshot boot"))
+    monkeypatch.setattr(res, "_create_sandbox_for_task", lambda task, backend: _FakeSandbox())
+    assert isinstance(get_sandbox(task, "modal", registry), _FakeSandbox)
+
+
 # --------------------------------------------------------------------------
 # get_sandbox — two gates + self-heal + no-live-call-on-miss
 # --------------------------------------------------------------------------

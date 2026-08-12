@@ -217,6 +217,8 @@ class ModalSandbox:
     - ``gpu``: GPU spec (e.g. ``"T4"``, ``"A10G"``).
     - ``cpu``: CPU count (float).
     - ``memory``: Memory in MB (int).
+    - ``shell``: Shell used for exec calls (default: ``"bash"``).
+    - ``experimental_options``: Options forwarded to ``modal.Sandbox.create``.
     """
 
     def __init__(self, name: str, image: str = "python:3.11-slim", **kwargs):
@@ -230,6 +232,7 @@ class ModalSandbox:
         # sandboxes (set RLLM_RUN_ID; else a random per-process id). Pass an
         # explicit app_name to override.
         self._app_name = kwargs.pop("app_name", None) or f"rllm-sandbox-{rllm_run_id()}"
+        self._shell = kwargs.pop("shell", "bash")
         # Env exported into every exec (populated via set_env); see exec().
         self._persistent_env: dict[str, str] = {}
 
@@ -263,7 +266,7 @@ class ModalSandbox:
                 create_kwargs["tags"] = run_tags
             else:
                 post_create_tags = run_tags
-            for key in ("secrets", "volumes", "workdir", "gpu", "cpu", "memory"):
+            for key in ("secrets", "volumes", "workdir", "gpu", "cpu", "memory", "experimental_options", "block_network"):
                 if key in kwargs:
                     create_kwargs[key] = kwargs.pop(key)
 
@@ -275,7 +278,7 @@ class ModalSandbox:
 
             # Pace creates under Modal's account-wide rate cap (see _CreateRateLimiter).
             _CREATE_LIMITER.acquire()
-            self._sandbox = modal.Sandbox.create(*entrypoint, **create_kwargs)
+            self._sandbox = modal.Sandbox.create(*(entrypoint or ()), **create_kwargs)
         except modal.exception.NotFoundError as e:
             if from_snapshot:
                 raise SnapshotNotFound(f"modal snapshot {image} no longer exists") from e
@@ -322,7 +325,7 @@ class ModalSandbox:
 
         run = _build_exec_command(command, self._persistent_env, user)
         start = time.monotonic()
-        process = self._sandbox.exec("bash", "-c", run, **exec_kwargs)
+        process = self._sandbox.exec(self._shell, "-c", run, **exec_kwargs)
 
         stdout = process.stdout.read()
         stderr = process.stderr.read()

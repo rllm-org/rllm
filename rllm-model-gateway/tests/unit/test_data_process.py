@@ -233,6 +233,82 @@ class TestBuildTraceRecord:
         assert trace.finish_reason == "stop"
         assert trace.token_counts == {"prompt": 3, "completion": 2}
 
+    def test_anthropic_message(self):
+        request_body = {"model": "claude-test", "messages": [{"role": "user", "content": "hello"}]}
+        response_body = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-test",
+            "content": [
+                {"type": "text", "text": "Let me check."},
+                {"type": "tool_use", "id": "tool_1", "name": "Bash", "input": {"command": "pwd"}},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 10, "output_tokens": 7},
+        }
+
+        trace = build_trace_record("session-anthropic", request_body, response_body, 50.0)
+
+        assert trace.response_message["content"] == "Let me check."
+        assert trace.response_message["tool_calls"] == [
+            {
+                "id": "tool_1",
+                "type": "function",
+                "function": {"name": "Bash", "arguments": '{"command": "pwd"}'},
+            }
+        ]
+        assert trace.finish_reason == "tool_calls"
+        assert trace.token_counts == {"prompt": 10, "completion": 7}
+
+    def test_anthropic_streaming_chunks(self):
+        request_body = {"model": "claude-test", "messages": [{"role": "user", "content": "hello"}]}
+        chunks = [
+            {
+                "type": "message_start",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-test",
+                    "usage": {"input_tokens": 10, "output_tokens": 1},
+                },
+            },
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Let me "}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "check."}},
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "tool_use", "id": "tool_1", "name": "Bash", "input": {}},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": '{"command":"pwd"}'},
+            },
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                "usage": {"output_tokens": 7},
+            },
+            {"type": "message_stop"},
+        ]
+
+        trace = build_trace_record_from_chunks("session-anthropic", request_body, chunks, 75.0)
+
+        assert trace.response_message == {
+            "role": "assistant",
+            "content": "Let me check.",
+            "tool_calls": [
+                {
+                    "id": "tool_1",
+                    "type": "function",
+                    "function": {"name": "Bash", "arguments": '{"command":"pwd"}'},
+                }
+            ],
+        }
+        assert trace.finish_reason == "tool_calls"
+        assert trace.token_counts == {"prompt": 10, "completion": 7}
+
 
 # ------------------------------------------------------------------
 # weight_version precedence (async staleness instrumentation)

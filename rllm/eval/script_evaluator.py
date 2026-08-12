@@ -13,13 +13,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shlex
+import tarfile
 import tempfile
+import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from rllm.eval.types import EvalOutput, Signal
-from rllm.sandbox.protocol import Sandbox, SandboxCommandTimeout
+from rllm.sandbox.protocol import ComposeSandbox, Sandbox, SandboxCommandTimeout
 from rllm.types import Episode, Task
 
 logger = logging.getLogger(__name__)
@@ -44,6 +48,41 @@ _RESERVED_REWARD_KEYS = frozenset({"reward", "rewards", "is_correct", "signals",
 _VERIFIER_STDOUT_TAIL_CHARS = 8000
 
 
+@dataclass(frozen=True)
+class ArtifactSpec:
+    """The TB3-relevant subset of Harbor's artifact declaration."""
+
+    source: str
+    service: str = "main"
+    exclude: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CollectedArtifact:
+    spec: ArtifactSpec
+    local_path: Path
+    is_dir: bool
+
+
+def normalize_artifacts(entries: list[str | dict] | None) -> list[ArtifactSpec]:
+    """Normalize Harbor's string and object artifact forms."""
+    artifacts: list[ArtifactSpec] = []
+    for entry in entries or []:
+        if isinstance(entry, str):
+            artifacts.append(ArtifactSpec(source=entry))
+            continue
+        if not isinstance(entry, dict) or not entry.get("source"):
+            raise ValueError(f"invalid artifact declaration: {entry!r}")
+        artifacts.append(
+            ArtifactSpec(
+                source=str(entry["source"]),
+                service=str(entry.get("service") or "main"),
+                exclude=tuple(str(pattern) for pattern in (entry.get("exclude") or [])),
+            )
+        )
+    return artifacts
+
+
 class ShellScriptEvaluator:
     """Run a verifier script inside the sandbox, parse the reward file.
 
@@ -61,8 +100,9 @@ class ShellScriptEvaluator:
         reward_file_override: str | None = None,
         git_heads: dict[str, str] | None = None,
         verifier_sandbox_factory: Callable[[], Sandbox] | None = None,
+        verifier_tests_baked: bool = False,
         collect_commands: list[dict] | None = None,
-        artifacts: list[str] | None = None,
+        artifacts: list[str | dict] | None = None,
     ):
         self.sandbox = sandbox
         self.script_path = script_path  # relative to the task's directory
@@ -75,8 +115,9 @@ class ShellScriptEvaluator:
         # grading then runs in a container this builds, not the agent's. See
         # :meth:`_grading_sandbox`.
         self.verifier_sandbox_factory = verifier_sandbox_factory
+        self.verifier_tests_baked = verifier_tests_baked
         self.collect_commands = collect_commands or []
-        self.artifacts = artifacts or []
+        self.artifacts = normalize_artifacts(artifacts)
 
     @property
     def separate_env(self) -> bool:
@@ -108,27 +149,28 @@ class ShellScriptEvaluator:
         # produced reaches it as collected artifacts. Own it for the duration so
         # the box can't outlive the grade.
         grading_sandbox = self.sandbox
-        collected: dict[str, bytes] = {}
-        if self.separate_env:
-            collected = self._run_collect(task, v_user)
-            try:
-                grading_sandbox = self.verifier_sandbox_factory()  # type: ignore[misc]
-            except Exception as e:
-                logger.warning("Could not create verifier sandbox for %s: %s", task.id, e)
-                return EvalOutput(
-                    reward=0.0,
-                    is_correct=False,
-                    error="VerifierEnvironmentError",
-                    metadata={"error": f"failed to create separate verifier environment: {e}"},
-                )
-        try:
-            return self._grade_in(grading_sandbox, task, tests_dir, script_name, v_user, collected)
-        finally:
-            if grading_sandbox is not self.sandbox:
+        with tempfile.TemporaryDirectory(prefix="rllm-artifacts-") as staging:
+            collected: list[CollectedArtifact] = []
+            if self.separate_env:
+                collected = self._run_collect(task, v_user, Path(staging))
                 try:
-                    grading_sandbox.close()
-                except Exception:
-                    logger.debug("Verifier sandbox teardown failed for %s", task.id, exc_info=True)
+                    grading_sandbox = self.verifier_sandbox_factory()  # type: ignore[misc]
+                except Exception as e:
+                    logger.warning("Could not create verifier sandbox for %s: %s", task.id, e)
+                    return EvalOutput(
+                        reward=0.0,
+                        is_correct=False,
+                        error="VerifierEnvironmentError",
+                        metadata={"error": f"failed to create separate verifier environment: {e}"},
+                    )
+            try:
+                return self._grade_in(grading_sandbox, task, tests_dir, script_name, v_user, collected)
+            finally:
+                if grading_sandbox is not self.sandbox:
+                    try:
+                        grading_sandbox.close()
+                    except Exception:
+                        logger.debug("Verifier sandbox teardown failed for %s", task.id, exc_info=True)
 
     def _grade_in(
         self,
@@ -137,43 +179,56 @@ class ShellScriptEvaluator:
         tests_dir: Path,
         script_name: str,
         v_user: str | None,
-        collected: dict[str, bytes],
+        collected: list[CollectedArtifact],
     ) -> EvalOutput:
         """Upload the tests (and any collected artifacts), run the verifier, read the reward."""
-        # Prepare reward directories
+        # Prepare reward directories. Harbor mounts /logs as a writable volume, so
+        # task verifiers assume any user can write under it — e.g. a test.sh that
+        # runs ``su postgres -c "pg_ctl -l /logs/verifier/pg.log"`` after creating
+        # the dir as root. A bare mkdir leaves 755 root:root and that write fails
+        # with EACCES; 1777 (like /tmp) restores harbor's contract. Grading always
+        # runs after the agent has finished, so this widens nothing the agent sees.
         try:
-            sandbox.exec("mkdir -p /tmp/rllm /logs/verifier", timeout=10, user=v_user)
+            sandbox.exec("mkdir -p /tmp/rllm /logs/verifier && chmod 1777 /logs/verifier", timeout=10, user=v_user)
         except Exception:
             pass
 
         # Upload to /tests/ (Harbor convention — scripts may reference /tests/*.py).
         # A failed upload means the verifier can't run — a grading-infra failure,
         # not a task score; tag it so the engine doesn't read it as reward 0.
-        try:
-            sandbox.upload_dir(str(tests_dir), "/tests")
-        except Exception as e:
-            logger.warning("Failed to upload tests dir for %s: %s", task.id, e)
-            return EvalOutput(
-                reward=0.0,
-                is_correct=False,
-                error="AddTestsDirError",
-                metadata={"error": f"failed to upload tests dir: {e}"},
-            )
+        if not self.verifier_tests_baked:
+            try:
+                sandbox.upload_dir(str(tests_dir), "/tests")
+            except Exception as e:
+                logger.warning("Failed to upload tests dir for %s: %s", task.id, e)
+                return EvalOutput(
+                    reward=0.0,
+                    is_correct=False,
+                    error="AddTestsDirError",
+                    metadata={"error": f"failed to upload tests dir: {e}"},
+                )
 
         # Re-materialise what the collect step snapshotted, at the same paths it
         # wrote them to — the verifier image doesn't pre-create those dirs.
-        for path, blob in collected.items():
+        for artifact in collected:
             try:
-                _write_remote_file(sandbox, path, blob, user=v_user)
+                target_dir = artifact.spec.source if artifact.is_dir else str(PurePosixPath(artifact.spec.source).parent)
+                sandbox.exec(
+                    f"mkdir -p {shlex.quote(target_dir)} && chmod 777 {shlex.quote(target_dir)}",
+                    timeout=30,
+                    user=v_user,
+                )
+                if artifact.is_dir:
+                    sandbox.upload_dir(str(artifact.local_path), artifact.spec.source)
+                else:
+                    sandbox.upload_file(str(artifact.local_path), artifact.spec.source)
             except Exception as e:
-                logger.warning("Could not upload artifact %s for %s: %s", path, task.id, e)
+                logger.warning("Could not upload artifact %s for %s: %s", artifact.spec.source, task.id, e)
 
-        # Only ``cd`` when the task explicitly declared a workdir.
-        # Otherwise the Dockerfile's WORKDIR wins — required for swesmith
-        # and similar harbor task families whose verifier scripts run
-        # ``git`` and ``pytest`` against ``/testbed`` (the image WORKDIR)
-        # and silently collect zero tests when forced into ``/workspace``.
-        workdir = task.metadata.get("workdir")
+        # A task workdir belongs to the agent image. A separate verifier image
+        # must retain its own Dockerfile WORKDIR; the agent path may not exist
+        # there, which would prevent the verifier script from running at all.
+        workdir = task.metadata.get("workdir") if sandbox is self.sandbox else None
         cd_prefix = f"cd {workdir} && " if workdir else ""
 
         # Only meaningful in the agent's own container; a fresh verifier box is
@@ -223,7 +278,7 @@ class ShellScriptEvaluator:
             out.metadata["verifier_stdout_tail"] = verifier_stdout[-_VERIFIER_STDOUT_TAIL_CHARS:]
         return out
 
-    def _run_collect(self, task: Task, user: str | None) -> dict[str, bytes]:
+    def _run_collect(self, task: Task, user: str | None, staging: Path) -> list[CollectedArtifact]:
         """Run ``[[verifier.collect]]`` in the agent's box and pull the artifacts out.
 
         Harbor's separate-mode contract: the agent's container is the only place
@@ -233,24 +288,74 @@ class ShellScriptEvaluator:
         collect step that fails leaves that artifact missing, which the verifier
         reports as an unsubmitted patch rather than a grading crash.
         """
-        for entry in self.collect_commands:
+        main_hooks = [entry for entry in self.collect_commands if _entry_service(entry) == "main"]
+        sidecar_hooks = [entry for entry in self.collect_commands if _entry_service(entry) != "main"]
+        main_artifacts = [artifact for artifact in self.artifacts if artifact.service == "main"]
+        sidecar_artifacts = [artifact for artifact in self.artifacts if artifact.service != "main"]
+
+        self._run_collect_hooks(task, main_hooks, user)
+        collected = self._collect_artifacts(task, main_artifacts, staging, user)
+
+        if sidecar_hooks or sidecar_artifacts:
+            if not isinstance(self.sandbox, ComposeSandbox):
+                raise RuntimeError(f"task {task.id!r} declares sidecar artifacts but its sandbox is not service-capable")
+            self.sandbox.stop_service("main")
+            self._run_collect_hooks(task, sidecar_hooks, user)
+            collected.extend(self._collect_artifacts(task, sidecar_artifacts, staging, user, offset=len(collected)))
+        return collected
+
+    def _run_collect_hooks(self, task: Task, entries: list[dict], user: str | None) -> None:
+        for entry in entries:
             command = entry.get("command") if isinstance(entry, dict) else str(entry)
             if not command:
                 continue
+            service = _entry_service(entry)
             try:
-                self.sandbox.exec(command, timeout=float((entry or {}).get("timeout_sec", 300.0)), user=user)
+                _service_exec(self.sandbox, service, command, timeout=float((entry or {}).get("timeout_sec", 300.0)), user=user)
             except Exception as e:
-                logger.warning("collect step failed for %s (%s): %s", task.id, command[:80], e)
+                logger.warning("collect step failed for %s in %s (%s): %s", task.id, service, command[:80], e)
 
-        collected: dict[str, bytes] = {}
-        for path in self.artifacts:
+    def _collect_artifacts(
+        self,
+        task: Task,
+        artifacts: list[ArtifactSpec],
+        staging: Path,
+        user: str | None,
+        *,
+        offset: int = 0,
+    ) -> list[CollectedArtifact]:
+        collected: list[CollectedArtifact] = []
+        for index, artifact in enumerate(artifacts, start=offset):
+            target = staging / str(index)
             try:
-                blob = _read_remote_file(self.sandbox, str(path))
+                kind = _service_exec(
+                    self.sandbox,
+                    artifact.service,
+                    f"if [ -d {shlex.quote(artifact.source)} ]; then echo directory; elif [ -f {shlex.quote(artifact.source)} ]; then echo file; else echo missing; fi",
+                    timeout=30,
+                    user=user,
+                ).strip()
+                if kind.endswith("directory"):
+                    local_path = _download_directory(self.sandbox, artifact, target, user=user)
+                    collected.append(CollectedArtifact(artifact, local_path, True))
+                elif kind.endswith("file"):
+                    target.mkdir(parents=True, exist_ok=True)
+                    local_path = target / (PurePosixPath(artifact.source.rstrip("/")).name or "artifact")
+                    local_path.write_bytes(_service_download_file(self.sandbox, artifact.service, artifact.source))
+                    mode = _remote_file_mode(self.sandbox, artifact, user=user)
+                    if mode is not None:
+                        os.chmod(local_path, mode)
+                    collected.append(CollectedArtifact(artifact, local_path, False))
+                else:
+                    # Compatibility for simple Sandbox test doubles and older
+                    # providers that cannot answer the shell type probe but can
+                    # still download a regular file.
+                    target.mkdir(parents=True, exist_ok=True)
+                    local_path = target / (PurePosixPath(artifact.source.rstrip("/")).name or "artifact")
+                    local_path.write_bytes(_service_download_file(self.sandbox, artifact.service, artifact.source))
+                    collected.append(CollectedArtifact(artifact, local_path, False))
             except Exception as e:
-                logger.warning("Could not collect artifact %s for %s: %s", path, task.id, e)
-                continue
-            if blob is not None:
-                collected[str(path)] = blob
+                logger.warning("Could not collect artifact %s from %s for %s: %s", artifact.source, artifact.service, task.id, e)
         return collected
 
     def _restore_git_heads(self, user: str | None) -> None:
@@ -283,35 +388,94 @@ class ShellScriptEvaluator:
 # ---------------------------------------------------------------------------
 
 
-def _read_remote_file(sandbox: Sandbox, path: str) -> bytes | None:
-    """Read a file out of a sandbox, or ``None`` when it isn't there.
+def _entry_service(entry: dict | str) -> str:
+    return str(entry.get("service") or "main") if isinstance(entry, dict) else "main"
 
-    Uses the backend's native transfer (:meth:`Sandbox.download_file`) rather
-    than shelling out: ``git diff --binary`` output is not text-safe, and routing
-    binary through ``exec`` stdout costs a base64 round-trip and holds the whole
-    payload as a string on both ends.
-    """
-    try:
+
+def _service_exec(
+    sandbox: Sandbox,
+    service: str,
+    command: str,
+    *,
+    timeout: float | None = None,
+    user: str | None = None,
+) -> str:
+    if service == "main":
+        # Any Sandbox can serve "main" — it is the sandbox itself.
+        return sandbox.exec(command, timeout=timeout, user=user)
+    if not isinstance(sandbox, ComposeSandbox):
+        raise RuntimeError(f"sandbox cannot execute in sidecar service {service!r}")
+    return sandbox.service_exec(service, command, timeout=timeout, user=user)
+
+
+def _service_download_file(sandbox: Sandbox, service: str, path: str) -> bytes:
+    if service == "main":
         return sandbox.download_file(path)
-    except FileNotFoundError:
+    if not isinstance(sandbox, ComposeSandbox):
+        raise RuntimeError(f"sandbox cannot download from sidecar service {service!r}")
+    return sandbox.service_download_file(service, path)
+
+
+def _remote_file_mode(
+    sandbox: Sandbox,
+    artifact: ArtifactSpec,
+    *,
+    user: str | None = None,
+) -> int | None:
+    """Read a regular artifact's permission bits so executables stay executable."""
+    path = shlex.quote(artifact.source)
+    command = f"stat -c '%a' {path} 2>/dev/null || stat -f '%Lp' {path} 2>/dev/null"
+    try:
+        raw = _service_exec(sandbox, artifact.service, command, timeout=30, user=user).strip().splitlines()[-1]
+        return int(raw, 8) & 0o7777
+    except (IndexError, TypeError, ValueError, RuntimeError):
         return None
 
 
-def _write_remote_file(sandbox: Sandbox, path: str, blob: bytes, user: str | None = None) -> None:
-    """Write bytes into a sandbox at *path*, creating parent directories.
-
-    Staged through a temp file so the backend's native ``upload_file`` carries
-    the bytes; the protocol has no "write these bytes" primitive.
-    """
-    parent = shlex.quote(str(PurePosixPath(path).parent))
+def _download_directory(
+    sandbox: Sandbox,
+    artifact: ArtifactSpec,
+    target: Path,
+    *,
+    user: str | None = None,
+) -> Path:
+    """Download a remote directory as one filtered tar archive."""
+    source = PurePosixPath(artifact.source.rstrip("/"))
+    if not source.name:
+        raise ValueError("artifact directory source must not be filesystem root")
+    archive_path = f"/tmp/.rllm-artifact-{uuid.uuid4().hex}.tgz"
+    excludes = " ".join(shlex.quote(f"--exclude={pattern}") for pattern in artifact.exclude)
+    command = " ".join(
+        part
+        for part in (
+            "tar czf",
+            shlex.quote(archive_path),
+            excludes,
+            "-C",
+            shlex.quote(str(source.parent)),
+            shlex.quote(source.name),
+        )
+        if part
+    )
     try:
-        sandbox.exec(f"mkdir -p {parent}", timeout=30, user=user)
-    except Exception:
-        pass
-    with tempfile.NamedTemporaryFile() as tmp:
-        tmp.write(blob)
-        tmp.flush()
-        sandbox.upload_file(tmp.name, path)
+        _service_exec(sandbox, artifact.service, command, timeout=600, user=user)
+        archive = _service_download_file(sandbox, artifact.service, archive_path)
+    finally:
+        try:
+            _service_exec(sandbox, artifact.service, f"rm -f {shlex.quote(archive_path)}", timeout=30, user=user)
+        except Exception:
+            pass
+
+    target.mkdir(parents=True, exist_ok=True)
+    local_archive = target / "artifact.tgz"
+    local_archive.write_bytes(archive)
+    with tarfile.open(local_archive, mode="r:gz") as tar:
+        tar.extractall(target, filter="data")
+    local_archive.unlink()
+    local_path = target / source.name
+    if not local_path.is_dir():
+        raise FileNotFoundError(f"downloaded artifact archive did not contain {source.name!r}")
+    return local_path
 
 
 # ---------------------------------------------------------------------------

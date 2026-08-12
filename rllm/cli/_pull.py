@@ -225,14 +225,14 @@ def resolve_harbor_catalog_entry(name: str) -> dict | None:
     a pre-registered entry in ``datasets.json``.
     """
     try:
-        from harbor.registry.client.factory import RegistryClientFactory
+        from rllm.integrations.harbor.dataset_loader import get_harbor_dataset_client
     except ImportError:
         return None
 
     import asyncio
 
     async def _probe():
-        client = RegistryClientFactory.create()
+        client = get_harbor_dataset_client(name)
         try:
             metadata = await client.get_dataset_metadata(name)
             return metadata
