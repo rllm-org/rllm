@@ -24,6 +24,56 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Per-run override for the port the gateway binds behind a tunnel. Sibling to
+#: ``RLLM_GATEWAY_TUNNEL``: whoever supplies the public URL is the only one who
+#: knows which port it forwards to, so the two travel together.
+ENV_GATEWAY_PORT = "RLLM_GATEWAY_PORT"
+
+
+def resolve_gateway_port(tunnel_url: str) -> int:
+    """Port the gateway must bind so *tunnel_url* reaches it.
+
+    A tunnel URL means an already-running forwarder, so the gateway has to bind
+    wherever that forwarder points — a free-port pick would leave the tunnel
+    aimed at nothing.
+
+    Resolution order: ``$RLLM_GATEWAY_PORT`` → the ``rllm tunnel up`` daemon's
+    recorded upstream (only when its URL matches) → the setup config's port.
+
+    The env var comes first because the other two are process-wide: one daemon
+    state file, one config file, one value each. Concurrent evals against
+    remote sandboxes each need their own tunnel on their own port, and without
+    an explicit override they would all read the same number and collide on
+    bind. Local backends never reach here — they need no tunnel, so the gateway
+    picks a free port per run and concurrent evals already coexist.
+    """
+    from rllm.env import env_int
+
+    override = env_int(ENV_GATEWAY_PORT, 0)
+    if override:
+        return override
+
+    from urllib.parse import urlparse
+
+    from rllm.gateway.tunnel import live_tunnel
+
+    state = live_tunnel() or {}
+    upstream = state.get("upstream") if state.get("url") == tunnel_url else None
+    port = urlparse(upstream).port if upstream else None
+    if port is not None:
+        return port
+
+    from rllm.eval.config import load_tunnel_config
+
+    port = int(load_tunnel_config().get("port") or 9090)
+    logger.warning(
+        "Tunnel URL %s has no matching daemon state; binding the gateway to port %d from the tunnel config — it must match the port that URL forwards to. Set %s to override.",
+        tunnel_url,
+        port,
+        ENV_GATEWAY_PORT,
+    )
+    return port
+
 
 async def run_dataset(
     tasks: list,  # list[rllm.types.Task]
@@ -107,27 +157,7 @@ async def run_dataset(
             if tunnel_warning:
                 logger.warning(tunnel_warning)
             if gateway_tunnel.startswith(("http://", "https://")):
-                # A tunnel URL means an already-running forwarder; the gateway
-                # must bind wherever it forwards (a free-port pick would leave
-                # the tunnel pointing at nothing). The daemon's recorded
-                # ``upstream`` is authoritative; a URL supplied some other way
-                # (env var) falls back to the setup config's port.
-                from urllib.parse import urlparse
-
-                from rllm.gateway.tunnel import live_tunnel
-
-                state = live_tunnel() or {}
-                upstream = state.get("upstream") if state.get("url") == gateway_tunnel else None
-                gateway_port = urlparse(upstream).port if upstream else None
-                if gateway_port is None:
-                    from rllm.eval.config import load_tunnel_config
-
-                    gateway_port = int(load_tunnel_config().get("port") or 9090)
-                    logger.warning(
-                        "Tunnel URL %s has no matching daemon state; binding the gateway to port %d from the tunnel config — it must match the port that URL forwards to.",
-                        gateway_tunnel,
-                        gateway_port,
-                    )
+                gateway_port = resolve_gateway_port(gateway_tunnel)
         gateway = EvalGatewayManager(upstream_url=base_url, model=model, tunnel=gateway_tunnel, port=gateway_port)
         gateway.start()
 
