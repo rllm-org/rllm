@@ -334,10 +334,8 @@ def _task_dockerfile(task: Task) -> Path | None:
 
 # Remote backends that build images themselves and so can build the *real* Dockerfile
 # (COPY/ENV/WORKDIR/RUN) instead of pulling FROM + replaying RUN. ``docker`` is excluded
-# because it already builds via ``docker build``; ``local`` cannot build. ``modal`` is a
-# tracked follow-up (it accepts a ``modal.Image`` and already keepalive-overrides the
-# entrypoint, but the from_dockerfile path there is untested — see _dockerfile_image).
-_FROM_DOCKERFILE_BACKENDS = ("daytona",)
+# because it already builds via ``docker build``; ``local`` cannot build.
+_FROM_DOCKERFILE_BACKENDS = ("daytona", "modal")
 
 
 def _builds_from_dockerfile(task: Task, backend: str) -> Path | None:
@@ -360,6 +358,18 @@ def _dockerfile_image(backend: str, dockerfile: Path):
         from daytona import Image  # daytona.Image.from_dockerfile bundles the Dockerfile dir as context
 
         return Image.from_dockerfile(str(dockerfile))
+    if backend == "modal":
+        import modal
+
+        # Modal takes the Dockerfile path and its build context separately; daytona
+        # infers the context from the file's directory, so pass the parent explicitly
+        # to keep COPY resolution identical across the two backends.
+        #
+        # WORKDIR is the directive that makes this matter beyond COPY: harbor SWE tasks
+        # (deepswe/uniswe) do `WORKDIR /app` then `git clone <url> .`, so under the
+        # replay path — which drops WORKDIR — the clone lands in the base image's root,
+        # /app never exists, and every `cd /app` in solve.sh and tests/test.sh fails.
+        return modal.Image.from_dockerfile(dockerfile, context_dir=dockerfile.parent)
     raise ValueError(f"from_dockerfile build unsupported for backend {backend!r}")
 
 
