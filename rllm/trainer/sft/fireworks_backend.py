@@ -25,22 +25,37 @@ import os
 import re
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
 
 from rllm.trainer.sft.backend import SFTConfigError
 from rllm.trainer.sft.tinker_backend import (
     TinkerSFTBackend,
+    _is_step_boundary,
     build_adam_params,
     build_sft_data,
+    iter_training_batches_from_step,
     resolve_sft_optimizer_settings,
+    resolve_sft_training_plan,
     sft_lr_multiplier,
 )
 
 logger = logging.getLogger(__name__)
 
 _CONFIG_FILE = Path(__file__).resolve().parent / "config" / "fireworks.yaml"
+
+
+@dataclass
+class _SubmittedFireworksBatch:
+    step: int
+    data: list[Any]
+    learning_rate: float
+    started_at: float
+    fb_future: Any
+    opt_future: Any
 
 
 class FireworksSFTBackend(TinkerSFTBackend):
@@ -236,22 +251,30 @@ class FireworksSFTBackend(TinkerSFTBackend):
             _tokenizer, train_dataset, val_dataset = build_sft_data(config, self.spec.train_dataset, self.spec.val_dataset)
 
             # Validate the complete loop before provisioning a paid trainer.
-            n_batches = len(train_dataset)
-            if n_batches <= 0:
-                raise SFTConfigError("The SFT training dataset contains no batches.")
-            total_epochs = int(config.trainer.get("total_epochs", 1))
-            if total_epochs <= 0:
-                raise SFTConfigError(f"trainer.total_epochs must be positive, got {total_epochs}.")
-            max_steps_value = config.trainer.get("max_steps")
-            max_steps = int(max_steps_value) if max_steps_value is not None else None
-            if max_steps is not None and max_steps <= 0:
-                raise SFTConfigError(f"trainer.max_steps must be positive when set, got {max_steps}.")
-            available_steps = n_batches * total_epochs
-            total_steps = min(available_steps, max_steps) if max_steps is not None else available_steps
+            plan = resolve_sft_training_plan(config, len(train_dataset))
+            n_batches = plan.n_batches
+            total_epochs = plan.total_epochs
+            max_steps = plan.max_steps
+            available_steps = plan.available_steps
+            total_steps = plan.total_steps
+            save_every = plan.save_every
+            eval_every = plan.eval_every
             optimizer = resolve_sft_optimizer_settings(
                 config.get("optim", {}),
                 total_steps=total_steps,
             )
+            planned_batches = (
+                (epoch_idx, batch_idx)
+                for _, epoch_idx, batch_idx in iter_training_batches_from_step(
+                    n_batches=n_batches,
+                    total_epochs=total_epochs,
+                    start_step=0,
+                    max_steps=max_steps,
+                )
+            )
+            train_dataset.preflight("train", planned_batches=planned_batches)
+            if val_dataset is not None:
+                val_dataset.preflight("validation")
 
             infra = self._provision(config, api_key, base_url)
             try:
@@ -266,16 +289,22 @@ class FireworksSFTBackend(TinkerSFTBackend):
 
                 # Auto-resume from the newest resumable checkpoint, if any.
                 resume = ckpt.resume()
-                if resume and resume.data_consumed:
+                if resume is not None:
+                    data_consumed = getattr(resume, "data_consumed", None)
+                    if isinstance(data_consumed, bool) or not isinstance(data_consumed, int) or data_consumed <= 0:
+                        raise SFTConfigError(
+                            "Fireworks found a resumable checkpoint without a positive persisted dataset cursor; "
+                            "refusing to replay training data. Use a new trainer job or restore its dataloader.json."
+                        )
                     # The service can rename a requested checkpoint (e.g.
                     # step-42 -> step-0), so its name-derived ``step`` is not a
                     # reliable data cursor. TrainingCheckpoints persists the
                     # raw-row cursor separately under the actual server name.
-                    start_step = train_dataset.step_for_data_cursor(resume.data_consumed)
+                    start_step = train_dataset.step_for_data_cursor(data_consumed)
                 else:
-                    # Legacy checkpoints lack dataloader.json; fall back to the
-                    # logical name's completed-step cursor.
-                    start_step = resume.step if resume else 0
+                    start_step = 0
+                if isinstance(start_step, bool) or not isinstance(start_step, int) or not 0 <= start_step <= total_steps:
+                    raise SFTConfigError(f"Fireworks checkpoint step {start_step!r} is outside the resolved SFT horizon 0..{total_steps}; use a new trainer job or an intact rLLM checkpoint.")
 
                 progress_denominator = total_steps if total_steps > 0 else 1
                 logger.info(
@@ -286,9 +315,6 @@ class FireworksSFTBackend(TinkerSFTBackend):
                     total_steps,
                 )
 
-                save_every = config.trainer.get("save_freq", 20)
-                eval_every = config.trainer.get("test_freq", 10)
-
                 if val_dataset is not None and start_step == 0:
                     tracking_logger.log(
                         data=self._validate(client, val_dataset),
@@ -296,14 +322,16 @@ class FireworksSFTBackend(TinkerSFTBackend):
                     )
 
                 current_epoch: int | None = None
-                for step in range(start_step, total_steps):
-                    epoch_idx, batch_idx = divmod(step, n_batches)
+                pending: _SubmittedFireworksBatch | None = None
+
+                def submit_batch(step, epoch_idx, batch_idx):
+                    nonlocal current_epoch
                     if epoch_idx != current_epoch:
                         logger.info("Starting epoch %d", epoch_idx)
                         train_dataset.set_epoch(seed=epoch_idx)
                         current_epoch = epoch_idx
 
-                    t0 = time.time()
+                    started_at = time.time()
                     lr = optimizer.learning_rate * sft_lr_multiplier(
                         optimizer.lr_schedule,
                         step,
@@ -322,22 +350,32 @@ class FireworksSFTBackend(TinkerSFTBackend):
                     data = train_dataset.get_batch(batch_idx)
                     fb_fut = client.submit_forward_backward(data, loss_fn="cross_entropy")
                     opt_fut = client.submit_optim_step(adam)
-                    fb_result = fb_fut.result(timeout=DEFAULT_TIMEOUT_S)
-                    opt_fut.result(timeout=DEFAULT_TIMEOUT_S)
+                    return _SubmittedFireworksBatch(
+                        step=step,
+                        data=data,
+                        learning_rate=lr,
+                        started_at=started_at,
+                        fb_future=fb_fut,
+                        opt_future=opt_fut,
+                    )
+
+                def finish_batch(submitted):
+                    fb_result = submitted.fb_future.result(timeout=DEFAULT_TIMEOUT_S)
+                    submitted.opt_future.result(timeout=DEFAULT_TIMEOUT_S)
                     # Fireworks' cross_entropy forward_backward returns aggregate
                     # metrics (loss:sum / response_tokens), not per-token logprobs.
                     fb_metrics = getattr(fb_result, "metrics", {}) or {}
                     n_loss_tokens = fb_metrics.get("response_tokens") or 0
                     train_loss = (fb_metrics.get("loss:sum", 0.0) / n_loss_tokens) if n_loss_tokens else 0.0
+                    completed_steps = submitted.step + 1
                     metrics = {
-                        "learning_rate": lr,
-                        "progress": min((step + 1) / progress_denominator, 1.0),
-                        "num_sequences": len(data),
+                        "learning_rate": submitted.learning_rate,
+                        "progress": min(completed_steps / progress_denominator, 1.0),
+                        "num_sequences": len(submitted.data),
                         "num_loss_tokens": n_loss_tokens,
                         "train_loss": train_loss,
-                        "time/total": time.time() - t0,
+                        "time/total": time.time() - submitted.started_at,
                     }
-                    completed_steps = step + 1
                     if val_dataset is not None and eval_every > 0 and completed_steps % eval_every == 0:
                         metrics.update(self._validate(client, val_dataset))
                     if save_every > 0 and completed_steps % save_every == 0 and completed_steps < total_steps:
@@ -349,7 +387,40 @@ class FireworksSFTBackend(TinkerSFTBackend):
                             data_consumed=train_dataset.data_cursor_for_step(completed_steps),
                         )
                     tracking_logger.log(data=metrics, step=completed_steps)
-                    logger.info("Step %d: train_loss=%.4f, lr=%.2e", completed_steps, train_loss, lr)
+                    logger.info(
+                        "Step %d: train_loss=%.4f, lr=%.2e",
+                        completed_steps,
+                        train_loss,
+                        submitted.learning_rate,
+                    )
+
+                for step, epoch_idx, batch_idx in iter_training_batches_from_step(
+                    n_batches=n_batches,
+                    total_epochs=total_epochs,
+                    start_step=start_step,
+                    max_steps=max_steps,
+                ):
+                    if pending is None:
+                        pending = submit_batch(step, epoch_idx, batch_idx)
+                        continue
+
+                    pending_completed = pending.step + 1
+                    if _is_step_boundary(
+                        pending_completed,
+                        total_steps,
+                        save_every=save_every,
+                        eval_every=eval_every,
+                        has_validation=val_dataset is not None,
+                    ):
+                        finish_batch(pending)
+                        pending = submit_batch(step, epoch_idx, batch_idx)
+                    else:
+                        following = submit_batch(step, epoch_idx, batch_idx)
+                        finish_batch(pending)
+                        pending = following
+
+                if pending is not None:
+                    finish_batch(pending)
 
                 if total_steps > start_step:
                     logger.info(f"Saving final checkpoint at step {total_steps}")

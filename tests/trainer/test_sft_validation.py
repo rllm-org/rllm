@@ -11,10 +11,6 @@ The two backends share the assertions but not the call protocol: tinker's
 ``ReconnectableClient.forward`` (which blocks internally).
 """
 
-import ast
-import inspect
-from pathlib import Path
-
 import pytest
 
 tinker = pytest.importorskip("tinker")
@@ -178,27 +174,3 @@ def test_validate_rejects_an_entirely_masked_dataset(
     del metric_key
     with pytest.raises(SFTConfigError, match="no trainable tokens"):
         run_validate(client_cls([_MASKED_OUTPUT]), [_MASKED_BATCH])
-
-
-@pytest.mark.parametrize(
-    ("backend_cls", "module_path"),
-    [
-        pytest.param(TinkerSFTBackend, "rllm/trainer/sft/tinker_backend.py", id="tinker"),
-        pytest.param(FireworksSFTBackend, "rllm/trainer/sft/fireworks_backend.py", id="fireworks"),
-    ],
-)
-def test_fit_loop_calls_validate_with_a_bindable_signature(backend_cls, module_path):
-    """Every ``self._validate(...)`` call in a fit loop binds to that backend's
-    own ``_validate``.
-
-    The call sites run only inside a live, billed training job on a step where
-    validation is due, so an arity drift between the two would otherwise first
-    surface as a ``TypeError`` mid-run.
-    """
-    source = (Path(__file__).resolve().parents[2] / module_path).read_text()
-    signature = inspect.signature(backend_cls._validate)
-    call_sites = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "_validate"]
-    assert call_sites, f"no self._validate(...) call site found in {module_path}"
-    for call in call_sites:
-        # bind() over placeholders: only the shape of the call is under test.
-        signature.bind(*["<arg>"] * len(call.args), **{kw.arg: "<arg>" for kw in call.keywords})

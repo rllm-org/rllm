@@ -292,22 +292,16 @@ def register(name: str, file_path: str, split: str, category: str | None, descri
 @click.option("--split", default="train", help="Split name to register the rows under (default: train).")
 @click.option("--train-on", type=click.Choice(["all", "last"]), default="all", help="[messages] Derive the loss mask over 'all' assistant turns (default) or only the 'last'.")
 @click.option("--no-explode", is_flag=True, help="[think-tags] Emit one row per conversation instead of one row per assistant turn.")
-@click.option(
-    "--trim-whitespace/--no-trim-whitespace",
-    default=False,
-    help="Strip leading/trailing message whitespace for templates known to do the same (default: preserve source text).",
-)
 @click.option("--description", default=None, help="Short description of the dataset.")
 @click.pass_context
-def import_data(ctx: click.Context, file_path: str, name: str, fmt: str, split: str, train_on: str, no_explode: bool, trim_whitespace: bool, description: str | None):
+def import_data(ctx: click.Context, file_path: str, name: str, fmt: str, split: str, train_on: str, no_explode: bool, description: str | None):
     """Import a local SFT data file, bridging it to the canonical row schema.
 
     FILE is a JSON/JSONL/CSV/Parquet file of ``{"messages": [...]}`` rows. The
     chosen --format bridge normalizes each row (deriving ``trainable`` masks,
     lifting ``reasoning_content`` into thinking parts, decoding JSON-string
-    ``tool_calls``, trimming template-trimmed whitespace and, for think-tags,
-    splitting the ``<think>`` chain-of-thought) before the rows are registered
-    ready for ``rllm sft``.
+    ``tool_calls`` and, for think-tags, splitting the ``<think>``
+    chain-of-thought) before the rows are registered ready for ``rllm sft``.
 
     \b
     Examples:
@@ -327,7 +321,6 @@ def import_data(ctx: click.Context, file_path: str, name: str, fmt: str, split: 
         console.print("  [yellow]--no-explode is ignored for --format messages[/] [dim](explosion only applies to think-tags).[/]")
 
     bridge_opts = {"train_on": train_on} if fmt == "messages" else {"explode": not no_explode}
-    bridge_opts["trim_whitespace"] = trim_whitespace
 
     ds = Dataset.load_data(file_path)
     try:
@@ -340,7 +333,7 @@ def import_data(ctx: click.Context, file_path: str, name: str, fmt: str, split: 
         name,
         records,
         split=split,
-        source=f"import:{fmt}:trim" if trim_whitespace else f"import:{fmt}",
+        source=f"import:{fmt}",
         description=description or "",
     )
 

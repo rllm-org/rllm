@@ -140,6 +140,46 @@ def test_normalize_messages_rejects_unbridged_reasoning_field():
         )
 
 
+@pytest.mark.parametrize("key", ["reasoning_content", "reasoning"])
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_normalize_messages_treats_empty_reasoning_as_absent(key, role):
+    message = normalize_messages([{"role": role, "content": "payload", key: ""}])[0]
+    assert message.text() == "payload"
+    assert message.thinking() == ""
+
+
+def test_normalize_row_rejects_structural_thinking_in_canonical_text_part():
+    with pytest.raises(SFTSchemaError, match="think-tags.*thinking parts"):
+        normalize_row(
+            {
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "<think>inline</think>visible"}],
+                    },
+                ]
+            }
+        )
+
+
+def test_structural_thinking_check_uses_concatenated_text_stream():
+    with pytest.raises(SFTSchemaError, match="think-tags.*thinking parts"):
+        normalize_row(
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "<think>split"},
+                            {"type": "text", "text": " block</think>visible"},
+                        ],
+                    }
+                ]
+            }
+        )
+
+
 # --- validation errors (raised as SFTSchemaError by normalize_*) -------------
 
 

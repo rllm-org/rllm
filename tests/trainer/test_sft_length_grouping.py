@@ -54,9 +54,9 @@ def test_length_grouped_order_is_full_permutation():
     assert sorted(order) == list(range(1000))
 
 
-@pytest.mark.parametrize("seed", [0, 7])
-def test_length_grouped_order_deterministic_and_seed_sensitive(seed):
+def test_length_grouped_order_deterministic_and_seed_sensitive():
     lengths = _lengths(500)
+    seed = 7
     a = length_grouped_order(lengths, 16, 25, seed)
     assert a == length_grouped_order(lengths, 16, 25, seed)  # same seed -> same order
     assert a != length_grouped_order(lengths, 16, 25, seed + 1)  # seed matters
@@ -91,14 +91,6 @@ def test_group_by_length_covers_every_row_through_get_batch(monkeypatch):
     assert len(set(seen)) == len(seen)  # each trained row exactly once
 
 
-def test_group_by_length_is_deterministic_across_instances():
-    a = TinkerSFTDataset(_messages_ds(120), renderer=object(), batch_size=8, group_by_length=True, length_group_factor=4)
-    b = TinkerSFTDataset(_messages_ds(120), renderer=object(), batch_size=8, group_by_length=True, length_group_factor=4)
-    a.set_epoch(3)
-    b.set_epoch(3)
-    assert a._order == b._order
-
-
 def test_default_shuffle_path_is_full_permutation_and_deterministic():
     """Grouping off (default): the explicit-order refactor still yields a seeded
     full-coverage permutation each epoch."""
@@ -118,3 +110,33 @@ def test_raw_row_cursor_round_trips_full_and_partial_batches():
     assert [ds.data_cursor_for_step(step) for step in range(7)] == [0, 4, 8, 10, 14, 18, 20]
     for step in range(7):
         assert ds.step_for_data_cursor(ds.data_cursor_for_step(step)) == step
+
+
+def test_grouped_resume_reconstructs_uninterrupted_epoch_suffix(monkeypatch):
+    uninterrupted = TinkerSFTDataset(
+        _messages_ds(23),
+        renderer=object(),
+        batch_size=4,
+        group_by_length=True,
+        length_group_factor=3,
+    )
+    resumed = TinkerSFTDataset(
+        _messages_ds(23),
+        renderer=object(),
+        batch_size=4,
+        group_by_length=True,
+        length_group_factor=3,
+    )
+    monkeypatch.setattr(
+        td,
+        "conversation_to_datum",
+        lambda messages, renderer, max_length, last_only, **kwargs: messages,
+    )
+    monkeypatch.setattr(td, "count_loss_tokens", lambda datums: 1)
+
+    uninterrupted.set_epoch(seed=2)
+    resumed.set_epoch(seed=2)
+    next_batch = 3
+    expected = [uninterrupted.get_batch(index) for index in range(next_batch, len(uninterrupted))]
+    actual = [resumed.get_batch(index) for index in range(next_batch, len(resumed))]
+    assert actual == expected

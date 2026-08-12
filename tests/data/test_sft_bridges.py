@@ -153,6 +153,27 @@ def test_no_explode_single_row_all_assistant_trainable():
             assert m.trainable is False
 
 
+def test_no_explode_honours_preexisting_trainable_flags():
+    row = bridge_think_tags([ROW_FLAGGED], explode=False)[0]
+    assert [m.trainable for m in row.messages] == [False, True, False, False, False, True]
+
+
+def test_no_explode_partial_flags_trigger_full_mask_derivation():
+    row = bridge_think_tags(
+        [
+            {
+                "messages": [
+                    {"role": "user", "content": "q", "trainable": False},
+                    {"role": "assistant", "content": "<think>plan</think>answer", "trainable": False},
+                    {"role": "user", "content": "follow-up"},
+                ]
+            }
+        ],
+        explode=False,
+    )[0]
+    assert [m.trainable for m in row.messages] == [False, True, False]
+
+
 # --- row-level extras passthrough --------------------------------------------
 
 
@@ -271,6 +292,16 @@ def test_reasoning_on_prompt_turn_raises_instead_of_being_dropped():
         bridge_messages([{"messages": messages}])
 
 
+@pytest.mark.parametrize("key", ["reasoning_content", "reasoning"])
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_empty_reasoning_field_is_absent_on_any_role(key, role):
+    row = bridge_messages([{"messages": [{"role": role, "content": "payload", key: ""}]}])[0]
+    message = row.messages[0]
+    assert message.text() == "payload"
+    assert message.thinking() == ""
+    assert key not in row.to_record()["messages"][0]
+
+
 def test_conflicting_reasoning_aliases_raise_instead_of_dropping_one():
     messages = [
         {"role": "user", "content": "q"},
@@ -307,36 +338,61 @@ def test_reasoning_does_not_hide_unsupported_visible_content(content):
     assert "assistant content must be a string, list, or null" in str(exc.value)
 
 
-def test_inline_think_tag_survives_a_sibling_reasoning_field():
-    """Lifting a sibling reasoning field must not hide an inline ``<think>``
-    block from the think-tags extractor."""
+@pytest.mark.parametrize(
+    ("bridge", "kwargs"),
+    [(bridge_messages, {}), (bridge_think_tags, {"explode": False})],
+)
+def test_sibling_reasoning_conflicts_with_structural_inline_thinking(bridge, kwargs):
     messages = [
         {"role": "user", "content": "q"},
         {"role": "assistant", "content": "<think>\ninline\n</think>\n\nvisible", "reasoning_content": "sibling"},
     ]
+    with pytest.raises(SFTSchemaError, match="sibling reasoning.*structural inline"):
+        bridge([{"messages": messages}], **kwargs)
+
+
+# --- structural inline thinking ---------------------------------------------
+
+
+def test_plain_messages_rejects_structural_inline_thinking():
+    messages = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "<think>inline</think>visible"},
+    ]
+    with pytest.raises(SFTSchemaError, match="think-tags.*thinking parts"):
+        bridge_messages([{"messages": messages}])
+
+
+def test_think_tags_remains_the_inline_thinking_parser():
+    messages = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "<think>inline</think>visible"},
+    ]
     asst = bridge_think_tags([{"messages": messages}], explode=False)[0].messages[-1]
-    assert [p.thinking for p in asst.content if isinstance(p, ThinkingPart)] == ["sibling", "inline"]
+    assert asst.thinking() == "inline"
     assert asst.text() == "visible"
 
 
-# --- whitespace trim ---------------------------------------------------------
+def test_literal_think_tags_outside_structural_assistant_prefix_are_text():
+    messages = [
+        {"role": "user", "content": "<think>literal prompt text</think>"},
+        {"role": "assistant", "content": "The literal is <think>not wire syntax</think>."},
+    ]
+    row = bridge_messages([{"messages": messages}])[0]
+    assert [m.text() for m in row.messages] == [
+        "<think>literal prompt text</think>",
+        "The literal is <think>not wire syntax</think>.",
+    ]
 
-# Padding in exactly the places a serving chat template ``|trim``s away: a
-# thinking block ending in newlines, the visible text opening with them, and
-# observation/instruction turns padded by the harness.
+
+# --- source whitespace preservation -----------------------------------------
+
 PADDED_MESSAGES = [
     {"role": "system", "content": "sys prompt\n\n"},
     {"role": "user", "content": "  fix the bug\n"},
     {"role": "assistant", "content": "\n\nTHOUGHT: look around\n", "reasoning_content": "Let me explore.\n\n"},
     {"role": "tool", "content": "a.py\tb.py\t\n"},
     {"role": "assistant", "content": "\n\ndone\n\n", "reasoning_content": "finished\n"},
-]
-CLEAN_MESSAGES = [
-    {"role": "system", "content": "sys prompt"},
-    {"role": "user", "content": "fix the bug"},
-    {"role": "assistant", "content": "THOUGHT: look around", "reasoning_content": "Let me explore."},
-    {"role": "tool", "content": "a.py\tb.py"},
-    {"role": "assistant", "content": "done", "reasoning_content": "finished"},
 ]
 
 
@@ -345,72 +401,15 @@ def _bridge(name, messages, **kwargs):
 
 
 @pytest.mark.parametrize(("fmt", "opts"), [("messages", {}), ("think-tags", {"explode": False})])
-def test_trim_removes_template_trimmed_boundary_whitespace(fmt, opts):
-    """Every content stream loses its boundary whitespace, on every role — that
-    padding is deleted by the serving template, so training on it is a pure
-    train/serve mismatch."""
-    row = _bridge(fmt, PADDED_MESSAGES, trim_whitespace=True, **opts)[0]
-    for m in row.messages:
-        for part in m.content:
-            payload = part.thinking if isinstance(part, ThinkingPart) else part.text
-            assert payload == payload.strip(), f"{m.role}: {payload!r}"
-    assert row.messages[2].thinking() == "Let me explore."
-    assert row.messages[2].text() == "THOUGHT: look around"
-    assert row.messages[3].text() == "a.py\tb.py"
-
-
-@pytest.mark.parametrize(("fmt", "opts"), [("messages", {}), ("think-tags", {"explode": False})])
-def test_trim_is_a_noop_on_already_clean_rows(fmt, opts):
-    """Negative control: a row with no boundary whitespace survives byte-identical,
-    and padded input converges on exactly that record."""
-    clean = _bridge(fmt, CLEAN_MESSAGES, trim_whitespace=True, **opts)[0].to_record()
-    assert _bridge(fmt, PADDED_MESSAGES, trim_whitespace=True, **opts)[0].to_record() == clean
-    assert _bridge(fmt, CLEAN_MESSAGES, **opts)[0].to_record() == clean
-
-
-@pytest.mark.parametrize(("fmt", "opts"), [("messages", {}), ("think-tags", {"explode": False})])
-def test_default_keeps_padding_verbatim(fmt, opts):
+def test_bridges_preserve_source_whitespace_verbatim(fmt, opts):
     row = _bridge(fmt, PADDED_MESSAGES, **opts)[0]
+    assert row.messages[0].text() == "sys prompt\n\n"
+    assert row.messages[1].text() == "  fix the bug\n"
     assert row.messages[2].thinking() == "Let me explore.\n\n"
     assert row.messages[2].text() == "\n\nTHOUGHT: look around\n"
-
-
-def test_trim_keeps_whitespace_between_parts_of_one_stream():
-    """Trimming is per stream, not per part: the blank line separating two text
-    parts is rendered by the template and must survive."""
-    messages = [
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "content": [{"type": "text", "text": "\n first\n\n"}, {"type": "text", "text": "second \n"}]},
-    ]
-    asst = bridge_messages([{"messages": messages}], trim_whitespace=True)[0].messages[-1]
-    assert [p.text for p in asst.content] == ["first\n\n", "second"]
-
-
-def test_trim_leaves_an_already_empty_part_alone():
-    """Only parts the trim emptied are dropped: a turn whose content was already
-    empty keeps the shape every pre-trim consumer already sees."""
-    messages = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "", "tool_calls": [{"id": "c", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]}]
-    asst = bridge_messages([{"messages": messages}], trim_whitespace=True)[0].messages[-1]
-    assert [p.text for p in asst.content] == [""]
-
-
-def test_trim_drops_whitespace_only_content_leaving_an_empty_parts_list():
-    """A whitespace-only turn trims to no parts at all — the same nothing the
-    serving template renders for it."""
-    messages = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "\n\n \n", "tool_calls": [{"id": "c", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]}]
-    asst = bridge_messages([{"messages": messages}], trim_whitespace=True)[0].messages[-1]
-    assert asst.content == []
-    assert asst.tool_calls[0].function.name == "bash"
-
-
-def test_explode_history_trimmed_too():
-    """The trim reaches exploded history turns, not just the target."""
-    rows = bridge_think_tags([{"messages": PADDED_MESSAGES}], trim_whitespace=True)
-    assert len(rows) == 2
-    for m in rows[-1].messages:
-        for part in m.content:
-            payload = part.thinking if isinstance(part, ThinkingPart) else part.text
-            assert payload == payload.strip()
+    assert row.messages[3].text() == "a.py\tb.py\t\n"
+    assert row.messages[4].thinking() == "finished\n"
+    assert row.messages[4].text() == "\n\ndone\n\n"
 
 
 # --- registry / get_bridge ---------------------------------------------------

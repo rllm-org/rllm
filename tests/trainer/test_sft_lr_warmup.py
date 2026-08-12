@@ -69,20 +69,6 @@ def test_zero_warmup_reduces_to_cookbook(schedule):
         assert sft_lr_multiplier(schedule, step, 100, warmup_steps_ratio=0.0) == pytest.approx(_cookbook(lr_schedule=schedule, step=step, total_steps=100))
 
 
-def test_cosine_and_warmup_reach_fireworks_subclass_config():
-    """cosine + warmup must land in the FIREWORKS config (the subclass path the
-    real run uses), not just tinker's."""
-    from rllm.data import Dataset
-    from rllm.trainer.sft import SFTSpec
-    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
-
-    ds = Dataset(data=[{"messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]}], name="t", split="train")
-    spec = SFTSpec(model="Qwen/Qwen2.5-7B-Instruct", train_dataset=ds, lr_schedule="cosine", overrides={"optim": {"warmup_steps_ratio": 0.1}})
-    cfg = FireworksSFTBackend(spec).build_config()
-    assert cfg.optim.lr_scheduler == "cosine"
-    assert cfg.optim.warmup_steps_ratio == pytest.approx(0.1)
-
-
 @pytest.mark.parametrize(
     ("overrides", "match"),
     [

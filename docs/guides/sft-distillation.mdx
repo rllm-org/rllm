@@ -94,7 +94,7 @@ If an attempt produces many trained steps but zero merges, curation logs a **deg
 
 ### `rllm dataset import` — external trace files
 
-`import` bridges a local file of `{"messages": [...]}` rows into the canonical schema and registers it. Choose the source shape with `--format` (`rllm/cli/dataset.py`, bridges in `rllm/data/sft_bridges.py`):
+Choose the format that matches your source:
 
 ```bash
 rllm dataset import data.jsonl --name my-sft                             # --format messages (default)
@@ -102,30 +102,83 @@ rllm dataset import data.jsonl --name my-sft --train-on last             # only 
 rllm dataset import traces.jsonl --name distill-traces --format think-tags  # split <think>...</think> into a thinking part
 ```
 
-- **`messages`** — plain OpenAI rows. The loss mask is derived from `--train-on` (`all` assistant turns, default, or only the `last`).
-- **`think-tags`** — rows whose assistant turns start with a `<think>...</think>` block (a common convention for distilled reasoning traces). The bridge splits that block into a `thinking` part and carries every non-`messages` top-level key through verbatim as row metadata.
+- **`messages`** accepts OpenAI-style rows, including sibling `reasoning_content` and tool calls. `--train-on` selects all assistant turns or only the last one.
+- **`think-tags`** parses a leading assistant `<think>...</think>` block into a `thinking` part.
+
+rLLM preserves source whitespace. If a `messages` row starts assistant text with a structural `<think>` block, import it with `--format think-tags`; rLLM rejects the ambiguous plain form instead of training the tags as visible text.
 
 #### `--explode` (think-tags only, default ON)
 
-This is the most important knob for `think-tags`, so spell out the tradeoff before choosing:
-
-- **Exploded (default)** — the conversation is split into one row per assistant turn. History turns keep only their visible text (CoT stripped), and the row's single final assistant turn is the trained target with its CoT kept. This is exactly what a next-token SFT loss wants, and it's **inference-faithful**: thinking-family renderers strip prior-turn reasoning at render time, so training every CoT block requires giving each its own row. The cost is duplicated history tokens.
-- **`--no-explode`** — one compact row per full conversation, every assistant turn trainable. But because thinking-family renderers strip history CoT at render time, only the **final** turn's CoT is actually trained; earlier turns contribute their visible text only. You save history-token duplication but train fewer CoT blocks.
-
-Rule of thumb: keep the default `--explode` when you want every reasoning block trained; use `--no-explode` for compact conversations where only the last turn's reasoning matters.
+- **Exploded (default)** creates one row per assistant turn. It duplicates history, but trains every reasoning block.
+- **`--no-explode`** keeps one compact conversation. Existing per-message masks are preserved; otherwise assistant turns are trained.
 
 ## Training with `rllm sft`
 
+<Steps>
+  <Step title="Inspect the registered rows">
+
+    ```bash
+    rllm dataset inspect my-sft --split train
+    ```
+
+    Confirm that reasoning uses `thinking` parts and the intended assistant messages have `trainable: true`.
+  </Step>
+
+  <Step title="Start with a short hosted run">
+
+    ```bash
+    rllm sft my-sft \
+      --model Qwen/Qwen3.5-4B \
+      --backend tinker \
+      --batch-size 2 \
+      --epochs 1 \
+      --save-freq 2 \
+      --val-freq 2
+    ```
+
+    Tinker and Fireworks render every train and validation row before creating a paid training client. Schema, renderer, masking, and length failures therefore stop locally.
+  </Step>
+
+  <Step title="Scale the verified configuration">
+
+    Increase the batch size, epochs, or step cap only after the short run succeeds. Use `--config` for backend-native controls:
+
+    ```yaml hosted-sft.yaml
+    data:
+      rllm:
+        overlength_policy: error
+        group_by_length: true
+        length_group_factor: 50
+        loss_reduction: token_mean
+    optim:
+      warmup_steps: 10
+      min_lr: 0.000001
+      weight_decay: 0.01
+    trainer:
+      max_steps: 100
+    ```
+
+    ```bash
+    rllm sft my-sft --backend tinker --config hosted-sft.yaml
+    ```
+  </Step>
+</Steps>
+
+The hosted backends use each message's `trainable` flag as the loss mask. Flag-less rows train assistant turns; `--tokenize-method stepwise` limits that derived default to the final assistant turn.
+
+### Checkpoints and resume
+
+Without `--output`, each Tinker launch creates an isolated run directory. To resume intentionally, pass the same explicit directory:
+
 ```bash
-rllm sft my-sft --model Qwen/Qwen3.5-4B --backend tinker --epochs 3
-rllm sft --train-file data.parquet --lr 1e-5 --backend fireworks
+rllm sft my-sft --backend tinker --output runs/my-sft
 ```
 
-Masking is always tinker's `CUSTOMIZED` mode, driven by each message's `trainable` flag — the data decides the loss mask (`rllm/trainer/sft/tinker_backend.py`, `build_sft_data`).
+On a later launch, rLLM resumes only when the local run contract and provider checkpoint match the model, LoRA settings, renderer, dataset, optimizer, and step horizon. A legacy or mismatched checkpoint fails before a resumed training client is created; use a new output directory.
 
 ### Logging training progress
 
-Per-step training metrics (loss, learning rate, progress) route through rLLM's unified tracking layer (`rllm.utils.tracking.Tracking`). `console` logging is always on; add more backends with `--logger`:
+Console logging is always on. Add another tracker with `--logger`:
 
 ```bash
 rllm sft my-sft --logger wandb                    # needs WANDB_API_KEY or `wandb login`
@@ -133,7 +186,7 @@ rllm sft my-sft --logger wandb --logger tensorboard   # repeatable
 rllm sft my-sft --ui                              # live rLLM UI (see `rllm login`)
 ```
 
-`--logger` accepts `console | wandb | mlflow | swanlab | tensorboard | file | ui`. `--project`/`--experiment` name the run in whichever backend you pick (default `rllm-sft` / the dataset name). `--ui` is auto-enabled when you're logged in; pass `--no-ui` to opt out.
+`--logger` accepts `console | wandb | mlflow | swanlab | tensorboard | file | ui`. `--project` and `--experiment` name the run. Pass `--no-ui` to disable automatic UI logging when you are logged in.
 
 <Note>
   Live rLLM UI logging (`--ui`) is supported on the **tinker** and **fireworks** backends only; on `--backend verl` it is dropped with a warning.
@@ -141,21 +194,14 @@ rllm sft my-sft --ui                              # live rLLM UI (see `rllm logi
 
 ### Renderer auto-detection and `--renderer`
 
-The tinker/fireworks path renders rows through a tinker-cookbook renderer. rLLM auto-detects it from the model in this order (`_resolve_renderer_name`, `rllm/trainer/sft/tinker_backend.py`):
-
-1. An explicit `--renderer` wins (an advisory warning fires if it looks mismatched — never fatal).
-2. Otherwise tinker-cookbook's recommendation map (`get_recommended_renderer_name`).
-3. Otherwise a family heuristic on the model basename (`qwen3.5 → qwen3_5`, `qwen3 → qwen3`, `deepseek → deepseekv3`, `llama-3 → llama3`).
-4. Otherwise fall back to `role_colon` with a warning.
-
-Pass `--renderer` when auto-detection can't place your model (e.g. a small or renamed checkpoint tinker's map doesn't cover). Valid names:
+Tinker and Fireworks auto-detect a renderer from the model. Pin one when using a renamed or unsupported model:
 
 ```text
 qwen3 | qwen3_5 | deepseekv3 | llama3 | role_colon
 ```
 
 <Warning>
-  `role_colon` and `llama3` are **text-only** renderers — they cannot represent reasoning (`thinking` parts) or tool calls. If your data contains either, the tinker backend **fails fast** with an `SFTConfigError` rather than silently dropping the reasoning. Pin a capable renderer (`qwen3` / `qwen3_5` / `deepseekv3`) or use a chat model whose default renderer supports structured content.
+  `role_colon` and `llama3` cannot represent reasoning or tool calls. Pin `qwen3`, `qwen3_5`, or `deepseekv3` for structured rows.
 </Warning>
 
 ## Backend support matrix
@@ -166,7 +212,7 @@ qwen3 | qwen3_5 | deepseekv3 | llama3 | role_colon
 | **fireworks** | ✓ (same data path) | ✓ |
 | **verl** | ✗ (rejected today) | ✓ |
 
-Fireworks subclasses the tinker backend and reuses the same rendering pipeline, so structured rows behave identically. The verl backend rejects structured rows — parts-list content or per-message `trainable` flags — with an actionable `SFTConfigError` (`_reject_structured_rows`, `rllm/trainer/sft/verl_backend.py`); plain `{role, content: str}` rows still train fine on verl. Structured SFT support on verl is planned.
+Fireworks reuses the Tinker rendering path. verl currently accepts only plain `{role, content: str}` rows. It also rejects hosted-only `--config` keys with the closest verl-native alternative instead of ignoring them.
 
 ## Worked example: importing think-tagged teacher traces
 
@@ -202,7 +248,11 @@ Common `SFTConfigError` messages and what to do:
 | `train dataset is empty` | The dataset/split resolved to zero rows. Check the name and `--split`; run `rllm dataset list --local`. |
 | `train dataset is missing a 'messages' column` | The file isn't in SFT shape. Import it first with `rllm dataset import` (or point at the right file). |
 | `... row 0 does not match the SFT schema` | A malformed message (bad part type, missing `role`/`content`). The error names the failing field. |
+| `assistant text begins with a structural <think>...` | Import the source with `--format think-tags`, or provide canonical `thinking` parts. |
+| `... renders to ... > data.max_length` | Raise `--max-length`, filter the row, or explicitly select the lossy `overlength_policy: truncate`. |
 | `The 'role_colon' renderer cannot represent reasoning (<think>) or tool-calls` | A text-only renderer met structured data. Pass `--renderer qwen3` (or `qwen3_5` / `deepseekv3`). |
+| `Cannot resume ... run identity mismatch` | The explicit Tinker output directory belongs to different training inputs. Choose a new directory. |
+| `verl cannot use hosted-backend SFT override keys` | Replace each rejected key with the alternative listed in the error. |
 | `... has structured SFT rows ... not supported on the verl backend yet` | Structured rows on verl. Use `--backend tinker` (or `fireworks`). |
 | `Unsupported lr_schedule ... for verl` | verl ships `constant` / `cosine` only; `linear` maps to `cosine` with a warning. |
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -37,6 +38,47 @@ _CUSTOM_CLS_NAME = "RLLMSFTDataset"
 # constant/cosine/wsd; "linear" has no direct analogue, so fall back to cosine.
 _LR_SCHEDULE_MAP = {"constant": "constant", "cosine": "cosine", "linear": "cosine"}
 
+_HOSTED_OVERRIDE_HINTS = {
+    "optim.grad_clip_norm": "use optim.clip_grad",
+    "optim.min_lr": "use optim.min_lr_ratio, which is a fraction of optim.lr rather than an absolute learning rate",
+    "optim.warmup_ratio": "use optim.lr_warmup_steps_ratio",
+    "optim.warmup_steps": "use optim.lr_warmup_steps",
+    "optim.warmup_steps_ratio": "use optim.lr_warmup_steps_ratio",
+    "trainer.max_steps": "use trainer.total_training_steps",
+}
+_SUPPORTED_RLLM_DATA_OVERRIDE = "data.rllm.tokenize_and_mask_method"
+
+
+def _iter_override_paths(node, prefix: tuple[str, ...] = ()):
+    if not isinstance(node, Mapping):
+        return
+    for key, value in node.items():
+        path = (*prefix, str(key))
+        if isinstance(value, Mapping):
+            yield from _iter_override_paths(value, path)
+        else:
+            yield ".".join(path)
+
+
+def _hosted_override_hint(path: str) -> str | None:
+    if path in _HOSTED_OVERRIDE_HINTS:
+        return _HOSTED_OVERRIDE_HINTS[path]
+    if path == "data.rllm":
+        return f"use a mapping; {_SUPPORTED_RLLM_DATA_OVERRIDE} is the only supported rLLM-specific verl data key"
+    if not path.startswith("data.rllm.") or path == _SUPPORTED_RLLM_DATA_OVERRIDE:
+        return None
+
+    key = path.removeprefix("data.rllm.")
+    if key in {"group_by_length", "length_group_factor", "group_by_length_factor"}:
+        return "unsupported on verl; its dynamic token batching (data.use_dynamic_bsz) is a different mechanism"
+    if key == "overlength_policy":
+        return "use data.truncation with one of 'error', 'left', or 'right'"
+    if key in {"loss_reduction", "loss_normalization"}:
+        return "unsupported because verl SFT is fixed to a global token mean"
+    if key.startswith("strip_"):
+        return "unsupported because verl has no renderer/history policy; curate the input messages or use a hosted backend"
+    return f"{_SUPPORTED_RLLM_DATA_OVERRIDE} is the only supported rLLM-specific verl data key"
+
 
 class VerlSFTBackend(SFTBackend):
     """Supervised fine-tuning on verl's FSDP trainer (multi-GPU, torchrun)."""
@@ -47,9 +89,18 @@ class VerlSFTBackend(SFTBackend):
     # -- contract -----------------------------------------------------------
 
     def validate_spec(self) -> None:
-        validate_messages_dataset(self.spec.train_dataset, "train")
+        self._reject_hosted_overrides()
+        validate_messages_dataset(
+            self.spec.train_dataset,
+            "train",
+            allow_structural_inline_thinking_text=True,
+        )
         if self.spec.val_dataset is not None:
-            validate_messages_dataset(self.spec.val_dataset, "val")
+            validate_messages_dataset(
+                self.spec.val_dataset,
+                "val",
+                allow_structural_inline_thinking_text=True,
+            )
         if self.spec.lr_schedule not in _LR_SCHEDULE_MAP:
             raise SFTConfigError(f"Unsupported lr_schedule {self.spec.lr_schedule!r} for verl. Use one of {sorted(_LR_SCHEDULE_MAP)}.")
         if self.spec.lr_schedule == "linear":
@@ -57,6 +108,19 @@ class VerlSFTBackend(SFTBackend):
         self._reject_structured_rows(self.spec.train_dataset, "train")
         if self.spec.val_dataset is not None:
             self._reject_structured_rows(self.spec.val_dataset, "val")
+
+    def _reject_hosted_overrides(self) -> None:
+        if not self.spec.overrides:
+            return
+        overrides = OmegaConf.to_container(OmegaConf.create(self.spec.overrides), resolve=False)
+        rejected = {path: hint for path in _iter_override_paths(overrides) if (hint := _hosted_override_hint(path)) is not None}
+        if not rejected:
+            return
+
+        details = "\n".join(f"- {path}: {rejected[path]}" for path in sorted(rejected))
+        raise SFTConfigError(
+            f"verl cannot use hosted-backend SFT override keys:\n{details}\nUse the listed verl-native keys in --config, or choose --backend tinker/fireworks. These spellings are not translated."
+        )
 
     @staticmethod
     def _reject_structured_rows(dataset, label: str) -> None:

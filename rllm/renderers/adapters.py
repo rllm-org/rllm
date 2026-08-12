@@ -67,10 +67,24 @@ def _is_qwen_history_renderer(renderer: Any) -> bool:
     return any(cls.__module__.startswith("tinker_cookbook.renderers.qwen3") for cls in type(renderer).__mro__)
 
 
+def _text_content(content: Any) -> str | None:
+    """Read wire text without mistaking multimodal content for a tool result."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    text: list[str] = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "text" or not isinstance(part.get("text"), str):
+            return None
+        text.append(part["text"])
+    return "".join(text)
+
+
 def _is_tool_response_user(message: dict) -> bool:
     """Recognize the legacy Qwen wire shape where a tool result has user role."""
-    content = message.get("content")
-    return message.get("role") == "user" and isinstance(content, str) and content.startswith("<tool_response>") and content.endswith("</tool_response>")
+    content = _text_content(message.get("content"))
+    return message.get("role") == "user" and content is not None and content.startswith("<tool_response>") and content.endswith("</tool_response>")
 
 
 def _last_real_user_index(messages: list[dict]) -> int:

@@ -444,6 +444,52 @@ def test_new_user_query_strips_prior_reasoning_in_training_and_serving(qwen_toke
     assert "CURRENT-REASONING" in rendered
 
 
+def test_wrapped_tool_response_parts_do_not_reset_qwen_reasoning(qwen_tokenizer):
+    """Canonical text parts preserve the active trace across legacy tool results."""
+    from rllm.data.sft_bridges import bridge_messages
+    from rllm.renderers.adapters import TinkerRendererAdapter
+
+    wire_messages = [
+        {"role": "user", "content": "Inspect the repository."},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "ACTIVE-TOOL-REASONING",
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "<tool_response>one.py</tool_response>",
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": "Done.",
+            "reasoning_content": "FINAL-REASONING",
+        },
+    ]
+    canonical = bridge_messages(
+        [{"messages": wire_messages}],
+        train_on="all",
+    )[0].to_record()["messages"]
+    renderer = get_renderer("qwen3", qwen_tokenizer)
+    renderer.strip_thinking_from_history = False
+    datum = conversation_to_datum(
+        canonical,
+        renderer,
+        max_length=None,
+    )
+    serving_ids = TinkerRendererAdapter(get_renderer("qwen3", qwen_tokenizer)).render_ids(wire_messages, add_generation_prompt=False)
+
+    assert _full_tokens(datum) == serving_ids
+    rendered = qwen_tokenizer.decode(serving_ids)
+    assert "ACTIVE-TOOL-REASONING" in rendered
+    assert "FINAL-REASONING" in rendered
+
+
 def test_invalid_row_tool_declaration_fails_with_dataset_error(qwen_tokenizer):
     renderer = get_renderer("qwen3", qwen_tokenizer)
     messages = [

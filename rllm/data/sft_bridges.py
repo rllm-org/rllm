@@ -22,9 +22,8 @@ variance is absorbed — once, at dataset-build time — rather than in renderer
 trainers that would otherwise each have to cope with every export's quirks. Both
 bridges therefore apply the same source-shape normalization before validation
 (``reasoning_content`` lifted to a thinking part, JSON-string ``tool_calls``
-decoded, already-parsed ``arguments`` re-encoded). ``trim_whitespace=True`` is
-an explicit compatibility option for serving templates known to strip message
-boundaries; source text is otherwise preserved verbatim.
+decoded, already-parsed ``arguments`` re-encoded). Source text is preserved
+verbatim; model-aware normalization belongs with the resolved renderer.
 
 Both bridges return ``list[SFTRow]``; callers persist ``[r.to_record() for r in
 rows]``. Malformed rows raise :class:`SFTSchemaError` naming the failing row
@@ -46,6 +45,7 @@ from rllm.data.sft_schema import (
     SFTMessage,
     SFTRow,
     SFTSchemaError,
+    _has_structural_inline_thinking,
     normalize_message_dict,
     normalize_rows,
 )
@@ -116,12 +116,12 @@ def _normalize_source_message(msg: Any) -> Any:
     if isinstance(out.get("tool_calls"), list):
         out["tool_calls"] = [_normalize_tool_call(c) for c in out["tool_calls"]]
 
-    # Only an assistant turn can reason. Reject prompt-side or conflicting
-    # provider fields rather than silently deleting source data.
+    # Empty provider fields are absent. Non-empty reasoning belongs only on an
+    # assistant turn; reject prompt-side or conflicting data rather than drop it.
     reasoning_values: list[tuple[str, str]] = []
     for key in _REASONING_KEYS:
         value = out.pop(key, None)
-        if value is None:
+        if value is None or (isinstance(value, str) and value == ""):
             continue
         if not isinstance(value, str):
             raise SFTSchemaError(f"{key} must be a string, got {type(value).__name__}.")
@@ -135,10 +135,13 @@ def _normalize_source_message(msg: Any) -> Any:
         raise SFTSchemaError(f"conflicting reasoning aliases ({fields}) carry different values.")
     reasoning = reasoning_values[0][1] if reasoning_values else ""
     if reasoning:
+        content = out.get("content")
+        if _has_structural_inline_thinking(content):
+            fields = ", ".join(key for key, _ in reasoning_values)
+            raise SFTSchemaError(f"sibling reasoning field ({fields}) conflicts with structural inline <think>...</think> content; choose one reasoning representation.")
         # Lifted ahead of ``content`` so the turn keeps the think-then-speak
         # order every reasoning renderer expects.
         parts: list = [{"type": "thinking", "thinking": reasoning}]
-        content = out.get("content")
         if isinstance(content, str):
             if content:
                 parts.append({"type": "text", "text": content})
@@ -162,31 +165,6 @@ def _payload_of(part: Any, kind: str | None = None) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _trim_parts(parts: list) -> list:
-    """Strip boundary whitespace from each content stream.
-
-    Serving chat templates ``|trim`` a message's ``content`` and
-    ``reasoning_content`` before rendering, so whenever the training renderer
-    does not (the tinker-cookbook renderers encode content verbatim), boundary
-    whitespace in the data is a pure train/serve mismatch: the model is trained
-    to emit padding the template deletes from every context it ever sees.
-    Trimming is per *stream* (all text parts together, all thinking parts
-    together) rather than per part, so whitespace between two parts of the same
-    stream — which the template does render — survives.
-
-    Only parts the trim itself emptied are dropped, so a row with nothing to trim
-    comes out byte-identical, its already-empty parts included.
-    """
-    out = [dict(p) if isinstance(p, dict) else p for p in parts]
-    for kind, key in _PART_PAYLOAD.items():
-        stream = [i for i, p in enumerate(out) if _payload_of(p, kind) is not None]
-        if not stream:
-            continue
-        out[stream[0]][key] = out[stream[0]][key].lstrip()
-        out[stream[-1]][key] = out[stream[-1]][key].rstrip()
-    return [p for p, before in zip(out, parts, strict=True) if _payload_of(p) != "" or _payload_of(before) == ""]
-
-
 # --- shared helpers ----------------------------------------------------------
 
 
@@ -204,10 +182,9 @@ def _content_to_parts(role: str, content: Any) -> list[dict]:
     An assistant leading ``<think>...</think>`` block is split into a
     ``thinking`` part (CoT ``strip``ed) plus a ``text`` part (remainder
     left-stripped) — whether the CoT arrives inside a raw ``str`` or inside the
-    first text part of an already-structured list, so a source that carries both
-    a sibling reasoning field and an inline tag loses neither. Any other ``str``
-    becomes a single ``text`` part; ``None`` and ``list`` content are coerced the
-    same way the schema does.
+    first text part of an already-structured list. Any other ``str`` becomes a
+    single ``text`` part; ``None`` and ``list`` content are coerced the same way
+    the schema does.
     """
     if isinstance(content, str):
         return _split_think_tag(content) if role == "assistant" else [{"type": "text", "text": content}]
@@ -248,17 +225,6 @@ def _make_message(raw_msg: dict, parts: list[dict], trainable: bool, idx: int) -
         raise SFTSchemaError(f"message {idx}: {e}") from e
 
 
-def _prepare_message(msg: Any, *, trim_whitespace: bool) -> Any:
-    """Source-shape normalization plus the optional trim, for one raw turn."""
-    out = _normalize_source_message(msg)
-    if not trim_whitespace or not isinstance(out, dict):
-        return out
-    cleaned = normalize_message_dict(out)
-    if isinstance(cleaned.get("content"), list):
-        cleaned["content"] = _trim_parts(cleaned["content"])
-    return cleaned
-
-
 def _row_fields(row: dict) -> dict:
     """Carry every non-``messages`` top-level key through as row-level metadata.
 
@@ -270,7 +236,7 @@ def _row_fields(row: dict) -> dict:
     return {key: value for key, value in row.items() if key != "messages"}
 
 
-def _bridge_think_row(row: dict, explode: bool, trim_whitespace: bool = False) -> list[SFTRow]:
+def _bridge_think_row(row: dict, explode: bool) -> list[SFTRow]:
     """Bridge one think-tagged row into one (no-explode) or many (explode) rows."""
     if not isinstance(row, dict):
         raise SFTSchemaError(f"row must be a dict with a 'messages' field, got {type(row).__name__}.")
@@ -283,19 +249,24 @@ def _bridge_think_row(row: dict, explode: bool, trim_whitespace: bool = False) -
         if not isinstance(m, dict):
             raise SFTSchemaError(f"message {j}: expected a dict, got {type(m).__name__}.")
 
-    # Source shape first, then ``<think>`` extraction, then the trim: trimming
-    # before extraction would strip the padding the tag's remainder is measured
-    # against.
+    # Source-shape normalization precedes the format-specific tag extraction.
     messages = [_normalize_source_message(m) for m in messages]
     roles = [m.get("role") for m in messages]
     full_parts = [_content_to_parts(role, m.get("content")) for role, m in zip(roles, messages, strict=True)]
-    if trim_whitespace:
-        full_parts = [_trim_parts(p) for p in full_parts]
     hist_parts = [_strip_thinking(p) for p in full_parts]
     fields = _row_fields(row)
+    all_flagged = all(isinstance(m.get("trainable"), bool) for m in messages)
 
     if not explode:
-        msgs = [_make_message(messages[j], full_parts[j], roles[j] == "assistant", j) for j in range(len(messages))]
+        msgs = [
+            _make_message(
+                messages[j],
+                full_parts[j],
+                bool(messages[j]["trainable"]) if all_flagged else roles[j] == "assistant",
+                j,
+            )
+            for j in range(len(messages))
+        ]
         return [SFTRow(messages=msgs, **fields)]
 
     # Target selection honours a pre-masked conversation. When every message
@@ -305,8 +276,6 @@ def _bridge_think_row(row: dict, explode: bool, trim_whitespace: bool = False) -
     # appears in later history (thinking stripped) but is never emitted as a
     # target to imitate. A flag-less row (the common raw-``<think>`` export)
     # explodes every assistant turn, matching the schema's all-or-nothing policy.
-    all_flagged = all(isinstance(m.get("trainable"), bool) for m in messages)
-
     def _is_target(j: int) -> bool:
         if roles[j] != "assistant":
             return False
@@ -323,15 +292,13 @@ def _bridge_think_row(row: dict, explode: bool, trim_whitespace: bool = False) -
 # --- bridges -----------------------------------------------------------------
 
 
-def bridge_messages(rows: Sequence[dict], *, train_on: str = "all", trim_whitespace: bool = False) -> list[SFTRow]:
+def bridge_messages(rows: Sequence[dict], *, train_on: str = "all") -> list[SFTRow]:
     """Bridge plain OpenAI ``{"messages": [...]}`` rows via the schema.
 
     ``train_on`` picks the derived loss mask: ``"all"`` trains every assistant
     turn, ``"last"`` only the final one. Explicit per-message ``trainable`` flags
     (when *every* message carries one) are preserved by the schema. Source-shape
     normalization (reasoning lifting, tool-call decoding) always applies.
-    ``trim_whitespace`` explicitly opts into stripping message boundaries for a
-    serving template known to do the same.
     """
     prepared: list = []
     for i, row in enumerate(rows):
@@ -339,13 +306,13 @@ def bridge_messages(rows: Sequence[dict], *, train_on: str = "all", trim_whitesp
             prepared.append(row)  # let the schema raise the row-level error
             continue
         try:
-            prepared.append({**row, "messages": [_prepare_message(m, trim_whitespace=trim_whitespace) for m in row["messages"]]})
+            prepared.append({**row, "messages": [_normalize_source_message(m) for m in row["messages"]]})
         except SFTSchemaError as e:
             raise SFTSchemaError(f"row {i}: {e}") from e
     return normalize_rows(prepared, default_trainable=train_on)
 
 
-def bridge_think_tags(rows: Sequence[dict], *, explode: bool = True, trim_whitespace: bool = False) -> list[SFTRow]:
+def bridge_think_tags(rows: Sequence[dict], *, explode: bool = True) -> list[SFTRow]:
     """Bridge ``<think>``-tagged rows into schema rows.
 
     ``explode=True`` (default) emits one row per assistant *target*: history
@@ -354,12 +321,13 @@ def bridge_think_tags(rows: Sequence[dict], *, explode: bool = True, trim_whites
     assistant turn, unless the source rows already carry explicit per-message
     ``trainable`` flags, in which case only flagged-trainable assistant turns
     are exploded (masked-out steps stay in history). ``explode=False`` emits one
-    row per conversation with every assistant turn trainable and CoT kept.
+    row per conversation with CoT kept; a fully explicit mask is preserved,
+    otherwise assistant targets are derived.
     """
     out: list[SFTRow] = []
     for i, row in enumerate(rows):
         try:
-            out.extend(_bridge_think_row(row, explode, trim_whitespace))
+            out.extend(_bridge_think_row(row, explode))
         except SFTSchemaError as e:
             raise SFTSchemaError(f"row {i}: {e}") from e
     return out

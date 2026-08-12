@@ -7,10 +7,12 @@ Imported lazily by :class:`rllm.trainer.sft.tinker_backend.TinkerSFTBackend`, so
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import random
+from collections.abc import Iterable
 from typing import Literal
 
 import datasets
@@ -312,6 +314,68 @@ class TinkerSFTDataset(SupervisedDataset):
             raise SFTConfigError("SFT batch has no trainable tokens after rendering and masking.")
         return datums
 
+    def preflight(
+        self,
+        label: str = "train",
+        planned_batches: Iterable[tuple[int, int]] | None = None,
+    ) -> None:
+        """Render planned batches without retaining rendered data."""
+        original_order = list(self._order)
+        try:
+            for batch_idx in range(len(self)):
+                try:
+                    self.get_batch(batch_idx)
+                except SFTConfigError as e:
+                    raise SFTConfigError(f"{label} preflight failed at batch {batch_idx}: {e}") from e
+            if planned_batches is None:
+                return
+
+            current_epoch = None
+            for epoch_idx, batch_idx in planned_batches:
+                if epoch_idx != current_epoch:
+                    self.set_epoch(seed=epoch_idx)
+                    current_epoch = epoch_idx
+                try:
+                    self.get_batch(batch_idx)
+                except SFTConfigError as e:
+                    raise SFTConfigError(f"{label} preflight failed at epoch {epoch_idx}, batch {batch_idx}: {e}") from e
+        finally:
+            self._order = original_order
+
+    def content_fingerprint(self) -> str:
+        """Hash the ordered training payload and batching boundary."""
+
+        def json_default(value):
+            if hasattr(value, "model_dump"):
+                return value.model_dump(mode="json", exclude_none=True)
+            if hasattr(value, "tolist"):
+                return value.tolist()
+            raise TypeError(f"Unsupported value {type(value).__name__} in SFT dataset fingerprint")
+
+        digest = hashlib.sha256()
+        header = json.dumps(
+            {"batch_size": self.batch_size, "row_count": len(self.dataset)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        digest.update(len(header).to_bytes(8, "big"))
+        digest.update(header)
+        for index in range(len(self.dataset)):
+            row = self.dataset[index]
+            payload = json.dumps(
+                {
+                    "messages": row["messages"],
+                    "tools": row.get("tools"),
+                },
+                default=json_default,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+        return digest.hexdigest()
+
     def set_epoch(self, seed: int = 0):
         n = len(self.dataset)
         if self.group_by_length and self._lengths is not None:
@@ -340,12 +404,17 @@ class TinkerSFTDataset(SupervisedDataset):
 
     def step_for_data_cursor(self, data_consumed: int) -> int:
         """Inverse of :meth:`data_cursor_for_step` at batch boundaries."""
+        if isinstance(data_consumed, bool) or not isinstance(data_consumed, int) or data_consumed < 0:
+            raise SFTConfigError(f"Checkpoint data cursor must be a non-negative integer, got {data_consumed!r}.")
         rows_per_epoch = len(self.dataset)
         if rows_per_epoch == 0:
             return 0
         completed_epochs, rows_in_epoch = divmod(data_consumed, rows_per_epoch)
         batches_in_epoch = math.ceil(rows_in_epoch / self.batch_size)
-        return completed_epochs * len(self) + batches_in_epoch
+        step = completed_epochs * len(self) + batches_in_epoch
+        if self.data_cursor_for_step(step) != data_consumed:
+            raise SFTConfigError(f"Checkpoint data cursor {data_consumed} is not an exact SFT batch boundary; use a new trainer job or an intact rLLM checkpoint.")
+        return step
 
 
 def create_tinker_sft_datasets(

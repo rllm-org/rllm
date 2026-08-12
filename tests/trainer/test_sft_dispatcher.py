@@ -432,6 +432,144 @@ def test_verl_rejects_structured_rows():
         VerlSFTBackend(spec).validate_spec()
 
 
+@pytest.mark.parametrize("think_row_index", [0, 1])
+def test_verl_keeps_legacy_inline_think_text_regardless_of_row_order(
+    think_row_index,
+):
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    plain = {
+        "messages": [
+            {"role": "user", "content": "plain"},
+            {"role": "assistant", "content": "answer"},
+        ]
+    }
+    inline = {
+        "messages": [
+            {"role": "user", "content": "reason"},
+            {
+                "role": "assistant",
+                "content": "<think>work</think>answer",
+            },
+        ]
+    }
+    rows = [plain, plain.copy()]
+    rows[think_row_index] = inline
+    dataset = Dataset(data=rows, name="legacy-think-text", split="train")
+
+    VerlSFTBackend(_spec(train_dataset=dataset)).validate_spec()
+
+
+def test_verl_rejects_hosted_override_paths_in_one_actionable_error():
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    overrides = OmegaConf.create(
+        {
+            "trainer": {"max_steps": 12},
+            "data": {
+                "rllm": {
+                    "group_by_length": True,
+                    "length_group_factor": 4,
+                    "group_by_length_factor": 4,
+                    "overlength_policy": "error",
+                    "loss_reduction": "token_mean",
+                    "loss_normalization": "token_mean",
+                    "strip_thinking_from_history": True,
+                    "strip_tool_history": True,
+                }
+            },
+            "optim": {
+                "warmup_steps": 4,
+                "warmup_steps_ratio": 0.1,
+                "warmup_ratio": 0.1,
+                "min_lr": 1e-6,
+                "grad_clip_norm": 1.0,
+            },
+        }
+    )
+
+    with pytest.raises(SFTConfigError) as exc_info:
+        VerlSFTBackend(_spec(overrides=overrides)).validate_spec()
+
+    message = str(exc_info.value)
+    rejected_paths = (
+        "trainer.max_steps",
+        "data.rllm.group_by_length",
+        "data.rllm.length_group_factor",
+        "data.rllm.group_by_length_factor",
+        "data.rllm.overlength_policy",
+        "data.rllm.loss_reduction",
+        "data.rllm.loss_normalization",
+        "data.rllm.strip_thinking_from_history",
+        "data.rllm.strip_tool_history",
+        "optim.warmup_steps",
+        "optim.warmup_steps_ratio",
+        "optim.warmup_ratio",
+        "optim.min_lr",
+        "optim.grad_clip_norm",
+    )
+    assert message.startswith("verl cannot use hosted-backend SFT override keys:")
+    for path in rejected_paths:
+        assert f"- {path}:" in message
+    for native_path in (
+        "trainer.total_training_steps",
+        "data.truncation",
+        "optim.lr_warmup_steps",
+        "optim.lr_warmup_steps_ratio",
+        "optim.min_lr_ratio",
+        "optim.clip_grad",
+    ):
+        assert native_path in message
+    assert "global token mean" in message
+    assert "dynamic token batching" in message
+    assert "renderer/history policy" in message
+
+
+def test_dispatch_verl_rejects_hosted_overrides_before_build_or_launch(monkeypatch):
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    calls = []
+    monkeypatch.setattr(VerlSFTBackend, "build_config", lambda self: calls.append("build"))
+    monkeypatch.setattr(VerlSFTBackend, "prepare_data", lambda self: calls.append("prepare_data"))
+    monkeypatch.setattr(AgentSFTTrainer, "_launch_distributed", lambda self, backend: calls.append("launch"))
+
+    with pytest.raises(SFTConfigError, match=r"trainer\.max_steps"):
+        AgentSFTTrainer(_spec(overrides={"trainer": {"max_steps": 12}}), backend="verl").train()
+    assert calls == []
+
+
+def test_verl_accepts_native_override_paths():
+    pytest.importorskip("verl")
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    backend = VerlSFTBackend(
+        _spec(
+            overrides={
+                "trainer": {"total_training_steps": 12},
+                "data": {"truncation": "error", "rllm": {"tokenize_and_mask_method": "stepwise"}},
+                "optim": {
+                    "lr_warmup_steps": 4,
+                    "lr_warmup_steps_ratio": 0.1,
+                    "min_lr_ratio": 0.2,
+                    "clip_grad": 1.0,
+                    "weight_decay": 0.1,
+                },
+            }
+        )
+    )
+
+    backend.validate_spec()
+    cfg = backend.build_config()
+    assert cfg.trainer.total_training_steps == 12
+    assert cfg.data.truncation == "error"
+    assert cfg.data.rllm.tokenize_and_mask_method == "stepwise"
+    assert cfg.optim.lr_warmup_steps == 4
+    assert cfg.optim.lr_warmup_steps_ratio == pytest.approx(0.1)
+    assert cfg.optim.min_lr_ratio == pytest.approx(0.2)
+    assert cfg.optim.clip_grad == pytest.approx(1.0)
+    assert cfg.optim.weight_decay == pytest.approx(0.1)
+
+
 # -- full-parameter (lora_rank=0) support ------------------------------------
 # (build_config shape/tokenizer resolution + the provision doc for rank 0 are
 # covered by the parametrized tests above; here: spec + validate_spec gating.)
