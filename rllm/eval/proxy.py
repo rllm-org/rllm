@@ -211,7 +211,15 @@ class EvalProxyManager(_ProxyManagerBase):
             logger.warning("Proxy subprocess already running")
             return ""
 
-        snapshot_path = self._snapshot_config_to_file(config, directory=kwargs.get("snapshot_directory"))
+        state_dir = os.getenv("LITELLM_PROXY_STATE_DIR")
+        if state_dir:
+            state_dir = os.path.abspath(os.path.expanduser(state_dir))
+        else:
+            state_root = os.path.join(os.getcwd(), ".litellm_proxy")
+            os.makedirs(state_root, exist_ok=True)
+            state_dir = tempfile.mkdtemp(prefix="rllm_", dir=state_root)
+
+        snapshot_path = self._snapshot_config_to_file(config, directory=kwargs.get("snapshot_directory") or os.getenv("RLLM_PROXY_CONFIG_DIR") or state_dir)
         if not snapshot_path or not os.path.exists(snapshot_path):
             raise RuntimeError("Config snapshot not available. Cannot start proxy.")
 
@@ -247,6 +255,8 @@ class EvalProxyManager(_ProxyManagerBase):
                 self.proxy_host,
                 "--port",
                 str(self.proxy_port),
+                "--state-dir",
+                state_dir,
             ]
 
             # Fresh stderr capture per attempt so a death leaves a readable trail.
