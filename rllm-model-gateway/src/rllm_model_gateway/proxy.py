@@ -50,6 +50,25 @@ _HOP_BY_HOP = frozenset(
     }
 )
 
+# Upstream statuses the proxy retries itself: provider throttling (429) and
+# transient faults (timeout / gateway / unavailable). See _send_with_retry.
+_RETRY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """The response's ``Retry-After`` delay in seconds, when it sends a usable one.
+
+    Only the delta-seconds form is honored (what LLM providers send); an HTTP-date
+    or a garbage value returns ``None`` so the caller falls back to its own backoff.
+    """
+    raw = response.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return max(0.0, min(float(raw.strip()), 60.0))
+    except ValueError:
+        return None
+
 
 def _strip_logprobs(response: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of *response* with ``logprobs`` removed from each choice.
@@ -1424,7 +1443,6 @@ class ReverseProxy:
         for attempt in range(1 + self.max_retries):
             try:
                 resp = await self._http.request(method, url, content=content, headers=headers)
-                return resp
             except httpx.ConnectError as exc:
                 last_exc = exc
                 if attempt < self.max_retries:
@@ -1434,7 +1452,28 @@ class ReverseProxy:
                         self.max_retries + 1,
                         exc,
                     )
-        raise last_exc  # type: ignore[misc]
+                continue
+            if resp.status_code not in _RETRY_STATUSES or attempt >= self.max_retries:
+                return resp
+            # Provider throttles and transient upstream faults have to be retried
+            # *here*: once the request is past `heartbeat_initial_delay_s` the
+            # response status is already committed to 200, so the error body would
+            # be forwarded under a 200 and the client's own retry logic — which
+            # keys on the status — never fires. The rollout then dies on an
+            # unparseable completion. Heartbeats keep the client's connection warm
+            # while we back off, so the retry is invisible to it.
+            delay = _retry_after_seconds(resp) or min(2.0**attempt, 30.0)
+            logger.warning(
+                "Upstream returned %d (attempt %d/%d); retrying in %.1fs",
+                resp.status_code,
+                attempt + 1,
+                self.max_retries + 1,
+                delay,
+            )
+            await asyncio.sleep(delay)
+        if last_exc is not None:
+            raise last_exc
+        return resp
 
     async def _persist(self, trace: TraceRecord) -> None:
         try:

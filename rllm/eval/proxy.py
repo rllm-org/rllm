@@ -143,12 +143,23 @@ class EvalProxyManager(_ProxyManagerBase):
         api_key: str,
         proxy_host: str = "127.0.0.1",
         proxy_port: int | None = None,
+        sampling_extra: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(proxy_host=proxy_host, proxy_port=proxy_port)
         self.provider = provider
         self.model_name = model_name
         self.api_key = api_key
+        self.sampling_extra = sampling_extra or {}
         self._stderr_path: str | None = None
+
+    def _litellm_supported(self, prefix: str) -> set[str]:
+        """Params litellm will forward top-level for this provider (empty if it can't say)."""
+        try:
+            import litellm
+
+            return set(litellm.get_supported_openai_params(self.model_name, custom_llm_provider=prefix) or ())
+        except Exception:  # unknown provider, litellm API drift — treat everything as passthrough
+            return set()
 
     def _generate_litellm_config(self) -> dict[str, Any]:
         from rllm.eval.config import get_provider_info
@@ -166,6 +177,18 @@ class EvalProxyManager(_ProxyManagerBase):
         # through the ``openai/`` adapter pinned to their ``api_base``.
         if info and info.base_url:
             litellm_params["api_base"] = info.base_url
+
+        # ``drop_params`` below deletes any param outside litellm's per-provider
+        # allowlist — including ones the provider really does support, since the
+        # allowlists lag (fireworks_ai has no ``reasoning_effort`` entry, yet
+        # Fireworks honours it and 400s on a bad value). Silently dropping it
+        # yields a run at the model's default effort that still looks valid, so
+        # route the unrecognised params through ``extra_body``, which litellm
+        # forwards verbatim. Params litellm does know stay top-level so it can
+        # still validate and translate them.
+        passthrough = {k: v for k, v in self.sampling_extra.items() if k not in self._litellm_supported(prefix)}
+        if passthrough:
+            litellm_params["extra_body"] = passthrough
 
         return {
             "model_list": [
@@ -188,7 +211,15 @@ class EvalProxyManager(_ProxyManagerBase):
             logger.warning("Proxy subprocess already running")
             return ""
 
-        snapshot_path = self._snapshot_config_to_file(config, directory=kwargs.get("snapshot_directory"))
+        state_dir = os.getenv("LITELLM_PROXY_STATE_DIR")
+        if state_dir:
+            state_dir = os.path.abspath(os.path.expanduser(state_dir))
+        else:
+            state_root = os.path.join(os.getcwd(), ".litellm_proxy")
+            os.makedirs(state_root, exist_ok=True)
+            state_dir = tempfile.mkdtemp(prefix="rllm_", dir=state_root)
+
+        snapshot_path = self._snapshot_config_to_file(config, directory=kwargs.get("snapshot_directory") or os.getenv("RLLM_PROXY_CONFIG_DIR") or state_dir)
         if not snapshot_path or not os.path.exists(snapshot_path):
             raise RuntimeError("Config snapshot not available. Cannot start proxy.")
 
@@ -224,6 +255,8 @@ class EvalProxyManager(_ProxyManagerBase):
                 self.proxy_host,
                 "--port",
                 str(self.proxy_port),
+                "--state-dir",
+                state_dir,
             ]
 
             # Fresh stderr capture per attempt so a death leaves a readable trail.

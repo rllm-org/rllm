@@ -258,6 +258,11 @@ class SandboxTaskHooks:
                 install = install_script_for(agent_flow)
                 sandbox = self.warm_queue.pop(task) if self.warm_queue is not None else get_sandbox(task, self.sandbox_backend, self._registry, install)
                 env_backend = _resolve_backend(task, self.sandbox_backend)
+                # Record the backend this task actually got, so anything resolved
+                # later can provision against the same one. Without it a separate
+                # verifier container re-resolves from an empty override and falls
+                # back to docker while the agent ran on Modal.
+                task.metadata["sandbox_backend"] = env_backend
                 _setup_task_environment(task, sandbox)
                 # CLI install, unless the image already contains exactly this
                 # script (baked_install, recorded at snapshot boot).
@@ -339,7 +344,7 @@ def enable_gateway_tunnel(config: DictConfig) -> DictConfig:
     Callers decide *when* (sandboxes run off-host — see
     :func:`scan_env_requirements`); this helper resolves *what*. An explicit
     ``rllm.gateway.tunnel`` always wins; otherwise resolution falls to
-    ``$RLLM_GATEWAY_TUNNEL`` → a running ``rllm tunnel up`` daemon → a free
+    ``$RLLM_GATEWAY_TUNNEL`` → a configured ngrok wildcard → a fresh
     Cloudflare quick tunnel (with a warning) — see
     :func:`rllm.gateway.tunnel.resolve_auto_tunnel`.
     """
