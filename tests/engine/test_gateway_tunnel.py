@@ -1,42 +1,30 @@
-"""Tunnel backend templates and automatic train-side wiring."""
+"""Focused tests for owned tunnel isolation."""
 
 from __future__ import annotations
 
 from omegaconf import OmegaConf
 
-from rllm.gateway.tunnel import NgrokTunnel, create_tunnel
+from rllm.gateway.tunnel import create_tunnel
+
+
+def _ngrok_url(tunnel) -> str:
+    command = tunnel._command()
+    return command[command.index("--url") + 1]
 
 
 def test_ngrok_wildcard_expands_once_per_tunnel():
     first = create_tunnel("ngrok:*.rllm.example.ngrok.app", "http://127.0.0.1:9101")
     second = create_tunnel("ngrok:*.rllm.example.ngrok.app", "http://127.0.0.1:9102")
+    first_url = _ngrok_url(first)
 
-    assert isinstance(first, NgrokTunnel)
-    assert isinstance(second, NgrokTunnel)
-    first_url = first._command()[first._command().index("--url") + 1]
-    second_url = second._command()[second._command().index("--url") + 1]
     assert first_url.startswith("https://rllm-")
     assert first_url.endswith(".rllm.example.ngrok.app")
-    assert first_url != second_url
-    assert first._command()[first._command().index("--url") + 1] == first_url
+    assert first_url != _ngrok_url(second)
+    assert first_url == _ngrok_url(first)
+    assert _ngrok_url(create_tunnel("ngrok:fixed.ngrok.app", "http://127.0.0.1:9090")) == "https://fixed.ngrok.app"
 
 
-def test_fixed_ngrok_domain_is_unchanged():
-    tunnel = create_tunnel("ngrok:gateway.example.ngrok.app", "http://127.0.0.1:9090")
-
-    command = tunnel._command()
-    assert command[command.index("--url") + 1] == "https://gateway.example.ngrok.app"
-
-
-def test_unset_gateway_port_keeps_legacy_9090_without_auto_wiring():
-    from rllm.gateway.manager import GatewayManager
-
-    config = OmegaConf.create({"rllm": {"gateway": {"port": None}}, "model": {"name": "probe"}})
-
-    assert GatewayManager(config).port == 9090
-
-
-def test_train_auto_resolution_prefers_configured_wildcard(monkeypatch):
+def test_configured_wildcard_precedes_daemon(monkeypatch):
     import rllm.eval.config as config_mod
     import rllm.gateway.tunnel as tunnel_mod
 
@@ -47,67 +35,47 @@ def test_train_auto_resolution_prefers_configured_wildcard(monkeypatch):
     assert tunnel_mod.resolve_auto_tunnel() == ("ngrok:*.rllm.example.ngrok.app", None)
 
 
-def test_train_wildcard_gets_automatic_gateway_port(monkeypatch):
-    import rllm.gateway.manager as manager_mod
+def test_environment_override_precedes_wildcard(monkeypatch):
+    import rllm.eval.config as config_mod
+    import rllm.gateway.tunnel as tunnel_mod
+
+    monkeypatch.setenv(tunnel_mod.ENV_TUNNEL, "ngrok")
+    monkeypatch.setattr(config_mod, "load_tunnel_config", lambda: {"backend": "ngrok", "domain": "*.rllm.example.ngrok.app"})
+
+    assert tunnel_mod.resolve_auto_tunnel() == ("ngrok", None)
+
+
+def test_default_resolution_skips_daemon(monkeypatch):
+    import rllm.eval.config as config_mod
+    import rllm.gateway.tunnel as tunnel_mod
+
+    monkeypatch.delenv(tunnel_mod.ENV_TUNNEL, raising=False)
+    monkeypatch.setattr(config_mod, "load_tunnel_config", lambda: {})
+    monkeypatch.setattr(tunnel_mod, "live_tunnel_url", lambda: "https://daemon.example")
+
+    value, _ = tunnel_mod.resolve_auto_tunnel()
+    assert value == "cloudflared"
+    assert tunnel_mod.resolve_auto_tunnel(reuse_daemon=True) == ("https://daemon.example", None)
+
+
+def test_train_resolution_skips_daemon(monkeypatch):
     import rllm.gateway.tunnel as tunnel_mod
     import rllm.hooks as hooks_mod
 
-    config = OmegaConf.create({"rllm": {"gateway": {"port": None, "tunnel": None}}})
-    monkeypatch.setattr(tunnel_mod, "resolve_auto_tunnel", lambda: ("ngrok:*.rllm.example.ngrok.app", None))
-    monkeypatch.setattr(manager_mod, "_find_free_port", lambda: 49123)
-
-    resolved = hooks_mod.enable_gateway_tunnel(config)
-
-    assert resolved.rllm.gateway.tunnel == "ngrok:*.rllm.example.ngrok.app"
-    assert resolved.rllm.gateway.port == 49123
-
-
-def test_train_wildcard_preserves_explicit_gateway_port(monkeypatch):
-    import rllm.gateway.tunnel as tunnel_mod
-    import rllm.hooks as hooks_mod
-
-    config = OmegaConf.create({"rllm": {"gateway": {"port": 9191, "tunnel": None}}})
-    monkeypatch.setattr(tunnel_mod, "resolve_auto_tunnel", lambda: ("ngrok:*.rllm.example.ngrok.app", None))
-
-    resolved = hooks_mod.enable_gateway_tunnel(config)
-
-    assert resolved.rllm.gateway.tunnel == "ngrok:*.rllm.example.ngrok.app"
-    assert resolved.rllm.gateway.port == 9191
-
-
-def test_train_cloudflared_default_gets_automatic_gateway_port(monkeypatch):
-    import rllm.gateway.manager as manager_mod
-    import rllm.gateway.tunnel as tunnel_mod
-    import rllm.hooks as hooks_mod
-
-    config = OmegaConf.create({"rllm": {"gateway": {"port": None, "tunnel": None}}})
     monkeypatch.setattr(tunnel_mod, "resolve_auto_tunnel", lambda: ("cloudflared", None))
-    monkeypatch.setattr(manager_mod, "_find_free_port", lambda: 49124)
+    config = OmegaConf.create({"rllm": {"gateway": {"tunnel": None}}})
 
-    resolved = hooks_mod.enable_gateway_tunnel(config)
-
-    assert resolved.rllm.gateway.tunnel == "cloudflared"
-    assert resolved.rllm.gateway.port == 49124
+    assert hooks_mod.enable_gateway_tunnel(config).rllm.gateway.tunnel == "cloudflared"
 
 
-def test_train_environment_wildcard_gets_automatic_gateway_port(monkeypatch):
+def test_owned_tunnel_gets_free_port_unless_explicit(monkeypatch):
     import rllm.gateway.manager as manager_mod
-    import rllm.gateway.tunnel as tunnel_mod
-    import rllm.hooks as hooks_mod
 
-    config = OmegaConf.create({"rllm": {"gateway": {"port": None, "tunnel": None}}})
-    monkeypatch.setenv(tunnel_mod.ENV_TUNNEL, "ngrok:*.env.example.ngrok.app")
-    monkeypatch.setattr(manager_mod, "_find_free_port", lambda: 49125)
+    monkeypatch.setattr(manager_mod, "_find_free_port", lambda: 49123)
+    automatic = OmegaConf.create({"rllm": {"gateway": {"port": None, "tunnel": "cloudflared"}}, "model": {"name": "probe"}})
+    explicit = OmegaConf.create({"rllm": {"gateway": {"port": 9191, "tunnel": "cloudflared"}}, "model": {"name": "probe"}})
+    local = OmegaConf.create({"rllm": {"gateway": {"port": None, "tunnel": None}}, "model": {"name": "probe"}})
 
-    resolved = hooks_mod.enable_gateway_tunnel(config)
-
-    assert resolved.rllm.gateway.tunnel == "ngrok:*.env.example.ngrok.app"
-    assert resolved.rllm.gateway.port == 49125
-
-
-def test_explicit_train_tunnel_and_port_are_unchanged():
-    from rllm.hooks import enable_gateway_tunnel
-
-    config = OmegaConf.create({"rllm": {"gateway": {"port": 9191, "tunnel": "ngrok:fixed.example.ngrok.app"}}})
-
-    assert enable_gateway_tunnel(config) is config
+    assert manager_mod.GatewayManager(automatic).port == 49123
+    assert manager_mod.GatewayManager(explicit).port == 9191
+    assert manager_mod.GatewayManager(local).port == 9090

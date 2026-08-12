@@ -502,7 +502,7 @@ def _describe_sandbox_routing(
             gateway_note = f"{tunnel_backend} tunnel (auto-spawn)"
         else:
             # No explicit tunnel: show what auto-resolution will actually use
-            # ($RLLM_GATEWAY_TUNNEL / `rllm tunnel up` daemon / cloudflared).
+            # ($RLLM_GATEWAY_TUNNEL / configured wildcard / cloudflared).
             from rllm.gateway.tunnel import resolve_auto_tunnel
 
             resolved, _ = resolve_auto_tunnel()

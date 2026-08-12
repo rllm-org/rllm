@@ -169,9 +169,13 @@ class UnifiedTrainer:
             # the backend has provisioned rollout infra (minutes on Fireworks) —
             # check the port here so a conflict fails before any of that.
             from rllm.gateway.manager import DEFAULT_GATEWAY_PORT, preflight_gateway_port
+            from rllm.gateway.tunnel import parse_tunnel
 
-            configured_port = (config.rllm.get("gateway", {}) or {}).get("port", None)
-            preflight_gateway_port(int(configured_port) if configured_port is not None else DEFAULT_GATEWAY_PORT)
+            gateway = config.rllm.get("gateway", {}) or {}
+            configured_port = gateway.get("port", None)
+            _, owned_backend = parse_tunnel(gateway.get("tunnel", None))
+            if configured_port is not None or not owned_backend:
+                preflight_gateway_port(int(configured_port) if configured_port is not None else DEFAULT_GATEWAY_PORT)
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}

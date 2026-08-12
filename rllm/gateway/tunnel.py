@@ -7,19 +7,18 @@ backends ship:
 * :class:`CloudflaredTunnel` — ``cloudflared tunnel --url`` →
   ``*.trycloudflare.com``. Zero-setup, but a shared, rate-limited (HTTP 429)
   quick tunnel; fine for smoke tests, not for high-concurrency training.
-* :class:`NgrokTunnel` — ``ngrok http`` using an account endpoint, a fixed
-  reserved domain, or a unique child of a configured wildcard. Needs a one-time
-  ``rllm tunnel setup`` (authtoken).
+* :class:`NgrokTunnel` — ``ngrok http`` → ``*.ngrok-free.app`` or your own
+  reserved domain. Needs a one-time ``rllm tunnel setup`` (authtoken) but is
+  stable across restarts.
 
 :class:`GatewayManager` plumbs the chosen tunnel's :attr:`public_url` into
 :class:`AgentConfig.base_url`. It builds a tunnel from the
 ``rllm.gateway.tunnel`` config via :func:`create_tunnel`.
 
-The ``rllm tunnel`` CLI can run a fixed backend as a *detached daemon*
+The ``rllm tunnel`` CLI can also run a backend as a *detached daemon*
 (:func:`spawn_detached`) whose live URL is written to a state file
-(:func:`write_tunnel_state`). Configured ngrok wildcards instead resolve to an
-owned backend per run. Training selects either path via
-:func:`resolve_auto_tunnel`; set ``rllm.gateway.tunnel`` explicitly to override.
+(:func:`write_tunnel_state`). Callers choose whether to reuse that route via
+:func:`resolve_auto_tunnel`; eval and train default to owned per-run tunnels.
 """
 
 from __future__ import annotations
@@ -47,28 +46,10 @@ _status = Console()
 # Sandbox backends that share network with the gateway host.
 LOCAL_SANDBOX_BACKENDS: frozenset[str] = frozenset({"docker", "local", "apple-container"})
 
-# Environment override consulted before the daemon state file (see
+# Environment override consulted before setup config and daemon state (see
 # :func:`resolve_auto_tunnel`). Either a backend name ("cloudflared",
 # "ngrok", "ngrok:<domain>") or an explicit http(s):// URL.
 ENV_TUNNEL = "RLLM_GATEWAY_TUNNEL"
-
-
-def is_ngrok_wildcard_domain(domain: str | None) -> bool:
-    """Whether ``domain`` is a valid wildcard hostname template."""
-    if not domain or len(domain) > 253 or not domain.startswith("*."):
-        return False
-    labels = domain[2:].split(".")
-    if len(labels) < 2:
-        return False
-    return all(1 <= len(label) <= 63 and label[0].isalnum() and label[-1].isalnum() and all(char.isascii() and (char.isalnum() or char == "-") for char in label) for label in labels)
-
-
-def is_ngrok_wildcard_spec(value: str | None) -> bool:
-    """Whether a tunnel backend spec requests a per-run ngrok wildcard child."""
-    if not value:
-        return False
-    name, sep, domain = value.partition(":")
-    return bool(sep and name.strip().lower() == "ngrok" and is_ngrok_wildcard_domain(domain.strip()))
 
 
 def is_local_sandbox_backend(name: str | None) -> bool:
@@ -340,10 +321,8 @@ class CloudflaredTunnel(_Tunnel):
 class NgrokTunnel(_Tunnel):
     """Run ``ngrok http <upstream>`` and surface the assigned ngrok URL.
 
-    Pass a fixed ``domain`` to pin one reserved endpoint, or a wildcard template
-    (for example ``*.rllm.example.ngrok.app``) to allocate a unique child
-    hostname for this tunnel instance. Without a domain, ngrok uses the
-    account-assigned endpoint. ngrok needs an authtoken — run
+    Pass ``domain`` to pin a reserved domain. A wildcard creates a unique child
+    hostname per tunnel instance. ngrok needs an authtoken — run
     ``rllm tunnel setup`` or ``ngrok config add-authtoken``.
     """
 
@@ -354,10 +333,9 @@ class NgrokTunnel(_Tunnel):
 
     def __init__(self, upstream_url: str, *, domain: str | None = None, **kwargs) -> None:
         super().__init__(upstream_url, **kwargs)
-        configured_domain = domain.strip() if domain else None
-        if is_ngrok_wildcard_domain(configured_domain):
-            configured_domain = f"rllm-{uuid.uuid4().hex}.{configured_domain[2:]}"
-        self.domain = configured_domain
+        self.domain = domain.strip() if domain else None
+        if self.domain and self.domain.startswith("*."):
+            self.domain = f"rllm-{uuid.uuid4().hex}.{self.domain[2:]}"
 
     def _command(self) -> list[str]:
         # ngrok http takes a local addr/port; strip the scheme so we pass
@@ -521,7 +499,7 @@ def tunnel_state_path() -> str:
 
 
 def write_tunnel_state(*, backend: str, url: str, pid: int, upstream: str, log_path: str | None = None) -> str:
-    """Record the running daemon tunnel so training can auto-discover its URL."""
+    """Record the running daemon tunnel so callers can explicitly reuse its URL."""
     path = tunnel_state_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -571,14 +549,12 @@ def live_tunnel_url() -> str | None:
     return state["url"] if state else None
 
 
-def resolve_auto_tunnel() -> tuple[str, str | None]:
+def resolve_auto_tunnel(*, reuse_daemon: bool = False) -> tuple[str, str | None]:
     """Decide ``rllm.gateway.tunnel`` when it is unset.
 
     Resolution order: ``$RLLM_GATEWAY_TUNNEL`` → a configured ngrok wildcard
-    (owned by this run) → a running ``rllm tunnel up`` daemon → a free
-    Cloudflare quick tunnel. Returns ``(value, warning)`` where ``warning`` is a
-    ready-to-log message when falling back to the quick tunnel (and ``None``
-    otherwise).
+    → a running ``rllm tunnel up`` daemon (when ``reuse_daemon``) → a free
+    Cloudflare quick tunnel.
     """
     env = os.getenv(ENV_TUNNEL)
     if env:
@@ -591,14 +567,15 @@ def resolve_auto_tunnel() -> tuple[str, str | None]:
     except Exception:
         cfg = {}
     configured_domain = cfg.get("domain")
-    if cfg.get("backend") == "ngrok" and is_ngrok_wildcard_domain(configured_domain):
+    if cfg.get("backend") == "ngrok" and str(configured_domain).startswith("*."):
         return f"ngrok:{configured_domain}", None
 
-    live = live_tunnel_url()
-    if live:
-        return live, None
+    if reuse_daemon:
+        live = live_tunnel_url()
+        if live:
+            return live, None
 
-    if cfg.get("backend"):
+    if cfg.get("backend") and reuse_daemon:
         warning = (
             f"Tunnel backend {cfg['backend']!r} is configured but no tunnel is running — "
             "run `rllm tunnel up` for a stable tunnel. "
@@ -606,8 +583,9 @@ def resolve_auto_tunnel() -> tuple[str, str | None]:
         )
     else:
         warning = (
-            "No gateway tunnel configured — falling back to a free Cloudflare quick tunnel "
+            "No isolated gateway tunnel configured — falling back to a free Cloudflare quick tunnel "
             "(*.trycloudflare.com): shared infra, rate-limited (HTTP 429) and unsuitable for "
-            "high-concurrency training. Run `rllm tunnel setup` then `rllm tunnel up` for a stable tunnel."
+            "high-concurrency training. Configure an ngrok wildcard with `rllm tunnel setup` "
+            "for an isolated per-run tunnel."
         )
     return "cloudflared", warning

@@ -13,7 +13,6 @@ traces, exactly as they do at training time.
 from __future__ import annotations
 
 import logging
-import os
 from typing import TYPE_CHECKING
 
 from rllm.eval.results import EvalItem, EvalResult
@@ -24,33 +23,6 @@ if TYPE_CHECKING:
     from rllm.gateway.manager import GatewayManager
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_eval_tunnel() -> str:
-    """Resolve the tunnel for one remote eval invocation.
-
-    Eval gateways are single-run services, so their tunnels must be single-run
-    too: reusing the ``rllm tunnel up`` daemon would force every concurrent eval
-    onto that daemon's one fixed origin port. An explicit environment override
-    still wins. A configured ngrok wildcard is safe because each process expands
-    it to a unique child hostname; fixed configured domains remain ignored.
-    Otherwise use a Cloudflare quick tunnel, whose URL is unique per process. A
-    backend spec makes the gateway choose a free port and own the tunnel
-    lifecycle.
-    """
-    from rllm.gateway.tunnel import ENV_TUNNEL, is_ngrok_wildcard_domain
-
-    explicit = os.getenv(ENV_TUNNEL)
-    if explicit:
-        return explicit
-
-    from rllm.eval.config import load_tunnel_config
-
-    configured = load_tunnel_config()
-    domain = configured.get("domain")
-    if configured.get("backend") == "ngrok" and is_ngrok_wildcard_domain(domain):
-        return f"ngrok:{domain}"
-    return "cloudflared"
 
 
 async def run_dataset(
@@ -120,14 +92,16 @@ async def run_dataset(
     # and tear down one ourselves (single-shot).
     owned_gateway = gateway is None
     if owned_gateway:
-        # Auto-tunnel for off-host sandboxes. Unlike training, each eval owns a
-        # tunnel backed by its own free gateway port; it must not auto-discover
-        # the singleton `rllm tunnel up` daemon and collide on that daemon's
-        # fixed origin port. Explicit URL/backend overrides remain supported.
+        # Each remote eval owns its tunnel instead of reusing the singleton
+        # `rllm tunnel up` daemon and its fixed origin port.
         gateway_tunnel: str | None = None
         gateway_port: int | None = None
         if not is_local_sandbox_backend(sandbox_backend):
-            gateway_tunnel = _resolve_eval_tunnel()
+            from rllm.gateway.tunnel import resolve_auto_tunnel
+
+            gateway_tunnel, tunnel_warning = resolve_auto_tunnel()
+            if tunnel_warning:
+                logger.warning(tunnel_warning)
             if gateway_tunnel.startswith(("http://", "https://")):
                 # A tunnel URL means an already-running forwarder; the gateway
                 # must bind wherever it forwards (a free-port pick would leave

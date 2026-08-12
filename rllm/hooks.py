@@ -344,31 +344,22 @@ def enable_gateway_tunnel(config: DictConfig) -> DictConfig:
     Callers decide *when* (sandboxes run off-host — see
     :func:`scan_env_requirements`); this helper resolves *what*. An explicit
     ``rllm.gateway.tunnel`` always wins; otherwise resolution falls to
-    ``$RLLM_GATEWAY_TUNNEL`` → a configured ngrok wildcard → a running
-    ``rllm tunnel up`` daemon → a free Cloudflare quick tunnel (with a warning) — see
+    ``$RLLM_GATEWAY_TUNNEL`` → a configured ngrok wildcard → a fresh
+    Cloudflare quick tunnel (with a warning) — see
     :func:`rllm.gateway.tunnel.resolve_auto_tunnel`.
     """
     gw = config.rllm.get("gateway", {}) or {}
     if gw.get("tunnel"):
         return config
 
-    from rllm.gateway.tunnel import parse_tunnel, resolve_auto_tunnel
+    from rllm.gateway.tunnel import resolve_auto_tunnel
 
     value, warning = resolve_auto_tunnel()
     if warning:
         logger.warning(warning)
-    gateway_config: dict[str, object] = {"tunnel": value}
-    _, owned_backend = parse_tunnel(value)
-    if owned_backend and gw.get("port") is None:
-        # An owned tunnel needs a run-local origin port unless the caller
-        # explicitly pinned one. This happens before UnifiedTrainer's port
-        # preflight and GatewayManager construction.
-        from rllm.gateway.manager import _find_free_port
-
-        gateway_config["port"] = _find_free_port()
     return OmegaConf.merge(
         config,
-        OmegaConf.create({"rllm": {"gateway": gateway_config}}),
+        OmegaConf.create({"rllm": {"gateway": {"tunnel": value}}}),
     )
 
 
