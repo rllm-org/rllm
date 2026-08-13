@@ -33,8 +33,11 @@ from omegaconf import DictConfig, OmegaConf
 from rllm.trainer.sft.backend import SFTConfigError
 from rllm.trainer.sft.tinker_backend import (
     TinkerSFTBackend,
+    build_adam_params,
     build_sft_data,
+    resolve_sft_optimizer_settings,
     resolve_training_steps,
+    sft_lr_multiplier,
     should_validate_step,
 )
 
@@ -195,8 +198,6 @@ class FireworksSFTBackend(TinkerSFTBackend):
         config = self._config
 
         try:
-            import tinker
-            from tinker_cookbook.utils.lr_scheduling import compute_schedule_lr_multiplier
             from training.utils.checkpoints import TrainingCheckpoints
             from training.utils.client import DEFAULT_TIMEOUT_S
         except ImportError as e:
@@ -264,10 +265,7 @@ class FireworksSFTBackend(TinkerSFTBackend):
                 progress_denominator = total_steps if total_steps > 0 else 1
                 logger.info(f"Training for {n_batches} batches x {total_epochs} epochs = {total_steps} steps")
 
-                base_lr = config.optim.lr
-                lr_schedule = config.optim.get("lr_scheduler", "constant")
-                betas = config.optim.get("betas", [0.9, 0.95])
-                eps = config.optim.get("eps", 1e-8)
+                optimizer = resolve_sft_optimizer_settings(config.optim, total_steps=total_steps)
                 save_every = config.trainer.get("save_freq", 20)
                 eval_every = config.trainer.get("test_freq", 10)
 
@@ -286,8 +284,21 @@ class FireworksSFTBackend(TinkerSFTBackend):
                 in_flight: deque = deque()
 
                 def submit(step: int):
-                    lr = base_lr * compute_schedule_lr_multiplier(lr_schedule=lr_schedule, step=step, total_steps=total_steps)
-                    adam = tinker.AdamParams(learning_rate=lr, beta1=betas[0], beta2=betas[1], eps=eps)
+                    lr = optimizer.learning_rate * sft_lr_multiplier(
+                        optimizer.lr_schedule,
+                        step,
+                        total_steps,
+                        optimizer.warmup_steps_ratio,
+                        optimizer.warmup_steps,
+                        optimizer.min_lr_ratio,
+                    )
+                    adam = build_adam_params(
+                        learning_rate=lr,
+                        betas=optimizer.betas,
+                        eps=optimizer.eps,
+                        weight_decay=optimizer.weight_decay,
+                        grad_clip_norm=optimizer.grad_clip_norm,
+                    )
                     data = train_dataset.get_batch(step % n_batches)
                     fb_fut = client.submit_forward_backward(data, loss_fn="cross_entropy")
                     opt_fut = client.submit_optim_step(adam)

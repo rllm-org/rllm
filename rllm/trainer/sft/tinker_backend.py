@@ -216,6 +216,111 @@ def iter_training_batches(
         yield step, epoch, batch
 
 
+def sft_lr_multiplier(
+    lr_schedule: str,
+    step: int,
+    total_steps: int,
+    warmup_steps_ratio: float = 0.0,
+    warmup_steps: int | None = -1,
+    min_lr_ratio: float = 0.0,
+) -> float:
+    """Apply linear warmup followed by the selected decay schedule."""
+    from tinker_cookbook.utils.lr_scheduling import compute_schedule_lr_multiplier
+
+    if not 0 <= min_lr_ratio <= 1:
+        raise SFTConfigError(f"optim.min_lr / optim.lr must be in [0, 1], got {min_lr_ratio}.")
+    resolved_warmup = -1 if warmup_steps is None else int(warmup_steps)
+    if resolved_warmup <= 0:
+        resolved_warmup = int(total_steps * (warmup_steps_ratio or 0.0))
+    if resolved_warmup > 0 and step < resolved_warmup:
+        return step / resolved_warmup
+    decay = compute_schedule_lr_multiplier(
+        lr_schedule=lr_schedule,
+        step=step - resolved_warmup,
+        total_steps=max(total_steps - resolved_warmup, 1),
+    )
+    return min_lr_ratio + (1 - min_lr_ratio) * decay
+
+
+def build_adam_params(
+    *,
+    learning_rate: float,
+    betas: tuple[float, float],
+    eps: float,
+    weight_decay: float,
+    grad_clip_norm: float,
+):
+    import tinker
+
+    return tinker.AdamParams(
+        learning_rate=learning_rate,
+        beta1=betas[0],
+        beta2=betas[1],
+        eps=eps,
+        weight_decay=weight_decay,
+        grad_clip_norm=grad_clip_norm,
+    )
+
+
+@dataclass(frozen=True)
+class SFTOptimizerSettings:
+    learning_rate: float
+    lr_schedule: str
+    warmup_steps_ratio: float
+    warmup_steps: int
+    min_lr_ratio: float
+    betas: tuple[float, float]
+    eps: float
+    weight_decay: float
+    grad_clip_norm: float
+
+
+def resolve_sft_optimizer_settings(optim_cfg, *, total_steps: int) -> SFTOptimizerSettings:
+    """Validate optimizer controls and normalize them for both hosted loops."""
+    learning_rate = float(optim_cfg.get("lr", 1e-5))
+    min_learning_rate = float(optim_cfg.get("min_lr", 0.0))
+    if learning_rate <= 0:
+        raise SFTConfigError(f"optim.lr must be positive, got {learning_rate}.")
+    if not 0 <= min_learning_rate <= learning_rate:
+        raise SFTConfigError(f"optim.min_lr must be between zero and optim.lr, got {min_learning_rate} with lr={learning_rate}.")
+
+    lr_schedule = str(optim_cfg.get("lr_scheduler", "constant"))
+    if lr_schedule not in {"constant", "linear", "cosine"}:
+        raise SFTConfigError(f"optim.lr_scheduler must be constant, linear, or cosine, got {lr_schedule!r}.")
+    warmup_steps_ratio = float(optim_cfg.get("warmup_steps_ratio", 0.0) or 0.0)
+    if not 0 <= warmup_steps_ratio <= 1:
+        raise SFTConfigError(f"optim.warmup_steps_ratio must be in [0, 1], got {warmup_steps_ratio}.")
+    warmup_steps = int(optim_cfg.get("warmup_steps", -1) or -1)
+    if warmup_steps > total_steps:
+        raise SFTConfigError(f"optim.warmup_steps cannot exceed total training steps ({total_steps}), got {warmup_steps}.")
+
+    raw_betas = optim_cfg.get("betas", [0.9, 0.95])
+    if len(raw_betas) != 2:
+        raise SFTConfigError(f"optim.betas must contain beta1 and beta2, got {raw_betas}.")
+    betas = (float(raw_betas[0]), float(raw_betas[1]))
+    if any(not 0 <= beta < 1 for beta in betas):
+        raise SFTConfigError(f"optim.betas must each be in [0, 1), got {betas}.")
+    eps = float(optim_cfg.get("eps", 1e-8))
+    weight_decay = float(optim_cfg.get("weight_decay", 0.0))
+    grad_clip_norm = float(optim_cfg.get("grad_clip_norm", 0.0))
+    if eps <= 0:
+        raise SFTConfigError(f"optim.eps must be positive, got {eps}.")
+    if weight_decay < 0 or grad_clip_norm < 0:
+        raise SFTConfigError("optim.weight_decay and optim.grad_clip_norm must be non-negative.")
+
+    return SFTOptimizerSettings(
+        learning_rate=learning_rate,
+        lr_schedule=lr_schedule,
+        warmup_steps_ratio=warmup_steps_ratio,
+        warmup_steps=warmup_steps,
+        min_lr_ratio=min_learning_rate / learning_rate,
+        betas=betas,
+        eps=eps,
+        weight_decay=weight_decay,
+        grad_clip_norm=grad_clip_norm,
+    )
+
+
 @dataclass
 class _SubmittedBatch:
     """A batch submitted to Tinker (forward-backward + optim step in flight)."""
@@ -328,7 +433,6 @@ class TinkerSFTBackend(SFTBackend):
         from tinker_cookbook import checkpoint_utils
         from tinker_cookbook.display import colorize_example
         from tinker_cookbook.supervised.common import compute_mean_nll
-        from tinker_cookbook.utils.lr_scheduling import compute_schedule_lr_multiplier
         from tinker_cookbook.utils.misc_utils import timed
 
         from rllm.utils.tracking import Tracking
@@ -379,10 +483,7 @@ class TinkerSFTBackend(SFTBackend):
             progress_denominator = total_steps if total_steps > 0 else 1
             logger.info(f"Training for {n_batches} batches x {total_epochs} epochs = {total_steps} steps")
 
-            base_learning_rate = config.get("optim", {}).get("lr", 1e-5)
-            lr_schedule = config.get("optim", {}).get("lr_scheduler", "constant")
-            adam_betas = config.get("optim", {}).get("betas", [0.9, 0.95])
-            adam_eps = config.get("optim", {}).get("eps", 1e-8)
+            optimizer = resolve_sft_optimizer_settings(config.get("optim", {}), total_steps=total_steps)
             save_every = config.trainer.get("save_freq", 20)
             eval_every = config.trainer.get("test_freq", 10)
 
@@ -401,9 +502,22 @@ class TinkerSFTBackend(SFTBackend):
                 step = epoch_idx * n_batches + batch_idx
                 batch_start_time = time.time()
                 metrics: dict[str, Any] = {"epoch": epoch_idx, "progress": step / progress_denominator}
-                learning_rate = base_learning_rate * compute_schedule_lr_multiplier(lr_schedule=lr_schedule, step=step, total_steps=total_steps)
+                learning_rate = optimizer.learning_rate * sft_lr_multiplier(
+                    optimizer.lr_schedule,
+                    step,
+                    total_steps,
+                    optimizer.warmup_steps_ratio,
+                    optimizer.warmup_steps,
+                    optimizer.min_lr_ratio,
+                )
                 metrics["learning_rate"] = learning_rate
-                adam_params = tinker.AdamParams(learning_rate=learning_rate, beta1=adam_betas[0], beta2=adam_betas[1], eps=adam_eps)
+                adam_params = build_adam_params(
+                    learning_rate=learning_rate,
+                    betas=optimizer.betas,
+                    eps=optimizer.eps,
+                    weight_decay=optimizer.weight_decay,
+                    grad_clip_norm=optimizer.grad_clip_norm,
+                )
 
                 with timed("get_batch", metrics):
                     data = train_dataset.get_batch(batch_idx)
