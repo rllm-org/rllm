@@ -47,9 +47,17 @@ class VerlSFTBackend(SFTBackend):
     # -- contract -----------------------------------------------------------
 
     def validate_spec(self) -> None:
-        validate_messages_dataset(self.spec.train_dataset, "train")
+        validate_messages_dataset(
+            self.spec.train_dataset,
+            "train",
+            allow_structural_inline_thinking_text=True,
+        )
         if self.spec.val_dataset is not None:
-            validate_messages_dataset(self.spec.val_dataset, "val")
+            validate_messages_dataset(
+                self.spec.val_dataset,
+                "val",
+                allow_structural_inline_thinking_text=True,
+            )
         if self.spec.lr_schedule not in _LR_SCHEDULE_MAP:
             raise SFTConfigError(f"Unsupported lr_schedule {self.spec.lr_schedule!r} for verl. Use one of {sorted(_LR_SCHEDULE_MAP)}.")
         if self.spec.lr_schedule == "linear":

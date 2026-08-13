@@ -298,6 +298,50 @@ def test_reasoning_does_not_hide_unsupported_visible_content(content):
         bridge_messages([{"messages": [message]}])
 
 
+def test_sibling_reasoning_conflicts_with_structural_inline_thinking():
+    message = {
+        "role": "assistant",
+        "content": "<think>inline</think>visible",
+        "reasoning_content": "sibling",
+    }
+    with pytest.raises(SFTSchemaError, match="sibling reasoning.*structural inline"):
+        bridge_messages([{"messages": [message]}])
+
+
+def test_plain_messages_reject_structural_inline_thinking():
+    messages = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "<think>inline</think>visible"},
+    ]
+    with pytest.raises(SFTSchemaError, match="think-tags.*thinking parts"):
+        bridge_messages([{"messages": messages}])
+
+
+def test_think_tags_parse_structural_text_parts():
+    messages = [
+        {"role": "user", "content": "q"},
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "<think>inline</think>visible"}],
+        },
+    ]
+    assistant = bridge_think_tags([{"messages": messages}], explode=False)[0].messages[-1]
+    assert assistant.thinking() == "inline"
+    assert assistant.text() == "visible"
+
+
+def test_literal_think_tags_outside_assistant_prefix_remain_text():
+    messages = [
+        {"role": "user", "content": "<think>literal prompt</think>"},
+        {"role": "assistant", "content": "Literal <think>tag</think>."},
+    ]
+    row = bridge_messages([{"messages": messages}])[0]
+    assert [message.text() for message in row.messages] == [
+        "<think>literal prompt</think>",
+        "Literal <think>tag</think>.",
+    ]
+
+
 def test_bridges_preserve_source_whitespace_verbatim():
     messages = [
         {"role": "system", "content": "sys prompt\n\n"},

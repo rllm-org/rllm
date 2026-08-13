@@ -415,6 +415,29 @@ def test_verl_rejects_structured_rows():
         VerlSFTBackend(spec).validate_spec()
 
 
+@pytest.mark.parametrize("think_row_index", [0, 1])
+def test_verl_keeps_legacy_inline_think_text(think_row_index):
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    plain = {
+        "messages": [
+            {"role": "user", "content": "plain"},
+            {"role": "assistant", "content": "answer"},
+        ]
+    }
+    inline = {
+        "messages": [
+            {"role": "user", "content": "reason"},
+            {"role": "assistant", "content": "<think>work</think>answer"},
+        ]
+    }
+    rows = [plain, plain.copy()]
+    rows[think_row_index] = inline
+    dataset = Dataset(data=rows, name="legacy-think-text", split="train")
+
+    VerlSFTBackend(_spec(train_dataset=dataset)).validate_spec()
+
+
 # -- full-parameter (lora_rank=0) support ------------------------------------
 # (build_config shape/tokenizer resolution + the provision doc for rank 0 are
 # covered by the parametrized tests above; here: spec + validate_spec gating.)

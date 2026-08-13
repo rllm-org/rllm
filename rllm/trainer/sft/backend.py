@@ -24,7 +24,12 @@ class SFTConfigError(Exception):
     """Raised for invalid SFT specs/config or unsupported backends."""
 
 
-def validate_messages_dataset(dataset, label: str = "train") -> None:
+def validate_messages_dataset(
+    dataset,
+    label: str = "train",
+    *,
+    allow_structural_inline_thinking_text: bool = False,
+) -> None:
     """Validate that *dataset* has the SFT ``messages`` schema.
 
     Mirrors the check the old experimental SFT CLI did, raising
@@ -49,7 +54,10 @@ def validate_messages_dataset(dataset, label: str = "train") -> None:
     from rllm.data.sft_schema import SFTSchemaError, normalize_row
 
     try:
-        normalize_row(row)
+        normalize_row(
+            row,
+            allow_structural_inline_thinking_text=allow_structural_inline_thinking_text,
+        )
     except SFTSchemaError as e:
         raise SFTConfigError(f"{label} dataset: row 0 does not match the SFT schema: {e}") from e
 

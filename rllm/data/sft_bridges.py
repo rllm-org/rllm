@@ -45,6 +45,7 @@ from rllm.data.sft_schema import (
     SFTMessage,
     SFTRow,
     SFTSchemaError,
+    _has_structural_inline_thinking,
     normalize_message_dict,
     normalize_rows,
 )
@@ -58,6 +59,7 @@ _THINK_RE = re.compile(r"\s*<think>(.*?)</think>(.*)", re.DOTALL)
 # Sibling fields carrying chain-of-thought next to ``content`` in the
 # OpenAI-compatible reasoning-model wire shape, in precedence order.
 _REASONING_KEYS = ("reasoning_content", "reasoning")
+_PART_PAYLOAD = {"text": "text", "thinking": "thinking"}
 
 
 # --- source-shape normalization ----------------------------------------------
@@ -121,6 +123,9 @@ def _normalize_source_message(msg: Any) -> Any:
     reasoning = reasoning_values[0][1] if reasoning_values else ""
     if reasoning:
         content = out.get("content")
+        if _has_structural_inline_thinking(content):
+            fields = ", ".join(key for key, _ in reasoning_values)
+            raise SFTSchemaError(f"sibling reasoning field ({fields}) conflicts with structural inline <think>...</think> content; choose one reasoning representation.")
         parts: list = [{"type": "thinking", "thinking": reasoning}]
         if isinstance(content, str):
             if content:
@@ -133,7 +138,28 @@ def _normalize_source_message(msg: Any) -> Any:
     return out
 
 
+def _payload_of(part: Any, kind: str | None = None) -> str | None:
+    if not isinstance(part, dict):
+        return None
+    part_type = part.get("type")
+    if kind is not None and part_type != kind:
+        return None
+    key = _PART_PAYLOAD.get(part_type) if isinstance(part_type, str) else None
+    value = part.get(key) if key else None
+    return value if isinstance(value, str) else None
+
+
 # --- shared helpers ----------------------------------------------------------
+
+
+def _split_think_tag(text: str) -> list[dict]:
+    match = _THINK_RE.match(text)
+    if not match:
+        return [{"type": "text", "text": text}]
+    return [
+        {"type": "thinking", "thinking": match.group(1).strip()},
+        {"type": "text", "text": match.group(2).lstrip()},
+    ]
 
 
 def _content_to_parts(role: str, content: Any) -> list[dict]:
@@ -146,19 +172,19 @@ def _content_to_parts(role: str, content: Any) -> list[dict]:
     does, so this bridge tolerates partially-structured inputs too.
     """
     if isinstance(content, str):
-        if role == "assistant":
-            m = _THINK_RE.match(content)
-            if m:
-                return [
-                    {"type": "thinking", "thinking": m.group(1).strip()},
-                    {"type": "text", "text": m.group(2).lstrip()},
-                ]
-        return [{"type": "text", "text": content}]
+        return _split_think_tag(content) if role == "assistant" else [{"type": "text", "text": content}]
     if content is None:
         return [{"type": "text", "text": ""}]
     if isinstance(content, list):
-        # Reuse the schema's part cleanup (drops ``None`` cross-keys).
-        return list(normalize_message_dict({"role": role, "content": content}).get("content", []))
+        parts = list(normalize_message_dict({"role": role, "content": content}).get("content", []))
+        if role != "assistant":
+            return parts
+        for index, part in enumerate(parts):
+            if _payload_of(part, "text") is None:
+                continue
+            split = _split_think_tag(part["text"])
+            return parts[:index] + split + parts[index + 1 :] if len(split) > 1 else parts
+        return parts
     raise SFTSchemaError(f"unsupported content type {type(content).__name__} for role {role!r}.")
 
 
