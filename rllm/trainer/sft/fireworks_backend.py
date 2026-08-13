@@ -31,7 +31,11 @@ from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
 
 from rllm.trainer.sft.backend import SFTConfigError
-from rllm.trainer.sft.tinker_backend import TinkerSFTBackend, build_sft_data
+from rllm.trainer.sft.tinker_backend import (
+    TinkerSFTBackend,
+    build_sft_data,
+    should_validate_step,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +266,17 @@ class FireworksSFTBackend(TinkerSFTBackend):
                 save_every = config.trainer.get("save_freq", 20)
                 eval_every = config.trainer.get("test_freq", 10)
 
+                if should_validate_step(
+                    0,
+                    eval_every=eval_every,
+                    has_validation=val_dataset is not None,
+                    include_initial=start_step == 0,
+                ):
+                    tracking_logger.log(
+                        data=self._validate(client, val_dataset, DEFAULT_TIMEOUT_S),
+                        step=0,
+                    )
+
                 # Pipelined sync loop: keep one (fwd_bwd, optim) pair in flight.
                 in_flight: deque = deque()
 
@@ -290,10 +305,15 @@ class FireworksSFTBackend(TinkerSFTBackend):
                         "train_loss": train_loss,
                         "time/total": time.time() - t0,
                     }
-                    if val_dataset and eval_every > 0 and step % eval_every == 0 and step > 0:
+                    completed_steps = step + 1
+                    if should_validate_step(
+                        completed_steps,
+                        eval_every=eval_every,
+                        has_validation=val_dataset is not None,
+                    ):
                         metrics.update(self._validate(client, val_dataset, DEFAULT_TIMEOUT_S))
-                    tracking_logger.log(data=metrics, step=step)
-                    logger.info(f"Step {step}: train_loss={train_loss:.4f}, lr={lr:.2e}")
+                    tracking_logger.log(data=metrics, step=completed_steps)
+                    logger.info(f"Step {completed_steps}: train_loss={train_loss:.4f}, lr={lr:.2e}")
                     if save_every > 0 and step % save_every == 0 and step > 0:
                         logger.info(f"Saving checkpoint at step {step}")
                         ckpt.save(f"step-{step}", resumable=True, promotable=False)
@@ -301,6 +321,12 @@ class FireworksSFTBackend(TinkerSFTBackend):
                 for step in range(start_step, total_steps):
                     if step % n_batches == 0:
                         train_dataset.set_epoch(seed=step // n_batches)
+                    if in_flight and should_validate_step(
+                        in_flight[0][0] + 1,
+                        eval_every=eval_every,
+                        has_validation=val_dataset is not None,
+                    ):
+                        collect()
                     submit(step)
                     if len(in_flight) > 1:
                         collect()

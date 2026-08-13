@@ -18,7 +18,28 @@ from tinker_cookbook.supervised.common import compute_mean_nll  # noqa: E402
 
 from rllm.trainer.sft.backend import SFTConfigError  # noqa: E402
 from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend  # noqa: E402
-from rllm.trainer.sft.tinker_backend import TinkerSFTBackend  # noqa: E402
+from rllm.trainer.sft.tinker_backend import TinkerSFTBackend, should_validate_step  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    ("completed_steps", "include_initial", "expected"),
+    [(0, False, False), (0, True, True), (1, False, False), (10, False, True), (20, False, True)],
+)
+def test_validation_cadence_uses_completed_steps(completed_steps, include_initial, expected):
+    assert (
+        should_validate_step(
+            completed_steps,
+            eval_every=10,
+            has_validation=True,
+            include_initial=include_initial,
+        )
+        is expected
+    )
+
+
+def test_validation_cadence_requires_validation_data():
+    assert not should_validate_step(0, eval_every=10, has_validation=False, include_initial=True)
+    assert not should_validate_step(10, eval_every=10, has_validation=False)
 
 
 def _tensor(values):
