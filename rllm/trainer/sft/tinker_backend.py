@@ -150,6 +150,7 @@ def build_sft_data(config, train_data, val_data):
 
     train_batch_size = config.data.get("train_batch_size", 32)
     val_batch_size = config.data.get("micro_batch_size_per_gpu", train_batch_size)
+    rllm_data = config.data.get("rllm", {})
     train_dataset, val_dataset = create_tinker_sft_datasets(
         train_data=train_data,
         val_data=val_data,
@@ -160,6 +161,8 @@ def build_sft_data(config, train_data, val_data):
         last_only=last_only,
         max_train_samples=config.data.get("train_max_samples", -1),
         max_val_samples=config.data.get("val_max_samples", -1),
+        overlength_policy=str(rllm_data.get("overlength_policy", "truncate")),
+        loss_reduction=str(rllm_data.get("loss_reduction", "none")),
     )
     return tokenizer, train_dataset, val_dataset
 

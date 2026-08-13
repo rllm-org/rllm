@@ -41,6 +41,8 @@ data:
   rllm:
     tokenize_and_mask_method: cumulative
     strip_thinking_from_history: false
+    overlength_policy: truncate
+    loss_reduction: none
 
 optim:
   lr: 1e-5

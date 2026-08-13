@@ -23,6 +23,8 @@ data:
   rllm:
     tokenize_and_mask_method: cumulative  # cumulative -> ALL_ASSISTANT_MESSAGES; stepwise -> LAST_ASSISTANT_MESSAGE
     strip_thinking_from_history: false    # preserve the active reasoning trace, matching serving
+    overlength_policy: truncate           # compatibility default; use error to preserve whole trajectories
+    loss_reduction: none                  # none | sequence_mean | token_mean
 
 optim:
   lr: 1e-5
