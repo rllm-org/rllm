@@ -35,6 +35,7 @@ from rllm.trainer.sft.tinker_backend import (
     TinkerSFTBackend,
     build_adam_params,
     build_sft_data,
+    iter_training_batches,
     resolve_sft_optimizer_settings,
     resolve_training_steps,
     sft_lr_multiplier,
@@ -238,6 +239,29 @@ class FireworksSFTBackend(TinkerSFTBackend):
         try:
             _tokenizer, train_dataset, val_dataset = build_sft_data(config, self.spec.train_dataset, self.spec.val_dataset)
 
+            n_batches = len(train_dataset)
+            total_epochs = config.trainer.get("total_epochs", 1)
+            max_steps = config.trainer.get("max_steps")
+            total_steps = resolve_training_steps(n_batches, total_epochs, max_steps)
+            progress_denominator = total_steps
+            optimizer = resolve_sft_optimizer_settings(config.optim, total_steps=total_steps)
+            save_every = config.trainer.get("save_freq", 20)
+            eval_every = config.trainer.get("test_freq", 10)
+
+            train_dataset.preflight(
+                label="train",
+                planned_batches=(
+                    (epoch_idx, batch_idx)
+                    for _step, epoch_idx, batch_idx in iter_training_batches(
+                        n_batches=n_batches,
+                        total_epochs=total_epochs,
+                        max_steps=max_steps,
+                    )
+                ),
+            )
+            if val_dataset is not None:
+                val_dataset.preflight(label="validation")
+
             infra = self._provision(config, api_key, base_url)
             try:
                 client = infra.policy
@@ -253,21 +277,7 @@ class FireworksSFTBackend(TinkerSFTBackend):
                 resume = ckpt.resume()
                 start_step = resume.step if resume else 0
 
-                # len(dataset) floors examples//batch_size; keep the final partial
-                # batch when the dataset is smaller than one batch (else 0 steps).
-                n_batches = max(1, len(train_dataset))
-                total_epochs = config.trainer.get("total_epochs", 1)
-                total_steps = resolve_training_steps(
-                    n_batches,
-                    total_epochs,
-                    config.trainer.get("max_steps"),
-                )
-                progress_denominator = total_steps if total_steps > 0 else 1
                 logger.info(f"Training for {n_batches} batches x {total_epochs} epochs = {total_steps} steps")
-
-                optimizer = resolve_sft_optimizer_settings(config.optim, total_steps=total_steps)
-                save_every = config.trainer.get("save_freq", 20)
-                eval_every = config.trainer.get("test_freq", 10)
 
                 if should_validate_step(
                     0,

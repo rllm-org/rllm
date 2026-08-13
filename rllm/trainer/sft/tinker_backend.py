@@ -439,6 +439,36 @@ class TinkerSFTBackend(SFTBackend):
 
         config = self._config
         os.makedirs(config.trainer.default_local_dir, exist_ok=True)
+        tokenizer, train_dataset, val_dataset = build_sft_data(config, self.spec.train_dataset, self.spec.val_dataset)
+
+        resume_info = checkpoint_utils.get_last_checkpoint(config.trainer.default_local_dir)
+        start_epoch = resume_info.get("epoch", 0) if resume_info else 0
+        start_batch = resume_info.get("batch", 0) if resume_info else 0
+        n_batches = len(train_dataset)
+        total_epochs = config.trainer.get("total_epochs", 1)
+        max_steps = config.trainer.get("max_steps")
+        total_steps = resolve_training_steps(n_batches, total_epochs, max_steps)
+        progress_denominator = total_steps
+        optimizer = resolve_sft_optimizer_settings(config.get("optim", {}), total_steps=total_steps)
+        save_every = config.trainer.get("save_freq", 20)
+        eval_every = config.trainer.get("test_freq", 10)
+
+        train_dataset.preflight(
+            label="train",
+            planned_batches=(
+                (epoch_idx, batch_idx)
+                for _step, epoch_idx, batch_idx in iter_training_batches(
+                    n_batches=n_batches,
+                    total_epochs=total_epochs,
+                    start_epoch=start_epoch,
+                    start_batch=start_batch,
+                    max_steps=max_steps,
+                )
+            ),
+        )
+        if val_dataset is not None:
+            val_dataset.preflight(label="validation")
+
         service_client = tinker.ServiceClient(base_url=config.get("tinker_base_url", None))
 
         logger_backend = config.trainer.logger
@@ -454,14 +484,9 @@ class TinkerSFTBackend(SFTBackend):
         # Wrap the loop so tracking_logger.finish() runs even on failure: the 'ui'
         # backend tees stdout/stderr and holds an open session until finish().
         try:
-            tokenizer, train_dataset, val_dataset = build_sft_data(config, self.spec.train_dataset, self.spec.val_dataset)
-
-            resume_info = checkpoint_utils.get_last_checkpoint(config.trainer.default_local_dir)
             if resume_info:
                 logger.info(f"Resuming from checkpoint: {resume_info}")
                 training_client = await service_client.create_training_client_from_state_async(resume_info["state_path"])
-                start_epoch = resume_info.get("epoch", 0)
-                start_batch = resume_info.get("batch", 0)
             else:
                 logger.info("Starting training from scratch")
                 training_client = await service_client.create_lora_training_client_async(
@@ -471,21 +496,7 @@ class TinkerSFTBackend(SFTBackend):
                     train_attn=OmegaConf.select(config, "model.train_attn", default=True),
                     train_mlp=OmegaConf.select(config, "model.train_mlp", default=True),
                 )
-                start_epoch = 0
-                start_batch = 0
-
-            # len(dataset) floors examples//batch_size; keep the final partial batch
-            # when the dataset is smaller than one batch (else 0 steps).
-            n_batches = max(1, len(train_dataset))
-            total_epochs = config.trainer.get("total_epochs", 1)
-            max_steps = config.trainer.get("max_steps")
-            total_steps = resolve_training_steps(n_batches, total_epochs, max_steps)
-            progress_denominator = total_steps if total_steps > 0 else 1
             logger.info(f"Training for {n_batches} batches x {total_epochs} epochs = {total_steps} steps")
-
-            optimizer = resolve_sft_optimizer_settings(config.get("optim", {}), total_steps=total_steps)
-            save_every = config.trainer.get("save_freq", 20)
-            eval_every = config.trainer.get("test_freq", 10)
 
             if should_validate_step(
                 0,
