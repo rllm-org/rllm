@@ -13,7 +13,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rllm.eval._resolution import _dockerfile_run_commands, _should_replay_dockerfile
+import pytest
+
+from rllm.eval._resolution import (
+    _builds_from_dockerfile,
+    _dockerfile_image,
+    _dockerfile_run_commands,
+    _should_replay_dockerfile,
+)
 from rllm.tasks.loader import _load_task_from_dir
 from rllm.types import Task
 
@@ -82,3 +89,44 @@ def test_replay_flag_read_from_task_toml(tmp_path):
     (tmp_path / "task.toml").write_text('[environment]\ndocker_image = "org/img:t"\nreplay_dockerfile = false\n')
     task = _load_task_from_dir(tmp_path, dataset_dir=tmp_path)
     assert _should_replay_dockerfile(task) is False
+
+
+# ---------------------------------------------------------------------------
+# _builds_from_dockerfile / _dockerfile_image: real-Dockerfile build backends
+# ---------------------------------------------------------------------------
+
+
+def test_modal_builds_from_dockerfile(tmp_path):
+    """Modal builds the real Dockerfile rather than replaying RUN steps.
+
+    Replay drops ``WORKDIR``, so a harbor SWE task doing ``WORKDIR /app`` then
+    ``git clone <url> .`` clones into the base image's root and every later
+    ``cd /app`` fails. Modal must take the from_dockerfile path like daytona.
+    """
+    task = _task_with_dockerfile(tmp_path, "FROM ubuntu:24.04\nWORKDIR /app\nRUN git clone https://example.com/r .\n")
+    assert _builds_from_dockerfile(task, "modal") == tmp_path / "environment" / "Dockerfile"
+    assert _builds_from_dockerfile(task, "daytona") == tmp_path / "environment" / "Dockerfile"
+
+
+def test_replay_only_backends_do_not_build_dockerfile(tmp_path):
+    """docker builds via ``docker build`` already; local cannot build at all."""
+    task = _task_with_dockerfile(tmp_path, "FROM ubuntu:24.04\nRUN echo hi\n")
+    assert _builds_from_dockerfile(task, "docker") is None
+    assert _builds_from_dockerfile(task, "local") is None
+
+
+def test_prebuilt_image_tasks_skip_dockerfile_build_on_modal(tmp_path):
+    """``replay_dockerfile = false`` means the image is complete — boot it as-is."""
+    task = _task_with_dockerfile(
+        tmp_path,
+        "FROM ubuntu:24.04\nRUN echo hi\n",
+        metadata={"environment": {"docker_image": "prebuilt", "replay_dockerfile": False}},
+    )
+    assert _builds_from_dockerfile(task, "modal") is None
+
+
+def test_dockerfile_image_rejects_unsupported_backend(tmp_path):
+    df = tmp_path / "Dockerfile"
+    df.write_text("FROM ubuntu:24.04\n")
+    with pytest.raises(ValueError, match="unsupported for backend"):
+        _dockerfile_image("e2b", df)
