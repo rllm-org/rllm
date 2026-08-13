@@ -222,10 +222,7 @@ async def run_dataset(
         # downstream consumer wants it) is stable; the engine's session uid
         # becomes f"{task.id}:0" which matches training's convention.
         if resume_items:
-            task_ids = [
-                f"{getattr(task, 'id', None) or task_idx}~attempt-{attempt}"
-                for task, (task_idx, attempt) in zip(tasks, rollout_map, strict=True)
-            ]
+            task_ids = [f"{getattr(task, 'id', None) or task_idx}~attempt-{attempt}" for task, (task_idx, attempt) in zip(tasks, rollout_map, strict=True)]
         else:
             task_ids = [getattr(t, "id", None) or str(idx) for idx, t in enumerate(tasks)]
 
