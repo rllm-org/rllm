@@ -7,10 +7,12 @@ today: the module does not exist yet, so the import below fails at collection.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from rllm.data.sft_bridges import BRIDGES, bridge_messages, bridge_think_tags, get_bridge
-from rllm.data.sft_schema import SFTRow, TextPart, ThinkingPart
+from rllm.data.sft_schema import SFTRow, SFTSchemaError, TextPart, ThinkingPart
 
 # Two think-tagged rows: one multi-turn think-tagged conversation, plus a row whose
 # assistant turn carries NO think tag.
@@ -157,6 +159,116 @@ def test_bridge_messages_train_on_all():
 def test_bridge_messages_train_on_last():
     row = bridge_messages(PLAIN, train_on="last")[0]
     assert [m.trainable for m in row.messages] == [False, False, False, True]
+
+
+# --- source-shape normalization ----------------------------------------------
+
+
+REASONING_ROW = {
+    "messages": [
+        {"role": "user", "content": "fix it"},
+        {
+            "role": "assistant",
+            "content": "THOUGHT: look around",
+            "reasoning_content": "Let me explore.",
+            "tool_calls": json.dumps([{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": '{"cmd": "ls"}'}}]),
+        },
+        {"role": "tool", "content": "a.py"},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "done",
+            "tool_calls": [{"id": "c2", "type": "function", "function": {"name": "submit", "arguments": {"ok": True}}}],
+        },
+    ],
+    "task_id": "t1",
+}
+
+
+@pytest.mark.parametrize("key", ["reasoning_content", "reasoning"])
+def test_reasoning_sibling_field_becomes_thinking_part(key):
+    message = {"role": "assistant", "content": "answer", key: "the chain of thought"}
+    row = bridge_messages([{"messages": [{"role": "user", "content": "q"}, message]}])[0]
+    assistant = row.messages[-1]
+    assert [type(part) for part in assistant.content] == [ThinkingPart, TextPart]
+    assert assistant.thinking() == "the chain of thought"
+    assert assistant.text() == "answer"
+
+
+def test_reasoning_only_turn_has_no_empty_text_part():
+    assistant = bridge_messages([REASONING_ROW])[0].messages[-1]
+    assert [type(part) for part in assistant.content] == [ThinkingPart]
+    assert assistant.thinking() == "done"
+
+
+@pytest.mark.parametrize(
+    ("message_index", "call_id", "name", "arguments"),
+    [(1, "c1", "bash", '{"cmd": "ls"}'), (-1, "c2", "submit", '{"ok": true}')],
+)
+def test_tool_calls_decoded_to_canonical_wire_shape(message_index, call_id, name, arguments):
+    calls = bridge_messages([REASONING_ROW])[0].messages[message_index].tool_calls
+    assert calls is not None and len(calls) == 1
+    assert (calls[0].id, calls[0].function.name) == (call_id, name)
+    assert calls[0].function.arguments == arguments
+
+
+def test_unparseable_tool_calls_string_raises_naming_the_row():
+    with pytest.raises(SFTSchemaError) as exc:
+        bridge_messages([{"messages": [{"role": "assistant", "content": "x", "tool_calls": "not json"}]}])
+    assert "row 0" in str(exc.value)
+    assert "tool_calls is a string but not valid JSON" in str(exc.value)
+
+
+def test_reasoning_on_prompt_turn_raises_instead_of_being_dropped():
+    messages = [
+        {"role": "user", "content": "q", "reasoning_content": "not mine"},
+        {"role": "assistant", "content": "a"},
+    ]
+    with pytest.raises(SFTSchemaError, match="only on assistant"):
+        bridge_messages([{"messages": messages}])
+
+
+@pytest.mark.parametrize("key", ["reasoning_content", "reasoning"])
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_empty_reasoning_field_is_absent_on_any_role(key, role):
+    message = bridge_messages([{"messages": [{"role": role, "content": "payload", key: ""}]}])[0].messages[0]
+    assert message.text() == "payload"
+    assert message.thinking() == ""
+
+
+def test_conflicting_reasoning_aliases_raise_instead_of_dropping_one():
+    message = {
+        "role": "assistant",
+        "content": "a",
+        "reasoning_content": "first",
+        "reasoning": "second",
+    }
+    with pytest.raises(SFTSchemaError, match="conflicting reasoning aliases"):
+        bridge_messages([{"messages": [message]}])
+
+
+@pytest.mark.parametrize("content", [7, {"text": "visible answer"}])
+def test_reasoning_does_not_hide_unsupported_visible_content(content):
+    message = {"role": "assistant", "content": content, "reasoning_content": "cot"}
+    with pytest.raises(SFTSchemaError, match="assistant content must be"):
+        bridge_messages([{"messages": [message]}])
+
+
+def test_bridges_preserve_source_whitespace_verbatim():
+    messages = [
+        {"role": "system", "content": "sys prompt\n\n"},
+        {"role": "user", "content": "  fix the bug\n"},
+        {
+            "role": "assistant",
+            "content": "\n\nTHOUGHT: look around\n",
+            "reasoning_content": "Let me explore.\n\n",
+        },
+    ]
+    row = bridge_messages([{"messages": messages}])[0]
+    assert row.messages[0].text() == "sys prompt\n\n"
+    assert row.messages[1].text() == "  fix the bug\n"
+    assert row.messages[2].thinking() == "Let me explore.\n\n"
+    assert row.messages[2].text() == "\n\nTHOUGHT: look around\n"
 
 
 # --- registry / get_bridge ---------------------------------------------------

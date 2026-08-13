@@ -298,9 +298,10 @@ def import_data(ctx: click.Context, file_path: str, name: str, fmt: str, split: 
     """Import a local SFT data file, bridging it to the canonical row schema.
 
     FILE is a JSON/JSONL/CSV/Parquet file of ``{"messages": [...]}`` rows. The
-    chosen --format bridge normalizes each row (deriving ``trainable`` masks and,
-    for think-tags, splitting the ``<think>`` chain-of-thought) before the rows
-    are registered ready for ``rllm sft``.
+    chosen --format bridge normalizes each row (deriving ``trainable`` masks,
+    lifting ``reasoning_content`` into thinking parts, decoding JSON-string
+    ``tool_calls`` and, for think-tags, splitting the ``<think>``
+    chain-of-thought) before the rows are registered ready for ``rllm sft``.
 
     \b
     Examples:

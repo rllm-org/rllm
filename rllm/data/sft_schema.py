@@ -217,6 +217,21 @@ def normalize_messages(messages, default_trainable: str = "all") -> list[SFTMess
     if not isinstance(messages, list) or len(messages) == 0:
         raise SFTSchemaError("'messages' must be a non-empty list of conversation turns.")
 
+    # Empty provider fields are serialization artifacts. Non-empty siblings are
+    # source data that must be lifted by the messages bridge rather than dropped.
+    for i, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        for reasoning_key in ("reasoning_content", "reasoning"):
+            if reasoning_key not in message:
+                continue
+            value = message[reasoning_key]
+            if value is None or (isinstance(value, str) and value == ""):
+                continue
+            if not isinstance(value, str):
+                raise SFTSchemaError(f"message {i} field {reasoning_key!r} must be a string, got {type(value).__name__}.")
+            raise SFTSchemaError(f"message {i} contains source field {reasoning_key!r}; import it through `rllm dataset import --format messages` so reasoning is preserved as a thinking part.")
+
     cleaned = [normalize_message_dict(m) for m in messages]
 
     all_flagged = all(isinstance(m, dict) and isinstance(m.get("trainable"), bool) for m in cleaned)
