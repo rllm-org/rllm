@@ -47,13 +47,54 @@ The two recognized part types are `text` (visible output) and `thinking` (the mo
 
 The schema and its normalization live in `rllm/data/sft_schema.py` (`SFTMessage`, `TextPart`, `ThinkingPart`, `SFTToolCall`).
 
+The import bridges also accept common provider wire variants. Assistant
+`reasoning_content` or `reasoning` becomes one leading `thinking` part;
+`tool_calls` may be a list or a JSON-stringified list; and
+`function.arguments` may be a JSON string or a parsed object/array. Stored
+canonical rows always use structured `thinking`, a tool-call list, and
+JSON-string arguments. Ambiguous dual reasoning representations are rejected.
+
+### Multi-message rows and loss targets
+
+A **row** is one training example containing an ordered `messages` sequence. A
+message with `trainable: true` is a **target message**; `trainable: false` makes
+it **context-only**. Context-only messages stay in the rendered sequence—the
+flag controls loss eligibility, not visibility.
+
+The flag applies to the whole rendered message. Its thinking, visible text, and
+tool-call output cannot be masked independently. The canonical schema does not
+restrict explicit targets by role, although derived masks and think-tag
+explosion select assistant messages.
+
+For rows that remain intact (`messages`, direct normalization, or compact
+`think-tags`), mask resolution is all-or-nothing:
+
+- If every source message has a boolean `trainable`, rLLM preserves the mask
+  exactly and ignores the derivation policy.
+- If any value is missing, null, or non-boolean, the mask is partial. rLLM
+  derives the entire mask again, overwriting any explicit values in that row.
+  `messages` uses its `all` or `last` policy; compact `think-tags` selects every
+  assistant message.
+
+For `think-tags`, exploded mode emits one prefix row per selected assistant
+target. The selected target is the final and only trainable message in that
+row; future messages are omitted, and thinking is removed from historical
+assistant messages. A complete source mask uses `trainable: true` assistant
+messages as selectors, then rewrites each emitted row to one target and
+all-false history. A non-assistant selector is rejected. A partial mask ignores
+its explicit values and selects every assistant message.
+
+A renderer may still omit content according to its history policy. If a
+renderer is configured to omit historical reasoning, explosion keeps each
+selected reasoning target final so that history stripping cannot remove it.
+
 ### Why structured `thinking` parts, not baked `<think>` strings
 
 Different model families wrap reasoning in different wire formats — DeepSeek uses `<think>...</think>`, Qwen and Harmony use their own. If the dataset hard-coded one format, it would only train that family. Instead, reasoning is stored **model-agnostically** as a `thinking` part, and the student's *renderer* decides the on-the-wire format at training time. One curated dataset trains any student.
 
-### Flag-less plain rows still work
+### Flag-less and partially flagged rows still work
 
-You can hand `rllm sft` a plain `{"role", "content": "..."}` dataset with no `trainable` flags at all (e.g. an external `--train-file`). The loader derives the mask: assistant turns are trainable, everything else is not. With `--tokenize-method stepwise`, only the **last** assistant turn is trained instead of all of them. Rows that already carry per-message `trainable` flags (everything from `from-eval` and `import`) are used verbatim — `--tokenize-method` does not override them.
+You can hand `rllm sft` a plain `{"role", "content": "..."}` dataset with no `trainable` flags at all (e.g. an external `--train-file`). The loader derives the mask: assistant messages are trainable, everything else is not. With `--tokenize-method stepwise`, only the **last** assistant message is trained instead of all of them. A complete boolean mask is used verbatim; a partial mask is fully re-derived as described above.
 
 ## Getting data in
 
@@ -102,17 +143,19 @@ rllm dataset import data.jsonl --name my-sft --train-on last             # only 
 rllm dataset import traces.jsonl --name distill-traces --format think-tags  # split <think>...</think> into a thinking part
 ```
 
-- **`messages`** — plain OpenAI rows. The loss mask is derived from `--train-on` (`all` assistant turns, default, or only the `last`).
-- **`think-tags`** — rows whose assistant turns start with a `<think>...</think>` block (a common convention for distilled reasoning traces). The bridge splits that block into a `thinking` part and carries every non-`messages` top-level key through verbatim as row metadata.
+- **`messages`** — plain OpenAI rows, including provider reasoning fields and OpenAI-shaped tool calls. Complete boolean masks are preserved; otherwise the loss mask is derived from `--train-on` (`all` assistant messages, default, or only the `last`).
+- **`think-tags`** — rows whose assistant messages start with a `<think>...</think>` block (a common convention for distilled reasoning traces). The bridge splits that block into a `thinking` part and carries every non-`messages` top-level key through verbatim as row metadata. In compact mode, complete boolean masks are preserved. In exploded mode, true assistant flags select targets, non-assistant selectors are rejected, and a partial mask selects every assistant message.
 
 #### `--explode` (think-tags only, default ON)
 
 This is the most important knob for `think-tags`, so spell out the tradeoff before choosing:
 
-- **Exploded (default)** — the conversation is split into one row per assistant turn. History turns keep only their visible text (CoT stripped), and the row's single final assistant turn is the trained target with its CoT kept. This is exactly what a next-token SFT loss wants, and it's **inference-faithful**: thinking-family renderers strip prior-turn reasoning at render time, so training every CoT block requires giving each its own row. The cost is duplicated history tokens.
-- **`--no-explode`** — one compact row per full conversation, every assistant turn trainable. But because thinking-family renderers strip history CoT at render time, only the **final** turn's CoT is actually trained; earlier turns contribute their visible text only. You save history-token duplication but train fewer CoT blocks.
+- **Exploded (default)** — the conversation is split into one row per selected assistant target. A complete source mask selects the targets; with a partial mask, every assistant message is selected. History messages keep only visible text (thinking stripped), and the row's single final assistant message is the trained target with its thinking kept. This matches inference when the renderer omits historical reasoning. The cost is duplicated history tokens.
+- **`--no-explode`** — one compact row per full conversation. A complete source mask is preserved; a partial mask makes every assistant message trainable. If the renderer omits historical thinking, only the final message's thinking is emitted and trained. You save history-token duplication but may train fewer reasoning blocks.
 
-Rule of thumb: keep the default `--explode` when you want every reasoning block trained; use `--no-explode` for compact conversations where only the last turn's reasoning matters.
+Rule of thumb: keep the default `--explode` when every selected reasoning block
+must be a final target. Use `--no-explode` for compact conversations when your
+renderer retains the reasoning you intend to train.
 
 ## Training with `rllm sft`
 
