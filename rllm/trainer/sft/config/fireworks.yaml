@@ -53,6 +53,7 @@ optim:
 
 trainer:
   total_epochs: 1
+  max_steps: null
   logger: ['console']
   project_name: 'rllm-fireworks-sft'
   experiment_name: 'default'

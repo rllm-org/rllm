@@ -182,6 +182,40 @@ def should_validate_step(
     return eval_every > 0 and completed_steps % eval_every == 0
 
 
+def resolve_training_steps(
+    n_batches: int,
+    total_epochs: int,
+    max_steps: int | None,
+) -> int:
+    """Resolve an optional positive step cap against the available batches."""
+    if n_batches <= 0:
+        raise SFTConfigError("The SFT training dataset contains no batches.")
+    if isinstance(total_epochs, bool) or not isinstance(total_epochs, int) or total_epochs <= 0:
+        raise SFTConfigError(f"trainer.total_epochs must be a positive integer, got {total_epochs!r}.")
+    available_steps = n_batches * total_epochs
+    if max_steps is None:
+        return available_steps
+    if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps <= 0:
+        raise SFTConfigError(f"trainer.max_steps must be a positive integer when set, got {max_steps!r}.")
+    return min(available_steps, max_steps)
+
+
+def iter_training_batches(
+    *,
+    n_batches: int,
+    total_epochs: int,
+    start_epoch: int = 0,
+    start_batch: int = 0,
+    max_steps: int | None = None,
+):
+    """Yield ``(step, epoch, batch)`` up to the exact effective horizon."""
+    total_steps = resolve_training_steps(n_batches, total_epochs, max_steps)
+    start_step = start_epoch * n_batches + start_batch
+    for step in range(start_step, total_steps):
+        epoch, batch = divmod(step, n_batches)
+        yield step, epoch, batch
+
+
 @dataclass
 class _SubmittedBatch:
     """A batch submitted to Tinker (forward-backward + optim step in flight)."""
@@ -340,7 +374,8 @@ class TinkerSFTBackend(SFTBackend):
             # when the dataset is smaller than one batch (else 0 steps).
             n_batches = max(1, len(train_dataset))
             total_epochs = config.trainer.get("total_epochs", 1)
-            total_steps = n_batches * total_epochs
+            max_steps = config.trainer.get("max_steps")
+            total_steps = resolve_training_steps(n_batches, total_epochs, max_steps)
             progress_denominator = total_steps if total_steps > 0 else 1
             logger.info(f"Training for {n_batches} batches x {total_epochs} epochs = {total_steps} steps")
 
@@ -420,32 +455,41 @@ class TinkerSFTBackend(SFTBackend):
                 logger.info(f"Step {completed_steps}: train_nll={train_nll:.4f}, lr={metrics['learning_rate']:.2e}")
 
             pending: _SubmittedBatch | None = None
-            for epoch_idx in range(start_epoch, total_epochs):
-                logger.info(f"Starting epoch {epoch_idx}")
-                train_dataset.set_epoch(seed=epoch_idx)
-                start_batch_idx = start_batch if epoch_idx == start_epoch else 0
-                for batch_idx in range(start_batch_idx, n_batches):
-                    if pending is not None and should_validate_step(
-                        pending.step + 1,
-                        eval_every=eval_every,
-                        has_validation=val_dataset is not None,
-                    ):
-                        await finish_batch(pending)
-                        pending = None
-                    submitted = await submit_batch(epoch_idx, batch_idx)
-                    if pending is not None:
-                        await finish_batch(pending)
-                    pending = submitted
+            current_epoch: int | None = None
+            for _step, epoch_idx, batch_idx in iter_training_batches(
+                n_batches=n_batches,
+                total_epochs=total_epochs,
+                start_epoch=start_epoch,
+                start_batch=start_batch,
+                max_steps=max_steps,
+            ):
+                if epoch_idx != current_epoch:
+                    logger.info(f"Starting epoch {epoch_idx}")
+                    train_dataset.set_epoch(seed=epoch_idx)
+                    current_epoch = epoch_idx
+                if pending is not None and should_validate_step(
+                    pending.step + 1,
+                    eval_every=eval_every,
+                    has_validation=val_dataset is not None,
+                ):
+                    await finish_batch(pending)
+                    pending = None
+                submitted = await submit_batch(epoch_idx, batch_idx)
+                if pending is not None:
+                    await finish_batch(pending)
+                pending = submitted
             if pending is not None:
                 await finish_batch(pending)
 
-            if start_epoch < total_epochs:
+            start_step = start_epoch * n_batches + start_batch
+            if start_step < total_steps:
+                final_epoch, final_batch = divmod(total_steps, n_batches)
                 await checkpoint_utils.save_checkpoint_async(
                     training_client=training_client,
                     name="final",
                     log_path=config.trainer.default_local_dir,
                     kind="both",
-                    loop_state={"epoch": total_epochs, "batch": n_batches},
+                    loop_state={"epoch": final_epoch, "batch": final_batch},
                 )
             else:
                 logger.info("Training was already complete; nothing to do")

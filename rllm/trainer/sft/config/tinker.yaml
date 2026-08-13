@@ -35,6 +35,7 @@ optim:
 
 trainer:
   total_epochs: 1
+  max_steps: null             # optional exact optimizer-step cap
   logger: ['console']
   project_name: 'rllm-tinker-sft'
   experiment_name: 'default'

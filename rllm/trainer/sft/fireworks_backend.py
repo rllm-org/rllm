@@ -34,6 +34,7 @@ from rllm.trainer.sft.backend import SFTConfigError
 from rllm.trainer.sft.tinker_backend import (
     TinkerSFTBackend,
     build_sft_data,
+    resolve_training_steps,
     should_validate_step,
 )
 
@@ -255,7 +256,11 @@ class FireworksSFTBackend(TinkerSFTBackend):
                 # batch when the dataset is smaller than one batch (else 0 steps).
                 n_batches = max(1, len(train_dataset))
                 total_epochs = config.trainer.get("total_epochs", 1)
-                total_steps = n_batches * total_epochs
+                total_steps = resolve_training_steps(
+                    n_batches,
+                    total_epochs,
+                    config.trainer.get("max_steps"),
+                )
                 progress_denominator = total_steps if total_steps > 0 else 1
                 logger.info(f"Training for {n_batches} batches x {total_epochs} epochs = {total_steps} steps")
 
