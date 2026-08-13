@@ -15,7 +15,13 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from rllm.renderers import BridgingRendererMixin, get_renderer, resolve  # noqa: E402
-from rllm.renderers.adapters import ChatTemplateAdapter  # noqa: E402
+from rllm.renderers.adapters import (  # noqa: E402
+    ChatTemplateAdapter,
+    _last_real_user_index,
+    _to_parsed,
+    to_tinker_messages,
+    to_tinker_tool_specs,
+)
 
 QWEN = "Qwen/Qwen3-0.6B"
 
@@ -126,11 +132,133 @@ def test_tinker_adapter_renders(qwen_tokenizer):
     assert a.get_stop_token_ids()  # non-empty
 
 
+def test_tinker_parse_flattens_structured_response_parts():
+    parsed = _to_parsed(
+        [
+            {"type": "thinking", "thinking": "plan"},
+            {"type": "text", "text": "answer"},
+        ],
+        None,
+        [],
+    )
+    assert parsed.reasoning_content == "plan"
+    assert parsed.content == "answer"
+
+
+def test_openai_tool_declarations_become_cookbook_specs():
+    pytest.importorskip("tinker_cookbook")
+    specs = to_tinker_tool_specs(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "Run a command",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+    )
+    assert len(specs) == 1
+    assert specs[0]["name"] == "bash"
+    assert specs[0]["parameters"] == {"type": "object"}
+
+
+def test_wrapped_tool_response_is_not_a_genuine_user_boundary():
+    pytest.importorskip("tinker_cookbook")
+    messages = [
+        {"role": "user", "content": "Fix it"},
+        {"role": "assistant", "content": "working", "reasoning_content": "CURRENT-TRACE"},
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "<tool_response>output</tool_response>"}],
+        },
+    ]
+    boundary = _last_real_user_index(messages)
+    assert boundary == 0
+    converted = to_tinker_messages(messages, lift_reasoning=True, keep_reasoning_after=boundary)
+    assert converted[1]["content"][0] == {"type": "thinking", "thinking": "CURRENT-TRACE"}
+
+
+@pytest.mark.parametrize(
+    "reasoning_field",
+    [
+        {"reasoning_content": "PRIOR-REASONING"},
+        {"reasoning": "PRIOR-REASONING"},
+        {"provider_specific_fields": {"refusal": None, "reasoning": "PRIOR-REASONING"}},
+    ],
+    ids=["reasoning_content", "reasoning", "provider_specific_fields"],
+)
+def test_tinker_adapter_renders_harness_wire_shape(qwen_tokenizer, reasoning_field):
+    """A reasoning harness re-sends prior turns as OpenAI dicts: reasoning in a
+    sibling field, tool calls as plain dicts, content sometimes absent. Cookbook
+    renderers read none of that, so the adapter has to translate — otherwise the
+    tool call raises and every prior turn's reasoning is missing from the prompt."""
+    adapter = _tinker_qwen3(qwen_tokenizer)
+    messages = [
+        {"role": "user", "content": "Fix the bug."},
+        {
+            "role": "assistant",
+            "content": "Exploring.",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}}],
+            **reasoning_field,
+        },
+        {"role": "tool", "content": "setup.py", "tool_call_id": "c1"},
+        # A content-less assistant turn is the dominant shape in real episodes.
+        {
+            "role": "assistant",
+            "tool_calls": [{"id": "c2", "type": "function", "function": {"name": "bash", "arguments": '{"command": "cat a.py"}'}}],
+            "reasoning_content": "SECOND-REASONING",
+        },
+        {"role": "tool", "content": "def f(): pass", "tool_call_id": "c2"},
+    ]
+
+    text = qwen_tokenizer.decode(adapter.render_ids(messages, add_generation_prompt=True))
+    assert "PRIOR-REASONING" in text
+    assert "SECOND-REASONING" in text
+    assert '"name": "bash"' in text
+
+
+def test_tinker_adapter_strips_reasoning_before_new_user_like_hf(qwen_tokenizer):
+    """A genuine follow-up user turn starts a new Qwen reasoning boundary."""
+    messages = [
+        {"role": "user", "content": "First question."},
+        {
+            "role": "assistant",
+            "content": "First answer.",
+            "reasoning_content": "SECRET-OLD-REASONING",
+        },
+        {"role": "user", "content": "Second question."},
+        {
+            "role": "assistant",
+            "content": "Second answer.",
+            "reasoning_content": "CURRENT-REASONING",
+        },
+    ]
+    adapter_ids = _tinker_qwen3(qwen_tokenizer).render_ids(
+        messages,
+        add_generation_prompt=False,
+    )
+    hf_ids = qwen_tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=False,
+    )
+
+    text = qwen_tokenizer.decode(adapter_ids)
+    hf_text = qwen_tokenizer.decode(hf_ids)
+    assert "SECRET-OLD-REASONING" not in text
+    assert "CURRENT-REASONING" in text
+    assert ("SECRET-OLD-REASONING" in text, "CURRENT-REASONING" in text) == (
+        "SECRET-OLD-REASONING" in hf_text,
+        "CURRENT-REASONING" in hf_text,
+    )
+
+
 def test_tinker_adapter_bridge_matches_prime(qwen_tokenizer):
     """The synthesized bridge must equal prime-rl's hand-tuned qwen3 bridge."""
     adapter = _tinker_qwen3(qwen_tokenizer)
     prime = _prime_qwen3(qwen_tokenizer)
-
     prompt = prime.render_ids([{"role": "user", "content": "hello there"}], add_generation_prompt=True)
     completion = [
         t
