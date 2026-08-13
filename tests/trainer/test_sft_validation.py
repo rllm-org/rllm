@@ -90,6 +90,9 @@ class _ValDataset:
     def get_batch(self, idx):
         return self._batches[idx]
 
+    def preflight(self, **_kwargs):
+        pass
+
 
 class _AsyncFuture:
     def __init__(self, output):
@@ -256,6 +259,9 @@ class _LoopDataset:
     def get_batch(self, index):
         self.events.append(f"batch-{index}")
         return self.batches[index]
+
+    def preflight(self, **_kwargs):
+        pass
 
 
 class _LoopTinkerClient:

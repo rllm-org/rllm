@@ -22,6 +22,8 @@ data:
   renderer_name: null   # null = auto-detect from the model; set explicitly to override, e.g. qwen3 / qwen3_5 / deepseekv3 / role_colon
   rllm:
     tokenize_and_mask_method: cumulative  # cumulative -> ALL_ASSISTANT_MESSAGES; stepwise -> LAST_ASSISTANT_MESSAGE
+    overlength_policy: truncate  # compatibility default; use error to preserve whole trajectories
+    loss_reduction: token_mean   # token_mean (default) | sequence_mean | none (raw weights)
 
 optim:
   lr: 1e-5
@@ -29,9 +31,14 @@ optim:
   eps: 1e-8
   lr_scheduler: constant  # constant | linear | cosine
   warmup_steps_ratio: 0.1
+  warmup_steps: -1      # -1 = derive from ratio; 0 = disable; non-negative value overrides ratio
+  min_lr: 0.0
+  weight_decay: 0.0
+  grad_clip_norm: 0.0
 
 trainer:
   total_epochs: 1
+  max_steps: null             # optional exact optimizer-step cap
   logger: ['console']
   project_name: 'rllm-tinker-sft'
   experiment_name: 'default'

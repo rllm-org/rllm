@@ -405,13 +405,11 @@ def test_f3_roundtrip_stamps_trainable_none(qwen_tokenizer, tmp_path):
 
 
 def test_truncation_past_max_length_warns_loudly(qwen_tokenizer, caplog):
-    """A row that renders past ``data.max_length`` must emit a loud warning.
+    """Overlength rows warn and fail when truncation removes every target.
 
     ``SFTSpec.max_length`` defaults to 2048, which silently truncated every
-    long trajectory row at datum build (the tail — including the final trainable
-    turn — dropped from training with zero signal to the user).
-
-    RED today: ``datum_from_model_input_weights`` truncates silently.
+    long trajectory row at datum build. The tail — including the final trainable
+    turn — must not disappear silently or enter training with zero loss.
     """
     import logging
 
@@ -425,8 +423,8 @@ def test_truncation_past_max_length_warns_loudly(qwen_tokenizer, caplog):
 
     td._truncation_warn_count = 0
     with caplog.at_level(logging.WARNING, logger="rllm.trainer.sft.tinker_dataset"):
-        datum = conversation_to_datum(convo, renderer, max_length=64)
-    assert datum.model_input.length <= 64
+        with pytest.raises(SFTConfigError, match="no trainable tokens"):
+            conversation_to_datum(convo, renderer, max_length=64)
     warned = [r for r in caplog.records if "max_length" in r.getMessage()]
     assert warned, "expected a loud truncation warning"
     assert "64" in warned[0].getMessage()

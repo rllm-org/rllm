@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -123,6 +124,7 @@ def build_sft_data(config, train_data, val_data):
 
     train_batch_size = config.data.get("train_batch_size", 32)
     val_batch_size = config.data.get("micro_batch_size_per_gpu", train_batch_size)
+    rllm_data = config.data.get("rllm", {})
     train_dataset, val_dataset = create_tinker_sft_datasets(
         train_data=train_data,
         val_data=val_data,
@@ -133,6 +135,8 @@ def build_sft_data(config, train_data, val_data):
         last_only=last_only,
         max_train_samples=config.data.get("train_max_samples", -1),
         max_val_samples=config.data.get("val_max_samples", -1),
+        overlength_policy=str(rllm_data.get("overlength_policy", "truncate")),
+        loss_reduction=str(rllm_data.get("loss_reduction", "token_mean")),
     )
     return tokenizer, train_dataset, val_dataset
 
@@ -150,6 +154,173 @@ def should_validate_step(
     if completed_steps == 0:
         return include_initial
     return completed_steps % eval_every == 0
+
+
+def resolve_training_steps(
+    n_batches: int,
+    total_epochs: int,
+    max_steps: int | None,
+) -> int:
+    """Resolve an optional positive step cap against the available batches."""
+    if n_batches <= 0:
+        raise SFTConfigError("The SFT training dataset contains no batches.")
+    if isinstance(total_epochs, bool) or not isinstance(total_epochs, int) or total_epochs <= 0:
+        raise SFTConfigError(f"trainer.total_epochs must be a positive integer, got {total_epochs!r}.")
+    available_steps = n_batches * total_epochs
+    if max_steps is None:
+        return available_steps
+    if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps <= 0:
+        raise SFTConfigError(f"trainer.max_steps must be a positive integer when set, got {max_steps!r}.")
+    return min(available_steps, max_steps)
+
+
+def iter_training_batches(
+    *,
+    n_batches: int,
+    total_epochs: int,
+    start_epoch: int = 0,
+    start_batch: int = 0,
+    max_steps: int | None = None,
+):
+    """Yield ``(step, epoch, batch)`` up to the exact effective horizon.
+
+    ``start_epoch`` and ``start_batch`` are an input cursor supplied by the
+    existing checkpoint layer. Defining how that cursor is persisted or
+    restored is intentionally outside this scheduling helper.
+    """
+    total_steps = resolve_training_steps(n_batches, total_epochs, max_steps)
+    start_step = start_epoch * n_batches + start_batch
+    for step in range(start_step, total_steps):
+        epoch, batch = divmod(step, n_batches)
+        yield step, epoch, batch
+
+
+def sft_lr_multiplier(
+    lr_schedule: str,
+    step: int,
+    total_steps: int,
+    warmup_steps_ratio: float = 0.0,
+    warmup_steps: int | None = -1,
+    min_lr_ratio: float = 0.0,
+) -> float:
+    """Apply linear warmup followed by the selected decay schedule."""
+    from tinker_cookbook.utils.lr_scheduling import compute_schedule_lr_multiplier
+
+    if total_steps <= 0:
+        raise SFTConfigError(f"total_steps must be positive, got {total_steps}.")
+    if step < 0:
+        raise SFTConfigError(f"optimizer step must be non-negative, got {step}.")
+    if not 0 <= warmup_steps_ratio <= 1:
+        raise SFTConfigError(f"optim.warmup_steps_ratio must be in [0, 1], got {warmup_steps_ratio}.")
+    if not 0 <= min_lr_ratio <= 1:
+        raise SFTConfigError(f"optim.min_lr / optim.lr must be in [0, 1], got {min_lr_ratio}.")
+    resolved_warmup = -1 if warmup_steps is None else int(warmup_steps)
+    if resolved_warmup < 0:
+        resolved_warmup = int(total_steps * (warmup_steps_ratio or 0.0))
+    if resolved_warmup > 0 and step < resolved_warmup:
+        return step / resolved_warmup
+    decay = compute_schedule_lr_multiplier(
+        lr_schedule=lr_schedule,
+        step=step - resolved_warmup,
+        total_steps=max(total_steps - resolved_warmup, 1),
+    )
+    return min_lr_ratio + (1 - min_lr_ratio) * decay
+
+
+def build_adam_params(
+    *,
+    learning_rate: float,
+    betas: tuple[float, float],
+    eps: float,
+    weight_decay: float,
+    grad_clip_norm: float,
+):
+    import tinker
+
+    return tinker.AdamParams(
+        learning_rate=learning_rate,
+        beta1=betas[0],
+        beta2=betas[1],
+        eps=eps,
+        weight_decay=weight_decay,
+        grad_clip_norm=grad_clip_norm,
+    )
+
+
+@dataclass(frozen=True)
+class SFTOptimizerSettings:
+    learning_rate: float
+    lr_schedule: str
+    warmup_steps_ratio: float
+    warmup_steps: int
+    min_lr_ratio: float
+    betas: tuple[float, float]
+    eps: float
+    weight_decay: float
+    grad_clip_norm: float
+
+
+def resolve_sft_optimizer_settings(optim_cfg, *, total_steps: int) -> SFTOptimizerSettings:
+    """Validate optimizer controls and normalize them for both hosted loops."""
+    if total_steps <= 0:
+        raise SFTConfigError(f"total_steps must be positive, got {total_steps}.")
+    try:
+        learning_rate = float(optim_cfg.get("lr", 1e-5))
+        min_learning_rate = float(optim_cfg.get("min_lr", 0.0))
+    except (TypeError, ValueError) as e:
+        raise SFTConfigError("optim.lr and optim.min_lr must be numeric.") from e
+    if not math.isfinite(learning_rate) or learning_rate <= 0:
+        raise SFTConfigError(f"optim.lr must be positive, got {learning_rate}.")
+    if not math.isfinite(min_learning_rate) or not 0 <= min_learning_rate <= learning_rate:
+        raise SFTConfigError(f"optim.min_lr must be between zero and optim.lr, got {min_learning_rate} with lr={learning_rate}.")
+
+    lr_schedule = str(optim_cfg.get("lr_scheduler", "constant"))
+    if lr_schedule not in {"constant", "linear", "cosine"}:
+        raise SFTConfigError(f"optim.lr_scheduler must be constant, linear, or cosine, got {lr_schedule!r}.")
+    try:
+        warmup_steps_ratio = float(optim_cfg.get("warmup_steps_ratio", 0.0) or 0.0)
+    except (TypeError, ValueError) as e:
+        raise SFTConfigError("optim.warmup_steps_ratio must be numeric.") from e
+    if not math.isfinite(warmup_steps_ratio) or not 0 <= warmup_steps_ratio <= 1:
+        raise SFTConfigError(f"optim.warmup_steps_ratio must be in [0, 1], got {warmup_steps_ratio}.")
+    raw_warmup_steps = optim_cfg.get("warmup_steps", -1)
+    if isinstance(raw_warmup_steps, bool) or not isinstance(raw_warmup_steps, int) or raw_warmup_steps < -1:
+        raise SFTConfigError(f"optim.warmup_steps must be -1 or a non-negative integer, got {raw_warmup_steps!r}.")
+    warmup_steps = raw_warmup_steps
+    if warmup_steps > total_steps:
+        raise SFTConfigError(f"optim.warmup_steps cannot exceed total training steps ({total_steps}), got {warmup_steps}.")
+
+    raw_betas = optim_cfg.get("betas", [0.9, 0.95])
+    if isinstance(raw_betas, str | bytes) or not hasattr(raw_betas, "__len__") or len(raw_betas) != 2:
+        raise SFTConfigError(f"optim.betas must contain beta1 and beta2, got {raw_betas}.")
+    try:
+        betas = (float(raw_betas[0]), float(raw_betas[1]))
+    except (TypeError, ValueError) as e:
+        raise SFTConfigError(f"optim.betas must be numeric, got {raw_betas}.") from e
+    if any(not math.isfinite(beta) or not 0 <= beta < 1 for beta in betas):
+        raise SFTConfigError(f"optim.betas must each be in [0, 1), got {betas}.")
+    try:
+        eps = float(optim_cfg.get("eps", 1e-8))
+        weight_decay = float(optim_cfg.get("weight_decay", 0.0))
+        grad_clip_norm = float(optim_cfg.get("grad_clip_norm", 0.0))
+    except (TypeError, ValueError) as e:
+        raise SFTConfigError("optim.eps, optim.weight_decay, and optim.grad_clip_norm must be numeric.") from e
+    if not math.isfinite(eps) or eps <= 0:
+        raise SFTConfigError(f"optim.eps must be positive, got {eps}.")
+    if any(not math.isfinite(value) or value < 0 for value in (weight_decay, grad_clip_norm)):
+        raise SFTConfigError("optim.weight_decay and optim.grad_clip_norm must be non-negative.")
+
+    return SFTOptimizerSettings(
+        learning_rate=learning_rate,
+        lr_schedule=lr_schedule,
+        warmup_steps_ratio=warmup_steps_ratio,
+        warmup_steps=warmup_steps,
+        min_lr_ratio=min_learning_rate / learning_rate,
+        betas=betas,
+        eps=eps,
+        weight_decay=weight_decay,
+        grad_clip_norm=grad_clip_norm,
+    )
 
 
 @dataclass
@@ -270,13 +441,43 @@ class TinkerSFTBackend(SFTBackend):
         from tinker_cookbook import checkpoint_utils
         from tinker_cookbook.display import colorize_example
         from tinker_cookbook.supervised.common import compute_mean_nll
-        from tinker_cookbook.utils.lr_scheduling import compute_schedule_lr_multiplier
         from tinker_cookbook.utils.misc_utils import timed
 
+        from rllm.trainer.sft.tinker_dataset import count_loss_tokens
         from rllm.utils.tracking import Tracking
 
         config = self._config
         os.makedirs(config.trainer.default_local_dir, exist_ok=True)
+        tokenizer, train_dataset, val_dataset = build_sft_data(config, self.spec.train_dataset, self.spec.val_dataset)
+
+        resume_info = checkpoint_utils.get_last_checkpoint(config.trainer.default_local_dir)
+        start_epoch = resume_info.get("epoch", 0) if resume_info else 0
+        start_batch = resume_info.get("batch", 0) if resume_info else 0
+        n_batches = len(train_dataset)
+        total_epochs = config.trainer.get("total_epochs", 1)
+        max_steps = config.trainer.get("max_steps")
+        total_steps = resolve_training_steps(n_batches, total_epochs, max_steps)
+        progress_denominator = total_steps
+        optimizer = resolve_sft_optimizer_settings(config.get("optim", {}), total_steps=total_steps)
+        save_every = config.trainer.get("save_freq", 20)
+        eval_every = config.trainer.get("test_freq", 10)
+
+        train_dataset.preflight(
+            label="train",
+            planned_batches=(
+                (epoch_idx, batch_idx)
+                for _step, epoch_idx, batch_idx in iter_training_batches(
+                    n_batches=n_batches,
+                    total_epochs=total_epochs,
+                    start_epoch=start_epoch,
+                    start_batch=start_batch,
+                    max_steps=max_steps,
+                )
+            ),
+        )
+        if val_dataset is not None:
+            val_dataset.preflight(label="validation")
+
         service_client = tinker.ServiceClient(base_url=config.get("tinker_base_url", None))
 
         logger_backend = config.trainer.logger
@@ -292,14 +493,9 @@ class TinkerSFTBackend(SFTBackend):
         # Wrap the loop so tracking_logger.finish() runs even on failure: the 'ui'
         # backend tees stdout/stderr and holds an open session until finish().
         try:
-            tokenizer, train_dataset, val_dataset = build_sft_data(config, self.spec.train_dataset, self.spec.val_dataset)
-
-            resume_info = checkpoint_utils.get_last_checkpoint(config.trainer.default_local_dir)
             if resume_info:
                 logger.info(f"Resuming from checkpoint: {resume_info}")
                 training_client = await service_client.create_training_client_from_state_async(resume_info["state_path"])
-                start_epoch = resume_info.get("epoch", 0)
-                start_batch = resume_info.get("batch", 0)
             else:
                 logger.info("Starting training from scratch")
                 training_client = await service_client.create_lora_training_client_async(
@@ -309,23 +505,7 @@ class TinkerSFTBackend(SFTBackend):
                     train_attn=OmegaConf.select(config, "model.train_attn", default=True),
                     train_mlp=OmegaConf.select(config, "model.train_mlp", default=True),
                 )
-                start_epoch = 0
-                start_batch = 0
-
-            # len(dataset) floors examples//batch_size; keep the final partial batch
-            # when the dataset is smaller than one batch (else 0 steps).
-            n_batches = max(1, len(train_dataset))
-            total_epochs = config.trainer.get("total_epochs", 1)
-            total_steps = n_batches * total_epochs
-            progress_denominator = total_steps if total_steps > 0 else 1
             logger.info(f"Training for {n_batches} batches x {total_epochs} epochs = {total_steps} steps")
-
-            base_learning_rate = config.get("optim", {}).get("lr", 1e-5)
-            lr_schedule = config.get("optim", {}).get("lr_scheduler", "constant")
-            adam_betas = config.get("optim", {}).get("betas", [0.9, 0.95])
-            adam_eps = config.get("optim", {}).get("eps", 1e-8)
-            save_every = config.trainer.get("save_freq", 20)
-            eval_every = config.trainer.get("test_freq", 10)
 
             if should_validate_step(
                 0,
@@ -342,9 +522,22 @@ class TinkerSFTBackend(SFTBackend):
                 step = epoch_idx * n_batches + batch_idx
                 batch_start_time = time.time()
                 metrics: dict[str, Any] = {"epoch": epoch_idx, "progress": step / progress_denominator}
-                learning_rate = base_learning_rate * compute_schedule_lr_multiplier(lr_schedule=lr_schedule, step=step, total_steps=total_steps)
+                learning_rate = optimizer.learning_rate * sft_lr_multiplier(
+                    optimizer.lr_schedule,
+                    step,
+                    total_steps,
+                    optimizer.warmup_steps_ratio,
+                    optimizer.warmup_steps,
+                    optimizer.min_lr_ratio,
+                )
                 metrics["learning_rate"] = learning_rate
-                adam_params = tinker.AdamParams(learning_rate=learning_rate, beta1=adam_betas[0], beta2=adam_betas[1], eps=adam_eps)
+                adam_params = build_adam_params(
+                    learning_rate=learning_rate,
+                    betas=optimizer.betas,
+                    eps=optimizer.eps,
+                    weight_decay=optimizer.weight_decay,
+                    grad_clip_norm=optimizer.grad_clip_norm,
+                )
 
                 with timed("get_batch", metrics):
                     data = train_dataset.get_batch(batch_idx)
@@ -377,7 +570,7 @@ class TinkerSFTBackend(SFTBackend):
                 metrics.update(
                     num_sequences=len(submitted.data),
                     num_tokens=sum(datum.model_input.length for datum in submitted.data),
-                    num_loss_tokens=sum(sum(datum.loss_fn_inputs["weights"].data) for datum in submitted.data),
+                    num_loss_tokens=count_loss_tokens(submitted.data),
                     train_mean_nll=train_nll,
                 )
                 metrics["time/total"] = time.time() - submitted.batch_start_time
@@ -396,32 +589,41 @@ class TinkerSFTBackend(SFTBackend):
                 logger.info(f"Step {completed_steps}: train_nll={train_nll:.4f}, lr={metrics['learning_rate']:.2e}")
 
             pending: _SubmittedBatch | None = None
-            for epoch_idx in range(start_epoch, total_epochs):
-                logger.info(f"Starting epoch {epoch_idx}")
-                train_dataset.set_epoch(seed=epoch_idx)
-                start_batch_idx = start_batch if epoch_idx == start_epoch else 0
-                for batch_idx in range(start_batch_idx, n_batches):
-                    if pending is not None and should_validate_step(
-                        pending.step + 1,
-                        eval_every=eval_every,
-                        has_validation=val_dataset is not None,
-                    ):
-                        await finish_batch(pending)
-                        pending = None
-                    submitted = await submit_batch(epoch_idx, batch_idx)
-                    if pending is not None:
-                        await finish_batch(pending)
-                    pending = submitted
+            current_epoch: int | None = None
+            for _step, epoch_idx, batch_idx in iter_training_batches(
+                n_batches=n_batches,
+                total_epochs=total_epochs,
+                start_epoch=start_epoch,
+                start_batch=start_batch,
+                max_steps=max_steps,
+            ):
+                if epoch_idx != current_epoch:
+                    logger.info(f"Starting epoch {epoch_idx}")
+                    train_dataset.set_epoch(seed=epoch_idx)
+                    current_epoch = epoch_idx
+                if pending is not None and should_validate_step(
+                    pending.step + 1,
+                    eval_every=eval_every,
+                    has_validation=val_dataset is not None,
+                ):
+                    await finish_batch(pending)
+                    pending = None
+                submitted = await submit_batch(epoch_idx, batch_idx)
+                if pending is not None:
+                    await finish_batch(pending)
+                pending = submitted
             if pending is not None:
                 await finish_batch(pending)
 
-            if start_epoch < total_epochs:
+            start_step = start_epoch * n_batches + start_batch
+            if start_step < total_steps:
+                final_epoch, final_batch = divmod(total_steps, n_batches)
                 await checkpoint_utils.save_checkpoint_async(
                     training_client=training_client,
                     name="final",
                     log_path=config.trainer.default_local_dir,
                     kind="both",
-                    loop_state={"epoch": total_epochs, "batch": n_batches},
+                    loop_state={"epoch": final_epoch, "batch": final_batch},
                 )
             else:
                 logger.info("Training was already complete; nothing to do")
@@ -437,13 +639,15 @@ class TinkerSFTBackend(SFTBackend):
     @staticmethod
     async def _validate(training_client, val_dataset, compute_mean_nll) -> dict[str, float]:
         """Compute held-out NLL without adding validation gradients."""
+        from rllm.trainer.sft.tinker_dataset import count_loss_tokens
+
         logger.info("Running validation...")
         total_nll = 0.0
         total_tokens = 0
         for batch_idx in range(len(val_dataset)):
             data = val_dataset.get_batch(batch_idx)
             weights = [datum.loss_fn_inputs["weights"] for datum in data]
-            batch_tokens = sum(sum(weight.data) for weight in weights)
+            batch_tokens = count_loss_tokens(data)
             if not batch_tokens:
                 continue
             forward_future = await training_client.forward_async(data, loss_fn="cross_entropy")
