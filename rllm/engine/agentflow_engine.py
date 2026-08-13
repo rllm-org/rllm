@@ -522,10 +522,7 @@ class AgentFlowEngine:
                     _steps = [s for t in (episode.trajectories or []) for s in (t.steps or [])]
                     # A step carrying tool calls is a real completion even when
                     # its text is empty (e.g. claude-code tool_use-only turns).
-                    if _steps and all(
-                        not (s.model_response or "").strip() and not (s.model_output and s.model_output.tool_calls)
-                        for s in _steps
-                    ):
+                    if _steps and all(not (s.model_response or "").strip() and not (s.model_output and s.model_output.tool_calls) for s in _steps):
                         n_empty_rollouts += 1
                         colorful_print(
                             f"[{task_id}:{rollout_idx}] ⚠️  EMPTY COMPLETIONS: all {len(_steps)} LLM calls "

@@ -43,11 +43,7 @@ class _StripThinkingBlocks(CustomLogger):
                 # Anthropic-shaped (raw /v1/messages body): content blocks.
                 content = message.get("content")
                 if isinstance(content, list):
-                    kept = [
-                        block
-                        for block in content
-                        if not (isinstance(block, dict) and block.get("type") in _THINKING_BLOCK_TYPES)
-                    ]
+                    kept = [block for block in content if not (isinstance(block, dict) and block.get("type") in _THINKING_BLOCK_TYPES)]
                     message["content"] = kept if kept else ""
         return data
 
