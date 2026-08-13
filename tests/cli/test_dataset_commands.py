@@ -188,3 +188,115 @@ class TestDatasetRegister:
         result = runner.invoke(cli, ["dataset", "inspect", "rt_ds", "--split", "test", "-n", "1"])
         assert result.exit_code == 0
         assert "Best pizza?" in result.output
+
+
+class TestDatasetImport:
+    """Tests for 'rllm dataset import' — the bridge → register → reload path."""
+
+    # A reasoning-model export: CoT in ``reasoning_content``, ``tool_calls`` as a
+    # JSON string, and source-significant boundary whitespace.
+    SOURCE_ROW = {
+        "messages": [
+            {"role": "system", "content": "sys\n\n"},
+            {"role": "user", "content": "  fix it\n"},
+            {
+                "role": "assistant",
+                "content": "\n\nTHOUGHT: look\n",
+                "reasoning_content": "Let me explore.\n\n",
+                "tool_calls": '[{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{\\"cmd\\": \\"ls\\"}"}}]',
+            },
+            {"role": "tool", "content": "a.py\t\n"},
+            {"role": "assistant", "content": "done\n"},
+        ],
+        "task_id": "t1",
+    }
+
+    def _write_source(self, tmp_path):
+        f = tmp_path / "traces.jsonl"
+        f.write_text(json.dumps(self.SOURCE_ROW))
+        return str(f)
+
+    def _reload_raw(self, name):
+        from rllm.data import DatasetRegistry
+
+        return DatasetRegistry.load_dataset(name, "train").get_data()
+
+    def _reload(self, name):
+        from rllm.data.sft_schema import normalize_row
+
+        return [normalize_row(r) for r in self._reload_raw(name)]
+
+    def test_import_normalizes_source_shape_through_parquet(self, runner, tmp_rllm_home, tmp_path):
+        """Reasoning, tool calls, masks, and whitespace survive registration,
+        parquet reload, and schema re-validation."""
+        result = runner.invoke(
+            cli,
+            [
+                "dataset",
+                "import",
+                self._write_source(tmp_path),
+                "--name",
+                "imported-sft",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        stored = self._reload_raw("imported-sft")[0]
+        assert stored["messages"][0]["content"][0]["text"] == "sys\n\n"
+        assert stored["messages"][1]["content"][0]["text"] == "  fix it\n"
+        assert stored["messages"][2]["content"][0]["thinking"] == "Let me explore.\n\n"
+        assert stored["messages"][2]["content"][1]["text"] == "\n\nTHOUGHT: look\n"
+
+        row = self._reload("imported-sft")[0]
+        asst = row.messages[2]
+        assert asst.thinking() == "Let me explore.\n\n"
+        assert asst.text() == "\n\nTHOUGHT: look\n"
+        assert asst.tool_calls[0].function.name == "bash"
+        assert asst.tool_calls[0].function.arguments == '{"cmd": "ls"}'
+        assert [m.trainable for m in row.messages] == [False, False, True, False, True]
+        assert row.to_record()["task_id"] == "t1"
+
+    def test_import_rejects_removed_trim_whitespace_option(self, runner, tmp_rllm_home, tmp_path):
+        result = runner.invoke(
+            cli,
+            [
+                "dataset",
+                "import",
+                self._write_source(tmp_path),
+                "--name",
+                "must-not-trim",
+                "--trim-whitespace",
+            ],
+        )
+        assert result.exit_code == 2
+        assert "No such option" in result.output
+        assert "--trim-whitespace" in result.output
+
+    def test_think_tags_no_explode_preserves_complete_masks(self, runner, tmp_rllm_home, tmp_path):
+        source = {
+            "messages": [
+                {"role": "user", "content": "q", "trainable": False},
+                {"role": "assistant", "content": "<think>skip</think>bad", "trainable": False},
+                {"role": "user", "content": "retry", "trainable": False},
+                {"role": "assistant", "content": "<think>use</think>good", "trainable": True},
+            ]
+        }
+        path = tmp_path / "masked.jsonl"
+        path.write_text(json.dumps(source))
+
+        result = runner.invoke(
+            cli,
+            [
+                "dataset",
+                "import",
+                str(path),
+                "--name",
+                "masked-sft",
+                "--format",
+                "think-tags",
+                "--no-explode",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        row = self._reload("masked-sft")[0]
+        assert [m.trainable for m in row.messages] == [False, False, False, True]

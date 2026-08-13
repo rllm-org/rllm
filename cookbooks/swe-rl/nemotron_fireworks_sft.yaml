@@ -1,0 +1,56 @@
+# Fireworks port of the measured Nemotron 3 Nano SWE-agent SFT run.
+#
+# This file is merged over rllm/trainer/sft/config/fireworks.yaml.  Keep the
+# Fireworks model, Hugging Face tokenizer, and training shape in lockstep.
+
+model:
+  name: accounts/fireworks/models/nemotron-nano-3-30b-a3b
+  tokenizer_model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  lora_rank: 32
+  # fireworks-ai 1.2.1 defaults all three targets to true.  The pinned rLLM
+  # backend does not forward these fields, so the preflight verifies the SDK
+  # defaults before any paid trainer is provisioned.
+  train_unembed: true
+  train_attn: true
+  train_mlp: true
+
+fireworks_config:
+  policy_trainer_shape_id: accounts/fireworks/trainingShapes/nemotron-nano-3-30b-a3b-262k-b200-lora
+  policy_trainer_replica_count: 1
+
+data:
+  train_batch_size: 9
+  micro_batch_size_per_gpu: 9
+  train_max_samples: -1
+  val_max_samples: -1
+  max_length: 65536
+  renderer_name: nemotron3
+  rllm:
+    tokenize_and_mask_method: cumulative
+    group_by_length: false
+    length_group_factor: 50
+    overlength_policy: error
+    # Match the measured run: one cross-entropy mean over all supervised
+    # assistant tokens in the nine-trajectory optimizer batch.
+    loss_reduction: token_mean
+    strip_thinking_from_history: false
+
+optim:
+  lr: 1.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  lr_scheduler: cosine
+  warmup_steps_ratio: 0.0
+  warmup_steps: 50
+  min_lr: 1.0e-5
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+
+trainer:
+  total_epochs: 1
+  max_steps: 1000
+  logger: [console]
+  project_name: rllm-nemotron3-swe-sft
+  experiment_name: nemotron3-nano-30b-a3b-lora32-fireworks
+  save_freq: 250
+  test_freq: 100

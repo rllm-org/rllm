@@ -25,24 +25,29 @@ logger = logging.getLogger(__name__)
 def _to_openai_tool_calls(tool_calls: list) -> list[dict[str, Any]]:
     """Convert tool calls from any producer shape to the OpenAI wire format.
 
-    ``ModelOutput.tool_calls`` arrives in one of three shapes depending on which parser
+    ``ModelOutput.tool_calls`` arrives in one of four shapes depending on which parser
     ``assemble_model_output`` used:
 
     * prime-rl ``renderers`` (the unified renderer, e.g. ``parse_qwen35``): a **nested**
       dict ``{"function": {"name", "arguments"}}`` — the OpenAI-ish shape.
+    * tinker/Fireworks-cookbook ``ToolCall``: the same nesting as a pydantic
+      **object**, ``.function.name`` / ``.function.arguments``.
     * rLLM ``ToolCall`` object: ``.name`` / ``.arguments`` attributes.
     * flat dict: ``{"name", "arguments"}``.
 
-    The nested form is easy to mis-read: pulling top-level ``name``/``arguments`` off it
-    yields empty tool calls (name=""), which is exactly what broke OpenAI function-calling
-    clients like opencode — they received a structurally-present but empty tool call and
-    took no action. Extract ``function`` first, then object attrs, then flat keys.
+    Every nested form is easy to mis-read: pulling top-level ``name``/``arguments`` off
+    one yields empty tool calls (name=""), which is exactly what broke OpenAI
+    function-calling clients like opencode — they received a structurally-present but
+    empty tool call and took no action. Unwrap ``function`` first, in both dict and
+    attribute form, then fall back to the flat shapes.
     """
     result = []
     for i, tc in enumerate(tool_calls):
-        fn = tc.get("function") if isinstance(tc, dict) else None
+        fn = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
         if isinstance(fn, dict):  # prime-rl nested shape
             name, args = fn.get("name", ""), fn.get("arguments", {})
+        elif fn is not None:  # cookbook ToolCall: nested pydantic model
+            name, args = getattr(fn, "name", ""), getattr(fn, "arguments", {})
         elif isinstance(tc, dict):  # flat dict
             name, args = tc.get("name", ""), tc.get("arguments", {})
         else:  # rLLM ToolCall object

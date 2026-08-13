@@ -16,15 +16,17 @@ which builds tinker's structured ``ToolCall`` objects for the renderer.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+import re
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, model_validator
 
 # Message-level keys we recognize; everything else is dropped during cleanup.
 _MESSAGE_KEYS = ("role", "content", "trainable", "tool_calls", "tool_call_id", "name")
 # Optional keys that arrive as ``None`` from a parquet struct-unification round
 # trip; a ``None`` here means "absent", so we drop the key entirely.
 _OPTIONAL_NONE_KEYS = ("tool_calls", "tool_call_id", "name")
+_STRUCTURAL_THINK_RE = re.compile(r"\s*<think>.*?</think>", re.DOTALL)
 
 
 class SFTSchemaError(ValueError):
@@ -58,6 +60,23 @@ class ThinkingPart(BaseModel):
 
 # Discriminated on ``type`` so an unknown part type is a clean validation error.
 ContentPart = Annotated[TextPart | ThinkingPart, Field(discriminator="type")]
+
+
+def _has_structural_inline_thinking(content: Any) -> bool:
+    """Whether an assistant text stream starts with a complete think block."""
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        chunks: list[str] = []
+        for part in content:
+            if isinstance(part, TextPart):
+                chunks.append(part.text)
+            elif isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                chunks.append(part["text"])
+        text = "".join(chunks)
+    else:
+        return False
+    return _STRUCTURAL_THINK_RE.match(text) is not None
 
 
 # --- tool calls --------------------------------------------------------------
@@ -98,6 +117,15 @@ class SFTMessage(BaseModel):
     tool_calls: list[SFTToolCall] | None = None
     tool_call_id: str | None = None
     name: str | None = None
+
+    @model_validator(mode="after")
+    def reject_structural_inline_thinking(self, info: ValidationInfo):
+        allow_inline = bool((info.context or {}).get("allow_structural_inline_thinking_text"))
+        if not allow_inline and self.role == "assistant" and _has_structural_inline_thinking(self.content):
+            raise ValueError(
+                "assistant text begins with a structural <think>...</think> block; import wire-format text with `rllm dataset import --format think-tags` or provide canonical thinking parts."
+            )
+        return self
 
     def text(self) -> str:
         """Concatenated visible text across the message's ``TextPart``s."""
@@ -205,7 +233,12 @@ def normalize_message_dict(msg: dict) -> dict:
     return out
 
 
-def normalize_messages(messages, default_trainable: str = "all") -> list[SFTMessage]:
+def normalize_messages(
+    messages,
+    default_trainable: str = "all",
+    *,
+    allow_structural_inline_thinking_text: bool = False,
+) -> list[SFTMessage]:
     """Clean and validate a conversation into ``SFTMessage`` objects.
 
     Trainable-flag policy: if ANY message lacks a real bool ``trainable`` (missing
@@ -216,6 +249,21 @@ def normalize_messages(messages, default_trainable: str = "all") -> list[SFTMess
     """
     if not isinstance(messages, list) or len(messages) == 0:
         raise SFTSchemaError("'messages' must be a non-empty list of conversation turns.")
+
+    # Empty provider fields are serialization artifacts. Non-empty siblings are
+    # source data that must be lifted by the messages bridge rather than dropped.
+    for i, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        for reasoning_key in ("reasoning_content", "reasoning"):
+            if reasoning_key not in message:
+                continue
+            value = message[reasoning_key]
+            if value is None or (isinstance(value, str) and value == ""):
+                continue
+            if not isinstance(value, str):
+                raise SFTSchemaError(f"message {i} field {reasoning_key!r} must be a string, got {type(value).__name__}.")
+            raise SFTSchemaError(f"message {i} contains source field {reasoning_key!r}; import it through `rllm dataset import --format messages` so reasoning is preserved as a thinking part.")
 
     cleaned = [normalize_message_dict(m) for m in messages]
 
@@ -233,13 +281,23 @@ def normalize_messages(messages, default_trainable: str = "all") -> list[SFTMess
     out: list[SFTMessage] = []
     for i, m in enumerate(cleaned):
         try:
-            out.append(SFTMessage.model_validate(m))
+            out.append(
+                SFTMessage.model_validate(
+                    m,
+                    context={"allow_structural_inline_thinking_text": allow_structural_inline_thinking_text},
+                )
+            )
         except ValidationError as e:
             raise SFTSchemaError(f"message {i}: {e}") from e
     return out
 
 
-def normalize_row(row: dict, default_trainable: str = "all") -> SFTRow:
+def normalize_row(
+    row: dict,
+    default_trainable: str = "all",
+    *,
+    allow_structural_inline_thinking_text: bool = False,
+) -> SFTRow:
     """Normalize a single ``{"messages": [...], **extra}`` row into an ``SFTRow``.
 
     Raises :class:`SFTSchemaError` for a non-dict row, a missing/empty
@@ -251,10 +309,17 @@ def normalize_row(row: dict, default_trainable: str = "all") -> SFTRow:
     if "messages" not in row:
         raise SFTSchemaError("row is missing a 'messages' field.")
 
-    messages = normalize_messages(row["messages"], default_trainable=default_trainable)
+    messages = normalize_messages(
+        row["messages"],
+        default_trainable=default_trainable,
+        allow_structural_inline_thinking_text=allow_structural_inline_thinking_text,
+    )
     extra = {k: v for k, v in row.items() if k != "messages"}
     try:
-        return SFTRow(messages=messages, **extra)
+        return SFTRow.model_validate(
+            {"messages": messages, **extra},
+            context={"allow_structural_inline_thinking_text": allow_structural_inline_thinking_text},
+        )
     except ValidationError as e:  # pragma: no cover - extra="allow" makes this rare
         raise SFTSchemaError(str(e)) from e
 

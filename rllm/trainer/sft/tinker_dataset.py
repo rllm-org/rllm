@@ -7,7 +7,13 @@ Imported lazily by :class:`rllm.trainer.sft.tinker_backend.TinkerSFTBackend`, so
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import math
+import random
+from collections.abc import Iterable
+from typing import Literal
 
 import datasets
 import tinker
@@ -43,6 +49,46 @@ def _row_context(conversation, limit: int = 400) -> str:
     return text if len(text) <= limit else text[:limit] + "..."
 
 
+def _message_byte_length(messages) -> int:
+    """Cheap per-row length proxy: serialized byte length of the messages.
+
+    Mirrors the Fireworks training cookbook's ``group_by_length`` proxy (raw
+    JSONL byte length) — no tokenizer pass, and byte length tracks rendered
+    token count closely for text-only rows (poor for base64 image parts, which
+    this SFT path does not carry).
+    """
+    try:
+        return len(json.dumps(messages, default=str))
+    except (TypeError, ValueError):
+        return len(str(messages))
+
+
+def length_grouped_order(lengths: list[int], batch_size: int, factor: int, seed: int) -> list[int]:
+    """Row ordering that packs similarly-sized rows into the same batch.
+
+    Bucket-then-shuffle (the standard length-grouped sampler, matching the
+    Fireworks cookbook's ``group_by_length``): a fresh seeded permutation is cut
+    into windows of ``batch_size * factor`` rows, each window is sorted by length
+    descending, then flattened. Contiguous ``batch_size`` slices of the result
+    therefore hold near-equal-length rows, so a batch pads to little more than
+    its own rows' real length. The result is always a permutation of
+    ``range(len(lengths))`` — no row is dropped or duplicated — and is fully
+    determined by ``seed``.
+    """
+    n = len(lengths)
+    order = list(range(n))
+    random.Random(seed).shuffle(order)
+    if factor < 1:
+        factor = 1
+    window = max(1, batch_size) * factor
+    grouped: list[int] = []
+    for start in range(0, n, window):
+        chunk = order[start : start + window]
+        chunk.sort(key=lambda idx: lengths[idx], reverse=True)
+        grouped.extend(chunk)
+    return grouped
+
+
 # Process-wide truncation-warning counter: warn loudly on the first few
 # over-length rows, then thin out so a fully over-length dataset doesn't flood
 # the logs (one reminder every 1000 rows).
@@ -71,6 +117,10 @@ def conversation_to_datum(
     renderer: Renderer,
     max_length: int | None,
     last_only: bool = False,
+    *,
+    tools: list[dict] | None = None,
+    overlength_policy: Literal["error", "truncate"] = "error",
+    loss_reduction: Literal["none", "sequence_mean", "token_mean"] = "none",
 ) -> tinker.Datum:
     """Convert a conversation (list of messages) to a Tinker Datum.
 
@@ -90,10 +140,82 @@ def conversation_to_datum(
         tinker_messages = [m.to_tinker_message() for m in messages]
     except SFTSchemaError as e:
         raise SFTConfigError(f"SFT row failed schema normalization: {e}\n  row={_row_context(conversation)}") from e
-    model_input, weights = renderer.build_supervised_example(tinker_messages, train_on_what=TrainOnWhat.CUSTOMIZED)
+    if not getattr(renderer, "strip_thinking_from_history", False):
+        # Qwen-family templates keep reasoning only after the last genuine user
+        # query (tool observations do not reset the boundary). Apply the same
+        # policy as serving before the cookbook renderer sees structured parts.
+        from rllm.renderers.adapters import prepare_tinker_messages_for_history
+
+        tinker_messages = prepare_tinker_messages_for_history(
+            renderer,
+            tinker_messages,
+            lift_reasoning=False,
+        )
+    if tools and hasattr(renderer, "build_supervised_example_with_tools"):
+        model_input, weights = renderer.build_supervised_example_with_tools(
+            tinker_messages,
+            tools,
+            train_on_what=TrainOnWhat.CUSTOMIZED,
+        )
+    else:
+        if tools:
+            from rllm.renderers.adapters import prepare_tinker_messages_with_tools
+
+            try:
+                tinker_messages = prepare_tinker_messages_with_tools(
+                    renderer,
+                    tinker_messages,
+                    tools,
+                )
+            except (TypeError, ValueError) as e:
+                raise SFTConfigError(f"SFT row has invalid tool declarations: {e}") from e
+            for message in tinker_messages:
+                message.setdefault("trainable", False)
+        model_input, weights = renderer.build_supervised_example(
+            tinker_messages,
+            train_on_what=TrainOnWhat.CUSTOMIZED,
+        )
+
+    if overlength_policy not in ("error", "truncate"):
+        raise SFTConfigError(f"Unknown overlength policy {overlength_policy!r}; use 'error' or 'truncate'.")
+    if loss_reduction not in ("none", "sequence_mean", "token_mean"):
+        raise SFTConfigError(f"Unknown SFT loss reduction {loss_reduction!r}; use 'none', 'sequence_mean', or 'token_mean'.")
     if max_length is not None and model_input.length > max_length:
+        if overlength_policy == "error":
+            raise SFTConfigError(
+                f"SFT row renders to {model_input.length} tokens > data.max_length={max_length}. "
+                "The trajectory was not truncated. Drop it whole during preprocessing, raise "
+                "max_length, or explicitly select overlength_policy='truncate' for the lossy "
+                "compatibility behavior."
+            )
         _warn_truncation(model_input.length, max_length)
-    return datum_from_model_input_weights(model_input, weights, max_length)
+    datum_max_length = max_length if overlength_policy == "truncate" else None
+    reduction = "mean" if loss_reduction == "sequence_mean" else "none"
+    return datum_from_model_input_weights(
+        model_input,
+        weights,
+        datum_max_length,
+        reduction=reduction,
+    )
+
+
+def count_loss_tokens(datums: list[tinker.Datum]) -> int:
+    """Count supervised positions independently of loss-weight scaling."""
+    return sum(1 for datum in datums for weight in datum.loss_fn_inputs["weights"].data if weight > 0)
+
+
+def _normalize_token_mean(datums: list[tinker.Datum]) -> None:
+    """Make one batch loss the mean over all of its supervised tokens."""
+    total_weight = sum(float(weight) for datum in datums for weight in datum.loss_fn_inputs["weights"].data)
+    if total_weight <= 0:
+        raise SFTConfigError("SFT batch has no trainable tokens after rendering and masking.")
+    for datum in datums:
+        weights = datum.loss_fn_inputs["weights"]
+        datum.loss_fn_inputs["weights"] = tinker.TensorData(
+            data=[float(weight) / total_weight for weight in weights.data],
+            dtype=weights.dtype,
+            shape=list(weights.shape),
+        )
 
 
 class TinkerSFTDataset(SupervisedDataset):
@@ -112,11 +234,27 @@ class TinkerSFTDataset(SupervisedDataset):
         max_length: int | None = None,
         last_only: bool = False,
         max_samples: int = -1,
+        group_by_length: bool = False,
+        length_group_factor: int = 50,
+        overlength_policy: Literal["error", "truncate"] = "error",
+        loss_reduction: Literal["none", "sequence_mean", "token_mean"] = "none",
     ):
         self.renderer = renderer
+        if batch_size <= 0:
+            raise SFTConfigError(f"SFT batch_size must be positive, got {batch_size}.")
+        if max_length is not None and max_length <= 1:
+            raise SFTConfigError(f"SFT max_length must be greater than 1, got {max_length}.")
+        if overlength_policy not in ("error", "truncate"):
+            raise SFTConfigError(f"Unknown overlength policy {overlength_policy!r}; use 'error' or 'truncate'.")
+        if loss_reduction not in ("none", "sequence_mean", "token_mean"):
+            raise SFTConfigError(f"Unknown SFT loss reduction {loss_reduction!r}; use 'none', 'sequence_mean', or 'token_mean'.")
         self.batch_size = batch_size
         self.max_length = max_length
         self.last_only = last_only
+        self.group_by_length = group_by_length
+        self.length_group_factor = max(1, int(length_group_factor))
+        self.overlength_policy = overlength_policy
+        self.loss_reduction = loss_reduction
 
         if isinstance(dataset_or_files, str | list):
             if isinstance(dataset_or_files, str):
@@ -133,27 +271,150 @@ class TinkerSFTDataset(SupervisedDataset):
             self.dataset = self.dataset.select(range(max_samples))
             logger.info(f"Limited dataset to {max_samples} samples")
 
+        # Explicit per-epoch row ordering (identity until set_epoch); get_batch
+        # reads rows through it, so shuffling never mutates the base dataset and
+        # the length-grouping order can be recomputed each epoch. Row-length
+        # proxies are precomputed once, only when grouping is on.
+        self._order = list(range(len(self.dataset)))
+        self._lengths: list[int] | None = None
+        if self.group_by_length:
+            # Per-row indexing (not column access): the rLLM Dataset object and a
+            # parquet-backed HF dataset both index by int but only HF supports
+            # string columns.
+            self._lengths = [_message_byte_length(self.dataset[i]["messages"]) for i in range(len(self.dataset))]
+            logger.info(f"Length-grouped batching enabled (factor={self.length_group_factor})")
+
         logger.info(f"Loaded {len(self.dataset)} examples from {source}")
         logger.info(f"Masking: CUSTOMIZED (derive last_only={last_only} for flag-less rows)")
 
     def get_batch(self, index: int) -> list[tinker.Datum]:
         start_idx = index * self.batch_size
-        end_idx = min(start_idx + self.batch_size, len(self.dataset))
+        end_idx = min(start_idx + self.batch_size, len(self._order))
         datums = []
-        for i in range(start_idx, end_idx):
+        for pos in range(start_idx, end_idx):
+            i = self._order[pos]
             row = self.dataset[i]
             try:
-                datums.append(conversation_to_datum(row["messages"], self.renderer, self.max_length, self.last_only))
+                datums.append(
+                    conversation_to_datum(
+                        row["messages"],
+                        self.renderer,
+                        self.max_length,
+                        self.last_only,
+                        tools=row.get("tools"),
+                        overlength_policy=self.overlength_policy,
+                        loss_reduction=self.loss_reduction,
+                    )
+                )
             except SFTConfigError as e:
                 raise SFTConfigError(f"dataset row {i}: {e}") from e
+        if self.loss_reduction == "token_mean":
+            _normalize_token_mean(datums)
+        elif datums and count_loss_tokens(datums) == 0:
+            raise SFTConfigError("SFT batch has no trainable tokens after rendering and masking.")
         return datums
 
+    def preflight(
+        self,
+        label: str = "train",
+        planned_batches: Iterable[tuple[int, int]] | None = None,
+    ) -> None:
+        """Render planned batches without retaining rendered data."""
+        original_order = list(self._order)
+        try:
+            for batch_idx in range(len(self)):
+                try:
+                    self.get_batch(batch_idx)
+                except SFTConfigError as e:
+                    raise SFTConfigError(f"{label} preflight failed at batch {batch_idx}: {e}") from e
+            if planned_batches is None:
+                return
+
+            current_epoch = None
+            for epoch_idx, batch_idx in planned_batches:
+                if epoch_idx != current_epoch:
+                    self.set_epoch(seed=epoch_idx)
+                    current_epoch = epoch_idx
+                try:
+                    self.get_batch(batch_idx)
+                except SFTConfigError as e:
+                    raise SFTConfigError(f"{label} preflight failed at epoch {epoch_idx}, batch {batch_idx}: {e}") from e
+        finally:
+            self._order = original_order
+
+    def content_fingerprint(self) -> str:
+        """Hash the ordered training payload and batching boundary."""
+
+        def json_default(value):
+            if hasattr(value, "model_dump"):
+                return value.model_dump(mode="json", exclude_none=True)
+            if hasattr(value, "tolist"):
+                return value.tolist()
+            raise TypeError(f"Unsupported value {type(value).__name__} in SFT dataset fingerprint")
+
+        digest = hashlib.sha256()
+        header = json.dumps(
+            {"batch_size": self.batch_size, "row_count": len(self.dataset)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        digest.update(len(header).to_bytes(8, "big"))
+        digest.update(header)
+        for index in range(len(self.dataset)):
+            row = self.dataset[index]
+            payload = json.dumps(
+                {
+                    "messages": row["messages"],
+                    "tools": row.get("tools"),
+                },
+                default=json_default,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+        return digest.hexdigest()
+
     def set_epoch(self, seed: int = 0):
-        self.dataset = self.dataset.shuffle(seed=seed)
-        logger.info(f"Shuffled dataset with seed {seed} ({len(self.dataset)} samples)")
+        n = len(self.dataset)
+        if self.group_by_length and self._lengths is not None:
+            self._order = length_grouped_order(self._lengths, self.batch_size, self.length_group_factor, seed)
+            logger.info(f"Length-grouped order for epoch (seed={seed}, {n} samples)")
+        else:
+            order = list(range(n))
+            random.Random(seed).shuffle(order)
+            self._order = order
+            logger.info(f"Shuffled dataset with seed {seed} ({n} samples)")
 
     def __len__(self) -> int:
-        return len(self.dataset) // self.batch_size
+        return math.ceil(len(self.dataset) / self.batch_size)
+
+    def data_cursor_for_step(self, completed_steps: int) -> int:
+        """Raw-row cursor after ``completed_steps`` optimizer batches."""
+        batches_per_epoch = len(self)
+        if batches_per_epoch == 0:
+            return 0
+        completed_epochs, batches_in_epoch = divmod(completed_steps, batches_per_epoch)
+        rows_per_epoch = len(self.dataset)
+        return completed_epochs * rows_per_epoch + min(
+            batches_in_epoch * self.batch_size,
+            rows_per_epoch,
+        )
+
+    def step_for_data_cursor(self, data_consumed: int) -> int:
+        """Inverse of :meth:`data_cursor_for_step` at batch boundaries."""
+        if isinstance(data_consumed, bool) or not isinstance(data_consumed, int) or data_consumed < 0:
+            raise SFTConfigError(f"Checkpoint data cursor must be a non-negative integer, got {data_consumed!r}.")
+        rows_per_epoch = len(self.dataset)
+        if rows_per_epoch == 0:
+            return 0
+        completed_epochs, rows_in_epoch = divmod(data_consumed, rows_per_epoch)
+        batches_in_epoch = math.ceil(rows_in_epoch / self.batch_size)
+        step = completed_epochs * len(self) + batches_in_epoch
+        if self.data_cursor_for_step(step) != data_consumed:
+            raise SFTConfigError(f"Checkpoint data cursor {data_consumed} is not an exact SFT batch boundary; use a new trainer job or an intact rLLM checkpoint.")
+        return step
 
 
 def create_tinker_sft_datasets(
@@ -166,8 +427,18 @@ def create_tinker_sft_datasets(
     last_only: bool = False,
     max_train_samples: int = -1,
     max_val_samples: int = -1,
+    group_by_length: bool = False,
+    length_group_factor: int = 50,
+    overlength_policy: Literal["error", "truncate"] = "error",
+    loss_reduction: Literal["none", "sequence_mean", "token_mean"] = "none",
 ) -> tuple[TinkerSFTDataset, TinkerSFTDataset | None]:
-    """Create train and optional validation datasets for Tinker SFT."""
+    """Create train and optional validation datasets for Tinker SFT.
+
+    ``group_by_length`` applies only to the train dataset: validation iterates
+    every batch and reduces over all tokens, so its batch composition does not
+    affect the metric — only the (single, sequential) pass cost, which the extra
+    length-proxy computation would not repay.
+    """
     if val_batch_size is None:
         val_batch_size = batch_size
 
@@ -178,6 +449,10 @@ def create_tinker_sft_datasets(
         max_length=max_length,
         last_only=last_only,
         max_samples=max_train_samples,
+        group_by_length=group_by_length,
+        length_group_factor=length_group_factor,
+        overlength_policy=overlength_policy,
+        loss_reduction=loss_reduction,
     )
 
     val_dataset = None
@@ -189,6 +464,9 @@ def create_tinker_sft_datasets(
             max_length=max_length,
             last_only=last_only,
             max_samples=max_val_samples,
+            overlength_policy=overlength_policy,
+            # Validation is always reported as a token-weighted NLL.
+            loss_reduction="none",
         )
 
     return train_dataset, val_dataset

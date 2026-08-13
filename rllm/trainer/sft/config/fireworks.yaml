@@ -40,16 +40,26 @@ data:
   renderer_name: null   # null = auto-detect from the model; set explicitly to override, e.g. qwen3 / qwen3_5 / deepseekv3 / role_colon
   rllm:
     tokenize_and_mask_method: cumulative
+    group_by_length: false      # bucket similarly-sized rows into a batch (cuts padding waste + context-parallel degree on high-variance sets); batch count/resume unchanged
+    length_group_factor: 50     # mega-window = train_batch_size * this; larger -> tighter length grouping, weaker shuffle
+    overlength_policy: error
+    loss_reduction: none
+    strip_thinking_from_history: false
 
 optim:
   lr: 1e-5
   betas: [0.9, 0.95]
   eps: 1e-8
   lr_scheduler: constant
-  warmup_steps_ratio: 0.1
+  warmup_steps_ratio: 0.0     # linear LR warmup as a fraction of total steps (0 = off)
+  warmup_steps: -1            # absolute warmup steps; <=0 falls back to warmup_steps_ratio
+  min_lr: 0.0
+  weight_decay: 0.0
+  grad_clip_norm: 0.0
 
 trainer:
   total_epochs: 1
+  max_steps: null
   logger: ['console']
   project_name: 'rllm-fireworks-sft'
   experiment_name: 'default'
