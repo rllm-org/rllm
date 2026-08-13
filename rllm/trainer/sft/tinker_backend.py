@@ -419,19 +419,24 @@ class TinkerSFTBackend(SFTBackend):
 
     @staticmethod
     async def _validate(training_client, val_dataset, compute_mean_nll) -> dict[str, float]:
+        """Compute held-out NLL without adding validation gradients."""
         logger.info("Running validation...")
         total_nll = 0.0
         total_tokens = 0
         for batch_idx in range(len(val_dataset)):
             data = val_dataset.get_batch(batch_idx)
-            fwd_bwd_future = await training_client.forward_backward_async(data, loss_fn="cross_entropy")
-            fwd_bwd_result = await fwd_bwd_future.result_async()
-            logprobs = [x["logprobs"] for x in fwd_bwd_result.loss_fn_outputs]
+            forward_future = await training_client.forward_async(data, loss_fn="cross_entropy")
+            forward_result = await forward_future.result_async()
             weights = [datum.loss_fn_inputs["weights"] for datum in data]
+            batch_tokens = sum(sum(weight.data) for weight in weights)
+            if not batch_tokens:
+                continue
+            logprobs = [output["logprobs"] for output in forward_result.loss_fn_outputs]
             batch_nll = compute_mean_nll(logprobs, weights)
-            batch_tokens = sum(sum(datum.loss_fn_inputs["weights"].data) for datum in data)
             total_nll += batch_nll * batch_tokens
             total_tokens += batch_tokens
-        val_nll = total_nll / total_tokens if total_tokens > 0 else 0.0
+        if total_tokens <= 0:
+            raise SFTConfigError("The validation dataset has no trainable tokens after rendering and masking.")
+        val_nll = total_nll / total_tokens
         logger.info(f"Validation NLL: {val_nll:.4f}")
         return {"test/mean_nll": val_nll}

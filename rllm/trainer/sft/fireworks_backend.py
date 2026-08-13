@@ -344,16 +344,25 @@ class FireworksSFTBackend(TinkerSFTBackend):
                 pass
 
     @staticmethod
-    def _validate(client, val_dataset, timeout) -> dict[str, float]:
+    def _validate(client, val_dataset, _timeout=None) -> dict[str, float]:
+        """Compute held-out NLL without adding validation gradients."""
+        from tinker_cookbook.supervised.common import compute_mean_nll
+
         logger.info("Running validation...")
-        total_loss = 0.0
+        total_nll = 0.0
         total_tokens = 0
         for batch_idx in range(len(val_dataset)):
             data = val_dataset.get_batch(batch_idx)
-            fb_result = client.submit_forward_backward(data, loss_fn="cross_entropy").result(timeout=timeout)
-            m = getattr(fb_result, "metrics", {}) or {}
-            total_loss += m.get("loss:sum", 0.0)
-            total_tokens += m.get("response_tokens") or 0
-        val_loss = total_loss / total_tokens if total_tokens > 0 else 0.0
+            forward_result = client.forward(data, "cross_entropy")
+            weights = [datum.loss_fn_inputs["weights"] for datum in data]
+            batch_tokens = sum(sum(weight.data) for weight in weights)
+            if not batch_tokens:
+                continue
+            logprobs = [output["logprobs"] for output in forward_result.loss_fn_outputs]
+            total_nll += compute_mean_nll(logprobs, weights) * batch_tokens
+            total_tokens += batch_tokens
+        if total_tokens <= 0:
+            raise SFTConfigError("The validation dataset has no trainable tokens after rendering and masking.")
+        val_loss = total_nll / total_tokens
         logger.info(f"Validation loss: {val_loss:.4f}")
         return {"test/loss": val_loss}
