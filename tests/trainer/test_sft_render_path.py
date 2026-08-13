@@ -37,6 +37,7 @@ from tinker_cookbook.renderers import get_renderer  # noqa: E402
 
 from rllm.data import Dataset  # noqa: E402
 from rllm.trainer.sft import SFTSpec  # noqa: E402
+from rllm.trainer.sft.backend import SFTConfigError  # noqa: E402
 from rllm.trainer.sft.tinker_backend import TinkerSFTBackend, build_sft_data  # noqa: E402
 from rllm.trainer.sft.tinker_dataset import conversation_to_datum  # noqa: E402
 
@@ -73,6 +74,47 @@ def _trained_text(datum, tokenizer) -> str:
     """Decode only the tokens that carry loss (weight > 0)."""
     trained = [t for t, w in zip(_targets(datum), _weights(datum), strict=True) if w > 0]
     return tokenizer.decode(trained)
+
+
+def _full_tokens(datum) -> list[int]:
+    """Reconstruct the pre-shift token stream from a Datum."""
+    return _input_ids(datum) + _targets(datum)[-1:]
+
+
+def test_row_tools_reach_renderer_without_tokenizer():
+    import tinker
+    import torch
+
+    class RecordingRenderer:
+        strip_thinking_from_history = False
+
+        def create_conversation_prefix_with_tools(self, tools, system_prompt=""):
+            assert tools[0]["name"] == "bash"
+            return [{"role": "system", "content": system_prompt or "tools"}]
+
+        def build_supervised_example(self, messages, train_on_what):
+            self.messages = messages
+            return tinker.ModelInput.from_ints([1, 2, 3]), torch.tensor([0.0, 1.0, 1.0])
+
+    renderer = RecordingRenderer()
+    datum = conversation_to_datum(
+        [
+            {"role": "user", "content": "inspect", "trainable": False},
+            {"role": "assistant", "content": "done", "trainable": True},
+        ],
+        renderer,
+        max_length=None,
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": "bash", "parameters": {"type": "object"}},
+            }
+        ],
+    )
+
+    assert datum.model_input.length == 2
+    assert renderer.messages[0]["role"] == "system"
+    assert renderer.messages[0]["trainable"] is False
 
 
 # -- F1: default renderer must not crash on reasoning rows -------------------
@@ -279,3 +321,116 @@ def test_truncation_past_max_length_warns_loudly(qwen_tokenizer, caplog):
     with caplog.at_level(logging.WARNING, logger="rllm.trainer.sft.tinker_dataset"):
         conversation_to_datum(convo, renderer, max_length=100_000)
     assert not [r for r in caplog.records if "max_length" in r.getMessage()]
+
+
+def test_tools_and_reasoning_match_unified_serving_renderer(qwen_tokenizer):
+    from rllm.data.sft_bridges import bridge_messages
+    from rllm.renderers.adapters import TinkerRendererAdapter
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": "Run a shell command.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                },
+            },
+        }
+    ]
+    wire_messages = [
+        {"role": "system", "content": "Solve the task."},
+        {"role": "user", "content": "Inspect the repository."},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "I should list the files first.",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command":"ls"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "a.py"},
+        {
+            "role": "assistant",
+            "content": "Done.",
+            "reasoning_content": "The repository has one file.",
+        },
+    ]
+    canonical = bridge_messages([{"messages": wire_messages, "tools": tools}])[0].to_record()
+    dataset = Dataset(data=[canonical], name="tool-parity", split="train")
+    spec = SFTSpec(
+        model=QWEN,
+        train_dataset=dataset,
+        max_length=100_000,
+        overrides={"data": {"renderer_name": "qwen3"}},
+    )
+    config = TinkerSFTBackend(spec).build_config()
+    _, training_dataset, _ = build_sft_data(config, dataset, None)
+    datum = training_dataset.get_batch(0)[0]
+
+    serving_ids = TinkerRendererAdapter(get_renderer("qwen3", qwen_tokenizer)).render_ids(
+        wire_messages,
+        tools=tools,
+        add_generation_prompt=False,
+    )
+    assert _full_tokens(datum) == serving_ids
+    trained = _trained_text(datum, qwen_tokenizer)
+    assert "list the files" in trained
+    assert "repository has one file" in trained
+    assert "Inspect the repository" not in trained
+
+
+def test_new_user_query_strips_prior_reasoning_in_training_and_serving(qwen_tokenizer):
+    from rllm.data.sft_bridges import bridge_messages
+    from rllm.renderers.adapters import TinkerRendererAdapter
+
+    wire_messages = [
+        {"role": "user", "content": "First question."},
+        {
+            "role": "assistant",
+            "content": "First answer.",
+            "reasoning_content": "SECRET-OLD-REASONING",
+        },
+        {"role": "user", "content": "Second question."},
+        {
+            "role": "assistant",
+            "content": "Second answer.",
+            "reasoning_content": "CURRENT-REASONING",
+        },
+    ]
+    canonical = bridge_messages([{"messages": wire_messages}])[0]
+    renderer = get_renderer("qwen3", qwen_tokenizer)
+    renderer.strip_thinking_from_history = False
+    datum = conversation_to_datum(canonical.to_record()["messages"], renderer, max_length=None)
+    serving_ids = TinkerRendererAdapter(get_renderer("qwen3", qwen_tokenizer)).render_ids(
+        wire_messages,
+        add_generation_prompt=False,
+    )
+
+    assert _full_tokens(datum) == serving_ids
+    rendered = qwen_tokenizer.decode(serving_ids)
+    assert "SECRET-OLD-REASONING" not in rendered
+    assert "CURRENT-REASONING" in rendered
+
+
+def test_invalid_row_tool_declaration_fails_with_dataset_error(qwen_tokenizer):
+    renderer = get_renderer("qwen3", qwen_tokenizer)
+    messages = [
+        {"role": "user", "content": "inspect", "trainable": False},
+        {"role": "assistant", "content": "done", "trainable": True},
+    ]
+
+    with pytest.raises(SFTConfigError, match="invalid tool declarations"):
+        conversation_to_datum(
+            messages,
+            renderer,
+            max_length=None,
+            tools=[{"type": "custom", "name": "not-supported"}],
+        )

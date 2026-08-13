@@ -40,6 +40,7 @@ data:
   renderer_name: null   # null = auto-detect from the model; set explicitly to override, e.g. qwen3 / qwen3_5 / deepseekv3 / role_colon
   rllm:
     tokenize_and_mask_method: cumulative
+    strip_thinking_from_history: false
 
 optim:
   lr: 1e-5

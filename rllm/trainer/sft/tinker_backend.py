@@ -137,7 +137,9 @@ def build_sft_data(config, train_data, val_data):
     # reasoning/tool-calls fails fast before we render.
     renderer_name = _resolve_renderer_name(tokenizer_name, config.data.get("renderer_name", None))
     _guard_plain_renderer(renderer_name, train_data)
-    renderer = get_renderer(renderer_name, tokenizer)
+    renderer = get_renderer(renderer_name, tokenizer, model_name=tokenizer_name)
+    if hasattr(renderer, "strip_thinking_from_history"):
+        renderer.strip_thinking_from_history = bool(config.data.get("rllm", {}).get("strip_thinking_from_history", False))
     # Masking is always CUSTOMIZED, driven by each message's ``trainable`` flag:
     # rows from ``from-eval``'s automerge carry the flags directly; flag-less rows
     # (e.g. an external ``--train-file``) get a derived default in the dataset

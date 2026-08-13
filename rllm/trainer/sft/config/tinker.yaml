@@ -22,6 +22,7 @@ data:
   renderer_name: null   # null = auto-detect from the model; set explicitly to override, e.g. qwen3 / qwen3_5 / deepseekv3 / role_colon
   rllm:
     tokenize_and_mask_method: cumulative  # cumulative -> ALL_ASSISTANT_MESSAGES; stepwise -> LAST_ASSISTANT_MESSAGE
+    strip_thinking_from_history: false    # preserve the active reasoning trace, matching serving
 
 optim:
   lr: 1e-5

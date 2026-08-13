@@ -71,6 +71,8 @@ def conversation_to_datum(
     renderer: Renderer,
     max_length: int | None,
     last_only: bool = False,
+    *,
+    tools: list[dict] | None = None,
 ) -> tinker.Datum:
     """Convert a conversation (list of messages) to a Tinker Datum.
 
@@ -90,7 +92,39 @@ def conversation_to_datum(
         tinker_messages = [m.to_tinker_message() for m in messages]
     except SFTSchemaError as e:
         raise SFTConfigError(f"SFT row failed schema normalization: {e}\n  row={_row_context(conversation)}") from e
-    model_input, weights = renderer.build_supervised_example(tinker_messages, train_on_what=TrainOnWhat.CUSTOMIZED)
+    if not getattr(renderer, "strip_thinking_from_history", False):
+        from rllm.renderers.adapters import prepare_tinker_messages_for_history
+
+        tinker_messages = prepare_tinker_messages_for_history(
+            renderer,
+            tinker_messages,
+            lift_reasoning=False,
+        )
+
+    if tools and hasattr(renderer, "build_supervised_example_with_tools"):
+        model_input, weights = renderer.build_supervised_example_with_tools(
+            tinker_messages,
+            tools,
+            train_on_what=TrainOnWhat.CUSTOMIZED,
+        )
+    else:
+        if tools:
+            from rllm.renderers.adapters import prepare_tinker_messages_with_tools
+
+            try:
+                tinker_messages = prepare_tinker_messages_with_tools(
+                    renderer,
+                    tinker_messages,
+                    tools,
+                )
+            except (TypeError, ValueError) as e:
+                raise SFTConfigError(f"SFT row has invalid tool declarations: {e}") from e
+            for message in tinker_messages:
+                message.setdefault("trainable", False)
+        model_input, weights = renderer.build_supervised_example(
+            tinker_messages,
+            train_on_what=TrainOnWhat.CUSTOMIZED,
+        )
     if max_length is not None and model_input.length > max_length:
         _warn_truncation(model_input.length, max_length)
     return datum_from_model_input_weights(model_input, weights, max_length)
@@ -143,7 +177,15 @@ class TinkerSFTDataset(SupervisedDataset):
         for i in range(start_idx, end_idx):
             row = self.dataset[i]
             try:
-                datums.append(conversation_to_datum(row["messages"], self.renderer, self.max_length, self.last_only))
+                datums.append(
+                    conversation_to_datum(
+                        row["messages"],
+                        self.renderer,
+                        self.max_length,
+                        self.last_only,
+                        tools=row.get("tools"),
+                    )
+                )
             except SFTConfigError as e:
                 raise SFTConfigError(f"dataset row {i}: {e}") from e
         return datums
