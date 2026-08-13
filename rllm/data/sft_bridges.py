@@ -212,13 +212,27 @@ def _bridge_think_row(row: dict, explode: bool) -> list[SFTRow]:
     full_parts = [_content_to_parts(role, m.get("content")) for role, m in zip(roles, messages, strict=True)]
     hist_parts = [_strip_thinking(p) for p in full_parts]
     fields = _row_fields(row)
+    all_flagged = all(isinstance(m.get("trainable"), bool) for m in messages)
 
     if not explode:
-        msgs = [_make_message(messages[j], full_parts[j], roles[j] == "assistant", j) for j in range(len(messages))]
+        msgs = [
+            _make_message(
+                messages[j],
+                full_parts[j],
+                bool(messages[j]["trainable"]) if all_flagged else roles[j] == "assistant",
+                j,
+            )
+            for j in range(len(messages))
+        ]
         return [SFTRow(messages=msgs, **fields)]
 
+    def _is_target(index: int) -> bool:
+        if roles[index] != "assistant":
+            return False
+        return bool(messages[index].get("trainable")) if all_flagged else True
+
     rows: list[SFTRow] = []
-    for target in (j for j, role in enumerate(roles) if role == "assistant"):
+    for target in (j for j in range(len(messages)) if _is_target(j)):
         history = [_make_message(messages[j], hist_parts[j], False, j) for j in range(target)]
         history.append(_make_message(messages[target], full_parts[target], True, target))
         rows.append(SFTRow(messages=history, **fields))
@@ -251,10 +265,11 @@ def bridge_messages(rows: Sequence[dict], *, train_on: str = "all") -> list[SFTR
 def bridge_think_tags(rows: Sequence[dict], *, explode: bool = True) -> list[SFTRow]:
     """Bridge ``<think>``-tagged rows into schema rows.
 
-    ``explode=True`` (default) emits one row per assistant turn: history turns
-    are non-trainable with their CoT stripped, and the single final assistant
-    turn is the trainable target (CoT kept). ``explode=False`` emits one row per
-    conversation with every assistant turn trainable and CoT kept.
+    ``explode=True`` (default) emits one row per assistant target: history turns
+    are non-trainable with their CoT stripped, and the final assistant turn is
+    the trainable target. A complete source ``trainable`` mask selects targets;
+    otherwise every assistant turn is selected. ``explode=False`` preserves a
+    complete source mask and derives assistant targets when the mask is partial.
     """
     out: list[SFTRow] = []
     for i, row in enumerate(rows):

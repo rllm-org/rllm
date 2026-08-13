@@ -224,3 +224,28 @@ class TestDatasetImport:
         assert assistant.tool_calls[0].function.name == "bash"
         assert assistant.tool_calls[0].function.arguments == '{"cmd": "ls"}'
         assert row.to_record()["task_id"] == "t1"
+
+    def test_think_tags_preserve_complete_masks(self, runner, tmp_rllm_home, tmp_path):
+        source = {
+            "messages": [
+                {"role": "user", "content": "q", "trainable": False},
+                {"role": "assistant", "content": "<think>skip</think>bad", "trainable": False},
+                {"role": "user", "content": "retry", "trainable": False},
+                {"role": "assistant", "content": "<think>use</think>good", "trainable": True},
+            ]
+        }
+        path = tmp_path / "masked.jsonl"
+        path.write_text(json.dumps(source))
+
+        result = runner.invoke(
+            cli,
+            ["dataset", "import", str(path), "--name", "masked-sft", "--format", "think-tags", "--no-explode"],
+        )
+        assert result.exit_code == 0, result.output
+
+        from rllm.data import DatasetRegistry
+        from rllm.data.sft_schema import normalize_row
+
+        stored = DatasetRegistry.load_dataset("masked-sft", "train").get_data()[0]
+        row = normalize_row(stored)
+        assert [message.trainable for message in row.messages] == [False, False, False, True]

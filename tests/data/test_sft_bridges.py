@@ -41,6 +41,17 @@ ROW_NO_THINK = {
     "_reward": 0,
 }
 
+ROW_FLAGGED = {
+    "messages": [
+        {"role": "user", "content": "u1", "trainable": False},
+        {"role": "assistant", "content": "<think>plan A</think>first", "trainable": True},
+        {"role": "user", "content": "retry", "trainable": False},
+        {"role": "assistant", "content": "<think>oops</think>bad", "trainable": False},
+        {"role": "user", "content": "again", "trainable": False},
+        {"role": "assistant", "content": "<think>plan C</think>done", "trainable": True},
+    ]
+}
+
 
 def _n_assistant(row):
     return sum(1 for m in row["messages"] if m["role"] == "assistant")
@@ -100,6 +111,18 @@ def test_explode_history_stripped_single_trainable_target():
     assert hist_asst[0].text() == '{"cmd": "ls"}'
 
 
+def test_explode_honours_preexisting_trainable_flags():
+    rows = bridge_think_tags([ROW_FLAGGED])
+    assert len(rows) == 2
+    targets = [next(message for message in row.messages if message.trainable) for row in rows]
+    assert [target.thinking() for target in targets] == ["plan A", "plan C"]
+
+    masked = [message for message in rows[-1].messages if message.text() == "bad"]
+    assert len(masked) == 1
+    assert masked[0].trainable is False
+    assert masked[0].thinking() == ""
+
+
 # --- no-explode: one row per conversation ------------------------------------
 
 
@@ -113,6 +136,27 @@ def test_no_explode_single_row_all_assistant_trainable():
             assert any(isinstance(p, ThinkingPart) for p in m.content)  # ThinkingParts KEPT
         else:
             assert m.trainable is False
+
+
+def test_no_explode_honours_preexisting_trainable_flags():
+    row = bridge_think_tags([ROW_FLAGGED], explode=False)[0]
+    assert [message.trainable for message in row.messages] == [False, True, False, False, False, True]
+
+
+def test_no_explode_partial_flags_trigger_full_mask_derivation():
+    row = bridge_think_tags(
+        [
+            {
+                "messages": [
+                    {"role": "user", "content": "q", "trainable": False},
+                    {"role": "assistant", "content": "<think>plan</think>answer", "trainable": False},
+                    {"role": "user", "content": "follow-up"},
+                ]
+            }
+        ],
+        explode=False,
+    )[0]
+    assert [message.trainable for message in row.messages] == [False, True, False]
 
 
 # --- row-level extras passthrough --------------------------------------------
