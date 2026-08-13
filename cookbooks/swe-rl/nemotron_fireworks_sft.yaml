@@ -54,4 +54,3 @@ trainer:
   experiment_name: nemotron3-nano-30b-a3b-lora32-fireworks
   save_freq: 250
   test_freq: 100
-  default_local_dir: /tmp/rllm-nemotron3-fireworks-sft-checkpoints

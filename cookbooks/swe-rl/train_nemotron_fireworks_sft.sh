@@ -3,6 +3,9 @@
 # prepared train/validation Parquet files.
 #
 # Usage:
+#   bash cookbooks/swe-rl/setup_nemotron_fireworks_sft.sh
+#   source .venv-nemotron-fireworks-sft/bin/activate
+#   hf auth login
 #   export FIREWORKS_API_KEY=...
 #   bash cookbooks/swe-rl/train_nemotron_fireworks_sft.sh [DATASET_DIR]
 #
@@ -22,16 +25,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 CONFIG_PATH="${SCRIPT_DIR}/nemotron_fireworks_sft.yaml"
-DEFAULT_DATASET_DIR="${REPO_ROOT}/artifacts/nemotron-swe/approx-a/migrated"
+DEFAULT_ENV_DIR="${NEMOTRON_SFT_ENV_DIR:-${REPO_ROOT}/.venv-nemotron-fireworks-sft}"
+DEFAULT_DATASET_DIR="${REPO_ROOT}/artifacts/nemotron-swe/approx-a/hf-download"
 DATASET_DIR="${1:-${NEMOTRON_SFT_DATASET_DIR:-${DEFAULT_DATASET_DIR}}}"
 TRAIN_PATH="${DATASET_DIR}/train.parquet"
 VALIDATION_PATH="${DATASET_DIR}/validation.parquet"
 MANIFEST_PATH="${DATASET_DIR}/manifest.json"
 EXPECTED_TRAIN_SHA256="da467b1937cc3f2e7ce8687b8b6ea122090984faa3080becf3a3b37eb0900e16"
 EXPECTED_VALIDATION_SHA256="76a18380d127d2c65716ec1c063667dfc91577280366e39702b71aa9cd9aa9e9"
-EXPECTED_CONFIG_SHA256="0ad7b8a439397d725d187d10aeb9672488b7836a7edfe9141cf9c239dcebab2c"
+EXPECTED_CONFIG_SHA256="2ce851d7b27c12be8e09914d3e72e31d85f0c4e51a17830f6596fe535908ad40"
 REQUIRED_RLLM_BASE_REVISION="079c65d4237da01de0334735f3684f475c4d976f"
 TOKENIZER_REVISION="2d59de1cbd51c0adf384eb906b766d1aee0e0517"
+TOKENIZER_REPO="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
 DEFAULT_DATASET_REPO="mobius-lab/nemotron-swe-v3-rllm-sft-surrogate-a"
 DEFAULT_DATASET_REVISION="e775ddc45209d327afd8e26d9571c9761ca3d7ae"
 
@@ -40,15 +45,20 @@ if [[ $# -gt 1 ]]; then
     exit 2
 fi
 
+HF_BIN="${HF_BIN:-${DEFAULT_ENV_DIR}/bin/hf}"
+if [[ ! -x "${HF_BIN}" ]]; then
+    HF_BIN="$(command -v hf || true)"
+fi
+
 if [[ ! -f "${TRAIN_PATH}" || ! -f "${VALIDATION_PATH}" ]]; then
     DATASET_REPO="${NEMOTRON_SFT_DATASET_REPO:-${DEFAULT_DATASET_REPO}}"
     DATASET_REVISION="${NEMOTRON_SFT_DATASET_REVISION:-${DEFAULT_DATASET_REVISION}}"
-    if ! command -v hf >/dev/null 2>&1; then
+    if [[ -z "${HF_BIN}" || ! -x "${HF_BIN}" ]]; then
         echo "the Hugging Face 'hf' CLI is required to download ${DATASET_REPO}" >&2
         exit 1
     fi
     mkdir -p "${DATASET_DIR}"
-    hf download "${DATASET_REPO}" \
+    "${HF_BIN}" download "${DATASET_REPO}" \
         train.parquet validation.parquet manifest.json README.md \
         --repo-type dataset \
         --revision "${DATASET_REVISION}" \
@@ -94,7 +104,10 @@ else
     echo "warning: ${MANIFEST_PATH} is absent; Parquet hashes still match" >&2
 fi
 
-RLLM_BIN="${RLLM_BIN:-${REPO_ROOT}/.venv/bin/rllm}"
+RLLM_BIN="${RLLM_BIN:-${DEFAULT_ENV_DIR}/bin/rllm}"
+if [[ ! -x "${RLLM_BIN}" ]]; then
+    RLLM_BIN="${REPO_ROOT}/.venv/bin/rllm"
+fi
 if [[ ! -x "${RLLM_BIN}" ]]; then
     RLLM_BIN="$(command -v rllm || true)"
 fi
@@ -123,6 +136,7 @@ expected = {
     "rllm": "0.3.0rc0",
     "fireworks-ai": "1.2.1",
     "fireworks-training-cookbook": "0.1.0",
+    "huggingface-hub": "0.36.2",
     "tinker": "0.22.7",
     "tinker-cookbook": "0.4.2",
     "transformers": "4.57.6",
@@ -158,17 +172,58 @@ if problems:
     raise SystemExit("runtime mismatch:\n- " + "\n- ".join(problems))
 PY
 
-export HF_HUB_CACHE="${HF_HUB_CACHE:-${REPO_ROOT}/../.hf-tokenizer-cache}"
-if [[ "${NEMOTRON_SFT_OFFLINE:-1}" == "1" ]]; then
-    TOKENIZER_REF="${HF_HUB_CACHE}/models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/refs/main"
-    if [[ ! -f "${TOKENIZER_REF}" || "$(<"${TOKENIZER_REF}")" != "${TOKENIZER_REVISION}" ]]; then
-        echo "the pinned Nemotron tokenizer revision is not cached under ${HF_HUB_CACHE}" >&2
-        echo "populate the cache first or set NEMOTRON_SFT_OFFLINE=0 for a non-identical online resolution" >&2
+TOKENIZER_CACHE="${NEMOTRON_SFT_TOKENIZER_CACHE:-${REPO_ROOT}/artifacts/nemotron-swe/tokenizer-cache}"
+TOKENIZER_REPO_CACHE="${TOKENIZER_CACHE}/models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+TOKENIZER_SNAPSHOT="${TOKENIZER_REPO_CACHE}/snapshots/${TOKENIZER_REVISION}"
+TOKENIZER_FILES=(
+    chat_template.jinja
+    config.json
+    special_tokens_map.json
+    tokenizer.json
+    tokenizer_config.json
+)
+TOKENIZER_SHA256=(
+    ab7813c3abdd9cb655905a410728b26c7884eca45ddfab8d9f931553485a7862
+    dd9fa380ac107b0477db5a26108db9febe6378e7bb3966a107944853ec4f76f8
+    e3a4f63da745f02317a45e00e6476c17fc66ac41faf14bb1b0be1f3211b0ca53
+    c6021eb6847e682f89aa52d5eb6e8c7d902a23acfc8137e25211cf84828f1592
+    3d568e506d0905285ae90a3fdd1482be7b6d0bf0b8ca9514d75dad4257b0827a
+)
+
+tokenizer_missing=0
+for filename in "${TOKENIZER_FILES[@]}"; do
+    if [[ ! -f "${TOKENIZER_SNAPSHOT}/${filename}" ]]; then
+        tokenizer_missing=1
+    fi
+done
+if [[ "${tokenizer_missing}" == "1" ]]; then
+    if [[ "${NEMOTRON_SFT_OFFLINE:-0}" == "1" ]]; then
+        echo "the pinned Nemotron tokenizer is absent and NEMOTRON_SFT_OFFLINE=1" >&2
         exit 1
     fi
-    export HF_HUB_OFFLINE=1
-    export TRANSFORMERS_OFFLINE=1
+    if [[ -z "${HF_BIN}" || ! -x "${HF_BIN}" ]]; then
+        echo "the Hugging Face 'hf' CLI is required to download ${TOKENIZER_REPO}" >&2
+        exit 1
+    fi
+    "${HF_BIN}" download "${TOKENIZER_REPO}" "${TOKENIZER_FILES[@]}" \
+        --revision "${TOKENIZER_REVISION}" \
+        --cache-dir "${TOKENIZER_CACHE}"
 fi
+
+for index in "${!TOKENIZER_FILES[@]}"; do
+    verify_sha256 \
+        "${TOKENIZER_SNAPSHOT}/${TOKENIZER_FILES[index]}" \
+        "${TOKENIZER_SHA256[index]}"
+done
+
+# Use a recipe-owned cache so resolving the model ID offline is pinned without
+# mutating the user's general Hugging Face cache or the remote tokenizer ID
+# passed to Fireworks provisioning.
+mkdir -p "${TOKENIZER_REPO_CACHE}/refs"
+printf '%s\n' "${TOKENIZER_REVISION}" > "${TOKENIZER_REPO_CACHE}/refs/main"
+export HF_HUB_CACHE="${TOKENIZER_CACHE}"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 
