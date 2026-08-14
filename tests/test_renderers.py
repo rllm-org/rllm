@@ -8,6 +8,7 @@ are skipped if it (or tinker_cookbook) is unavailable. Run offline.
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,7 +16,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from rllm.renderers import BridgingRendererMixin, get_renderer, resolve  # noqa: E402
-from rllm.renderers.adapters import ChatTemplateAdapter  # noqa: E402
+from rllm.renderers.adapters import ChatTemplateAdapter, TinkerRendererAdapter  # noqa: E402
 
 QWEN = "Qwen/Qwen3-0.6B"
 
@@ -124,6 +125,54 @@ def test_tinker_adapter_renders(qwen_tokenizer):
     ids = a.render_ids([{"role": "user", "content": "hi"}], add_generation_prompt=True)
     assert ids and isinstance(ids[0], int)
     assert a.get_stop_token_ids()  # non-empty
+
+
+def test_tinker_parse_normalizes_structured_content_and_tool_calls():
+    class CookbookRenderer:
+        @staticmethod
+        def get_stop_sequences():
+            return [99]
+
+        @staticmethod
+        def parse_response(_token_ids):
+            return (
+                {
+                    "content": [
+                        {"type": "thinking", "thinking": "first\n"},
+                        {"type": "thinking", "thinking": "second"},
+                        {"type": "text", "text": "answer "},
+                        {"type": "text", "text": "body"},
+                    ],
+                    "tool_calls": [
+                        SimpleNamespace(
+                            id="call_1",
+                            function=SimpleNamespace(name="bash", arguments='{"command":"ls"}'),
+                        )
+                    ],
+                },
+                None,
+            )
+
+    parsed = TinkerRendererAdapter(CookbookRenderer()).parse_response([1, 2, 3], tools=[])
+
+    assert parsed.reasoning_content == "first\nsecond"
+    assert parsed.content == "answer body"
+    import renderers
+
+    parsed_tool_call_type = getattr(renderers, "ParsedToolCall", None)
+    if parsed_tool_call_type is None:
+        assert parsed.tool_calls == [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": '{"command":"ls"}'},
+            }
+        ]
+    else:
+        assert isinstance(parsed.tool_calls[0], parsed_tool_call_type)
+        assert parsed.tool_calls[0].name == "bash"
+        assert parsed.tool_calls[0].arguments == '{"command":"ls"}'
+        assert parsed.tool_calls[0].status.value == "ok"
 
 
 def test_tinker_adapter_bridge_matches_prime(qwen_tokenizer):
