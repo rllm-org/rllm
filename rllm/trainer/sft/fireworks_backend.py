@@ -21,11 +21,14 @@ Requires ``FIREWORKS_API_KEY``. Fireworks SDK imports are deferred to
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +57,29 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_FILE = Path(__file__).resolve().parent / "config" / "fireworks.yaml"
 _RESUME_NOT_CHECKED = object()
+
+
+def _fireworks_mean_loss(result: Any, loss_weight: Real) -> float:
+    """Compute mean NLL from strict provider loss and local Datum weight mass."""
+    metrics = getattr(result, "metrics", None)
+    value = metrics.get("loss:sum") if isinstance(metrics, Mapping) else None
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(float(value)):
+        raise SFTConfigError(f"Fireworks forward/backward returned invalid loss:sum metric {value!r}.")
+    if isinstance(loss_weight, bool) or not isinstance(loss_weight, Real) or not math.isfinite(float(loss_weight)) or loss_weight <= 0:
+        raise SFTConfigError(f"Fireworks batch has invalid loss-weight mass {loss_weight!r}.")
+    return float(value) / float(loss_weight)
+
+
+def _fireworks_optimizer_metrics(result: Any) -> dict[str, Real]:
+    """Preserve finite numeric optimizer telemetry under a provider namespace."""
+    raw = getattr(result, "metrics", None)
+    if not isinstance(raw, Mapping):
+        return {}
+    metrics = {}
+    for key, value in raw.items():
+        if isinstance(key, str) and not isinstance(value, bool) and isinstance(value, Real) and math.isfinite(float(value)):
+            metrics[f"fireworks/optimizer/{key}"] = value
+    return metrics
 
 
 @dataclass
@@ -478,6 +504,11 @@ class FireworksSFTBackend(TinkerSFTBackend):
                         weight_decay=optimizer.weight_decay,
                         grad_clip_norm=optimizer.grad_clip_norm,
                     )
+                    # The pinned Fireworks SDK serializes this Adam field and
+                    # returns provider-named global/RMS grad metrics. It does not
+                    # add gradient normalization; Datum weights remain the sole
+                    # implementation of token_mean.
+                    adam = adam.model_copy(update={"emit_grad_norm_metrics": "basic"})
                     data = train_dataset.get_batch(batch_idx)
                     fb_fut = client.submit_forward_backward(data, loss_fn="cross_entropy")
                     # Datum weights encode reduction; provider normalization would double-divide token_mean.
@@ -493,14 +524,13 @@ class FireworksSFTBackend(TinkerSFTBackend):
 
                 def finish_batch(submitted: _SubmittedFireworksBatch):
                     fb_result = submitted.fb_future.result(timeout=DEFAULT_TIMEOUT_S)
-                    submitted.opt_future.result(timeout=DEFAULT_TIMEOUT_S)
+                    opt_result = submitted.opt_future.result(timeout=DEFAULT_TIMEOUT_S)
                     # Fireworks exposes only aggregate loss. Divide by the
                     # submitted weight mass, while logging the independent count
                     # of positive-weight tokens (normalization can rescale mass).
-                    fb_metrics = getattr(fb_result, "metrics", {}) or {}
                     n_loss_tokens = count_loss_tokens(submitted.data)
                     loss_weight = sum_loss_weights(submitted.data)
-                    train_loss = (fb_metrics.get("loss:sum", 0.0) / loss_weight) if loss_weight else 0.0
+                    train_loss = _fireworks_mean_loss(fb_result, loss_weight)
                     completed_steps = submitted.step + 1
                     metrics = {
                         "learning_rate": submitted.learning_rate,
@@ -510,6 +540,7 @@ class FireworksSFTBackend(TinkerSFTBackend):
                         "train_loss": train_loss,
                         "time/total": time.time() - submitted.started_at,
                     }
+                    metrics.update(_fireworks_optimizer_metrics(opt_result))
                     if should_validate_step(
                         completed_steps,
                         eval_every=eval_every,
