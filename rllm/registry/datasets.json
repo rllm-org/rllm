@@ -1,6 +1,18 @@
 {
   "version": 1,
   "datasets": {
+    "gdpval": {
+      "description": "GDPval graded against OpenAI's weighted rubric by a multimodal LLM judge (dense [0,1] reward). Not AA's methodology, which is pairwise against human experts.",
+      "source": "openai/gdpval",
+      "builder": "rllm.data.gdpval_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "train"
+      ],
+      "eval_split": "train",
+      "default_agent": "gdpval-stirrup",
+      "reward_fn": "gdpval_rubric_reward_fn"
+    },
     "claw_eval": {
       "description": "Claw-Eval general split: 161 personal-assistant agent tasks (sandbox; LLM-judge graded)",
       "source": "claw-eval/Claw-Eval",

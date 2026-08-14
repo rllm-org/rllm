@@ -65,6 +65,11 @@
       "module": "rllm.harnesses.zeroclaw",
       "function": "ZeroClawHarness",
       "description": "Run the ZeroClaw autonomous-assistant CLI inside the sandbox."
+    },
+    "gdpval-stirrup": {
+      "module": "rllm.harnesses.gdpval_stirrup",
+      "function": "GdpvalStirrupHarness",
+      "description": "Stirrup under Artificial Analysis' GDPval-AA v2 contract."
     }
   }
 }

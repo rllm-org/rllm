@@ -114,6 +114,18 @@ langgraph = [
     "langchain-openai>=0.2.0",
 ]
 
+# Host-side document parsing for the ``gdpval`` grader. Without these the
+# judge receives an extraction-error marker instead of the deliverable and
+# returns a confident low score, so the grader refuses to run without them.
+gdpval = [
+    "openpyxl>=3.1",     # .xlsx
+    "python-docx>=1.0",  # .docx
+    "python-pptx>=1.0",  # .pptx
+    "pdfplumber>=0.11",  # .pdf text
+    "pymupdf>=1.26",     # pdf -> page images
+    "pillow>=10.0",
+]
+
 swe = [
     "docker",
     "kubernetes",
@@ -189,6 +201,11 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+# Verbatim transcription of AA's published GDPval prompts; reflowing them would
+# defeat the point of the snapshot.
+"tests/data/test_gdpval_aa_spec.py" = ["E501"]
+# Long OCI LABEL text is a single unbreakable string.
+"rllm/data/gdpval_aa/__init__.py" = ["E501"]
 "rllm/rewards/code_utils/**" = ["ALL"]
 # Prompt / string-heavy files where long lines are intentional
 "rllm/agents/system_prompts.py" = ["E501"]
@@ -213,7 +230,7 @@ where   = ["."]
 include = ["rllm", "rllm.*"]
 
 [tool.setuptools.package-data]
-rllm = ["trainer/**/config/**/*.yaml", "registry/*.json"]
+rllm = ["trainer/**/config/**/*.yaml", "registry/*.json", "data/gdpval_aa/*.txt"]
 
 [tool.mypy]
 plugins = ["pydantic.mypy"]

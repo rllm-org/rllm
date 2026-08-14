@@ -1,0 +1,8 @@
+## Reference Files Location
+
+The reference files for the task are available in your environment's file system.
+
+Here are their paths:
+
+{reference_file_lines}
+
