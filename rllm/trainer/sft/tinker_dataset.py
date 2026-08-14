@@ -7,6 +7,7 @@ Imported lazily by :class:`rllm.trainer.sft.tinker_backend.TinkerSFTBackend`, so
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -327,7 +328,7 @@ class TinkerSFTDataset(SupervisedDataset):
 
         # Every epoch is derived from this stable source order. This makes the
         # sequence rendered during preflight identical to the sequence consumed
-        # during training, without letting preflight mutate training state.
+        # during training and resume, without letting preflight mutate state.
         self._source_dataset = self.dataset
 
         logger.info(f"Loaded {len(self.dataset)} examples from {source}")
@@ -396,12 +397,61 @@ class TinkerSFTDataset(SupervisedDataset):
         finally:
             self.dataset = original_dataset
 
+    def content_fingerprint(self) -> str:
+        """Hash the ordered source rows that determine rendered training data."""
+
+        def json_default(value):
+            if hasattr(value, "model_dump"):
+                return value.model_dump(mode="json", exclude_none=True)
+            if hasattr(value, "tolist"):
+                return value.tolist()
+            raise TypeError(f"Unsupported value {type(value).__name__} in SFT dataset fingerprint")
+
+        digest = hashlib.sha256()
+        for index in range(len(self._source_dataset)):
+            row = self._source_dataset[index]
+            payload = json.dumps(
+                {"messages": row["messages"], "tools": row.get("tools")},
+                default=json_default,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+        return digest.hexdigest()
+
     def set_epoch(self, seed: int = 0):
         self.dataset = self._source_dataset.shuffle(seed=seed)
         logger.info(f"Shuffled dataset with seed {seed} ({len(self.dataset)} samples)")
 
     def __len__(self) -> int:
         return math.ceil(len(self.dataset) / self.batch_size)
+
+    def data_cursor_for_step(self, completed_steps: int) -> int:
+        """Return the raw-row cursor after ``completed_steps`` batches."""
+        if isinstance(completed_steps, bool) or not isinstance(completed_steps, int) or completed_steps < 0:
+            raise SFTConfigError(f"Completed SFT steps must be a non-negative integer, got {completed_steps!r}.")
+        batches_per_epoch = len(self)
+        if batches_per_epoch == 0:
+            return 0
+        completed_epochs, batches_in_epoch = divmod(completed_steps, batches_per_epoch)
+        rows_per_epoch = len(self._source_dataset)
+        return completed_epochs * rows_per_epoch + min(batches_in_epoch * self.batch_size, rows_per_epoch)
+
+    def step_for_data_cursor(self, data_consumed: int) -> int:
+        """Invert :meth:`data_cursor_for_step` at exact batch boundaries."""
+        if isinstance(data_consumed, bool) or not isinstance(data_consumed, int) or data_consumed < 0:
+            raise SFTConfigError(f"Checkpoint data cursor must be a non-negative integer, got {data_consumed!r}.")
+        rows_per_epoch = len(self._source_dataset)
+        if rows_per_epoch == 0:
+            return 0
+        completed_epochs, rows_in_epoch = divmod(data_consumed, rows_per_epoch)
+        batches_in_epoch = math.ceil(rows_in_epoch / self.batch_size)
+        step = completed_epochs * len(self) + batches_in_epoch
+        if self.data_cursor_for_step(step) != data_consumed:
+            raise SFTConfigError(f"Checkpoint data cursor {data_consumed} is not an exact SFT batch boundary; use a new trainer job or an intact rLLM checkpoint.")
+        return step
 
 
 def create_tinker_sft_datasets(

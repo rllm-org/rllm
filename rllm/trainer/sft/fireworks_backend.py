@@ -25,26 +25,127 @@ import os
 import re
 import tempfile
 import time
-from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
 
 from rllm.trainer.sft.backend import SFTConfigError
 from rllm.trainer.sft.tinker_backend import (
+    PreparedResumeManifest,
+    SFTOptimizerSettings,
+    SFTResumeContract,
     TinkerSFTBackend,
+    _is_step_boundary,
     build_adam_params,
+    build_hosted_resume_contract,
     build_sft_data,
-    iter_training_batches,
+    iter_training_batches_from_step,
+    prepare_hosted_resume_manifest,
     resolve_sft_optimizer_settings,
     resolve_training_steps,
     sft_lr_multiplier,
     should_validate_step,
+    update_hosted_resume_manifest,
 )
 
 logger = logging.getLogger(__name__)
 
 _CONFIG_FILE = Path(__file__).resolve().parent / "config" / "fireworks.yaml"
+_RESUME_NOT_CHECKED = object()
+
+
+@dataclass
+class _SubmittedFireworksBatch:
+    step: int
+    data: list[Any]
+    learning_rate: float
+    started_at: float
+    fb_future: Any
+    opt_future: Any
+
+
+def _configured_policy_job_id(config) -> str | None:
+    value = OmegaConf.select(config, "fireworks_infra.trainers.policy.job_id")
+    return str(value) if value else None
+
+
+def build_fireworks_resume_contract(
+    config,
+    train_dataset,
+    optimizer: SFTOptimizerSettings,
+    *,
+    n_batches: int,
+    total_steps: int,
+) -> SFTResumeContract:
+    """Build the local identity for a Fireworks optimizer-state resume."""
+    return build_hosted_resume_contract(
+        config,
+        train_dataset,
+        optimizer,
+        backend="fireworks",
+        provider={
+            "training_shape_id": str(config.fireworks_config.policy_trainer_shape_id),
+        },
+        n_batches=n_batches,
+        total_steps=total_steps,
+    )
+
+
+def prepare_fireworks_resume_contract(
+    checkpoint_dir: str,
+    contract: SFTResumeContract,
+    *,
+    configured_job_id: str | None,
+) -> PreparedResumeManifest:
+    """Validate local identity before provisioning or reattaching a trainer."""
+    prepared = prepare_hosted_resume_manifest(
+        checkpoint_dir,
+        contract,
+        require_existing=configured_job_id is not None,
+    )
+    bound_job_id = prepared.data.get("provider_job_id")
+    if bound_job_id is not None and (not isinstance(bound_job_id, str) or not bound_job_id):
+        raise SFTConfigError("Fireworks run identity has an invalid provider_job_id. Use a new output directory.")
+    if configured_job_id is not None:
+        if bound_job_id is None:
+            raise SFTConfigError("Cannot reattach the Fireworks trainer: the local run manifest has no provider job identity. Use a new output directory.")
+        if bound_job_id != configured_job_id:
+            raise SFTConfigError(f"Cannot reattach Fireworks job {configured_job_id!r}: the local run manifest belongs to {bound_job_id!r}. Use the matching output directory.")
+    elif bound_job_id is not None:
+        raise SFTConfigError(f"The Fireworks output directory belongs to provider job {bound_job_id!r}. Set fireworks_infra.trainers.policy.job_id to reattach it, or use a new output directory.")
+    return prepared
+
+
+def validate_fireworks_resume_contract(
+    prepared: PreparedResumeManifest,
+    *,
+    configured_job_id: str | None,
+    actual_job_id: str,
+    resume_info=_RESUME_NOT_CHECKED,
+) -> PreparedResumeManifest:
+    """Bind the provider job, then optionally validate its resume state."""
+    if not isinstance(actual_job_id, str) or not actual_job_id:
+        raise SFTConfigError("Fireworks provisioning did not return a provider job identity; exact resume is unavailable.")
+    if configured_job_id is not None and actual_job_id != configured_job_id:
+        raise SFTConfigError(f"Fireworks reattached job {actual_job_id!r}, expected configured job {configured_job_id!r}.")
+
+    bound_job_id = prepared.data.get("provider_job_id")
+    if configured_job_id is not None and bound_job_id is None:
+        raise SFTConfigError("Cannot reattach the Fireworks trainer: the local run manifest has no provider job identity. Use a new output directory.")
+    if bound_job_id is not None and bound_job_id != actual_job_id:
+        raise SFTConfigError(f"Fireworks job {actual_job_id!r} does not match the local run manifest job {bound_job_id!r}.")
+    if bound_job_id is None:
+        prepared = update_hosted_resume_manifest(prepared, provider_job_id=actual_job_id)
+
+    if resume_info is _RESUME_NOT_CHECKED:
+        return prepared
+    if configured_job_id is not None and resume_info is None:
+        raise SFTConfigError(f"Fireworks reattached job {configured_job_id!r}, but it has no resumable checkpoint/cursor. Exact resume is unavailable; use a new output directory.")
+    if configured_job_id is None and resume_info is not None:
+        raise SFTConfigError("A newly provisioned Fireworks job unexpectedly contained a checkpoint. Refusing an identity-ambiguous resume; use a new output directory.")
+    return prepared
 
 
 class FireworksSFTBackend(TinkerSFTBackend):
@@ -105,6 +206,29 @@ class FireworksSFTBackend(TinkerSFTBackend):
             cfg = OmegaConf.merge(cfg, OmegaConf.create(spec.overrides))
         self._align_shape_with_lora_rank(cfg)
         self._require_consistent_model_swap(base, cfg)
+        user = OmegaConf.to_container(OmegaConf.create(spec.overrides), resolve=False) if spec.overrides else {}
+        user_trainer = user.get("trainer") if isinstance(user, dict) else None
+        explicit_override = isinstance(user_trainer, dict) and user_trainer.get("default_local_dir") is not None
+        self._resume_requested = bool(spec.output_dir) or explicit_override
+        configured_job_id = _configured_policy_job_id(cfg)
+        if configured_job_id is not None and not self._resume_requested:
+            raise SFTConfigError(
+                "Reattaching a Fireworks trainer via fireworks_infra.trainers.policy.job_id requires an explicit --output (or trainer.default_local_dir override) containing its local cursor metadata."
+            )
+        if not self._resume_requested:
+            experiment = (
+                re.sub(
+                    r"[^A-Za-z0-9._-]+",
+                    "-",
+                    str(cfg.trainer.get("experiment_name") or "default"),
+                ).strip("-._")
+                or "default"
+            )
+            cfg.trainer.default_local_dir = os.path.join(
+                str(cfg.trainer.default_local_dir),
+                experiment,
+                self._run_leaf,
+            )
         self._config = cfg
         return cfg
 
@@ -183,14 +307,15 @@ class FireworksSFTBackend(TinkerSFTBackend):
         finally:
             doc_path.unlink(missing_ok=True)
 
-        # cleanup_existing/cleanup_on_close mirror the RL backend: rllm provisions
-        # a fresh trainer per run and tears it down on exit.
+        # Provider trainer state is the durable half of the resume contract.
+        # ``infra.close()`` must release local/client handles without deleting a
+        # fresh or reattached trainer after an exception, Ctrl-C, or relaunch.
         return init_fireworks_infra(
             "sft",
             provision_cfg,
             base_url=base_url,
-            cleanup_on_close=True,
-            cleanup_existing=True,
+            cleanup_on_close=False,
+            cleanup_existing=False,
         )
 
     def fit(self) -> None:
@@ -212,16 +337,11 @@ class FireworksSFTBackend(TinkerSFTBackend):
             raise SFTConfigError("FIREWORKS_API_KEY is not set; required for the fireworks SFT backend.")
         base_url = os.environ.get("FIREWORKS_BASE_URL", config.get("fireworks_base_url", "https://api.fireworks.ai"))
 
-        # <local dir>/<experiment>/<run stamp>/ — the template default is a fixed
-        # shared /tmp path, and even an explicit --output collides across
-        # relaunches; a per-run stamp keeps every run's logs/metadata separate.
-        # Safe here: Fireworks SFT resume is server-side (job DCP), not local.
-        run_stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
-        config.trainer.default_local_dir = os.path.join(
-            config.trainer.default_local_dir,
-            config.trainer.get("experiment_name") or "default",
-            run_stamp,
-        )
+        # A generated path is isolated per backend instance. An explicit path is
+        # stable because Fireworks keeps its exact data cursor locally beside the
+        # run manifest; changing this path would make provider resume ambiguous.
+        if not self._resume_requested and os.path.exists(config.trainer.default_local_dir):
+            raise SFTConfigError("The generated Fireworks run directory already exists; create a new backend instance so a fresh isolated directory can be selected.")
         os.makedirs(config.trainer.default_local_dir, exist_ok=True)
         lora_rank = config.model.get("lora_rank", 32)
 
@@ -253,9 +373,10 @@ class FireworksSFTBackend(TinkerSFTBackend):
                 label="train",
                 planned_batches=(
                     (epoch_idx, batch_idx)
-                    for _step, epoch_idx, batch_idx in iter_training_batches(
+                    for _step, epoch_idx, batch_idx in iter_training_batches_from_step(
                         n_batches=n_batches,
                         total_epochs=total_epochs,
+                        start_step=0,
                         max_steps=max_steps,
                     )
                 ),
@@ -263,8 +384,29 @@ class FireworksSFTBackend(TinkerSFTBackend):
             if val_dataset is not None:
                 val_dataset.preflight(label="validation")
 
+            resume_contract = build_fireworks_resume_contract(
+                config,
+                train_dataset,
+                optimizer,
+                n_batches=n_batches,
+                total_steps=total_steps,
+            )
+            configured_job_id = _configured_policy_job_id(config)
+            prepared_manifest = prepare_fireworks_resume_contract(
+                config.trainer.default_local_dir,
+                resume_contract,
+                configured_job_id=configured_job_id,
+            )
+
             infra = self._provision(config, api_key, base_url)
             try:
+                # Persist the provider identity before any checkpoint call, so a
+                # failure during resume discovery cannot orphan a durable job.
+                prepared_manifest = validate_fireworks_resume_contract(
+                    prepared_manifest,
+                    configured_job_id=configured_job_id,
+                    actual_job_id=infra.policy_job_id,
+                )
                 client = infra.policy
                 ckpt = TrainingCheckpoints(
                     client,
@@ -276,7 +418,27 @@ class FireworksSFTBackend(TinkerSFTBackend):
 
                 # Auto-resume from the newest resumable checkpoint, if any.
                 resume = ckpt.resume()
-                start_step = resume.step if resume else 0
+                validate_fireworks_resume_contract(
+                    prepared_manifest,
+                    configured_job_id=configured_job_id,
+                    actual_job_id=infra.policy_job_id,
+                    resume_info=resume,
+                )
+                if resume is not None:
+                    data_consumed = getattr(resume, "data_consumed", None)
+                    if isinstance(data_consumed, bool) or not isinstance(data_consumed, int) or data_consumed <= 0:
+                        raise SFTConfigError(
+                            "Fireworks found a resumable checkpoint without a positive persisted dataset cursor; "
+                            "refusing to replay training data. Use a new trainer job or restore its dataloader.json."
+                        )
+                    # Fireworks may rename the requested checkpoint (for example
+                    # step-42 to step-0), so its name-derived ``step`` is not a
+                    # data cursor. The raw-row cursor persisted by rLLM is.
+                    start_step = train_dataset.step_for_data_cursor(data_consumed)
+                else:
+                    start_step = 0
+                if not 0 <= start_step <= total_steps:
+                    raise SFTConfigError(f"Fireworks checkpoint step {start_step!r} is outside the resolved SFT horizon 0..{total_steps}; use a new trainer job or an intact rLLM checkpoint.")
 
                 logger.info(f"Training for {n_batches} batches x {total_epochs} epochs = {total_steps} steps")
 
@@ -291,10 +453,16 @@ class FireworksSFTBackend(TinkerSFTBackend):
                         step=0,
                     )
 
-                # Pipelined sync loop: keep one (fwd_bwd, optim) pair in flight.
-                in_flight: deque = deque()
+                current_epoch: int | None = None
+                pending: _SubmittedFireworksBatch | None = None
 
-                def submit(step: int):
+                def submit_batch(step: int, epoch_idx: int, batch_idx: int):
+                    nonlocal current_epoch
+                    if epoch_idx != current_epoch:
+                        logger.info("Starting epoch %d", epoch_idx)
+                        train_dataset.set_epoch(seed=epoch_idx)
+                        current_epoch = epoch_idx
+                    started_at = time.time()
                     lr = optimizer.learning_rate * sft_lr_multiplier(
                         optimizer.lr_schedule,
                         step,
@@ -310,67 +478,99 @@ class FireworksSFTBackend(TinkerSFTBackend):
                         weight_decay=optimizer.weight_decay,
                         grad_clip_norm=optimizer.grad_clip_norm,
                     )
-                    data = train_dataset.get_batch(step % n_batches)
+                    data = train_dataset.get_batch(batch_idx)
                     fb_fut = client.submit_forward_backward(data, loss_fn="cross_entropy")
                     # Datum weights encode reduction; provider normalization would double-divide token_mean.
                     opt_fut = client.submit_optim_step(adam)
-                    in_flight.append((step, lr, data, fb_fut, opt_fut, time.time()))
+                    return _SubmittedFireworksBatch(
+                        step=step,
+                        data=data,
+                        learning_rate=lr,
+                        started_at=started_at,
+                        fb_future=fb_fut,
+                        opt_future=opt_fut,
+                    )
 
-                def collect():
-                    step, lr, data, fb_fut, opt_fut, t0 = in_flight.popleft()
-                    fb_result = fb_fut.result(timeout=DEFAULT_TIMEOUT_S)
-                    opt_fut.result(timeout=DEFAULT_TIMEOUT_S)
+                def finish_batch(submitted: _SubmittedFireworksBatch):
+                    fb_result = submitted.fb_future.result(timeout=DEFAULT_TIMEOUT_S)
+                    submitted.opt_future.result(timeout=DEFAULT_TIMEOUT_S)
                     # Fireworks exposes only aggregate loss. Divide by the
                     # submitted weight mass, while logging the independent count
                     # of positive-weight tokens (normalization can rescale mass).
                     fb_metrics = getattr(fb_result, "metrics", {}) or {}
-                    n_loss_tokens = count_loss_tokens(data)
-                    loss_weight = sum_loss_weights(data)
+                    n_loss_tokens = count_loss_tokens(submitted.data)
+                    loss_weight = sum_loss_weights(submitted.data)
                     train_loss = (fb_metrics.get("loss:sum", 0.0) / loss_weight) if loss_weight else 0.0
+                    completed_steps = submitted.step + 1
                     metrics = {
-                        "learning_rate": lr,
-                        "progress": min((step + 1) / progress_denominator, 1.0),
-                        "num_sequences": len(data),
+                        "learning_rate": submitted.learning_rate,
+                        "progress": min(completed_steps / progress_denominator, 1.0),
+                        "num_sequences": len(submitted.data),
                         "num_loss_tokens": n_loss_tokens,
                         "train_loss": train_loss,
-                        "time/total": time.time() - t0,
+                        "time/total": time.time() - submitted.started_at,
                     }
-                    completed_steps = step + 1
                     if should_validate_step(
                         completed_steps,
                         eval_every=eval_every,
                         has_validation=val_dataset is not None,
                     ):
                         metrics.update(self._validate(client, val_dataset, DEFAULT_TIMEOUT_S))
+                    if save_every > 0 and completed_steps % save_every == 0 and completed_steps < total_steps:
+                        logger.info("Saving checkpoint at step %d", completed_steps)
+                        ckpt.save(
+                            f"step-{completed_steps}",
+                            resumable=True,
+                            promotable=False,
+                            data_consumed=train_dataset.data_cursor_for_step(completed_steps),
+                        )
                     tracking_logger.log(data=metrics, step=completed_steps)
-                    logger.info(f"Step {completed_steps}: train_loss={train_loss:.4f}, lr={lr:.2e}")
-                    if save_every > 0 and step % save_every == 0 and step > 0:
-                        logger.info(f"Saving checkpoint at step {step}")
-                        ckpt.save(f"step-{step}", resumable=True, promotable=False)
+                    logger.info(
+                        "Step %d: train_loss=%.4f, lr=%.2e",
+                        completed_steps,
+                        train_loss,
+                        submitted.learning_rate,
+                    )
 
-                for step in range(start_step, total_steps):
-                    if step % n_batches == 0:
-                        train_dataset.set_epoch(seed=step // n_batches)
-                    if in_flight and should_validate_step(
-                        in_flight[0][0] + 1,
+                for step, epoch_idx, batch_idx in iter_training_batches_from_step(
+                    n_batches=n_batches,
+                    total_epochs=total_epochs,
+                    start_step=start_step,
+                    max_steps=max_steps,
+                ):
+                    if pending is None:
+                        pending = submit_batch(step, epoch_idx, batch_idx)
+                        continue
+
+                    if _is_step_boundary(
+                        pending.step + 1,
+                        total_steps,
+                        save_every=save_every,
                         eval_every=eval_every,
                         has_validation=val_dataset is not None,
                     ):
-                        collect()
-                    submit(step)
-                    if len(in_flight) > 1:
-                        collect()
-                while in_flight:
-                    collect()
+                        finish_batch(pending)
+                        pending = submit_batch(step, epoch_idx, batch_idx)
+                    else:
+                        following = submit_batch(step, epoch_idx, batch_idx)
+                        finish_batch(pending)
+                        pending = following
+                if pending is not None:
+                    finish_batch(pending)
 
                 if total_steps > start_step:
                     logger.info(f"Saving final checkpoint at step {total_steps}")
                     # promotable=True writes the servable sampler row that
                     # ``promote_latest`` needs. Without it the weights are a
                     # resumable-only DCP blob, GC'd after the job's ~30-day retention
-                    # window — so promote BEFORE ``finally: infra.close()`` deletes the
+                    # window, so promote it before detaching from the retained
                     # trainer job. Mirrors the RL path and the SDK sft recipe.
-                    ckpt.save(f"step-{total_steps}", resumable=True, promotable=True)
+                    ckpt.save(
+                        f"step-{total_steps}",
+                        resumable=True,
+                        promotable=True,
+                        data_consumed=train_dataset.data_cursor_for_step(total_steps),
+                    )
                     artifact = "LoRA adapter" if lora_rank else "full-weight model"
                     experiment = config.trainer.get("experiment_name") or "default"
                     output_model_id = re.sub(r"[^a-z0-9-]+", "-", f"{config.trainer.get('project_name', 'rllm-sft')}-{experiment}".lower()).strip("-")[:63]
@@ -380,7 +580,7 @@ class FireworksSFTBackend(TinkerSFTBackend):
                     except Exception:
                         logger.exception(
                             "Final %s promotion failed. The promotable sampler checkpoint for job %s "
-                            "survives job deletion for ~30 days; promote it manually via "
+                            "remains available for manual promotion via "
                             "TrainerJobManager.promote_checkpoint(name=<row from list_checkpoints>, "
                             "output_model_id=%r, base_model=%r).",
                             artifact,
