@@ -215,6 +215,7 @@ async def run_dataset(
                 reward=reward,
                 is_correct=bool(episode.is_correct),
                 signals=signals,
+                metrics=dict(episode.metrics or {}),
                 error=error_msg,
                 termination_reason=reason.value if reason is not None else None,
             )
