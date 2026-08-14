@@ -278,6 +278,11 @@ def iter_training_batches_from_step(
     )
 
 
+def iter_preflight_batches(*, n_batches: int, total_steps: int):
+    """Validate each planned source-row occurrence once, in epoch-0 order."""
+    return ((0, batch) for batch in range(min(n_batches, total_steps)))
+
+
 def sft_lr_multiplier(
     lr_schedule: str,
     step: int,
@@ -834,14 +839,7 @@ class TinkerSFTBackend(SFTBackend):
 
         train_dataset.preflight(
             label="train",
-            planned_batches=(
-                (epoch_idx, batch_idx)
-                for _step, epoch_idx, batch_idx in iter_training_batches(
-                    n_batches=n_batches,
-                    total_epochs=total_epochs,
-                    max_steps=max_steps,
-                )
-            ),
+            planned_batches=iter_preflight_batches(n_batches=n_batches, total_steps=total_steps),
         )
         if val_dataset is not None:
             val_dataset.preflight(label="validation")

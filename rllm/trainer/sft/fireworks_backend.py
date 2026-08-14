@@ -44,6 +44,7 @@ from rllm.trainer.sft.tinker_backend import (
     build_adam_params,
     build_hosted_resume_contract,
     build_sft_data,
+    iter_preflight_batches,
     iter_training_batches_from_step,
     prepare_hosted_resume_manifest,
     resolve_sft_optimizer_settings,
@@ -397,15 +398,7 @@ class FireworksSFTBackend(TinkerSFTBackend):
 
             train_dataset.preflight(
                 label="train",
-                planned_batches=(
-                    (epoch_idx, batch_idx)
-                    for _step, epoch_idx, batch_idx in iter_training_batches_from_step(
-                        n_batches=n_batches,
-                        total_epochs=total_epochs,
-                        start_step=0,
-                        max_steps=max_steps,
-                    )
-                ),
+                planned_batches=iter_preflight_batches(n_batches=n_batches, total_steps=total_steps),
             )
             if val_dataset is not None:
                 val_dataset.preflight(label="validation")
