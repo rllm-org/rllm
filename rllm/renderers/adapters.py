@@ -11,17 +11,77 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .bridging import BridgingRendererMixin
 from .types import ParsedResponse, RenderedTokens
 
 
-def _to_parsed(content: str, reasoning: str | None, tool_calls: Any) -> ParsedResponse:
+def _flatten_parts(content: Any) -> tuple[str, str]:
+    """Split structured renderer content into visible text and thinking."""
+    if not isinstance(content, list):
+        return content or "", ""
+    text = "".join(part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text")
+    thinking = "".join(part.get("thinking", "") for part in content if isinstance(part, dict) and part.get("type") == "thinking")
+    return text, thinking
+
+
+def _to_openai_tool_call(tool_call: Any) -> dict[str, Any]:
+    """Normalize renderer-owned tool calls to the canonical nested shape."""
+    if isinstance(tool_call, dict):
+        function = tool_call.get("function")
+        if isinstance(function, dict):
+            return {
+                "id": tool_call.get("id"),
+                "type": tool_call.get("type", "function"),
+                "function": {
+                    "name": function.get("name", ""),
+                    "arguments": function.get("arguments", "{}"),
+                },
+            }
+        name = tool_call.get("name", "")
+        arguments = tool_call.get("arguments", "{}")
+        tool_call_id = tool_call.get("id")
+    else:
+        function = getattr(tool_call, "function", None)
+        source = function if function is not None else tool_call
+        name = getattr(source, "name", "")
+        arguments = getattr(source, "arguments", "{}")
+        tool_call_id = getattr(tool_call, "id", None)
+    return {
+        "id": tool_call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+
+
+def _to_versioned_tool_call(tool_call: Any) -> Any:
+    """Return the tool-call type required by the installed renderer API."""
+    normalized = _to_openai_tool_call(tool_call)
+    try:
+        from renderers import ParsedToolCall  # type: ignore
+    except ImportError:
+        return normalized
+    if isinstance(tool_call, ParsedToolCall):
+        return tool_call
+    function = normalized["function"]
+    return ParsedToolCall(
+        raw=json.dumps(normalized, separators=(",", ":")),
+        name=function["name"],
+        arguments=function["arguments"],
+        id=normalized["id"],
+    )
+
+
+def _to_parsed(content: Any, reasoning: str | None, tool_calls: Any) -> ParsedResponse:
+    if isinstance(content, list):
+        content, thinking = _flatten_parts(content)
+        reasoning = reasoning or thinking
     return ParsedResponse(
         content=content or "",
         reasoning_content=reasoning or None,
-        tool_calls=list(tool_calls) if tool_calls else None,
+        tool_calls=[_to_versioned_tool_call(tool_call) for tool_call in tool_calls or []],
     )
 
 
@@ -61,7 +121,7 @@ class TinkerRendererAdapter(BridgingRendererMixin):
     def get_stop_token_ids(self) -> list[int]:
         return [int(t) for t in self._inner.get_stop_sequences()]
 
-    def parse_response(self, token_ids: list[int]) -> ParsedResponse:
+    def parse_response(self, token_ids: list[int], *, tools=None) -> ParsedResponse:
         msg, _term = self._inner.parse_response(list(token_ids))
         get = msg.get if isinstance(msg, dict) else (lambda k, d=None: getattr(msg, k, d))
         return _to_parsed(get("content", ""), get("reasoning_content"), get("tool_calls"))
@@ -88,5 +148,5 @@ class ChatTemplateAdapter(BridgingRendererMixin):
     def get_stop_token_ids(self) -> list[int]:
         return list(self.close_token_ids)
 
-    def parse_response(self, token_ids: list[int]) -> ParsedResponse:
+    def parse_response(self, token_ids: list[int], *, tools=None) -> ParsedResponse:
         return _to_parsed(self._tok.decode(list(token_ids), skip_special_tokens=True), None, None)
