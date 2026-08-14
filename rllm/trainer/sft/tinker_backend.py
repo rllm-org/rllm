@@ -137,6 +137,21 @@ def build_sft_data(config, train_data, val_data):
     return tokenizer, train_dataset, val_dataset
 
 
+def should_validate_step(
+    completed_steps: int,
+    *,
+    eval_every: int,
+    has_validation: bool,
+    include_initial: bool = False,
+) -> bool:
+    """Whether validation belongs at this completed-update boundary."""
+    if not has_validation or eval_every <= 0:
+        return False
+    if completed_steps == 0:
+        return include_initial
+    return completed_steps % eval_every == 0
+
+
 @dataclass
 class _SubmittedBatch:
     """A batch submitted to Tinker (forward-backward + optim step in flight)."""
@@ -312,6 +327,17 @@ class TinkerSFTBackend(SFTBackend):
             save_every = config.trainer.get("save_freq", 20)
             eval_every = config.trainer.get("test_freq", 10)
 
+            if should_validate_step(
+                0,
+                eval_every=eval_every,
+                has_validation=val_dataset is not None,
+                include_initial=start_epoch == 0 and start_batch == 0,
+            ):
+                initial_metrics: dict[str, Any] = {}
+                with timed("validation", initial_metrics):
+                    initial_metrics.update(await self._validate(training_client, val_dataset, compute_mean_nll))
+                tracking_logger.log(data=initial_metrics, step=0)
+
             async def submit_batch(epoch_idx: int, batch_idx: int) -> _SubmittedBatch:
                 step = epoch_idx * n_batches + batch_idx
                 batch_start_time = time.time()
@@ -356,13 +382,18 @@ class TinkerSFTBackend(SFTBackend):
                 )
                 metrics["time/total"] = time.time() - submitted.batch_start_time
 
-                if val_dataset and eval_every > 0 and submitted.step % eval_every == 0 and submitted.step > 0:
+                completed_steps = submitted.step + 1
+                if should_validate_step(
+                    completed_steps,
+                    eval_every=eval_every,
+                    has_validation=val_dataset is not None,
+                ):
                     with timed("validation", metrics):
                         val_metrics = await self._validate(training_client, val_dataset, compute_mean_nll)
                     metrics.update(val_metrics)
 
-                tracking_logger.log(data=metrics, step=submitted.step)
-                logger.info(f"Step {submitted.step}: train_nll={train_nll:.4f}, lr={metrics['learning_rate']:.2e}")
+                tracking_logger.log(data=metrics, step=completed_steps)
+                logger.info(f"Step {completed_steps}: train_nll={train_nll:.4f}, lr={metrics['learning_rate']:.2e}")
 
             pending: _SubmittedBatch | None = None
             for epoch_idx in range(start_epoch, total_epochs):
@@ -370,6 +401,13 @@ class TinkerSFTBackend(SFTBackend):
                 train_dataset.set_epoch(seed=epoch_idx)
                 start_batch_idx = start_batch if epoch_idx == start_epoch else 0
                 for batch_idx in range(start_batch_idx, n_batches):
+                    if pending is not None and should_validate_step(
+                        pending.step + 1,
+                        eval_every=eval_every,
+                        has_validation=val_dataset is not None,
+                    ):
+                        await finish_batch(pending)
+                        pending = None
                     submitted = await submit_batch(epoch_idx, batch_idx)
                     if pending is not None:
                         await finish_batch(pending)
@@ -398,19 +436,24 @@ class TinkerSFTBackend(SFTBackend):
 
     @staticmethod
     async def _validate(training_client, val_dataset, compute_mean_nll) -> dict[str, float]:
+        """Compute held-out NLL without adding validation gradients."""
         logger.info("Running validation...")
         total_nll = 0.0
         total_tokens = 0
         for batch_idx in range(len(val_dataset)):
             data = val_dataset.get_batch(batch_idx)
-            fwd_bwd_future = await training_client.forward_backward_async(data, loss_fn="cross_entropy")
-            fwd_bwd_result = await fwd_bwd_future.result_async()
-            logprobs = [x["logprobs"] for x in fwd_bwd_result.loss_fn_outputs]
             weights = [datum.loss_fn_inputs["weights"] for datum in data]
+            batch_tokens = sum(sum(weight.data) for weight in weights)
+            if not batch_tokens:
+                continue
+            forward_future = await training_client.forward_async(data, loss_fn="cross_entropy")
+            forward_result = await forward_future.result_async()
+            logprobs = [output["logprobs"] for output in forward_result.loss_fn_outputs]
             batch_nll = compute_mean_nll(logprobs, weights)
-            batch_tokens = sum(sum(datum.loss_fn_inputs["weights"].data) for datum in data)
             total_nll += batch_nll * batch_tokens
             total_tokens += batch_tokens
-        val_nll = total_nll / total_tokens if total_tokens > 0 else 0.0
+        if total_tokens <= 0:
+            raise SFTConfigError("The validation dataset has no trainable tokens after rendering and masking.")
+        val_nll = total_nll / total_tokens
         logger.info(f"Validation NLL: {val_nll:.4f}")
         return {"test/mean_nll": val_nll}
