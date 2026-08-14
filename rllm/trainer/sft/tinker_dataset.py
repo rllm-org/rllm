@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+from collections.abc import Iterable
+from typing import Literal
 
 import datasets
 import tinker
@@ -113,6 +116,8 @@ def conversation_to_datum(
     last_only: bool = False,
     *,
     tools: list[dict] | None = None,
+    overlength_policy: Literal["error", "truncate"] = "truncate",
+    loss_reduction: Literal["none", "sequence_mean", "token_mean"] = "none",
 ) -> tinker.Datum:
     """Convert a conversation (list of messages) to a Tinker Datum.
 
@@ -155,9 +160,61 @@ def conversation_to_datum(
         dtype=torch.float32,
     )
     model_input = tinker.ModelInput.from_ints(rendered.token_ids)
+    if overlength_policy not in ("error", "truncate"):
+        raise SFTConfigError(f"Unknown overlength policy {overlength_policy!r}; use 'error' or 'truncate'.")
+    if loss_reduction not in ("none", "sequence_mean", "token_mean"):
+        raise SFTConfigError(f"Unknown SFT loss reduction {loss_reduction!r}; use 'none', 'sequence_mean', or 'token_mean'.")
     if max_length is not None and model_input.length > max_length:
+        if overlength_policy == "error":
+            raise SFTConfigError(
+                f"SFT row renders to {model_input.length} tokens > data.max_length={max_length}. "
+                "The trajectory was not truncated. Drop it whole during preprocessing, raise max_length, "
+                "or explicitly select overlength_policy='truncate'."
+            )
         _warn_truncation(model_input.length, max_length)
-    return datum_from_model_input_weights(model_input, weights, max_length)
+    datum_max_length = max_length if overlength_policy == "truncate" else None
+    reduction = "mean" if loss_reduction == "sequence_mean" else "none"
+    datum = datum_from_model_input_weights(
+        model_input,
+        weights,
+        datum_max_length,
+        reduction=reduction,
+    )
+    _validate_datum_loss(datum, conversation)
+    return datum
+
+
+def count_loss_tokens(datums: list[tinker.Datum]) -> int:
+    """Count supervised positions independently of loss-weight scaling."""
+    return sum(1 for datum in datums for weight in datum.loss_fn_inputs["weights"].data if weight > 0)
+
+
+def sum_loss_weights(datums: list[tinker.Datum]) -> float:
+    """Return the loss denominator represented by a rendered batch."""
+    return sum(float(weight) for datum in datums for weight in datum.loss_fn_inputs["weights"].data)
+
+
+def _validate_datum_loss(datum: tinker.Datum, conversation: list[Message]) -> None:
+    """Reject a malformed or zero-loss row before it can hide in a batch."""
+    weights = [float(weight) for weight in datum.loss_fn_inputs["weights"].data]
+    if any(not math.isfinite(weight) or weight < 0 for weight in weights):
+        raise SFTConfigError(f"SFT row produced invalid loss weights after rendering and masking. Weights must be finite and non-negative.\n  row={_row_context(conversation)}")
+    if not any(weight > 0 for weight in weights):
+        raise SFTConfigError(f"SFT row has no trainable tokens after rendering, masking, and truncation. Check its trainable flags and overlength policy.\n  row={_row_context(conversation)}")
+
+
+def _normalize_token_mean(datums: list[tinker.Datum]) -> None:
+    """Make one batch loss the mean over all supervised tokens."""
+    total_weight = sum_loss_weights(datums)
+    if total_weight <= 0:
+        raise SFTConfigError("SFT batch has no trainable tokens after rendering and masking.")
+    for datum in datums:
+        weights = datum.loss_fn_inputs["weights"]
+        datum.loss_fn_inputs["weights"] = tinker.TensorData(
+            data=[float(weight) / total_weight for weight in weights.data],
+            dtype=weights.dtype,
+            shape=list(weights.shape),
+        )
 
 
 def _to_renderer_message(message: SFTMessage) -> dict:
@@ -235,11 +292,23 @@ class TinkerSFTDataset(SupervisedDataset):
         max_length: int | None = None,
         last_only: bool = False,
         max_samples: int = -1,
+        overlength_policy: Literal["error", "truncate"] = "truncate",
+        loss_reduction: Literal["none", "sequence_mean", "token_mean"] = "none",
     ):
         self.renderer = renderer
+        if batch_size <= 0:
+            raise SFTConfigError(f"SFT batch_size must be positive, got {batch_size}.")
+        if max_length is not None and max_length <= 1:
+            raise SFTConfigError(f"SFT max_length must be greater than 1, got {max_length}.")
+        if overlength_policy not in ("error", "truncate"):
+            raise SFTConfigError(f"Unknown overlength policy {overlength_policy!r}; use 'error' or 'truncate'.")
+        if loss_reduction not in ("none", "sequence_mean", "token_mean"):
+            raise SFTConfigError(f"Unknown SFT loss reduction {loss_reduction!r}; use 'none', 'sequence_mean', or 'token_mean'.")
         self.batch_size = batch_size
         self.max_length = max_length
         self.last_only = last_only
+        self.overlength_policy = overlength_policy
+        self.loss_reduction = loss_reduction
 
         if isinstance(dataset_or_files, str | list):
             if isinstance(dataset_or_files, str):
@@ -256,8 +325,19 @@ class TinkerSFTDataset(SupervisedDataset):
             self.dataset = self.dataset.select(range(max_samples))
             logger.info(f"Limited dataset to {max_samples} samples")
 
+        # Every epoch is derived from this stable source order. This makes the
+        # sequence rendered during preflight identical to the sequence consumed
+        # during training, without letting preflight mutate training state.
+        self._source_dataset = self.dataset
+
         logger.info(f"Loaded {len(self.dataset)} examples from {source}")
         logger.info(f"Masking: CUSTOMIZED (derive last_only={last_only} for flag-less rows)")
+        logger.info(
+            "Batching: batch_size=%d, final partial batch included; overlength=%s; loss_reduction=%s",
+            batch_size,
+            overlength_policy,
+            loss_reduction,
+        )
 
     def get_batch(self, index: int) -> list[tinker.Datum]:
         start_idx = index * self.batch_size
@@ -273,18 +353,55 @@ class TinkerSFTDataset(SupervisedDataset):
                         self.max_length,
                         self.last_only,
                         tools=row.get("tools"),
+                        overlength_policy=self.overlength_policy,
+                        loss_reduction=self.loss_reduction,
                     )
                 )
             except SFTConfigError as e:
                 raise SFTConfigError(f"dataset row {i}: {e}") from e
+        if self.loss_reduction == "token_mean":
+            _normalize_token_mean(datums)
         return datums
 
+    def preflight(
+        self,
+        *,
+        label: str,
+        planned_batches: Iterable[tuple[int, int]] | None = None,
+    ) -> None:
+        """Render planned batches without changing the order used for training."""
+        if len(self) == 0:
+            raise SFTConfigError(f"{label} preflight failed: dataset contains no batches.")
+        original_dataset = self.dataset
+        try:
+            if planned_batches is None:
+                for batch_idx in range(len(self)):
+                    try:
+                        if not self.get_batch(batch_idx):
+                            raise SFTConfigError("rendered batch is empty")
+                    except SFTConfigError as e:
+                        raise SFTConfigError(f"{label} preflight failed at batch {batch_idx}: {e}") from e
+                return
+
+            current_epoch: int | None = None
+            for epoch_idx, batch_idx in planned_batches:
+                if epoch_idx != current_epoch:
+                    self.set_epoch(seed=epoch_idx)
+                    current_epoch = epoch_idx
+                try:
+                    if not self.get_batch(batch_idx):
+                        raise SFTConfigError("rendered batch is empty")
+                except SFTConfigError as e:
+                    raise SFTConfigError(f"{label} preflight failed at epoch {epoch_idx}, batch {batch_idx}: {e}") from e
+        finally:
+            self.dataset = original_dataset
+
     def set_epoch(self, seed: int = 0):
-        self.dataset = self.dataset.shuffle(seed=seed)
+        self.dataset = self._source_dataset.shuffle(seed=seed)
         logger.info(f"Shuffled dataset with seed {seed} ({len(self.dataset)} samples)")
 
     def __len__(self) -> int:
-        return len(self.dataset) // self.batch_size
+        return math.ceil(len(self.dataset) / self.batch_size)
 
 
 def create_tinker_sft_datasets(
@@ -297,6 +414,8 @@ def create_tinker_sft_datasets(
     last_only: bool = False,
     max_train_samples: int = -1,
     max_val_samples: int = -1,
+    overlength_policy: Literal["error", "truncate"] = "truncate",
+    loss_reduction: Literal["none", "sequence_mean", "token_mean"] = "none",
 ) -> tuple[TinkerSFTDataset, TinkerSFTDataset | None]:
     """Create train and optional validation datasets for Tinker SFT."""
     if val_batch_size is None:
@@ -309,6 +428,8 @@ def create_tinker_sft_datasets(
         max_length=max_length,
         last_only=last_only,
         max_samples=max_train_samples,
+        overlength_policy=overlength_policy,
+        loss_reduction=loss_reduction,
     )
 
     val_dataset = None
@@ -320,6 +441,8 @@ def create_tinker_sft_datasets(
             max_length=max_length,
             last_only=last_only,
             max_samples=max_val_samples,
+            overlength_policy=overlength_policy,
+            loss_reduction="none",
         )
 
     return train_dataset, val_dataset
