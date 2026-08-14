@@ -74,9 +74,11 @@ actual = {
     "transformers": importlib.metadata.version("transformers"),
     "tokenizers": importlib.metadata.version("tokenizers"),
     "max_length": manifest["conversion"]["max_length"],
+    "train_rows": manifest["train"]["rows"],
 }
 expected["transformers"] = manifest["runtime"]["transformers"]
 expected["tokenizers"] = manifest["runtime"]["tokenizers"]
+expected["train_rows"] = 222
 if actual != expected:
     raise SystemExit(f"dataset/runtime contract mismatch: {actual!r} != {expected!r}")
 for split, path in (("train", train_path), ("validation", validation_path), ("canary", canary_path)):
@@ -147,24 +149,68 @@ RUNS_DIR="${DEEPSWE_SUPER_RUNS_DIR:-${REPO_ROOT}/artifacts/deepswe/nemotron-supe
 mkdir -p "${RUNS_DIR}"
 TRAIN_FILE="${TRAIN_PATH}"
 BATCH_SIZE="${DEEPSWE_SUPER_BATCH_SIZE:-2}"
-EXPERIMENT="nemotron3-super-120b-a12b-lora32-256k"
-VAL_FREQ=50
+LR="${DEEPSWE_SUPER_LR:-1.0e-4}"
+EPOCHS="${DEEPSWE_SUPER_EPOCHS:-10}"
+MAX_STEPS="${DEEPSWE_SUPER_MAX_STEPS:-}"
+WARMUP_STEPS="${DEEPSWE_SUPER_WARMUP_STEPS:-10}"
+LR_SCHEDULE="${DEEPSWE_SUPER_LR_SCHEDULE:-constant}"
+if [[ "${BATCH_SIZE}" != 1 && "${BATCH_SIZE}" != 2 ]]; then
+    echo "only batch sizes 1 and 2 are supported by this 256K recipe" >&2
+    exit 1
+fi
+STEPS_PER_EPOCH=$(((222 + BATCH_SIZE - 1) / BATCH_SIZE))
+VAL_FREQ="${DEEPSWE_SUPER_VAL_FREQ:-${STEPS_PER_EPOCH}}"
+SAVE_FREQ="${DEEPSWE_SUPER_SAVE_FREQ:-${STEPS_PER_EPOCH}}"
+JOB_ID="${DEEPSWE_SUPER_JOB_ID:-}"
 DATA_ARGS=(--train-file "${TRAIN_FILE}" --val-file "${VALIDATION_PATH}")
 EXTRA_ARGS=()
 if [[ "${DEEPSWE_SUPER_CANARY:-0}" == 1 ]]; then
     TRAIN_FILE="${CANARY_PATH}"
     BATCH_SIZE=2
-    EXPERIMENT="${EXPERIMENT}-capacity-canary"
+    EPOCHS=1
+    MAX_STEPS=1
+    WARMUP_STEPS=0
     VAL_FREQ=-1
+    SAVE_FREQ=-1
     DATA_ARGS=(--train-file "${TRAIN_FILE}" --max-examples 2)
-fi
-if [[ "${BATCH_SIZE}" != 1 && "${BATCH_SIZE}" != 2 ]]; then
-    echo "only batch sizes 1 and 2 are supported by this 256K recipe" >&2
-    exit 1
 fi
 if [[ "${DEEPSWE_SUPER_WANDB:-0}" == 1 ]]; then
     EXTRA_ARGS+=(--logger wandb)
 fi
+
+RECIPE_REVISION="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+DATASET_REVISION="$(sha256sum "${MANIFEST_PATH}" | awk '{print $1}')"
+HORIZON_TAG="e${EPOCHS}${MAX_STEPS:+-s${MAX_STEPS}}"
+EXPERIMENT="deepswe-n3super-b${BATCH_SIZE}-lr${LR}-${HORIZON_TAG}-${LR_SCHEDULE}-wu${WARMUP_STEPS}-d${DATASET_REVISION:0:8}-r${RECIPE_REVISION:0:8}"
+if [[ "${DEEPSWE_SUPER_CANARY:-0}" == 1 ]]; then
+    EXPERIMENT="deepswe-n3super-capacity-b2-d${DATASET_REVISION:0:8}-r${RECIPE_REVISION:0:8}"
+fi
+EXPERIMENT="${EXPERIMENT//[^[:alnum:]._-]/-}"
+OUTPUT_DIR="${DEEPSWE_SUPER_OUTPUT_DIR:-${RUNS_DIR}/${EXPERIMENT}}"
+if [[ "${DEEPSWE_SUPER_DRY_RUN:-0}" != 1 && -n "${JOB_ID}" && ! -f "${OUTPUT_DIR}/sft-run.json" ]]; then
+    echo "DEEPSWE_SUPER_JOB_ID requires the matching DEEPSWE_SUPER_OUTPUT_DIR containing sft-run.json" >&2
+    exit 1
+fi
+if [[ "${DEEPSWE_SUPER_DRY_RUN:-0}" != 1 && -z "${JOB_ID}" && -f "${OUTPUT_DIR}/sft-run.json" ]]; then
+    echo "output already belongs to a run; set its DEEPSWE_SUPER_JOB_ID to resume or choose a new DEEPSWE_SUPER_OUTPUT_DIR" >&2
+    exit 1
+fi
+RUN_CONFIG_PATH="$(mktemp "${TMPDIR:-/tmp}/deepswe-super-fireworks.XXXXXX.yaml")"
+trap 'rm -f -- "${RUN_CONFIG_PATH}"' EXIT
+"${RLLM_PYTHON}" - "${CONFIG_PATH}" "${RUN_CONFIG_PATH}" "${MAX_STEPS}" "${WARMUP_STEPS}" "${JOB_ID}" <<'PY'
+import sys
+
+from omegaconf import OmegaConf
+
+source, destination, max_steps, warmup_steps, job_id = sys.argv[1:]
+override = {
+    "optim": {"warmup_steps": int(warmup_steps)},
+    "trainer": {"max_steps": int(max_steps) if max_steps else None},
+}
+if job_id:
+    override["fireworks_infra"] = {"trainers": {"policy": {"job_id": job_id}}}
+OmegaConf.save(OmegaConf.merge(OmegaConf.load(source), OmegaConf.create(override)), destination)
+PY
 
 COMMAND=(
     "${RLLM_BIN}" sft
@@ -173,27 +219,29 @@ COMMAND=(
     --model "${MODEL}"
     --renderer nemotron3
     --lora-rank 32
-    --lr 1.0e-4
+    --lr "${LR}"
     --batch-size "${BATCH_SIZE}"
-    --epochs 1
+    --epochs "${EPOCHS}"
     --max-length "${MAX_LENGTH}"
     --tokenize-method cumulative
-    --lr-schedule constant
+    --lr-schedule "${LR_SCHEDULE}"
     --val-freq "${VAL_FREQ}"
-    --save-freq -1
+    --save-freq "${SAVE_FREQ}"
     --project rllm-deepswe-sft
     --experiment "${EXPERIMENT}"
     --no-ui
-    --output "${RUNS_DIR}"
-    --config "${CONFIG_PATH}"
+    --output "${OUTPUT_DIR}"
+    --config "${RUN_CONFIG_PATH}"
     "${EXTRA_ARGS[@]}"
 )
 
 printf 'command:'
 printf ' %q' "${COMMAND[@]}"
 printf '\n'
+printf 'run config: output=%q max_steps=%s warmup_steps=%s%s\n' \
+    "${OUTPUT_DIR}" "${MAX_STEPS:-null}" "${WARMUP_STEPS}" "${JOB_ID:+ resume_job=${JOB_ID}}"
 if [[ "${DEEPSWE_SUPER_DRY_RUN:-0}" == 1 ]]; then
-    "${RLLM_PYTHON}" - "${CONFIG_PATH}" "${CANARY_PATH}" <<'PY'
+    "${RLLM_PYTHON}" - "${RUN_CONFIG_PATH}" "${CANARY_PATH}" <<'PY'
 from omegaconf import OmegaConf
 
 from rllm.data import Dataset
@@ -237,7 +285,6 @@ PY
     exit 0
 fi
 CANARY_MARKER="${RUNS_DIR}/.super-256k-batch2-canary-passed"
-RECIPE_REVISION="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 CANARY_CONTRACT="$("${RLLM_PYTHON}" - "${MANIFEST_PATH}" "${CONFIG_PATH}" "${RESOLVED_SHAPE}" "${RECIPE_REVISION}" <<'PY'
 import hashlib
 import json
@@ -265,10 +312,20 @@ if [[ "${DEEPSWE_SUPER_CANARY:-0}" != 1 && "${BATCH_SIZE}" == 2 ]] && \
     echo "  DEEPSWE_SUPER_CANARY=1 $0 ${DATASET_DIR}" >&2
     exit 1
 fi
-LOG_PATH="${RUNS_DIR}/${EXPERIMENT}-$(date -u +%Y%m%d-%H%M%S).log"
-"${COMMAND[@]}" 2>&1 | tee "${LOG_PATH}"
+LOG_PATH="${RUNS_DIR}/${EXPERIMENT}.log"
+"${COMMAND[@]}" 2>&1 | tee -a "${LOG_PATH}"
 if [[ "${DEEPSWE_SUPER_CANARY:-0}" == 1 ]]; then
     marker_tmp="${CANARY_MARKER}.tmp.$$"
     printf '%s' "${CANARY_CONTRACT}" > "${marker_tmp}"
     mv "${marker_tmp}" "${CANARY_MARKER}"
+fi
+RUN_MANIFEST="${OUTPUT_DIR}/sft-run.json"
+if [[ -f "${RUN_MANIFEST}" ]]; then
+    PROVIDER_JOB_ID="$("${RLLM_PYTHON}" -c 'import json, sys; print(json.load(open(sys.argv[1])).get("provider_job_id") or "")' "${RUN_MANIFEST}")"
+    if [[ -n "${PROVIDER_JOB_ID}" ]]; then
+        echo "provider trainer retained for resume; after confirming the promoted adapter, delete it explicitly:"
+        CLEANUP_COMMAND=("${RLLM_PYTHON}" -c 'import os, sys; from fireworks.training.sdk import TrainerJobManager; TrainerJobManager(api_key=os.environ["FIREWORKS_API_KEY"]).delete(sys.argv[1])' "${PROVIDER_JOB_ID}")
+        printf ' %q' "${CLEANUP_COMMAND[@]}"
+        printf '\n'
+    fi
 fi
