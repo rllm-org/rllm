@@ -37,7 +37,7 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
     - logprobs (per-token)
     """
     content = trace.response_message.get("content", "") or ""
-    reasoning = trace.response_message.get("reasoning", "") or ""
+    reasoning = trace.response_message.get("reasoning") or trace.response_message.get("reasoning_content") or ""
 
     # Extract tool_calls from response message (OpenAI format)
     raw_tool_calls = trace.response_message.get("tool_calls")
