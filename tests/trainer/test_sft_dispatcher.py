@@ -3,6 +3,8 @@
 These avoid the tinker stack: only ``fit()`` needs it, and it is patched.
 """
 
+from types import SimpleNamespace
+
 import pytest
 from omegaconf import OmegaConf
 
@@ -10,7 +12,7 @@ from rllm.data import Dataset
 from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
 from rllm.trainer.sft import SFTSpec
 from rllm.trainer.sft.backend import SFTConfigError
-from rllm.trainer.sft.tinker_backend import TinkerSFTBackend
+from rllm.trainer.sft.tinker_backend import TinkerSFTBackend, build_sft_data
 
 
 def _ds(n: int = 4):
@@ -93,6 +95,73 @@ def test_validate_spec_rejects_empty():
     empty = Dataset(data=[], name="e", split="train")
     with pytest.raises(SFTConfigError):
         TinkerSFTBackend(_spec(train_dataset=empty)).validate_spec()
+
+
+@pytest.mark.parametrize("backend_name", ["tinker", "fireworks"])
+def test_hosted_validate_spec_rejects_hf_template(backend_name):
+    backend_type = TinkerSFTBackend
+    if backend_name == "fireworks":
+        from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+        backend_type = FireworksSFTBackend
+
+    with pytest.raises(SFTConfigError, match="bypasses the canonical renderer"):
+        backend_type(_spec(tokenize_method="hf_template")).validate_spec()
+
+
+def test_build_sft_data_rejects_hf_template_before_renderer_setup():
+    config = OmegaConf.create(
+        {
+            "model": {"name": "Qwen/Qwen3.5-4B"},
+            "data": {"rllm": {"tokenize_and_mask_method": "hf_template"}},
+        }
+    )
+
+    with pytest.raises(SFTConfigError, match="bypasses the canonical renderer"):
+        build_sft_data(config, _ds(), None)
+
+
+def test_build_sft_data_rejects_structured_chat_template_fallback(monkeypatch):
+    config = OmegaConf.create(
+        {
+            "model": {"name": "unknown/model", "tokenizer_model": None},
+            "data": {
+                "renderer_name": None,
+                "rllm": {"tokenize_and_mask_method": "cumulative"},
+            },
+        }
+    )
+    structured = Dataset(
+        data=[
+            {
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "question"}]},
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": "reason"},
+                            {"type": "text", "text": "answer"},
+                        ],
+                    },
+                ]
+            }
+        ],
+        name="structured",
+        split="train",
+    )
+    monkeypatch.setattr("tinker_cookbook.tokenizer_utils.get_tokenizer", lambda _: object())
+    monkeypatch.setattr(
+        "rllm.renderers.resolve",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            renderer=object(),
+            name="chat_template",
+            source="chat_template",
+        ),
+    )
+
+    for train_data, val_data in ((structured, None), (_ds(), structured)):
+        with pytest.raises(SFTConfigError, match="cannot represent reasoning"):
+            build_sft_data(config, train_data, val_data)
 
 
 def test_dispatch_tinker_runs_lifecycle(monkeypatch):

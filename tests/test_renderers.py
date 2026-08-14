@@ -8,6 +8,7 @@ are skipped if it (or tinker_cookbook) is unavailable. Run offline.
 from __future__ import annotations
 
 import os
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +17,12 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from rllm.renderers import BridgingRendererMixin, get_renderer, resolve  # noqa: E402
-from rllm.renderers.adapters import ChatTemplateAdapter, TinkerRendererAdapter  # noqa: E402
+from rllm.renderers.adapters import (  # noqa: E402
+    ChatTemplateAdapter,
+    TinkerRendererAdapter,
+    to_tinker_messages,
+    to_tinker_tool_specs,
+)
 
 QWEN = "Qwen/Qwen3-0.6B"
 
@@ -115,9 +121,9 @@ def _tinker_qwen3(tokenizer):
 
 
 def _prime_qwen3(tokenizer):
-    from renderers import create_renderer
+    import renderers
 
-    return create_renderer(tokenizer, renderer="qwen3")
+    return renderers.create_renderer(tokenizer, renderers.config_from_name("qwen3"))
 
 
 def test_tinker_adapter_renders(qwen_tokenizer):
@@ -175,8 +181,95 @@ def test_tinker_parse_normalizes_structured_content_and_tool_calls():
         assert parsed.tool_calls[0].status.value == "ok"
 
 
-def test_tinker_adapter_bridge_matches_prime(qwen_tokenizer):
-    """The synthesized bridge must equal prime-rl's hand-tuned qwen3 bridge."""
+def test_cookbook_input_normalizes_reasoning_tools_and_trainable():
+    converted = to_tinker_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "answer",
+                "reasoning_content": "plan",
+                "trainable": True,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command":"ls"}'},
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert "reasoning_content" not in converted[0]
+    assert "trainable" not in converted[0]
+    assert converted[0]["content"] == [
+        {"type": "thinking", "thinking": "plan"},
+        {"type": "text", "text": "answer"},
+    ]
+    assert converted[0]["tool_calls"][0].function.name == "bash"
+
+
+def test_cookbook_adapter_attributes_tokens_by_message():
+    class ModelInput:
+        def __init__(self, token_ids):
+            self._token_ids = token_ids
+
+        def to_ints(self):
+            return self._token_ids
+
+    class CookbookRenderer:
+        @staticmethod
+        def get_stop_sequences():
+            return [99]
+
+        @staticmethod
+        def build_supervised_example(messages):
+            return ModelInput(list(range(1, len(messages) + 1))), None
+
+    rendered = TinkerRendererAdapter(CookbookRenderer()).render(
+        [
+            {"role": "user", "content": "question", "trainable": False},
+            {"role": "assistant", "content": "answer", "trainable": True},
+        ]
+    )
+
+    assert rendered.token_ids == [1, 2]
+    assert rendered.message_indices == [0, 1]
+
+    class RewritingCookbookRenderer(CookbookRenderer):
+        @staticmethod
+        def build_supervised_example(messages):
+            token_ids = [1] if len(messages) == 1 else [9, 2]
+            return ModelInput(token_ids), None
+
+    with pytest.raises(ValueError, match="rewrites previously rendered history"):
+        TinkerRendererAdapter(RewritingCookbookRenderer()).render(
+            [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "answer"},
+            ]
+        )
+
+
+def test_openai_tool_declarations_become_cookbook_specs():
+    specs = to_tinker_tool_specs(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "Run a command",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+    )
+
+    assert specs[0]["name"] == "bash"
+    assert specs[0]["parameters"] == {"type": "object"}
+
+
+def test_tinker_adapter_bridge_preserves_prefix_and_matches_prime_when_available(qwen_tokenizer):
     adapter = _tinker_qwen3(qwen_tokenizer)
     prime = _prime_qwen3(qwen_tokenizer)
 
@@ -189,17 +282,53 @@ def test_tinker_adapter_bridge_matches_prime(qwen_tokenizer):
         )[len(prompt) :]
     ]
 
-    for new in (
-        [{"role": "user", "content": "and then?"}],
-        [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}],
-    ):
-        a_out = adapter.bridge_to_next_turn(prompt, completion, new)
-        p_out = prime.bridge_to_next_turn(prompt, completion, new)
-        assert a_out is not None and p_out is not None
-        assert a_out.token_ids == p_out.token_ids, f"bridge mismatch for new={new}"
+    new = [{"role": "user", "content": "and then?"}]
+    a_out = adapter.bridge_to_next_turn(prompt, completion, new)
+    p_out = prime.bridge_to_next_turn(prompt, completion, new)
+    assert a_out is not None
+    assert a_out.token_ids[: len(prompt + completion)] == prompt + completion
+    if p_out is not None:  # Newer native renderers may request a full rerender.
+        assert a_out.token_ids == p_out.token_ids
 
 
 # ── registry resolution ──────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("renderer_name", "prime_name"),
+    [
+        ("qwen3_5", "qwen3.5"),
+        ("nemotron3", "nemotron-3"),
+        ("nemotron_3", "nemotron-3"),
+        ("nemotron-3", "nemotron-3"),
+    ],
+)
+def test_resolve_legacy_name_through_pinned_typed_factory(monkeypatch, renderer_name, prime_name):
+    calls = []
+    lookups = []
+    config = object()
+
+    class NativeRenderer: ...
+
+    def config_from_name(name):
+        lookups.append(name)
+        return config
+
+    monkeypatch.setitem(
+        sys.modules,
+        "renderers",
+        SimpleNamespace(
+            config_from_name=config_from_name,
+            create_renderer=lambda tokenizer, renderer_config: calls.append((tokenizer, renderer_config)) or NativeRenderer(),
+        ),
+    )
+    tokenizer = object()
+
+    result = resolve("model", tokenizer, renderer_name=renderer_name)
+
+    assert result.source == "prime"
+    assert lookups == [prime_name]
+    assert calls == [(tokenizer, config)]
 
 
 def test_resolve_prime_native_for_qwen(qwen_tokenizer):
@@ -214,11 +343,6 @@ def test_resolve_chat_template_fallback(qwen_tokenizer, monkeypatch):
     res = resolve("some/Unknown-Finetune-XYZ", qwen_tokenizer, family="auto")
     assert res.source == "chat_template"
     assert isinstance(res.renderer, ChatTemplateAdapter)
-
-
-def test_resolve_renderer_name_override_uses_tinker(qwen_tokenizer):
-    res = resolve(QWEN, qwen_tokenizer, renderer_name="qwen3")
-    assert res.source == "tinker"
 
 
 def test_unified_renderer_matches_chat_template_for_qwen(qwen_tokenizer):

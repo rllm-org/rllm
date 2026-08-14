@@ -32,77 +32,27 @@ _CONFIG_FILE = Path(__file__).resolve().parent / "config" / "tinker.yaml"
 _PLAIN_RENDERERS = {"role_colon", "llama3"}
 
 
-def _resolve_renderer_name(model_source: str, explicit: str | None) -> str:
-    """Resolve the tinker_cookbook renderer name for ``model_source``.
+def _guard_renderer_capability(renderer_name: str, renderer_source: str, train_data) -> None:
+    """Reject structured rows when the resolved renderer cannot prove support.
 
-    - ``explicit`` (a non-null ``data.renderer_name``) wins; a best-effort
-      ``warn_if_renderer_not_recommended`` advises if it looks off (never fails).
-    - otherwise auto-detect via ``model_info.get_recommended_renderer_name``;
-      tinker's map doesn't cover every model/size (e.g. ``Qwen3-0.6B`` raises
-      ``KeyError``), so on *any* exception fall back to a small family heuristic
-      on the lowercased model basename.
-
-    tinker imports stay lazy (inside the function), matching the rest of this
-    module. Every returned name is a real ``renderers.get_renderer`` entry.
+    Plain renderers cannot represent reasoning or tool calls. An automatically
+    selected chat-template fallback is likewise unverified, so it may train only
+    inspectable text-only data; file-backed input must pin a capable renderer.
     """
-    from tinker_cookbook import model_info
-
-    if explicit:
-        try:
-            model_info.warn_if_renderer_not_recommended(model_source, explicit)
-        except Exception as e:  # noqa: BLE001 - advisory only, never fail resolution
-            logger.debug("warn_if_renderer_not_recommended(%r, %r) failed: %s", model_source, explicit, e)
-        logger.info("SFT renderer %r (explicit override for model %r)", explicit, model_source)
-        return explicit
-
-    # Auto-detect: tinker's recommendation map first.
-    try:
-        rec = model_info.get_recommended_renderer_name(model_source)
-        if rec:
-            logger.info("SFT renderer %r (auto-detected for model %r via tinker_cookbook)", rec, model_source)
-            return rec
-    except Exception as e:  # noqa: BLE001 - map doesn't cover every model/size
-        logger.debug("get_recommended_renderer_name(%r) failed (%s); using family heuristic", model_source, e)
-
-    # Minimal family heuristic on the lowercased model basename.
-    base = model_source.rsplit("/", 1)[-1].lower()
-    if "qwen3.5" in base or "qwen3_5" in base or "qwen3p5" in base:
-        name = "qwen3_5"
-    elif "qwen3" in base:
-        name = "qwen3"
-    elif "deepseek" in base:
-        name = "deepseekv3"
-    elif "llama-3" in base or "llama3" in base:
-        name = "llama3"
-    else:
-        logger.warning(
-            "Could not auto-detect a renderer for model %r; falling back to 'role_colon', which "
-            "CANNOT represent reasoning (<think>) or tool-calls. If your data has either, pass "
-            "--renderer (e.g. qwen3 / qwen3_5 / deepseekv3) to pin a renderer.",
-            model_source,
-        )
-        return "role_colon"
-    logger.info("SFT renderer %r (family heuristic for model %r)", name, model_source)
-    return name
-
-
-def _guard_plain_renderer(renderer_name: str, train_data) -> None:
-    """Fail fast if a plain-text renderer would silently drop structured content.
-
-    ``role_colon`` / ``llama3`` can't represent reasoning parts or tool-calls, so
-    if the in-memory dataset carries either, raise rather than render lossily.
-    Pure dict inspection (no coupling to the ``sft_schema`` module); samples up to
-    8 rows and only runs for in-memory datasets (``get_data()``).
-    """
-    if renderer_name not in _PLAIN_RENDERERS or not hasattr(train_data, "get_data"):
+    fallback = renderer_source == "chat_template"
+    if renderer_name not in _PLAIN_RENDERERS and not fallback:
         return
+    if not hasattr(train_data, "get_data"):
+        raise SFTConfigError(f"Hosted SFT cannot verify structured-message support for the {renderer_name!r} renderer on file-backed data. Pin a capable renderer.")
     try:
-        rows = train_data.get_data()[:8]
-    except Exception:  # noqa: BLE001 - guard is best-effort
-        return
+        rows = train_data.get_data()
+    except Exception as e:  # noqa: BLE001 - convert inspection failure to config error
+        raise SFTConfigError(f"Hosted SFT could not inspect data before using the {renderer_name!r} renderer. Pin a capable renderer.") from e
     for row in rows:
         if not isinstance(row, dict):
             continue
+        if row.get("tools"):
+            raise SFTConfigError(f"The {renderer_name!r} renderer cannot safely represent tool declarations in hosted SFT. Pin a capable renderer.")
         for msg in row.get("messages") or []:
             if not isinstance(msg, dict):
                 continue
@@ -120,31 +70,56 @@ def _guard_plain_renderer(renderer_name: str, train_data) -> None:
 def build_sft_data(config, train_data, val_data):
     """Build (tokenizer, train_dataset, val_dataset) from a backend config.
 
-    Shared by the tinker and fireworks SFT backends: both render rLLM
-    ``messages`` rows into tinker Datums via tinker_cookbook renderers.
+    Shared by the Tinker and Fireworks SFT backends: both use rLLM's production
+    renderer, then package the resulting tokens and loss mask as Tinker Datums.
     """
-    from tinker_cookbook.renderers import get_renderer
+    tokenize_method = config.data.get("rllm", {}).get("tokenize_and_mask_method", "cumulative")
+    if tokenize_method == "hf_template":
+        raise SFTConfigError(
+            "Hosted SFT does not support tokenize_and_mask_method='hf_template': "
+            "it bypasses the canonical renderer and its exact trainable-token attribution. "
+            "Use 'cumulative' or 'stepwise', or use the verl backend for hf_template."
+        )
+
     from tinker_cookbook.tokenizer_utils import get_tokenizer
 
+    from rllm.renderers import resolve
     from rllm.trainer.sft.tinker_dataset import create_tinker_sft_datasets
 
     # Fireworks' model.name is a FW model path (accounts/fireworks/models/...),
     # not HF-resolvable, so render/tokenize from the HF tokenizer_model when set.
     tokenizer_name = config.model.get("tokenizer_model") or config.model.name
     tokenizer = get_tokenizer(tokenizer_name)
-    # renderer_name=null (yaml default) -> auto-detect from the model; an explicit
-    # value (e.g. from --renderer) overrides. A plain renderer that would drop
-    # reasoning/tool-calls fails fast before we render.
-    renderer_name = _resolve_renderer_name(tokenizer_name, config.data.get("renderer_name", None))
-    _guard_plain_renderer(renderer_name, train_data)
-    renderer = get_renderer(renderer_name, tokenizer)
+    # Training and serving resolve through the same production renderer layer
+    # with the same template-faithful history policy.
+    explicit = config.data.get("renderer_name", None)
+    try:
+        if explicit:
+            resolution = resolve(
+                tokenizer_name,
+                tokenizer,
+                renderer_name=explicit,
+            )
+        else:
+            resolution = resolve(tokenizer_name, tokenizer)
+    except Exception as e:  # noqa: BLE001 - surface renderer setup as config
+        raise SFTConfigError(f"Could not initialize SFT renderer for {tokenizer_name!r}: {e}") from e
+    _guard_renderer_capability(resolution.name, resolution.source, train_data)
+    if val_data is not None:
+        _guard_renderer_capability(resolution.name, resolution.source, val_data)
+    renderer = resolution.renderer
     # Masking is always CUSTOMIZED, driven by each message's ``trainable`` flag:
     # rows from ``from-eval``'s automerge carry the flags directly; flag-less rows
     # (e.g. an external ``--train-file``) get a derived default in the dataset
     # loader. ``tokenize_and_mask_method=stepwise`` only selects that default
     # (train just the last assistant turn) rather than the all-assistant default.
-    last_only = config.data.get("rllm", {}).get("tokenize_and_mask_method", "cumulative") == "stepwise"
-    logger.info(f"Using renderer: {renderer_name}, masking: CUSTOMIZED (last_only={last_only})")
+    last_only = tokenize_method == "stepwise"
+    logger.info(
+        "Using canonical renderer: %s (%s), masking=trainable (last_only=%s)",
+        resolution.name,
+        resolution.source,
+        last_only,
+    )
 
     train_batch_size = config.data.get("train_batch_size", 32)
     val_batch_size = config.data.get("micro_batch_size_per_gpu", train_batch_size)
@@ -192,6 +167,12 @@ class TinkerSFTBackend(SFTBackend):
     # -- contract -----------------------------------------------------------
 
     def validate_spec(self) -> None:
+        if self.spec.tokenize_method == "hf_template":
+            raise SFTConfigError(
+                f"The {self.name!r} hosted SFT backend does not support tokenize_method='hf_template': "
+                "it bypasses the canonical renderer and exact trainable-token attribution. "
+                "Use 'cumulative' or 'stepwise', or use the verl backend."
+            )
         if self._effective_lora_rank() == 0 and not self.supports_full_finetune:
             raise SFTConfigError(
                 f"--lora-rank 0 (full-parameter fine-tuning) is not supported by the {self.name!r} SFT backend: "
