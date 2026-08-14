@@ -249,6 +249,8 @@ class _LoopDataset:
     def __init__(self, events, batches):
         self.events = events
         self.batches = batches
+        self.dataset = list(batches)
+        self.batch_size = 1
 
     def __len__(self):
         return len(self.batches)
@@ -262,6 +264,12 @@ class _LoopDataset:
 
     def preflight(self, **_kwargs):
         pass
+
+    def content_fingerprint(self):
+        return "validation-loop-dataset"
+
+    def data_cursor_for_step(self, completed_steps):
+        return completed_steps
 
 
 class _LoopTinkerClient:
