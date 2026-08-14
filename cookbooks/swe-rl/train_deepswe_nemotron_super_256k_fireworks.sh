@@ -148,7 +148,15 @@ mkdir -p "${RUNS_DIR}"
 TRAIN_FILE="${TRAIN_PATH}"
 BATCH_SIZE="${DEEPSWE_SUPER_BATCH_SIZE:-2}"
 EXPERIMENT="nemotron3-super-120b-a12b-lora32-256k"
-VAL_FREQ=50
+# A full 26-trajectory validation pass takes about 3--4 minutes on the 256K
+# shape.  Validate every 25 optimizer steps by default so the held-out curve
+# is useful for early stopping; callers may still override this explicitly.
+VAL_FREQ="${DEEPSWE_SUPER_VAL_FREQ:-25}"
+PROJECT="${DEEPSWE_SUPER_PROJECT:-rllm-deepswe-sft}"
+# W&B is part of the default experiment contract.  Set this to 0 for an
+# offline/local dry run.  rLLM accepts either WANDB_API_KEY or a prior wandb
+# login; this script never reads or prints either credential.
+WANDB_ENABLED="${DEEPSWE_SUPER_WANDB:-1}"
 DATA_ARGS=(--train-file "${TRAIN_FILE}" --val-file "${VALIDATION_PATH}")
 EXTRA_ARGS=()
 if [[ "${DEEPSWE_SUPER_CANARY:-0}" == 1 ]]; then
@@ -162,7 +170,11 @@ if [[ "${BATCH_SIZE}" != 1 && "${BATCH_SIZE}" != 2 ]]; then
     echo "only batch sizes 1 and 2 are supported by this 256K recipe" >&2
     exit 1
 fi
-if [[ "${DEEPSWE_SUPER_WANDB:-0}" == 1 ]]; then
+if [[ "${WANDB_ENABLED}" != 0 && "${WANDB_ENABLED}" != 1 ]]; then
+    echo "DEEPSWE_SUPER_WANDB must be 0 or 1" >&2
+    exit 2
+fi
+if [[ "${WANDB_ENABLED}" == 1 ]]; then
     EXTRA_ARGS+=(--logger wandb)
 fi
 
@@ -181,7 +193,7 @@ COMMAND=(
     --lr-schedule constant
     --val-freq "${VAL_FREQ}"
     --save-freq -1
-    --project rllm-deepswe-sft
+    --project "${PROJECT}"
     --experiment "${EXPERIMENT}"
     --no-ui
     --output "${RUNS_DIR}"
@@ -192,6 +204,8 @@ COMMAND=(
 printf 'command:'
 printf ' %q' "${COMMAND[@]}"
 printf '\n'
+printf 'tracking: wandb=%s project=%q experiment=%q\n' \
+    "${WANDB_ENABLED}" "${PROJECT}" "${EXPERIMENT}"
 if [[ "${DEEPSWE_SUPER_DRY_RUN:-0}" == 1 ]]; then
     "${RLLM_PYTHON}" - "${CONFIG_PATH}" "${CANARY_PATH}" <<'PY'
 from omegaconf import OmegaConf
