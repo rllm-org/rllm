@@ -60,6 +60,14 @@ _CONFIG_FILE = Path(__file__).resolve().parent / "config" / "fireworks.yaml"
 _RESUME_NOT_CHECKED = object()
 
 
+def _fireworks_output_model_id(project: str, experiment: str) -> str:
+    """Return a Fireworks-safe final model ID within the 63-character limit."""
+    model_id = re.sub(r"[^a-z0-9-]+", "-", f"{project}-{experiment}".lower()).strip("-")[:63].rstrip("-")
+    if not model_id:
+        raise SFTConfigError("Fireworks final model ID is empty after sanitization")
+    return model_id
+
+
 def _fireworks_mean_loss(result: Any, loss_weight: Real) -> float:
     """Compute mean NLL from strict provider loss and local Datum weight mass."""
     metrics = getattr(result, "metrics", None)
@@ -597,7 +605,10 @@ class FireworksSFTBackend(TinkerSFTBackend):
                     )
                     artifact = "LoRA adapter" if lora_rank else "full-weight model"
                     experiment = config.trainer.get("experiment_name") or "default"
-                    output_model_id = re.sub(r"[^a-z0-9-]+", "-", f"{config.trainer.get('project_name', 'rllm-sft')}-{experiment}".lower()).strip("-")[:63]
+                    output_model_id = _fireworks_output_model_id(
+                        config.trainer.get("project_name", "rllm-sft"),
+                        experiment,
+                    )
                     try:
                         model = ckpt.promote_latest(output_model_id, config.model.name)
                         logger.info("Promoted final %s -> %s", artifact, (model or {}).get("name", output_model_id))

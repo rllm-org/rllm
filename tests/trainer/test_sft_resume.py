@@ -17,6 +17,7 @@ from rllm.trainer.sft import SFTSpec  # noqa: E402
 from rllm.trainer.sft.backend import SFTConfigError  # noqa: E402
 from rllm.trainer.sft.fireworks_backend import (  # noqa: E402
     FireworksSFTBackend,
+    _fireworks_output_model_id,
     build_fireworks_resume_contract,
     prepare_fireworks_resume_contract,
     validate_fireworks_resume_contract,
@@ -45,6 +46,17 @@ class _TokenRenderer:
             token_ids=[0, token, 0],
             message_indices=[-1, 1, -1],
         )
+
+
+def test_fireworks_output_model_id_trims_truncation_separator():
+    model_id = _fireworks_output_model_id(
+        "rllm-deepswe-sft",
+        "deepswe-n3super-b2-lr2.0e-4-e10-constant-wu10-dbac8cfdc-r987e71f8",
+    )
+
+    assert model_id == "rllm-deepswe-sft-deepswe-n3super-b2-lr2-0e-4-e10-constant-wu10"
+    assert len(model_id) <= 63
+    assert not model_id.endswith("-")
 
 
 def _source(size: int = 7) -> Dataset:
