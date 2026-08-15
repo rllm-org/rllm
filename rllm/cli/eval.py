@@ -1,6 +1,6 @@
 """Eval CLI command.
 
-``rllm eval <benchmark> --agent <name> [--evaluator <name>] [--base-url <url>] [--model <name>]``
+``rllm eval <benchmark> --agent <name> [--evaluator <name>] [--provider <name>] [--base-url <url>] [--model <name>]``
 
 When ``--base-url`` is omitted, a LiteLLM proxy is auto-started using the
 configuration from ``rllm setup`` (stored in ``~/.rllm/config.json``).
@@ -19,9 +19,12 @@ from rllm import paths
 from rllm.cli._pull import load_dataset_catalog, pull_dataset
 from rllm.cli._sampling import SAMPLING_PARAMS_HELP as _SAMPLING_PARAMS_HELP
 from rllm.cli._ui import console, fail, info_panel, not_found, parse_index_spec
+from rllm.eval.config import SUPPORTED_PROVIDERS
 from rllm.types import Task
 
 logger = logging.getLogger(__name__)
+
+_EVAL_PROVIDERS = [provider for provider in SUPPORTED_PROVIDERS if provider != "custom"]
 
 
 def _suggest_benchmarks(name: str, catalog_names: list[str], max_suggestions: int = 3) -> list[str]:
@@ -591,7 +594,14 @@ def _run_eval(
 @click.option(
     "--proxy-port", "proxy_port", default=None, type=int, help="Pin the auto-started LiteLLM proxy to this port. Default: a free port is picked automatically (so concurrent eval jobs don't collide)."
 )
-@click.option("--model", default=None, help="Model name to evaluate. Defaults to configured model from 'rllm setup'.")
+@click.option(
+    "--provider",
+    "provider_override",
+    default=None,
+    type=click.Choice(_EVAL_PROVIDERS, case_sensitive=False),
+    help="Provider to use for this run, overriding 'rllm setup' without changing it. Requires --model and uses the provider's stored API key.",
+)
+@click.option("--model", default=None, help="Model name to evaluate. Defaults to the configured model unless --provider or --base-url is used.")
 @click.option("--split", default=None, help="Dataset split (default: from catalog eval_split).")
 @click.option("--concurrency", default=64, type=int, help="Number of parallel requests.")
 @click.option("--attempts", default=1, type=int, help="Independent rollouts per task; reports pass@k for k=1..N (default: 1).")
@@ -643,6 +653,7 @@ def eval_cmd(
     evaluator_name: str | None,
     base_url: str | None,
     proxy_port: int | None,
+    provider_override: str | None,
     model: str | None,
     split: str | None,
     concurrency: int,
@@ -688,6 +699,8 @@ def eval_cmd(
     proxy_manager = None
 
     if base_url is not None:
+        if provider_override is not None:
+            fail("--provider cannot be used with --base-url; the direct endpoint already defines routing.")
         # Direct mode: user provided --base-url, require --model too
         if model is None:
             fail("--model is required when --base-url is provided.")
@@ -698,6 +711,10 @@ def eval_cmd(
         from rllm.eval.config import load_config
 
         config = load_config()
+        if provider_override is not None and model is None:
+            fail("--model is required when --provider is provided.")
+        if provider_override is not None:
+            config.provider = provider_override
 
         # A ``tinker://`` sampler-checkpoint path (produced by ``rllm sft`` on the
         # tinker backend) is served by the Tinker OAI endpoint, which the built-in
