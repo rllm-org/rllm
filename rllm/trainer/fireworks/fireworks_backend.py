@@ -132,6 +132,14 @@ class FireworksBackend(TinkerBackend):
         common["learning_rate"] = self.learning_rate
         common["router_replay"] = algorithm_config.router_replay == "R3"
         common["router_replay_completion_only"] = True
+        # LoRA alpha, optional via `+model.lora_alpha=<int>`. The rest of the
+        # chain already supports it (rl_loop.Config.lora_alpha ->
+        # FiretitanProvisioningConfig -> create_model -> the tinker alpha
+        # patch); without mirroring it here it silently stays at the SDK
+        # default of 32, so alpha/rank scaling cannot be tuned from rllm.
+        _lora_alpha = cfg.model.get("lora_alpha") if cfg.get("model") is not None else None
+        if _lora_alpha is not None:
+            common["lora_alpha"] = int(_lora_alpha)
         if cfg.get("concurrency") is not None:
             common["concurrency"] = OmegaConf.to_container(cfg.concurrency, resolve=True)
         if cfg.training.get("max_length") is not None:
