@@ -118,7 +118,7 @@ def conversation_to_datum(
     tools: list[dict] | None = None,
     overlength_policy: Literal["error", "truncate"] = "truncate",
     loss_reduction: Literal["none", "sequence_mean", "token_mean"] = "none",
-    validate_prefix_stability: bool = True,
+    validate_prefix_stability: bool = False,
 ) -> tinker.Datum:
     """Convert a conversation (list of messages) to a Tinker Datum.
 
@@ -130,7 +130,8 @@ def conversation_to_datum(
     the default for source rows without a complete explicit mask.
 
     Schema/validation failures are re-raised as :class:`SFTConfigError` with the
-    failing row's context.
+    failing row's context. Prefix-stability rerenders are disabled unless an
+    explicit dataset preflight requests them.
     """
     default_trainable = "last" if last_only else "all"
     try:
