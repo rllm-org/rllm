@@ -20,6 +20,7 @@ The store is consumed by :mod:`rllm.eval.visualizer` for read-back.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -101,6 +102,15 @@ class EvalEpisodeStore:
         # Stamp the eval-time idx into the saved episode so consumers
         # (e.g. the visualizer) can cross-reference EvalResult.items.
         data["eval_idx"] = idx
+        # Opt-in compact schema: per-step chat_completions snapshots repeat
+        # every conversation prefix (quadratic in steps — 9.3 GB for one
+        # 113-task run); schema 2 stores each unique message once. Readers
+        # (visualizer, curation) expand transparently; conversion back is
+        # lossless (see rllm.eval.episode_codec and its real-dump parity test).
+        if os.environ.get("RLLM_EPISODE_SCHEMA") == "2":
+            from rllm.eval.episode_codec import compact_episode
+
+            data = compact_episode(data)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, default=_json_default)
         return path

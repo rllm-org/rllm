@@ -908,6 +908,14 @@ def _make_handler(root_path: Path, html_factory):
             except OSError:
                 self.send_error(404, "Not Found")
                 return
+            # Compact (schema-2) episodes must be expanded for the browser —
+            # its renderer reads step.chat_completions. Legacy files stream
+            # untouched; the needle probe keeps the fast path parse-free, and
+            # a false hit is harmless (expand_episode is identity on legacy).
+            if b'"episode_schema"' in data:
+                from rllm.eval.episode_codec import expand_episode
+
+                data = json.dumps(expand_episode(json.loads(data))).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))

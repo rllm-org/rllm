@@ -430,7 +430,10 @@ def _load_step_message_lists(ref: _AttemptRef, trajectory_name: str | None, stat
             episode = json.load(f)
     except (OSError, json.JSONDecodeError):
         return []
-    return _episode_to_step_message_lists(episode, trajectory_name, stats)
+    # Schema-2 episodes store deduplicated messages; identity on legacy files.
+    from rllm.eval.episode_codec import expand_episode
+
+    return _episode_to_step_message_lists(expand_episode(episode), trajectory_name, stats)
 
 
 def _content_len(messages: list[dict]) -> int:
