@@ -89,28 +89,31 @@ def test_normalize_messages_derive_last():
 
 def test_normalize_messages_already_flagged_untouched():
     # All messages carry real bools -> keep them, even a pattern derivation would
-    # never produce (trainable user, non-trainable assistant).
+    # never produce (trainable user, non-trainable assistant). The requested
+    # derivation policy is ignored for a complete mask.
     msgs = normalize_messages(
         [
             {"role": "user", "content": "u", "trainable": True},
             {"role": "assistant", "content": "a", "trainable": False},
         ],
-        default_trainable="all",
+        default_trainable="last",
     )
     assert [m.trainable for m in msgs] == [True, False]
 
 
-def test_normalize_messages_partial_flags_trigger_full_derive():
-    # ANY message lacking a bool flag -> derive the WHOLE conversation, overriding
-    # even the explicit False on the assistant.
+@pytest.mark.parametrize("partial_value", [None, 1, "true"])
+def test_normalize_messages_partial_flags_trigger_full_derive(partial_value):
+    # ANY message lacking a bool flag -> derive the WHOLE conversation,
+    # overriding even an explicit earlier target.
     msgs = normalize_messages(
         [
-            {"role": "user", "content": "u"},  # no flag
-            {"role": "assistant", "content": "a", "trainable": False},
+            {"role": "user", "content": "u", "trainable": partial_value},
+            {"role": "assistant", "content": "a1", "trainable": True},
+            {"role": "assistant", "content": "a2", "trainable": False},
         ],
-        default_trainable="all",
+        default_trainable="last",
     )
-    assert [m.trainable for m in msgs] == [False, True]
+    assert [m.trainable for m in msgs] == [False, False, True]
 
 
 def test_normalize_messages_content_is_parts_list():
@@ -118,6 +121,37 @@ def test_normalize_messages_content_is_parts_list():
     assert all(isinstance(m, SFTMessage) for m in msgs)
     assert all(isinstance(p, TextPart) for p in msgs[0].content)
     assert msgs[2].text() == "a1"
+
+
+def test_normalize_messages_rejects_unbridged_reasoning_field():
+    with pytest.raises(SFTSchemaError, match="reasoning_content.*dataset import"):
+        normalize_messages(
+            [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a", "reasoning_content": "important hidden reasoning"},
+            ]
+        )
+
+
+@pytest.mark.parametrize("key", ["reasoning_content", "reasoning"])
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_normalize_messages_treats_empty_reasoning_as_absent(key, role):
+    message = normalize_messages([{"role": role, "content": "payload", key: ""}])[0]
+    assert message.text() == "payload"
+    assert message.thinking() == ""
+
+
+def test_canonical_text_part_may_contain_literal_think_tag():
+    message = normalize_messages(
+        [
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "<think>literal text</think>"}],
+                "trainable": True,
+            }
+        ]
+    )[0]
+    assert message.text() == "<think>literal text</think>"
 
 
 # --- validation errors (raised as SFTSchemaError by normalize_*) -------------
