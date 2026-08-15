@@ -7,7 +7,7 @@ import pytest
 from click.testing import CliRunner
 
 from rllm.cli.main import cli
-from rllm.eval.config import RllmConfig
+from rllm.eval.config import RllmConfig, load_config, save_config
 from rllm.eval.types import EvalOutput, Signal
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
@@ -64,6 +64,20 @@ class _MockEvaluator:
         return EvalOutput(reward=1.0, is_correct=True, signals=[Signal(name="accuracy", value=1.0)])
 
 
+def _invoke_rejected_eval(runner: CliRunner, args: list[str]):
+    """Invoke an invalid eval command and assert it never starts evaluation."""
+    with (
+        patch("rllm.eval.proxy.EvalProxyManager") as mock_pm_cls,
+        patch("rllm.cli.eval._run_eval") as mock_run,
+    ):
+        result = runner.invoke(cli, ["eval", "test_math", *args])
+
+    assert result.exit_code != 0
+    mock_pm_cls.assert_not_called()
+    mock_run.assert_not_called()
+    return result
+
+
 def test_eval_missing_config(runner, tmp_rllm_home):
     """Eval without --base-url and no config should tell user to run 'rllm setup'."""
     with patch("rllm.eval.config.load_config", return_value=RllmConfig()):
@@ -104,6 +118,92 @@ def test_eval_with_proxy_mode(runner, tmp_rllm_home, mock_dataset):
     assert result.exit_code == 0
     mock_pm.start_proxy_subprocess.assert_called_once()
     mock_pm.shutdown_proxy.assert_called_once()
+
+
+def test_eval_provider_override_uses_stored_key_for_run(runner, tmp_rllm_home):
+    """--provider should route through that provider without changing config."""
+    original = RllmConfig(
+        provider="openai",
+        model="gpt-5-mini",
+        api_keys={"openai": "sk-openai", "fireworks": "fw-test"},
+    )
+    save_config(original)
+
+    mock_pm = MagicMock()
+    mock_pm.get_proxy_url.return_value = "http://127.0.0.1:4000/v1"
+    mock_pm.build_proxy_config.return_value = {"model_list": []}
+    model = "accounts/fireworks/models/kimi-k3"
+
+    with (
+        patch("rllm.eval.proxy.EvalProxyManager", return_value=mock_pm) as mock_pm_cls,
+        patch("rllm.cli.eval._run_eval"),
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "eval",
+                "test_math",
+                "--agent",
+                "math",
+                "--provider",
+                "fireworks",
+                "--model",
+                model,
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    kwargs = mock_pm_cls.call_args.kwargs
+    assert kwargs["provider"] == "fireworks"
+    assert kwargs["model_name"] == model
+    assert kwargs["api_key"] == "fw-test"
+    mock_pm.start_proxy_subprocess.assert_called_once()
+    mock_pm.shutdown_proxy.assert_called_once()
+    assert load_config() == original
+
+
+def test_eval_provider_override_requires_model(runner, tmp_rllm_home):
+    """A provider override must not reuse the configured model implicitly."""
+    save_config(
+        RllmConfig(
+            provider="openai",
+            model="gpt-5-mini",
+            api_keys={"openai": "sk-openai", "fireworks": "fw-test"},
+        )
+    )
+
+    result = _invoke_rejected_eval(runner, ["--provider", "fireworks"])
+
+    assert "--model is required when --provider is provided" in result.output
+
+
+def test_eval_provider_override_requires_stored_key(runner, tmp_rllm_home):
+    """A provider override should fail before launch when its key is missing."""
+    save_config(RllmConfig(provider="openai", model="gpt-5-mini", api_keys={"openai": "sk-openai"}))
+
+    result = _invoke_rejected_eval(
+        runner,
+        ["--provider", "fireworks", "--model", "accounts/fireworks/models/kimi-k3"],
+    )
+
+    assert "No configuration found" in result.output
+
+
+def test_eval_provider_cannot_be_used_with_base_url(runner, tmp_rllm_home):
+    """Direct endpoints already define routing, so --provider is ambiguous."""
+    result = _invoke_rejected_eval(
+        runner,
+        [
+            "--provider",
+            "fireworks",
+            "--base-url",
+            "http://localhost:8000/v1",
+            "--model",
+            "test-model",
+        ],
+    )
+
+    assert "--provider cannot be used with --base-url" in result.output
 
 
 def test_eval_base_url_skips_proxy(runner, tmp_rllm_home, mock_dataset):
