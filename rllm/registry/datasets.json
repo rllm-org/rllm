@@ -131,6 +131,21 @@
       "transform": "rllm.data.transforms:hotpotqa_transform",
       "instruction_field": "question"
     },
+    "gaia": {
+      "description": "GAIA: General AI Assistants — real-world multi-step assistant tasks graded by exact match (text-only subset; validation split, gated — requires HF_TOKEN)",
+      "source": "gaia-benchmark/GAIA",
+      "category": "agentic",
+      "splits": [
+        "validation"
+      ],
+      "default_agent": "search",
+      "reward_fn": "gaia_reward_fn",
+      "eval_split": "validation",
+      "gated": true,
+      "hf_config": "2023_all",
+      "transform": "rllm.data.transforms:gaia_transform",
+      "instruction_field": "question"
+    },
     "mmlu_pro": {
       "description": "MMLU-Pro: Expert-level multiple choice with 10 options (12K test)",
       "source": "TIGER-Lab/MMLU-Pro",
