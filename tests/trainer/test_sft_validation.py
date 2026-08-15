@@ -22,7 +22,11 @@ from tinker_cookbook.supervised.common import compute_mean_nll  # noqa: E402
 from rllm.data import Dataset  # noqa: E402
 from rllm.trainer.sft import SFTSpec  # noqa: E402
 from rllm.trainer.sft.backend import SFTConfigError  # noqa: E402
-from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend  # noqa: E402
+from rllm.trainer.sft.fireworks_backend import (  # noqa: E402
+    FireworksSFTBackend,
+    _fireworks_mean_loss,
+    _fireworks_optimizer_metrics,
+)
 from rllm.trainer.sft.tinker_backend import TinkerSFTBackend, should_validate_step  # noqa: E402
 
 
@@ -249,6 +253,8 @@ class _LoopDataset:
     def __init__(self, events, batches):
         self.events = events
         self.batches = batches
+        self.dataset = list(batches)
+        self.batch_size = 1
 
     def __len__(self):
         return len(self.batches)
@@ -262,6 +268,12 @@ class _LoopDataset:
 
     def preflight(self, **_kwargs):
         pass
+
+    def content_fingerprint(self):
+        return "validation-loop-dataset"
+
+    def data_cursor_for_step(self, completed_steps):
+        return completed_steps
 
 
 class _LoopTinkerClient:
@@ -311,10 +323,11 @@ class _LoopFireworksClient:
         return _EventSyncFuture(self.events, f"finish-fb-{self.last_label}", output)
 
     def submit_optim_step(self, adam):
-        del adam
+        assert adam.emit_grad_norm_metrics == "basic"
         label = self.last_label
         self.events.append(f"submit-opt-{label}")
-        return _EventSyncFuture(self.events, f"finish-opt-{label}", SimpleNamespace())
+        result = SimpleNamespace(metrics={"provider_metric_a": 3.0, "provider_metric_b": 0.25})
+        return _EventSyncFuture(self.events, f"finish-opt-{label}", result)
 
 
 class _LoopTracking:
@@ -416,6 +429,12 @@ def test_fireworks_fit_drains_training_before_completed_step_validation(monkeypa
     train_dataset = _LoopDataset(events, train_batches)
     val_dataset = _ValDataset([[_Datum([0.0, 1.0])]])
     client = _LoopFireworksClient(events)
+    logged = []
+
+    class _CapturingTracking(_LoopTracking):
+        def log(self, data, step):
+            logged.append((step, dict(data)))
+            super().log(data, step)
 
     class _Checkpoints:
         def __init__(self, *args, **kwargs):
@@ -453,8 +472,41 @@ def test_fireworks_fit_drains_training_before_completed_step_validation(monkeypa
     monkeypatch.setattr(backend_module, "build_sft_data", lambda *_: (object(), train_dataset, val_dataset))
     monkeypatch.setattr(backend, "_provision", lambda config, api_key, base_url: infra)
     monkeypatch.setattr(checkpoints_module, "TrainingCheckpoints", _Checkpoints)
-    monkeypatch.setattr(tracking_module, "Tracking", lambda **kwargs: _LoopTracking(events, **kwargs))
+    monkeypatch.setattr(tracking_module, "Tracking", lambda **kwargs: _CapturingTracking(events, **kwargs))
 
     backend.fit()
 
     _assert_validation_boundary(events)
+    step_one = next(data for step, data in logged if step == 1)
+    assert step_one["fireworks/optimizer/provider_metric_a"] == 3.0
+    assert step_one["fireworks/optimizer/provider_metric_b"] == 0.25
+
+
+def test_fireworks_provider_metrics_are_strict_and_namespaced():
+    response = SimpleNamespace(
+        metrics={
+            "loss:sum": 2.5,
+            "provider_metric_a": 3.0,
+            "provider_metric_b": 0.25,
+            "not_finite": float("nan"),
+            "flag": True,
+        }
+    )
+    assert _fireworks_mean_loss(response, 2.0) == 1.25
+    assert _fireworks_optimizer_metrics(response) == {
+        "fireworks/optimizer/loss:sum": 2.5,
+        "fireworks/optimizer/provider_metric_a": 3.0,
+        "fireworks/optimizer/provider_metric_b": 0.25,
+    }
+
+
+@pytest.mark.parametrize("value", [None, float("nan"), float("inf"), True])
+def test_fireworks_missing_or_nonfinite_loss_fails(value):
+    with pytest.raises(SFTConfigError, match="invalid loss:sum"):
+        _fireworks_mean_loss(SimpleNamespace(metrics={"loss:sum": value}), 1.0)
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf"), True])
+def test_fireworks_nonpositive_or_nonfinite_loss_weight_fails(value):
+    with pytest.raises(SFTConfigError, match="invalid loss-weight mass"):
+        _fireworks_mean_loss(SimpleNamespace(metrics={"loss:sum": 1.0}), value)

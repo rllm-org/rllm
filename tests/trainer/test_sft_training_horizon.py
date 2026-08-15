@@ -3,7 +3,7 @@
 import pytest
 
 from rllm.trainer.sft.backend import SFTConfigError
-from rllm.trainer.sft.tinker_backend import iter_training_batches, resolve_training_steps
+from rllm.trainer.sft.tinker_backend import iter_preflight_batches, iter_training_batches, resolve_training_steps
 
 
 def test_training_iterator_caps_mid_epoch_at_exact_max_steps():
@@ -36,6 +36,18 @@ def test_training_iterator_honors_a_caller_supplied_start_cursor():
 def test_max_steps_cannot_extend_available_training():
     assert resolve_training_steps(3, 2, None) == 6
     assert resolve_training_steps(3, 2, 100) == 6
+
+
+@pytest.mark.parametrize(
+    ("total_steps", "expected"),
+    [
+        (2, [(0, 0), (0, 1)]),
+        (3, [(0, 0), (0, 1), (0, 2)]),
+        (30, [(0, 0), (0, 1), (0, 2)]),
+    ],
+)
+def test_preflight_checks_each_planned_source_batch_once(total_steps, expected):
+    assert list(iter_preflight_batches(n_batches=3, total_steps=total_steps)) == expected
 
 
 @pytest.mark.parametrize(

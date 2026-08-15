@@ -9,11 +9,16 @@ imports it — stay importable without the tinker stack installed.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import math
 import os
+import re
+import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from importlib import metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,9 +33,65 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _CONFIG_FILE = Path(__file__).resolve().parent / "config" / "tinker.yaml"
+_RESUME_CONTRACT_VERSION = 1
+_LOOP_SEMANTICS_VERSION = "deterministic-ceil-batches-v1"
+_RUN_MANIFEST_NAME = "sft-run.json"
 
 # Plain-text renderers that cannot represent reasoning (``<think>``) or tool-calls.
 _PLAIN_RENDERERS = {"role_colon", "llama3"}
+
+
+def _distribution_versions(module_name: str) -> dict[str, str]:
+    """Return installed distributions owning a module, without filesystem paths."""
+    root = module_name.partition(".")[0]
+    distributions = metadata.packages_distributions().get(root, ())
+    versions: dict[str, str] = {}
+    for distribution in sorted(distributions):
+        try:
+            versions[distribution] = metadata.version(distribution)
+        except metadata.PackageNotFoundError:
+            continue
+    return versions
+
+
+def _class_identity(value: Any) -> dict[str, Any]:
+    cls = type(value)
+    return {
+        "class": f"{cls.__module__}.{cls.__qualname__}",
+        "distributions": _distribution_versions(cls.__module__),
+    }
+
+
+def _renderer_identity(renderer: Any) -> dict[str, Any]:
+    """Record the resolved adapter and underlying implementation when exposed."""
+    identity = {"adapter": _class_identity(renderer)}
+    implementation = getattr(renderer, "_inner", renderer)
+    identity["implementation"] = _class_identity(implementation)
+    return identity
+
+
+def _tokenizer_identity(tokenizer: Any) -> dict[str, Any]:
+    """Record stable tokenizer implementation and revision metadata when known."""
+    init_kwargs = getattr(tokenizer, "init_kwargs", None)
+    revision = init_kwargs.get("_commit_hash") if isinstance(init_kwargs, dict) else None
+    revision = revision or getattr(tokenizer, "_commit_hash", None)
+    chat_template = getattr(tokenizer, "chat_template", None)
+    special_ids = getattr(tokenizer, "all_special_ids", None)
+    return {
+        **_class_identity(tokenizer),
+        "name_or_path": str(getattr(tokenizer, "name_or_path", "") or ""),
+        "revision": str(revision) if revision else None,
+        "chat_template_hash": hashlib.sha256(chat_template.encode()).hexdigest() if isinstance(chat_template, str) else None,
+        "special_token_ids": [int(token_id) for token_id in special_ids] if special_ids is not None else None,
+        "runtime_versions": {distribution: version for distribution in ("tokenizers", "transformers") if (version := _installed_version(distribution)) is not None},
+    }
+
+
+def _installed_version(distribution: str) -> str | None:
+    try:
+        return metadata.version(distribution)
+    except metadata.PackageNotFoundError:
+        return None
 
 
 def _guard_renderer_capability(renderer_name: str, renderer_source: str, train_data) -> None:
@@ -121,6 +182,10 @@ def build_sft_data(config, train_data, val_data):
         resolution.source,
         last_only,
     )
+    config.data.resolved_renderer_name = resolution.name
+    config.data.resolved_renderer_source = resolution.source
+    config.data.resolved_renderer_identity = _renderer_identity(renderer)
+    config.data.resolved_tokenizer_identity = _tokenizer_identity(tokenizer)
 
     train_batch_size = config.data.get("train_batch_size", 32)
     val_batch_size = config.data.get("micro_batch_size_per_gpu", train_batch_size)
@@ -195,6 +260,29 @@ def iter_training_batches(
         yield step, epoch, batch
 
 
+def iter_training_batches_from_step(
+    *,
+    n_batches: int,
+    total_epochs: int,
+    start_step: int,
+    max_steps: int | None = None,
+):
+    """Yield the remaining plan from a completed-step (next unseen) cursor."""
+    start_epoch, start_batch = divmod(start_step, n_batches)
+    return iter_training_batches(
+        n_batches=n_batches,
+        total_epochs=total_epochs,
+        start_epoch=start_epoch,
+        start_batch=start_batch,
+        max_steps=max_steps,
+    )
+
+
+def iter_preflight_batches(*, n_batches: int, total_steps: int):
+    """Validate each planned source-row occurrence once, in epoch-0 order."""
+    return ((0, batch) for batch in range(min(n_batches, total_steps)))
+
+
 def sft_lr_multiplier(
     lr_schedule: str,
     step: int,
@@ -258,6 +346,274 @@ class SFTOptimizerSettings:
     eps: float
     weight_decay: float
     grad_clip_norm: float
+
+
+@dataclass(frozen=True)
+class SFTResumeContract:
+    """Versioned local identity required for an optimizer-state resume."""
+
+    payload: dict[str, Any]
+    digest: str
+
+
+def _stable_digest(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _contract_differences(expected: Any, actual: Any, prefix: str = "") -> list[str]:
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        differences: list[str] = []
+        for key in sorted(set(expected) | set(actual)):
+            path = f"{prefix}.{key}" if prefix else key
+            if key not in expected or key not in actual:
+                differences.append(path)
+            else:
+                differences.extend(_contract_differences(expected[key], actual[key], path))
+        return differences
+    return [] if expected == actual else [prefix or "contract"]
+
+
+def _resume_field(resume_info, field: str, default=None):
+    if hasattr(resume_info, "get"):
+        missing = object()
+        value = resume_info.get(field, missing)
+        if value is not missing:
+            return value
+    return getattr(resume_info, field, default)
+
+
+def _plain_config_value(value: Any) -> Any:
+    return OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
+
+
+def build_hosted_resume_contract(
+    config,
+    train_dataset,
+    optimizer: SFTOptimizerSettings,
+    *,
+    backend: str,
+    n_batches: int,
+    total_steps: int,
+    provider: dict[str, Any] | None = None,
+) -> SFTResumeContract:
+    """Capture local inputs that can change hosted-SFT resume semantics."""
+    rllm_data = config.data.get("rllm", {})
+    optimizer_payload = asdict(optimizer)
+    optimizer_payload["betas"] = list(optimizer_payload["betas"])
+    source_dataset = getattr(train_dataset, "_source_dataset", train_dataset.dataset)
+    payload: dict[str, Any] = {
+        "contract_version": _RESUME_CONTRACT_VERSION,
+        "loop_semantics": _LOOP_SEMANTICS_VERSION,
+        "backend": {
+            "name": backend,
+            "provider": provider or {},
+        },
+        "model": {
+            "base_model": str(config.model.name),
+            "lora_rank": int(config.model.get("lora_rank", 32)),
+            "train_unembed": bool(OmegaConf.select(config, "model.train_unembed", default=True)),
+            "train_attn": bool(OmegaConf.select(config, "model.train_attn", default=True)),
+            "train_mlp": bool(OmegaConf.select(config, "model.train_mlp", default=True)),
+        },
+        "rendering": {
+            "renderer_name": config.data.get("resolved_renderer_name"),
+            "renderer_source": config.data.get("resolved_renderer_source"),
+            "renderer_identity": _plain_config_value(config.data.get("resolved_renderer_identity", {})),
+            "tokenizer_model": str(config.model.get("tokenizer_model") or config.model.name),
+            "tokenizer_identity": _plain_config_value(config.data.get("resolved_tokenizer_identity", {})),
+            "tokenize_and_mask_method": str(rllm_data.get("tokenize_and_mask_method", "cumulative")),
+            "max_length": config.data.get("max_length"),
+            "overlength_policy": str(rllm_data.get("overlength_policy", "truncate")),
+            "loss_reduction": str(rllm_data.get("loss_reduction", "token_mean")),
+        },
+        "dataset": {
+            "fingerprint": train_dataset.content_fingerprint(),
+            "implementation": _class_identity(source_dataset),
+            "row_count": len(source_dataset),
+            "batch_size": int(train_dataset.batch_size),
+        },
+        "optimizer": optimizer_payload,
+        "horizon": {
+            "batches_per_epoch": n_batches,
+            "total_steps": total_steps,
+        },
+    }
+    return SFTResumeContract(payload=payload, digest=_stable_digest(payload))
+
+
+def build_tinker_resume_contract(
+    config,
+    train_dataset,
+    optimizer: SFTOptimizerSettings,
+    *,
+    n_batches: int,
+    total_steps: int,
+) -> SFTResumeContract:
+    return build_hosted_resume_contract(
+        config,
+        train_dataset,
+        optimizer,
+        backend="tinker",
+        n_batches=n_batches,
+        total_steps=total_steps,
+    )
+
+
+@dataclass(frozen=True)
+class PreparedResumeManifest:
+    path: Path
+    data: dict[str, Any]
+
+
+def _expected_resume_manifest(contract: SFTResumeContract) -> dict[str, Any]:
+    return {
+        "contract_hash": contract.digest,
+        "contract": contract.payload,
+    }
+
+
+def _write_resume_manifest(path: Path, data: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        temporary.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        temporary.replace(path)
+    except OSError as e:
+        temporary.unlink(missing_ok=True)
+        raise SFTConfigError(f"Could not write hosted SFT run identity to {path}: {e}") from e
+
+
+def prepare_hosted_resume_manifest(
+    checkpoint_dir: str,
+    contract: SFTResumeContract,
+    *,
+    require_existing: bool = False,
+) -> PreparedResumeManifest:
+    """Validate or atomically create a local hosted-SFT run manifest."""
+    manifest_path = Path(checkpoint_dir) / _RUN_MANIFEST_NAME
+    expected = _expected_resume_manifest(contract)
+    if not manifest_path.exists():
+        if require_existing:
+            raise SFTConfigError(f"Cannot resume the legacy checkpoint/run in {checkpoint_dir!r}: {_RUN_MANIFEST_NAME} is missing. Use a new output directory.")
+        _write_resume_manifest(manifest_path, expected)
+        return PreparedResumeManifest(manifest_path, expected)
+
+    try:
+        existing = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        raise SFTConfigError(f"Cannot resume from {checkpoint_dir!r}: {_RUN_MANIFEST_NAME} is unreadable ({e}). Use a new output directory.") from e
+    differences = _contract_differences(
+        expected["contract"],
+        existing.get("contract") if isinstance(existing, dict) else None,
+    )
+    if not isinstance(existing, dict) or existing.get("contract_hash") != contract.digest or differences:
+        fields = ", ".join(differences[:8]) or "contract hash"
+        raise SFTConfigError(f"Cannot resume from {checkpoint_dir!r}: run identity mismatch in {fields}. Use a new output directory.")
+    return PreparedResumeManifest(manifest_path, existing)
+
+
+def update_hosted_resume_manifest(
+    prepared: PreparedResumeManifest,
+    **updates: Any,
+) -> PreparedResumeManifest:
+    data = {**prepared.data, **updates}
+    _write_resume_manifest(prepared.path, data)
+    return PreparedResumeManifest(prepared.path, data)
+
+
+def prepare_tinker_resume_contract(
+    checkpoint_dir: str,
+    contract: SFTResumeContract,
+    resume_info,
+) -> None:
+    """Validate or create the local manifest before opening a provider client."""
+    prepare_hosted_resume_manifest(
+        checkpoint_dir,
+        contract,
+        require_existing=resume_info is not None,
+    )
+    if resume_info is not None:
+        checkpoint_hash = _resume_field(resume_info, "contract_hash")
+        if checkpoint_hash != contract.digest:
+            raise SFTConfigError(f"Cannot resume from {checkpoint_dir!r}: checkpoint contract hash is {checkpoint_hash!r}, expected {contract.digest!r}. Use a new output directory.")
+
+
+def validate_tinker_resume_cursor(
+    resume_info,
+    *,
+    n_batches: int,
+    total_steps: int,
+) -> int:
+    """Require a complete, consistent next-unseen completed-step cursor."""
+    values: dict[str, int] = {}
+    for field in ("epoch", "batch", "step"):
+        value = _resume_field(resume_info, field)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise SFTConfigError(f"checkpoint loop_state.{field} must be a non-negative integer, got {value!r}.")
+        if value < 0:
+            raise SFTConfigError(f"checkpoint loop_state.{field} must be non-negative, got {value}.")
+        values[field] = value
+    expected_step = values["epoch"] * n_batches + values["batch"]
+    if values["batch"] >= n_batches or values["step"] != expected_step or values["step"] > total_steps:
+        raise SFTConfigError(
+            "Tinker checkpoint cursor is inconsistent with the resolved SFT batch plan "
+            f"(epoch={values['epoch']}, batch={values['batch']}, step={values['step']}, "
+            f"batches_per_epoch={n_batches}, total_steps={total_steps}). Use a new output directory."
+        )
+    return values["step"]
+
+
+async def validate_tinker_checkpoint_identity(
+    service_client,
+    checkpoint_path: str,
+    config,
+) -> None:
+    """Hard-compare provider checkpoint metadata with the resolved run config."""
+    from tinker_cookbook import checkpoint_utils
+
+    rest_client = service_client.create_rest_client()
+    weights = await rest_client.get_weights_info_by_tinker_path(checkpoint_path)
+    training_run = await rest_client.get_training_run_by_tinker_path_async(checkpoint_path)
+    expected = {
+        "base_model": str(config.model.name),
+        "lora_rank": int(config.model.get("lora_rank", 32)),
+        "train_unembed": bool(OmegaConf.select(config, "model.train_unembed", default=True)),
+        "train_attn": bool(OmegaConf.select(config, "model.train_attn", default=True)),
+        "train_mlp": bool(OmegaConf.select(config, "model.train_mlp", default=True)),
+        "renderer": str(config.data.get("resolved_renderer_name")),
+    }
+    actual = {
+        "base_model": weights.base_model,
+        "lora_rank": weights.lora_rank,
+        "train_unembed": weights.train_unembed if weights.train_unembed is not None else True,
+        "train_attn": weights.train_attn if weights.train_attn is not None else True,
+        "train_mlp": weights.train_mlp if weights.train_mlp is not None else True,
+        "renderer": (training_run.user_metadata or {}).get(checkpoint_utils.RENDERER_NAME_METADATA_KEY),
+    }
+    mismatches = [f"{field}={actual[field]!r} (expected {value!r})" for field, value in expected.items() if actual[field] != value]
+    if mismatches:
+        raise SFTConfigError("Tinker checkpoint identity mismatch: " + "; ".join(mismatches) + ". Use a new output directory.")
+
+
+def _is_step_boundary(
+    completed_steps: int,
+    total_steps: int,
+    *,
+    save_every: int,
+    eval_every: int,
+    has_validation: bool,
+) -> bool:
+    """Whether the one-ahead pipeline must drain at this model boundary."""
+    return (
+        completed_steps >= total_steps
+        or (has_validation and eval_every > 0 and completed_steps % eval_every == 0)
+        or (save_every > 0 and completed_steps % save_every == 0 and completed_steps < total_steps)
+    )
 
 
 def resolve_sft_optimizer_settings(optim_cfg, *, total_steps: int) -> SFTOptimizerSettings:
@@ -349,6 +705,8 @@ class TinkerSFTBackend(SFTBackend):
     def __init__(self, spec):
         super().__init__(spec)
         self._config: DictConfig | None = None
+        self._run_leaf = f"{time.strftime('%Y%m%d_%H%M%S', time.gmtime())}-{secrets.token_hex(4)}"
+        self._resume_requested = False
 
     # -- contract -----------------------------------------------------------
 
@@ -417,6 +775,24 @@ class TinkerSFTBackend(SFTBackend):
             cfg = OmegaConf.merge(cfg, OmegaConf.create({"trainer": {"default_local_dir": spec.output_dir}}))
         if spec.overrides:
             cfg = OmegaConf.merge(cfg, OmegaConf.create(spec.overrides))
+        user = OmegaConf.to_container(OmegaConf.create(spec.overrides), resolve=False) if spec.overrides else {}
+        user_trainer = user.get("trainer") if isinstance(user, dict) else None
+        explicit_override = isinstance(user_trainer, dict) and user_trainer.get("default_local_dir") is not None
+        self._resume_requested = bool(spec.output_dir) or explicit_override
+        if not self._resume_requested:
+            experiment = (
+                re.sub(
+                    r"[^A-Za-z0-9._-]+",
+                    "-",
+                    str(cfg.trainer.get("experiment_name") or "default"),
+                ).strip("-._")
+                or "default"
+            )
+            cfg.trainer.default_local_dir = os.path.join(
+                str(cfg.trainer.default_local_dir),
+                experiment,
+                self._run_leaf,
+            )
         self._config = cfg
         return cfg
 
@@ -447,12 +823,11 @@ class TinkerSFTBackend(SFTBackend):
         from rllm.utils.tracking import Tracking
 
         config = self._config
+        if not self._resume_requested and os.path.exists(config.trainer.default_local_dir):
+            raise SFTConfigError("The generated Tinker run directory already exists; create a new backend instance so a fresh isolated directory can be selected.")
         os.makedirs(config.trainer.default_local_dir, exist_ok=True)
         tokenizer, train_dataset, val_dataset = build_sft_data(config, self.spec.train_dataset, self.spec.val_dataset)
 
-        resume_info = checkpoint_utils.get_last_checkpoint(config.trainer.default_local_dir)
-        start_epoch = resume_info.get("epoch", 0) if resume_info else 0
-        start_batch = resume_info.get("batch", 0) if resume_info else 0
         n_batches = len(train_dataset)
         total_epochs = config.trainer.get("total_epochs", 1)
         max_steps = config.trainer.get("max_steps")
@@ -464,21 +839,36 @@ class TinkerSFTBackend(SFTBackend):
 
         train_dataset.preflight(
             label="train",
-            planned_batches=(
-                (epoch_idx, batch_idx)
-                for _step, epoch_idx, batch_idx in iter_training_batches(
-                    n_batches=n_batches,
-                    total_epochs=total_epochs,
-                    start_epoch=start_epoch,
-                    start_batch=start_batch,
-                    max_steps=max_steps,
-                )
-            ),
+            planned_batches=iter_preflight_batches(n_batches=n_batches, total_steps=total_steps),
         )
         if val_dataset is not None:
             val_dataset.preflight(label="validation")
 
-        service_client = tinker.ServiceClient(base_url=config.get("tinker_base_url", None))
+        resume_info = checkpoint_utils.get_last_checkpoint(config.trainer.default_local_dir) if self._resume_requested else None
+        resume_contract = build_tinker_resume_contract(
+            config,
+            train_dataset,
+            optimizer,
+            n_batches=n_batches,
+            total_steps=total_steps,
+        )
+        prepare_tinker_resume_contract(
+            config.trainer.default_local_dir,
+            resume_contract,
+            resume_info,
+        )
+        start_step = (
+            validate_tinker_resume_cursor(
+                resume_info,
+                n_batches=n_batches,
+                total_steps=total_steps,
+            )
+            if resume_info is not None
+            else 0
+        )
+        checkpoint_contract = {
+            "contract_hash": resume_contract.digest,
+        }
 
         logger_backend = config.trainer.logger
         if isinstance(logger_backend, str):
@@ -493,9 +883,22 @@ class TinkerSFTBackend(SFTBackend):
         # Wrap the loop so tracking_logger.finish() runs even on failure: the 'ui'
         # backend tees stdout/stderr and holds an open session until finish().
         try:
+            service_client = tinker.ServiceClient(base_url=config.get("tinker_base_url", None))
+            user_metadata: dict[str, str] = {}
+            checkpoint_utils.add_renderer_name_to_user_metadata(
+                user_metadata,
+                config.data.get("resolved_renderer_name"),
+            )
             if resume_info:
                 logger.info(f"Resuming from checkpoint: {resume_info}")
-                training_client = await service_client.create_training_client_from_state_async(resume_info["state_path"])
+                state_path = _resume_field(resume_info, "state_path")
+                if not isinstance(state_path, str) or not state_path:
+                    raise SFTConfigError("Tinker checkpoint is missing a provider state_path; use a new output directory.")
+                await validate_tinker_checkpoint_identity(service_client, state_path, config)
+                training_client = await service_client.create_training_client_from_state_with_optimizer_async(
+                    state_path,
+                    user_metadata=user_metadata,
+                )
             else:
                 logger.info("Starting training from scratch")
                 training_client = await service_client.create_lora_training_client_async(
@@ -504,6 +907,7 @@ class TinkerSFTBackend(SFTBackend):
                     train_unembed=OmegaConf.select(config, "model.train_unembed", default=True),
                     train_attn=OmegaConf.select(config, "model.train_attn", default=True),
                     train_mlp=OmegaConf.select(config, "model.train_mlp", default=True),
+                    user_metadata=user_metadata,
                 )
             logger.info(f"Training for {n_batches} batches x {total_epochs} epochs = {total_steps} steps")
 
@@ -511,15 +915,21 @@ class TinkerSFTBackend(SFTBackend):
                 0,
                 eval_every=eval_every,
                 has_validation=val_dataset is not None,
-                include_initial=start_epoch == 0 and start_batch == 0,
+                include_initial=start_step == 0,
             ):
                 initial_metrics: dict[str, Any] = {}
                 with timed("validation", initial_metrics):
                     initial_metrics.update(await self._validate(training_client, val_dataset, compute_mean_nll))
                 tracking_logger.log(data=initial_metrics, step=0)
 
-            async def submit_batch(epoch_idx: int, batch_idx: int) -> _SubmittedBatch:
-                step = epoch_idx * n_batches + batch_idx
+            current_epoch: int | None = None
+
+            async def submit_batch(step: int, epoch_idx: int, batch_idx: int) -> _SubmittedBatch:
+                nonlocal current_epoch
+                if epoch_idx != current_epoch:
+                    logger.info(f"Starting epoch {epoch_idx}")
+                    train_dataset.set_epoch(seed=epoch_idx)
+                    current_epoch = epoch_idx
                 batch_start_time = time.time()
                 metrics: dict[str, Any] = {"epoch": epoch_idx, "progress": step / progress_denominator}
                 learning_rate = optimizer.learning_rate * sft_lr_multiplier(
@@ -546,20 +956,19 @@ class TinkerSFTBackend(SFTBackend):
 
                 fwd_bwd_future = await training_client.forward_backward_async(data, loss_fn="cross_entropy")
                 optim_step_future = await training_client.optim_step_async(adam_params)
-                return _SubmittedBatch(fwd_bwd_future, optim_step_future, metrics, data, step, epoch_idx, batch_idx, batch_start_time)
+                return _SubmittedBatch(
+                    fwd_bwd_future=fwd_bwd_future,
+                    optim_step_future=optim_step_future,
+                    metrics=metrics,
+                    data=data,
+                    step=step,
+                    epoch_idx=epoch_idx,
+                    batch_idx=batch_idx,
+                    batch_start_time=batch_start_time,
+                )
 
             async def finish_batch(submitted: _SubmittedBatch) -> None:
                 metrics = submitted.metrics
-                metrics["progress"] = min((submitted.step + 1) / progress_denominator, 1.0)
-                if save_every > 0 and submitted.step % save_every == 0 and submitted.step > 0:
-                    with timed("save_checkpoint", metrics):
-                        await checkpoint_utils.save_checkpoint_async(
-                            training_client=training_client,
-                            name=f"{submitted.step:06d}",
-                            log_path=config.trainer.default_local_dir,
-                            loop_state={"epoch": submitted.epoch_idx, "batch": submitted.batch_idx},
-                            kind="both",
-                        )
                 with timed("step", metrics):
                     fwd_bwd_result = await submitted.fwd_bwd_future.result_async()
                     await submitted.optim_step_future.result_async()
@@ -576,6 +985,7 @@ class TinkerSFTBackend(SFTBackend):
                 metrics["time/total"] = time.time() - submitted.batch_start_time
 
                 completed_steps = submitted.step + 1
+                metrics["progress"] = min(completed_steps / progress_denominator, 1.0)
                 if should_validate_step(
                     completed_steps,
                     eval_every=eval_every,
@@ -585,37 +995,52 @@ class TinkerSFTBackend(SFTBackend):
                         val_metrics = await self._validate(training_client, val_dataset, compute_mean_nll)
                     metrics.update(val_metrics)
 
+                if save_every > 0 and completed_steps % save_every == 0 and completed_steps < total_steps:
+                    next_epoch, next_batch = divmod(completed_steps, n_batches)
+                    with timed("save_checkpoint", metrics):
+                        await checkpoint_utils.save_checkpoint_async(
+                            training_client=training_client,
+                            name=f"{completed_steps:06d}",
+                            log_path=config.trainer.default_local_dir,
+                            loop_state={
+                                "epoch": next_epoch,
+                                "batch": next_batch,
+                                "step": completed_steps,
+                                **checkpoint_contract,
+                            },
+                            kind="both",
+                        )
+
                 tracking_logger.log(data=metrics, step=completed_steps)
                 logger.info(f"Step {completed_steps}: train_nll={train_nll:.4f}, lr={metrics['learning_rate']:.2e}")
 
             pending: _SubmittedBatch | None = None
-            current_epoch: int | None = None
-            for _step, epoch_idx, batch_idx in iter_training_batches(
+            for step, epoch_idx, batch_idx in iter_training_batches_from_step(
                 n_batches=n_batches,
                 total_epochs=total_epochs,
-                start_epoch=start_epoch,
-                start_batch=start_batch,
+                start_step=start_step,
                 max_steps=max_steps,
             ):
-                if epoch_idx != current_epoch:
-                    logger.info(f"Starting epoch {epoch_idx}")
-                    train_dataset.set_epoch(seed=epoch_idx)
-                    current_epoch = epoch_idx
-                if pending is not None and should_validate_step(
+                if pending is None:
+                    pending = await submit_batch(step, epoch_idx, batch_idx)
+                    continue
+
+                if _is_step_boundary(
                     pending.step + 1,
+                    total_steps,
+                    save_every=save_every,
                     eval_every=eval_every,
                     has_validation=val_dataset is not None,
                 ):
                     await finish_batch(pending)
-                    pending = None
-                submitted = await submit_batch(epoch_idx, batch_idx)
-                if pending is not None:
+                    pending = await submit_batch(step, epoch_idx, batch_idx)
+                else:
+                    following = await submit_batch(step, epoch_idx, batch_idx)
                     await finish_batch(pending)
-                pending = submitted
+                    pending = following
             if pending is not None:
                 await finish_batch(pending)
 
-            start_step = start_epoch * n_batches + start_batch
             if start_step < total_steps:
                 final_epoch, final_batch = divmod(total_steps, n_batches)
                 await checkpoint_utils.save_checkpoint_async(
@@ -623,7 +1048,13 @@ class TinkerSFTBackend(SFTBackend):
                     name="final",
                     log_path=config.trainer.default_local_dir,
                     kind="both",
-                    loop_state={"epoch": final_epoch, "batch": final_batch},
+                    loop_state={
+                        "epoch": final_epoch,
+                        "batch": final_batch,
+                        "step": total_steps,
+                        "final": True,
+                        **checkpoint_contract,
+                    },
                 )
             else:
                 logger.info("Training was already complete; nothing to do")
