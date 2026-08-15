@@ -1,6 +1,8 @@
 """In-memory trace store for testing and embedded usage."""
 
 import array
+import hashlib
+import json
 import time
 from collections import defaultdict
 from typing import Any
@@ -50,19 +52,94 @@ def _unpack(data: dict[str, Any]) -> dict[str, Any]:
     return out if out is not None else data
 
 
-class MemoryTraceStore:
-    """Ephemeral in-memory store.  Useful for tests and short-lived processes."""
+# Sentinel key marking an interned ``messages`` field: [session_id, leaf_node_id, length].
+# Present only inside the store; readers always see the expanded list.
+_INTERNED_KEY = "__interned_messages__"
 
-    def __init__(self) -> None:
+
+def _message_fp(message: dict[str, Any]) -> str:
+    """Stable content fingerprint of one message (canonical JSON → sha256)."""
+    payload = json.dumps(message, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+class MemoryTraceStore:
+    """Ephemeral in-memory store.  Useful for tests and short-lived processes.
+
+    ``compact=True`` (the ``memory-compact`` store worker) opts into message
+    interning: agentic clients resend the whole conversation on every call, so
+    trace N of a session carries the same N-1 leading messages as trace N-1 —
+    storing each trace's ``messages`` verbatim makes a session's memory
+    quadratic in turns (measured 30–400 MB per task on DeepSWE-length
+    rollouts). Like ``_pack`` does for token-id lists, compact mode interns on
+    write: each unique (parent, content) pair is kept once in a per-session
+    node table and the trace stores only its leaf reference; reads expand back
+    to the full list, so the external contract is unchanged. Node identity
+    hashes the *parent chain* as well as content (a Merkle chain) so identical
+    content at different positions — e.g. repeated empty completions from
+    throttled calls — keeps distinct nodes and reconstruction is exact.
+
+    The default mode stores traces verbatim, exactly as before.
+    """
+
+    def __init__(self, compact: bool = False) -> None:
+        self._compact = compact
         # trace_id -> data dict
         self._traces: dict[str, dict[str, Any]] = {}
         # trace_id -> created_at
         self._timestamps: dict[str, float] = {}
         # session_id -> list[trace_id]  (insertion order)
         self._session_index: dict[str, list[str]] = defaultdict(list)
+        # session_id -> {node_id: (parent_node_id | None, message)}
+        self._session_nodes: dict[str, dict[str, tuple[str | None, dict[str, Any]]]] = defaultdict(dict)
+        # session_id -> {(parent_node_id | None, content_fp): node_id} — O(1)
+        # re-interning of prefixes without walking or re-storing them.
+        self._session_chain: dict[str, dict[tuple[str | None, str], str]] = defaultdict(dict)
+
+    def _intern_messages(self, session_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Return ``data`` with ``messages`` replaced by a leaf reference."""
+        messages = data.get("messages")
+        if type(messages) is not list or not messages or not all(isinstance(m, dict) for m in messages):
+            return data  # empty/unknown shape: store verbatim
+        nodes = self._session_nodes[session_id]
+        chain = self._session_chain[session_id]
+        parent: str | None = None
+        for message in messages:
+            key = (parent, _message_fp(message))
+            node_id = chain.get(key)
+            if node_id is None:
+                # Merkle id: parent chain + content, so position matters.
+                node_id = hashlib.sha256(f"{parent}:{key[1]}".encode()).hexdigest()
+                nodes[node_id] = (parent, message)
+                chain[key] = node_id
+            parent = node_id
+        out = dict(data)
+        out["messages"] = {_INTERNED_KEY: [session_id, parent, len(messages)]}
+        return out
+
+    def _expand_messages(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Inverse of :meth:`_intern_messages` — rebuild the full message list."""
+        marker = data.get("messages")
+        if type(marker) is not dict or _INTERNED_KEY not in marker:
+            return data
+        session_id, leaf, length = marker[_INTERNED_KEY]
+        nodes = self._session_nodes.get(session_id, {})
+        messages: list[dict[str, Any]] = []
+        node_id = leaf
+        while node_id is not None:
+            parent, message = nodes[node_id]
+            messages.append(message)
+            node_id = parent
+        messages.reverse()
+        assert len(messages) == length, f"interned chain length {len(messages)} != recorded {length}"
+        out = dict(data)
+        out["messages"] = messages
+        return out
 
     async def store_trace(self, trace_id: str, session_id: str, data: dict[str, Any]) -> None:
         now = time.time()
+        if self._compact:
+            data = self._intern_messages(session_id, data)
         self._traces[trace_id] = _pack(data)
         if trace_id not in self._timestamps:
             self._timestamps[trace_id] = now
@@ -72,7 +149,7 @@ class MemoryTraceStore:
 
     async def get_trace(self, trace_id: str) -> dict[str, Any] | None:
         data = self._traces.get(trace_id)
-        return _unpack(data) if data is not None else None
+        return self._expand_messages(_unpack(data)) if data is not None else None
 
     async def get_session_traces(
         self,
@@ -91,10 +168,12 @@ class MemoryTraceStore:
                 results.append(data)
         if limit is not None:
             results = results[:limit]
-        return [_unpack(d) for d in results]
+        return [self._expand_messages(_unpack(d)) for d in results]
 
     async def delete_session(self, session_id: str) -> int:
         ids = self._session_index.pop(session_id, [])
+        self._session_nodes.pop(session_id, None)
+        self._session_chain.pop(session_id, None)
         # Collect trace_ids referenced by other sessions
         referenced: set[str] = set()
         for sid, tids in self._session_index.items():

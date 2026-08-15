@@ -88,6 +88,12 @@ def create_store(config: GatewayConfig) -> TraceStore:
         from rllm_model_gateway.store.memory_store import MemoryTraceStore
 
         return MemoryTraceStore()
+    elif worker == "memory-compact":
+        # Message-interning variant — see MemoryTraceStore(compact=True).
+        # Same external contract as "memory"; opt-in via RLLM_GATEWAY_STORE.
+        from rllm_model_gateway.store.memory_store import MemoryTraceStore
+
+        return MemoryTraceStore(compact=True)
     else:
         raise ValueError(f"Unknown store worker: {worker}")
 
