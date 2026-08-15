@@ -72,6 +72,19 @@ BASH_TOOL = {
     },
 }
 
+_KNOWN_TOOL_REPAIR = {
+    "source_eval_idx": 241,
+    "source_message_index": 2,
+    "tool_call_ordinal": 0,
+    "old_target_sha256": "e9d196d870d22e757e0cfb352ec79d27da92958c5a59ddb908d1702fcb2243f9",
+    "new_target_sha256": "b640478760e9cf1c83a29a9915a65c5b00235122c9a1890c05c8a2bd60e3625e",
+    "preserved_command_sha256": "1bf5d0988fee0524a98b581865cc0ea3dd761a209a2815cd56a5403b4b4fbd91",
+    "arguments": {
+        "command": 'find / -name "cssselect2" -type d 2>/dev/null | head -5',
+        "bash<arg_key>command": "ls -la",
+    },
+}
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -105,7 +118,58 @@ def _episode_path(run_dir: Path, eval_idx: int, attempt: int) -> Path:
     return matches[0]
 
 
-def _canonical_correct_histories(run_dir: Path) -> list[dict]:
+def _canonical_message(raw_message: dict) -> dict:
+    return bridge_messages([{"messages": [copy.deepcopy(raw_message)]}])[0].to_record()["messages"][0]
+
+
+def _repair_and_validate_bash_calls(raw_messages: list[dict], source_eval_idx: int) -> list[dict]:
+    """Repair one pinned GLM parser artifact, then enforce the declared tool schema."""
+    repairs: list[dict] = []
+    if source_eval_idx == _KNOWN_TOOL_REPAIR["source_eval_idx"]:
+        message_index = _KNOWN_TOOL_REPAIR["source_message_index"]
+        call_ordinal = _KNOWN_TOOL_REPAIR["tool_call_ordinal"]
+        try:
+            message = raw_messages[message_index]
+            old_hash = _json_sha256(_canonical_message(message))
+            call = message["tool_calls"][call_ordinal]
+            arguments = json.loads(call["function"]["arguments"])
+        except (IndexError, KeyError, TypeError, json.JSONDecodeError) as e:
+            raise ValueError(f"known tool repair source changed at eval_idx={source_eval_idx}") from e
+        if old_hash != _KNOWN_TOOL_REPAIR["old_target_sha256"] or arguments != _KNOWN_TOOL_REPAIR["arguments"]:
+            raise ValueError(f"known tool repair source changed at eval_idx={source_eval_idx}")
+        command = arguments["command"]
+        command_sha256 = hashlib.sha256(command.encode()).hexdigest()
+        if command_sha256 != _KNOWN_TOOL_REPAIR["preserved_command_sha256"]:
+            raise ValueError(f"known tool repair command changed at eval_idx={source_eval_idx}")
+        call["function"]["arguments"] = json.dumps({"command": command})
+        new_hash = _json_sha256(_canonical_message(message))
+        if new_hash != _KNOWN_TOOL_REPAIR["new_target_sha256"]:
+            raise ValueError(f"known tool repair produced unexpected target at eval_idx={source_eval_idx}")
+        repairs.append(
+            {
+                "source_eval_idx": source_eval_idx,
+                "source_message_index": message_index,
+                "tool_call_ordinal": call_ordinal,
+                "reason": "drop ignored GLM parser artifact bash<arg_key>command",
+                "old_target_sha256": old_hash,
+                "new_target_sha256": new_hash,
+                "preserved_command_sha256": command_sha256,
+            }
+        )
+
+    for message_index, message in enumerate(raw_messages):
+        for call_ordinal, call in enumerate(message.get("tool_calls") or []):
+            function = call.get("function") or {}
+            try:
+                arguments = json.loads(function.get("arguments", ""))
+            except (TypeError, json.JSONDecodeError) as e:
+                raise ValueError(f"eval_idx={source_eval_idx} message={message_index} call={call_ordinal} has invalid tool arguments") from e
+            if function.get("name") != "bash" or not isinstance(arguments, dict) or set(arguments) != {"command"} or not isinstance(arguments["command"], str):
+                raise ValueError(f"eval_idx={source_eval_idx} message={message_index} call={call_ordinal} does not match bash(command: string)")
+    return repairs
+
+
+def _canonical_correct_histories(run_dir: Path) -> tuple[list[dict], list[dict]]:
     results_path = run_dir / "results.json"
     meta_path = run_dir / "meta.json"
     if _sha256(results_path) != SOURCE_RESULTS_SHA256:
@@ -115,6 +179,7 @@ def _canonical_correct_histories(run_dir: Path) -> list[dict]:
 
     results = json.loads(results_path.read_text())
     histories: list[dict] = []
+    source_repairs: list[dict] = []
     for item in sorted(results["items"], key=lambda value: (value["idx"], value["attempt"])):
         if item.get("is_correct") is not True:
             continue
@@ -133,6 +198,7 @@ def _canonical_correct_histories(run_dir: Path) -> list[dict]:
         raw_messages = copy.deepcopy(trajectory["steps"][-1]["chat_completions"])
         for message in raw_messages:
             message["trainable"] = message.get("role") == "assistant"
+        source_repairs.extend(_repair_and_validate_bash_calls(raw_messages, item["idx"]))
         task_id = episode["task"]["task"]["name"]
         row = bridge_messages(
             [
@@ -152,7 +218,9 @@ def _canonical_correct_histories(run_dir: Path) -> list[dict]:
         row["source_message_count"] = len(row["messages"])
         row["raw_step_target_count"] = len(trajectory["steps"])
         histories.append(row)
-    return histories
+    if len(source_repairs) != 1:
+        raise ValueError(f"expected exactly one pinned source repair, found {len(source_repairs)}")
+    return histories, source_repairs
 
 
 def _interval_rows(history: dict) -> list[dict]:
@@ -378,7 +446,7 @@ def prepare(args: argparse.Namespace) -> dict:
     if (resolution.source, resolution.name) != ("prime", "nemotron-3"):
         raise ValueError(f"expected Prime nemotron-3 renderer, got {resolution.source}:{resolution.name}")
 
-    histories = _canonical_correct_histories(run_dir)
+    histories, source_repairs = _canonical_correct_histories(run_dir)
     print(f"selected {len(histories)} verifier-correct final histories", flush=True)
     accepted_targets = {row["source_eval_idx"]: [(index, _json_sha256(message)) for index, message in enumerate(row["messages"]) if message["role"] == "assistant"] for row in histories}
     val_tasks = _task_split([row["task_id"] for row in histories], args.val_fraction, args.seed)
@@ -454,6 +522,8 @@ def prepare(args: argparse.Namespace) -> dict:
             "seed": args.seed,
             "task_grouped_split": True,
             "tool_semantic_sha256": _json_sha256([BASH_TOOL]),
+            "source_repair_count": len(source_repairs),
+            "source_repairs": source_repairs,
         },
         "rendering": {
             "model": MODEL,

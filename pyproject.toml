@@ -19,6 +19,7 @@ classifiers = [
 license = {file = "LICENSE"}
 dependencies = [
     "rllm-model-gateway",
+    "renderers==0.1.9",
     # CLI
     "click>=8.0",
     "rich>=13.9.4",
@@ -93,7 +94,7 @@ tinker = [
 
 fireworks = [
     "fireworks-ai[training]==1.2.1 ; python_version >= '3.11'",
-    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git#subdirectory=training ; python_version >= '3.11'",
+    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git@6b1232504fdacd1149895acf63b388ae792cb062#subdirectory=training ; python_version >= '3.11'",
 ]
 
 opentelemetry = [

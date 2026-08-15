@@ -568,7 +568,9 @@ def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force:
     snapshot keyed on the install must actually contain it.
     """
     from rllm.eval._resolution import (
+        _builds_from_dockerfile,
         _create_base_sandbox,
+        _dockerfile_image,
         _dockerfile_run_commands,
         _replay_dockerfile,
         _should_replay_dockerfile,
@@ -578,17 +580,30 @@ def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force:
         logger.info("modal snapshot %s already live (%s) — reusing", key, prior_ref)
         return prior_ref
 
+    # Mirrors build_daytona_snapshot: when the task builds from its real Dockerfile,
+    # the image already carries every RUN (plus COPY/ENV/WORKDIR), so replaying would
+    # double-apply them — and a snapshotted task must come out identical to a cold-built
+    # one. Only the install script layers on top.
+    dockerfile = _builds_from_dockerfile(task, "modal")
+
     # Size the build sandbox's lifetime to the worst-case replay: each RUN is
     # bounded at 900s (a step that hangs against a prebuilt image burns its
     # full bound), plus the install bound and pull/capture slack — floored at
     # the rollout default. Without this floor, two hung steps killed the
-    # sandbox mid-build.
+    # sandbox mid-build. A from_dockerfile build replays nothing.
     install_budget = env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 900) if install_script else 0
-    n_replay = len(_dockerfile_run_commands(task)) if _should_replay_dockerfile(task) else 0
+    n_replay = 0 if dockerfile is not None else (len(_dockerfile_run_commands(task)) if _should_replay_dockerfile(task) else 0)
     build_timeout = max(_default_sandbox_timeout(), 900 * n_replay + install_budget + 600)
-    sb = _create_base_sandbox(task, "modal", name=f"{key}-build", timeout=build_timeout)
+    sb = _create_base_sandbox(
+        task,
+        "modal",
+        image=_dockerfile_image("modal", dockerfile) if dockerfile is not None else None,
+        name=f"{key}-build",
+        timeout=build_timeout,
+    )
     try:
-        _replay_dockerfile(task, sb, "modal")
+        if dockerfile is None:
+            _replay_dockerfile(task, sb, "modal")
         if install_script:
             sb.exec(install_script, timeout=env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 900), user="root")
         image = sb._sandbox.snapshot_filesystem()  # noqa: SLF001 — modal.Image

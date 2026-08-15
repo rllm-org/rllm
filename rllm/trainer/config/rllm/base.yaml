@@ -161,7 +161,7 @@ remote_runtime:
 
 # Gateway Configuration (model gateway for AgentFlow-based training)
 gateway:
-  port: 9090
+  port: null          # Owned tunnels auto-select; otherwise defaults to 9090
   host: null          # Auto-detects routable IP; set explicitly to override
   num_workers: 0      # 0 = gateway runs in a trainer thread (shares the trainer's GIL).
                       # 1 = run it in its own process (own event loop/GIL; recommended when the
@@ -170,11 +170,11 @@ gateway:
                       # session-sharding front on `port`, to spread the gateway's per-request CPU
                       # across cores. Use when one gateway process still saturates its core.
   tunnel: null        # Reach the gateway from remote sandboxes. When null and a run uses remote
-                      # sandboxes, it auto-resolves: $RLLM_GATEWAY_TUNNEL -> a running `rllm tunnel up`
-                      # daemon -> a free Cloudflare quick tunnel (shared/rate-limited; warns). Or set
+                      # sandboxes, it auto-resolves: $RLLM_GATEWAY_TUNNEL -> a configured ngrok
+                      # wildcard -> a fresh Cloudflare quick tunnel (shared/rate-limited; warns). Or set
                       # explicitly to a backend to auto-spawn ("cloudflared", "ngrok", "ngrok:<domain>")
                       # or an http(s):// URL reachable from the sandbox (tailscale IP, bore/frp, etc.).
-                      # For a stable tunnel with no per-run config: `rllm tunnel setup` then `rllm tunnel up`.
+                      # `rllm tunnel setup` can reserve a wildcard for isolated per-run ngrok URLs.
   store: memory       # "memory" (non-persistent) | "sqlite" (writes traces to disk)
   db_path: null       # Only used when store=sqlite; null → auto-resolved path (logged at startup)
   # Sampling params attached to a session overwrite those keys on every LLM call;

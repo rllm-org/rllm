@@ -1,10 +1,10 @@
 """rLLM CLI: set up and run the public tunnel that lets remote sandboxes reach the gateway.
 
-``rllm tunnel setup`` records a backend + credentials in ``~/.rllm/config.json``
+``rllm tunnel setup`` records backend settings in ``~/.rllm/config.json``
 (per-user, so nothing personal lands in shared train scripts). ``rllm tunnel up``
 runs that backend as a background daemon and writes its live URL to a state file;
-training auto-discovers it (see :func:`rllm.gateway.tunnel.resolve_auto_tunnel`),
-so no ``rllm.gateway.tunnel=...`` is needed in the run command.
+set ``RLLM_GATEWAY_TUNNEL`` to reuse that URL. Wildcard setups instead create
+an owned tunnel per eval/train run.
 """
 
 from __future__ import annotations
@@ -22,8 +22,8 @@ def tunnel():
     """Set up and run the public tunnel to the model gateway.
 
     Remote sandboxes (Daytona / Modal / Fireworks runtimes) reach the local
-    gateway through this tunnel. Run `rllm tunnel setup` once, then
-    `rllm tunnel up`; training auto-discovers the live URL with no per-run config.
+    gateway through this tunnel. A wildcard ngrok setup creates one tunnel per
+    run; fixed domains use `rllm tunnel up` as before.
     """
 
 
@@ -36,7 +36,7 @@ def tunnel_setup():
 
     existing = load_tunnel_config()
     backends = [
-        ("ngrok", "ngrok — stable reserved domain, needs a (free) account  [recommended]"),
+        ("ngrok", "ngrok — reserved domain or wildcard (wildcards need Pay-as-you-go)  [recommended]"),
         ("cloudflared", "cloudflared — free quick tunnel, zero setup, shared & rate-limited"),
     ]
     cursor = next((i for i, (b, _) in enumerate(backends) if b == existing.get("backend")), 0)
@@ -63,27 +63,65 @@ def tunnel_setup():
                 fail(f"ngrok rejected the authtoken: {(e.stderr or '').strip() or e}")
         domain = (
             click.prompt(
-                "  Reserved domain (e.g. you.ngrok.dev; blank for an ephemeral *.ngrok-free.app URL)",
+                "  Reserved domain or wildcard (e.g. gateway.ngrok.app or *.rllm-team.ngrok.app)",
                 default=existing.get("domain", ""),
                 show_default=bool(existing.get("domain")),
             ).strip()
             or None
         )
+        if (
+            domain
+            and domain.startswith("*.")
+            and click.confirm(
+                "  Reserve this wildcard with the ngrok API now?",
+                default=domain != existing.get("domain"),
+            )
+        ):
+            api_key = click.prompt(
+                "  ngrok API key (used once, not saved; blank uses existing config; https://dashboard.ngrok.com/api)",
+                default="",
+                hide_input=True,
+                show_default=False,
+            ).strip()
+            try:
+                command = ["ngrok", "api", "reserved-domains", "create", "--domain", domain, "--description", "rLLM per-run gateway tunnels"]
+                if api_key:
+                    command.extend(["--api-key", api_key])
+                subprocess.run(
+                    command,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                console.print(f"  [success]✓[/] Reserved [val]{domain}[/] with ngrok.")
+            except subprocess.CalledProcessError as e:
+                detail = (e.stderr or e.stdout or "").strip() or f"ngrok exited with status {e.returncode}"
+                detail = detail.replace(api_key, "***") if api_key else detail
+                if "ERR_NGROK_413" in detail:
+                    console.print(f"  [success]✓[/] [val]{domain}[/] is already reserved on this account.")
+                else:
+                    fail(f"ngrok could not reserve {domain}: {detail}")
     else:
         if not CloudflaredTunnel.is_available():
             fail(f"cloudflared not found on PATH. {CloudflaredTunnel.install_hint}")
         console.print("  [muted]cloudflared quick tunnels are shared and rate-limited (HTTP 429); fine for smoke tests.[/]")
 
-    port = click.prompt(
-        "  Gateway port (must match rllm.gateway.port in training)",
-        default=int(existing.get("port") or DEFAULT_PORT),
-        type=int,
-    )
+    port: int | None = None
+    if not (backend == "ngrok" and domain and domain.startswith("*.")):
+        port = click.prompt(
+            "  Gateway port (must match rllm.gateway.port in training)",
+            default=int(existing.get("port") or DEFAULT_PORT),
+            type=int,
+        )
 
-    save_tunnel_config(backend, domain=domain, port=int(port))
+    save_tunnel_config(backend, domain=domain, port=port)
     summary = backend + (f":{domain}" if domain else "")
-    console.print(f"\n  [success]✓ Tunnel configured:[/] [val]{summary}[/] [muted](gateway port {port})[/]")
-    console.print("  Start it with [key]rllm tunnel up[/]; training picks up the URL automatically.")
+    if port is None:
+        console.print(f"\n  [success]✓ Tunnel configured:[/] [val]{summary}[/]")
+        console.print("  Remote eval/train runs create a unique hostname and gateway port automatically.")
+    else:
+        console.print(f"\n  [success]✓ Tunnel configured:[/] [val]{summary}[/] [muted](gateway port {port})[/]")
+        console.print("  Start it with [key]rllm tunnel up[/]; set its URL explicitly to reuse this fixed route.")
 
 
 @tunnel.command("up")
@@ -132,7 +170,8 @@ def tunnel_up(backend, port):
     write_tunnel_state(backend=resolved_backend, url=url, pid=pid, upstream=upstream, log_path=log_path)
     console.print(f"  [success]✓ Tunnel up:[/] [val]{url}[/] [muted](pid {pid})[/]")
     console.print(f"  [label]logs[/] {log_path}")
-    console.print("  Training runs forward through this automatically. Stop it with [key]rllm tunnel down[/].")
+    console.print(f"  To reuse it, set [key]RLLM_GATEWAY_TUNNEL[/] to this URL and [key]rllm.gateway.port={resolved_port}[/].")
+    console.print("  Stop it with [key]rllm tunnel down[/].")
 
 
 @tunnel.command("status")

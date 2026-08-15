@@ -1,8 +1,8 @@
 """Resolve a (model, backend) to the best available renderer.
 
 Priority:
-1. Explicit override — ``family`` (prime-rl native) or ``renderer_name`` (tinker
-   style, e.g. ``"deepseek_v4"``).
+1. Explicit override — ``family`` (native) or ``renderer_name`` (legacy names
+   prefer the equivalent native renderer; cookbook-only names stay adapted).
 2. prime-rl native renderer if the model is in its ``MODEL_RENDERER_MAP``
    (hand-tuned, parity-tested, first-class ``bridge_to_next_turn``).
 3. Fireworks-cookbook renderer (``glm5``, ``deepseek_v4``, ...) auto-detected by
@@ -56,6 +56,23 @@ _FW_MODULES: tuple[str, ...] = (
     "fireworks_training_cookbook.renderers",
 )
 
+# Historical CLI/config spellings for renderer families now implemented by the
+# production ``renderers`` package. Prefer the native renderer so an explicit
+# override cannot accidentally select a different train/serve implementation.
+_PRIME_FAMILY_ALIASES: dict[str, str] = {
+    "qwen3": "qwen3",
+    "qwen3_5": "qwen3.5",
+    "qwen3.5": "qwen3.5",
+    "qwen3_6": "qwen3.6",
+    "qwen3.6": "qwen3.6",
+    "deepseekv3": "deepseek-v3",
+    "deepseek_v3": "deepseek-v3",
+    "deepseek-v3": "deepseek-v3",
+    "nemotron3": "nemotron-3",
+    "nemotron_3": "nemotron-3",
+    "nemotron-3": "nemotron-3",
+}
+
 
 def _cookbook_renderer_name(model_name: str) -> str | None:
     """Fireworks-cookbook renderer name for *model_name*, or None."""
@@ -80,10 +97,12 @@ def _infer_model_name(model: str | None, tokenizer: Any) -> str:
 def _try_prime(tokenizer: Any, family: str) -> Any | None:
     """prime-rl native renderer, or None if it falls back to DefaultRenderer."""
     try:
-        from renderers import create_renderer  # type: ignore
+        import renderers as prime_renderers  # type: ignore
     except ImportError:
         return None
-    renderer = create_renderer(tokenizer, renderer=family)
+
+    config = prime_renderers.config_from_name(family)
+    renderer = prime_renderers.create_renderer(tokenizer, config)
     if type(renderer).__name__ == "DefaultRenderer":
         return None
     return renderer
@@ -128,9 +147,20 @@ def resolve(
 ) -> RendererResolution:
     name = _infer_model_name(model, tokenizer)
 
-    # 1a. Explicit tinker-style override.
+    # 1a. Explicit renderer override. Legacy cookbook spellings resolve to the
+    # native production implementation when one exists; cookbook-only names
+    # continue through the adapter below.
     if renderer_name:
-        return RendererResolution(_tinker_adapter(renderer_name, tokenizer, model=name), "tinker", renderer_name)
+        prime_family = _PRIME_FAMILY_ALIASES.get(renderer_name)
+        if prime_family:
+            renderer = _try_prime(tokenizer, prime_family)
+            if renderer is not None:
+                return RendererResolution(renderer, "prime", prime_family)
+        return RendererResolution(
+            _tinker_adapter(renderer_name, tokenizer, model=name),
+            "tinker",
+            renderer_name,
+        )
 
     # 1b. Explicit prime-rl family.
     if family and family != "auto":

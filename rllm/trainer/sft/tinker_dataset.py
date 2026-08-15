@@ -7,15 +7,22 @@ Imported lazily by :class:`rllm.trainer.sft.tinker_backend.TinkerSFTBackend`, so
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import math
+from collections.abc import Iterable
+from typing import Literal
 
 import datasets
 import tinker
-from tinker_cookbook.renderers import Message, Renderer, TrainOnWhat
+import torch
+from tinker_cookbook.renderers import Message
 from tinker_cookbook.supervised.common import datum_from_model_input_weights
 from tinker_cookbook.supervised.types import SupervisedDataset
 
-from rllm.data.sft_schema import SFTSchemaError, normalize_messages
+from rllm.data.sft_schema import SFTMessage, SFTSchemaError, normalize_messages
+from rllm.renderers.types import Renderer
 from rllm.trainer.sft.backend import SFTConfigError
 
 logger = logging.getLogger(__name__)
@@ -66,20 +73,61 @@ def _warn_truncation(row_tokens: int, max_length: int) -> None:
         )
 
 
+def _validate_rendered_attribution(rendered, message_count: int) -> None:
+    """Require one valid source-message index per rendered token."""
+    if len(rendered.message_indices) != len(rendered.token_ids):
+        raise ValueError("renderer did not return one message attribution per token")
+    invalid = next((index for index in rendered.message_indices if index < -1 or index >= message_count), None)
+    if invalid is not None:
+        raise ValueError(f"renderer returned invalid message index {invalid} for {message_count} messages")
+    is_content = getattr(rendered, "is_content", None)
+    if is_content and len(is_content) != len(rendered.token_ids):
+        raise ValueError("renderer returned incomplete content-token metadata")
+
+
+def _validate_trainable_targets_represented(
+    renderer: Renderer,
+    renderer_messages: list[dict],
+    messages: list[SFTMessage],
+    rendered,
+    *,
+    tools: list[dict] | None,
+) -> None:
+    """Fail when a full render rewrites an explicitly trainable target.
+
+    Compare the full sequence through every earlier trainable target with that
+    prefix rendered alone. This protects both the target and its causal context
+    from history-dependent template rewrites.
+    """
+    for index, message in enumerate(messages):
+        if not message.trainable or index == len(messages) - 1:
+            continue
+        prefix = renderer.render(renderer_messages[: index + 1], tools=tools)
+        _validate_rendered_attribution(prefix, index + 1)
+        if rendered.token_ids[: len(prefix.token_ids)] != prefix.token_ids:
+            raise ValueError(
+                f"the rendered prefix through trainable message {index} is rewritten when later turns are present. Explode this trajectory per target, or store that target as a separate SFT example."
+            )
+
+
 def conversation_to_datum(
     conversation: list[Message],
     renderer: Renderer,
     max_length: int | None,
     last_only: bool = False,
+    *,
+    tools: list[dict] | None = None,
+    overlength_policy: Literal["error", "truncate"] = "truncate",
+    loss_reduction: Literal["none", "sequence_mean", "token_mean"] = "none",
 ) -> tinker.Datum:
     """Convert a conversation (list of messages) to a Tinker Datum.
 
-    Normalizes the raw messages through :mod:`rllm.data.sft_schema` (str/None
-    content coercion, parquet ``None``-artifact stripping, structured
-    ``tool_calls``, trainable-flag derivation) and renders with tinker's
-    ``CUSTOMIZED`` masking — each message's ``trainable`` flag alone decides the
-    loss mask. ``last_only`` selects the flag-less default (train just the last
-    assistant turn) rather than the all-assistant default.
+    Normalizes through :mod:`rllm.data.sft_schema`, then renders with the same
+    canonical :mod:`rllm.renderers` implementation used for inference. The
+    renderer returns a source-message index for every token; ``trainable`` maps
+    those indices to the loss mask. When the renderer also identifies message
+    body tokens, template scaffolding is excluded. ``last_only`` only selects
+    the default for source rows without a complete explicit mask.
 
     Schema/validation failures are re-raised as :class:`SFTConfigError` with the
     failing row's context.
@@ -87,21 +135,154 @@ def conversation_to_datum(
     default_trainable = "last" if last_only else "all"
     try:
         messages = normalize_messages(conversation, default_trainable=default_trainable)
-        tinker_messages = [m.to_tinker_message() for m in messages]
+        renderer_messages = [_to_renderer_message(message) for message in messages]
+        renderer_tools = _validate_tools(tools)
+        rendered = renderer.render(
+            renderer_messages,
+            tools=renderer_tools,
+        )
+        _validate_rendered_attribution(rendered, len(messages))
+        _validate_trainable_targets_represented(
+            renderer,
+            renderer_messages,
+            messages,
+            rendered,
+            tools=renderer_tools,
+        )
     except SFTSchemaError as e:
         raise SFTConfigError(f"SFT row failed schema normalization: {e}\n  row={_row_context(conversation)}") from e
-    model_input, weights = renderer.build_supervised_example(tinker_messages, train_on_what=TrainOnWhat.CUSTOMIZED)
+    except (TypeError, ValueError) as e:
+        raise SFTConfigError(f"SFT row failed canonical rendering: {e}\n  row={_row_context(conversation)}") from e
+
+    is_content = getattr(rendered, "is_content", None)
+    content_mask = is_content or [True] * len(rendered.token_ids)
+    weights = torch.tensor(
+        [float(index >= 0 and bool(messages[index].trainable) and content) for index, content in zip(rendered.message_indices, content_mask, strict=True)],
+        dtype=torch.float32,
+    )
+    model_input = tinker.ModelInput.from_ints(rendered.token_ids)
+    if overlength_policy not in ("error", "truncate"):
+        raise SFTConfigError(f"Unknown overlength policy {overlength_policy!r}; use 'error' or 'truncate'.")
+    if loss_reduction not in ("none", "sequence_mean", "token_mean"):
+        raise SFTConfigError(f"Unknown SFT loss reduction {loss_reduction!r}; use 'none', 'sequence_mean', or 'token_mean'.")
     if max_length is not None and model_input.length > max_length:
+        if overlength_policy == "error":
+            raise SFTConfigError(
+                f"SFT row renders to {model_input.length} tokens > data.max_length={max_length}. "
+                "The trajectory was not truncated. Drop it whole during preprocessing, raise max_length, "
+                "or explicitly select overlength_policy='truncate'."
+            )
         _warn_truncation(model_input.length, max_length)
-    return datum_from_model_input_weights(model_input, weights, max_length)
+    datum_max_length = max_length if overlength_policy == "truncate" else None
+    reduction = "mean" if loss_reduction == "sequence_mean" else "none"
+    datum = datum_from_model_input_weights(
+        model_input,
+        weights,
+        datum_max_length,
+        reduction=reduction,
+    )
+    _validate_datum_loss(datum, conversation)
+    return datum
+
+
+def count_loss_tokens(datums: list[tinker.Datum]) -> int:
+    """Count supervised positions independently of loss-weight scaling."""
+    return sum(1 for datum in datums for weight in datum.loss_fn_inputs["weights"].data if weight > 0)
+
+
+def sum_loss_weights(datums: list[tinker.Datum]) -> float:
+    """Return the loss denominator represented by a rendered batch."""
+    return sum(float(weight) for datum in datums for weight in datum.loss_fn_inputs["weights"].data)
+
+
+def _validate_datum_loss(datum: tinker.Datum, conversation: list[Message]) -> None:
+    """Reject a malformed or zero-loss row before it can hide in a batch."""
+    weights = [float(weight) for weight in datum.loss_fn_inputs["weights"].data]
+    if any(not math.isfinite(weight) or weight < 0 for weight in weights):
+        raise SFTConfigError(f"SFT row produced invalid loss weights after rendering and masking. Weights must be finite and non-negative.\n  row={_row_context(conversation)}")
+    if not any(weight > 0 for weight in weights):
+        raise SFTConfigError(f"SFT row has no trainable tokens after rendering, masking, and truncation. Check its trainable flags and overlength policy.\n  row={_row_context(conversation)}")
+
+
+def _normalize_token_mean(datums: list[tinker.Datum]) -> None:
+    """Make one batch loss the mean over all supervised tokens."""
+    total_weight = sum_loss_weights(datums)
+    if total_weight <= 0:
+        raise SFTConfigError("SFT batch has no trainable tokens after rendering and masking.")
+    for datum in datums:
+        weights = datum.loss_fn_inputs["weights"]
+        datum.loss_fn_inputs["weights"] = tinker.TensorData(
+            data=[float(weight) / total_weight for weight in weights.data],
+            dtype=weights.dtype,
+            shape=list(weights.shape),
+        )
+
+
+def _to_renderer_message(message: SFTMessage) -> dict:
+    """Lower one canonical SFT message to the renderer/OpenAI message shape.
+
+    Structured parts remain canonical in storage; the rendering contract has a
+    single visible-text field and a sibling ``reasoning_content`` field. Joining
+    parts by kind preserves their bytes and avoids provider-specific objects.
+    """
+    thinking_parts: list[str] = []
+    text_parts: list[str] = []
+    seen_text = False
+    for part in message.content:
+        if part.type == "text":
+            seen_text = True
+            text_parts.append(part.text)
+        elif seen_text:
+            raise ValueError("thinking parts must precede visible text; the renderer schema cannot preserve interleaved text/thinking order")
+        else:
+            thinking_parts.append(part.thinking)
+
+    output: dict = {
+        "role": message.role,
+        "content": "".join(text_parts),
+        "trainable": bool(message.trainable),
+    }
+    thinking = "".join(thinking_parts)
+    if thinking:
+        output["reasoning_content"] = thinking
+    if message.tool_calls:
+        output["tool_calls"] = []
+        for index, tool_call in enumerate(message.tool_calls):
+            try:
+                arguments = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"tool call {index} has invalid JSON arguments") from e
+            if not isinstance(arguments, dict):
+                raise ValueError(f"tool call {index} arguments must decode to an object")
+            output["tool_calls"].append(tool_call.model_dump(exclude_none=True))
+    if message.tool_call_id is not None:
+        output["tool_call_id"] = message.tool_call_id
+    if message.name is not None:
+        output["name"] = message.name
+    return output
+
+
+def _validate_tools(tools: list[dict] | None) -> list[dict] | None:
+    """Validate declarations before a renderer can ignore malformed entries."""
+    if not tools:
+        return None
+    for index, tool in enumerate(tools):
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            raise ValueError(f"tool declaration {index} must be an OpenAI function tool")
+        function = tool.get("function")
+        if not isinstance(function, dict) or not function.get("name"):
+            raise ValueError(f"tool declaration {index} needs a non-empty function.name")
+        if not isinstance(function.get("parameters", {}), dict):
+            raise ValueError(f"tool declaration {index} function.parameters must be an object")
+    return tools
 
 
 class TinkerSFTDataset(SupervisedDataset):
     """Dataset for Tinker SFT that loads from rLLM sources.
 
     Accepts a HuggingFace/rLLM Dataset object (from DatasetRegistry) or parquet
-    file path(s) with a ``messages`` column, renders via Tinker's renderer, and
-    yields Tinker Datums in batches.
+    file path(s) with a ``messages`` column, renders through rLLM's production
+    renderer, and yields Tinker-compatible Datums in batches.
     """
 
     def __init__(
@@ -112,11 +293,23 @@ class TinkerSFTDataset(SupervisedDataset):
         max_length: int | None = None,
         last_only: bool = False,
         max_samples: int = -1,
+        overlength_policy: Literal["error", "truncate"] = "truncate",
+        loss_reduction: Literal["none", "sequence_mean", "token_mean"] = "none",
     ):
         self.renderer = renderer
+        if batch_size <= 0:
+            raise SFTConfigError(f"SFT batch_size must be positive, got {batch_size}.")
+        if max_length is not None and max_length <= 1:
+            raise SFTConfigError(f"SFT max_length must be greater than 1, got {max_length}.")
+        if overlength_policy not in ("error", "truncate"):
+            raise SFTConfigError(f"Unknown overlength policy {overlength_policy!r}; use 'error' or 'truncate'.")
+        if loss_reduction not in ("none", "sequence_mean", "token_mean"):
+            raise SFTConfigError(f"Unknown SFT loss reduction {loss_reduction!r}; use 'none', 'sequence_mean', or 'token_mean'.")
         self.batch_size = batch_size
         self.max_length = max_length
         self.last_only = last_only
+        self.overlength_policy = overlength_policy
+        self.loss_reduction = loss_reduction
 
         if isinstance(dataset_or_files, str | list):
             if isinstance(dataset_or_files, str):
@@ -133,8 +326,19 @@ class TinkerSFTDataset(SupervisedDataset):
             self.dataset = self.dataset.select(range(max_samples))
             logger.info(f"Limited dataset to {max_samples} samples")
 
+        # Every epoch is derived from this stable source order. This makes the
+        # sequence rendered during preflight identical to the sequence consumed
+        # during training and resume, without letting preflight mutate state.
+        self._source_dataset = self.dataset
+
         logger.info(f"Loaded {len(self.dataset)} examples from {source}")
         logger.info(f"Masking: CUSTOMIZED (derive last_only={last_only} for flag-less rows)")
+        logger.info(
+            "Batching: batch_size=%d, final partial batch included; overlength=%s; loss_reduction=%s",
+            batch_size,
+            overlength_policy,
+            loss_reduction,
+        )
 
     def get_batch(self, index: int) -> list[tinker.Datum]:
         start_idx = index * self.batch_size
@@ -143,17 +347,111 @@ class TinkerSFTDataset(SupervisedDataset):
         for i in range(start_idx, end_idx):
             row = self.dataset[i]
             try:
-                datums.append(conversation_to_datum(row["messages"], self.renderer, self.max_length, self.last_only))
+                datums.append(
+                    conversation_to_datum(
+                        row["messages"],
+                        self.renderer,
+                        self.max_length,
+                        self.last_only,
+                        tools=row.get("tools"),
+                        overlength_policy=self.overlength_policy,
+                        loss_reduction=self.loss_reduction,
+                    )
+                )
             except SFTConfigError as e:
                 raise SFTConfigError(f"dataset row {i}: {e}") from e
+        if self.loss_reduction == "token_mean":
+            _normalize_token_mean(datums)
         return datums
 
+    def preflight(
+        self,
+        *,
+        label: str,
+        planned_batches: Iterable[tuple[int, int]] | None = None,
+    ) -> None:
+        """Render planned batches without changing the order used for training."""
+        if len(self) == 0:
+            raise SFTConfigError(f"{label} preflight failed: dataset contains no batches.")
+        original_dataset = self.dataset
+        try:
+            if planned_batches is None:
+                for batch_idx in range(len(self)):
+                    try:
+                        if not self.get_batch(batch_idx):
+                            raise SFTConfigError("rendered batch is empty")
+                    except SFTConfigError as e:
+                        raise SFTConfigError(f"{label} preflight failed at batch {batch_idx}: {e}") from e
+                return
+
+            current_epoch: int | None = None
+            for epoch_idx, batch_idx in planned_batches:
+                if epoch_idx != current_epoch:
+                    self.set_epoch(seed=epoch_idx)
+                    current_epoch = epoch_idx
+                try:
+                    if not self.get_batch(batch_idx):
+                        raise SFTConfigError("rendered batch is empty")
+                except SFTConfigError as e:
+                    raise SFTConfigError(f"{label} preflight failed at epoch {epoch_idx}, batch {batch_idx}: {e}") from e
+        finally:
+            self.dataset = original_dataset
+
+    def content_fingerprint(self) -> str:
+        """Hash the ordered source rows that determine rendered training data."""
+
+        def json_default(value):
+            if hasattr(value, "model_dump"):
+                return value.model_dump(mode="json", exclude_none=True)
+            if hasattr(value, "tolist"):
+                return value.tolist()
+            raise TypeError(f"Unsupported value {type(value).__name__} in SFT dataset fingerprint")
+
+        digest = hashlib.sha256()
+        for index in range(len(self._source_dataset)):
+            row = self._source_dataset[index]
+            payload = json.dumps(
+                {"messages": row["messages"], "tools": row.get("tools")},
+                default=json_default,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+        return digest.hexdigest()
+
     def set_epoch(self, seed: int = 0):
-        self.dataset = self.dataset.shuffle(seed=seed)
+        self.dataset = self._source_dataset.shuffle(seed=seed)
         logger.info(f"Shuffled dataset with seed {seed} ({len(self.dataset)} samples)")
 
     def __len__(self) -> int:
-        return len(self.dataset) // self.batch_size
+        return math.ceil(len(self.dataset) / self.batch_size)
+
+    def data_cursor_for_step(self, completed_steps: int) -> int:
+        """Return the raw-row cursor after ``completed_steps`` batches."""
+        if isinstance(completed_steps, bool) or not isinstance(completed_steps, int) or completed_steps < 0:
+            raise SFTConfigError(f"Completed SFT steps must be a non-negative integer, got {completed_steps!r}.")
+        batches_per_epoch = len(self)
+        if batches_per_epoch == 0:
+            return 0
+        completed_epochs, batches_in_epoch = divmod(completed_steps, batches_per_epoch)
+        rows_per_epoch = len(self._source_dataset)
+        return completed_epochs * rows_per_epoch + min(batches_in_epoch * self.batch_size, rows_per_epoch)
+
+    def step_for_data_cursor(self, data_consumed: int) -> int:
+        """Invert :meth:`data_cursor_for_step` at exact batch boundaries."""
+        if isinstance(data_consumed, bool) or not isinstance(data_consumed, int) or data_consumed < 0:
+            raise SFTConfigError(f"Checkpoint data cursor must be a non-negative integer, got {data_consumed!r}.")
+        rows_per_epoch = len(self._source_dataset)
+        if rows_per_epoch == 0:
+            return 0
+        completed_epochs, rows_in_epoch = divmod(data_consumed, rows_per_epoch)
+        batches_in_epoch = math.ceil(rows_in_epoch / self.batch_size)
+        step = completed_epochs * len(self) + batches_in_epoch
+        if self.data_cursor_for_step(step) != data_consumed:
+            raise SFTConfigError(f"Checkpoint data cursor {data_consumed} is not an exact SFT batch boundary; use a new trainer job or an intact rLLM checkpoint.")
+        return step
 
 
 def create_tinker_sft_datasets(
@@ -166,6 +464,8 @@ def create_tinker_sft_datasets(
     last_only: bool = False,
     max_train_samples: int = -1,
     max_val_samples: int = -1,
+    overlength_policy: Literal["error", "truncate"] = "truncate",
+    loss_reduction: Literal["none", "sequence_mean", "token_mean"] = "none",
 ) -> tuple[TinkerSFTDataset, TinkerSFTDataset | None]:
     """Create train and optional validation datasets for Tinker SFT."""
     if val_batch_size is None:
@@ -178,6 +478,8 @@ def create_tinker_sft_datasets(
         max_length=max_length,
         last_only=last_only,
         max_samples=max_train_samples,
+        overlength_policy=overlength_policy,
+        loss_reduction=loss_reduction,
     )
 
     val_dataset = None
@@ -189,6 +491,8 @@ def create_tinker_sft_datasets(
             max_length=max_length,
             last_only=last_only,
             max_samples=max_val_samples,
+            overlength_policy=overlength_policy,
+            loss_reduction="none",
         )
 
     return train_dataset, val_dataset
