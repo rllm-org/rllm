@@ -162,7 +162,7 @@ STEPS_PER_EPOCH=$(((222 + BATCH_SIZE - 1) / BATCH_SIZE))
 # A full 26-row 256K validation takes about 3--4 minutes.  Keep a dense curve
 # for early stopping instead of waiting for a whole 111-step epoch.
 VAL_FREQ="${DEEPSWE_SUPER_VAL_FREQ:-25}"
-SAVE_FREQ="${DEEPSWE_SUPER_SAVE_FREQ:-${STEPS_PER_EPOCH}}"
+SAVE_FREQ="${DEEPSWE_SUPER_SAVE_FREQ:-25}"
 JOB_ID="${DEEPSWE_SUPER_JOB_ID:-}"
 PROJECT="${DEEPSWE_SUPER_PROJECT:-rllm-deepswe-sft}"
 WANDB_ENABLED="${DEEPSWE_SUPER_WANDB:-1}"
