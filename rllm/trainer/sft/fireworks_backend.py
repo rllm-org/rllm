@@ -35,7 +35,6 @@ from rllm.trainer.sft.tinker_backend import (
     TinkerSFTBackend,
     build_adam_params,
     build_sft_data,
-    iter_training_batches,
     resolve_sft_optimizer_settings,
     resolve_training_steps,
     sft_lr_multiplier,
@@ -248,20 +247,6 @@ class FireworksSFTBackend(TinkerSFTBackend):
             optimizer = resolve_sft_optimizer_settings(config.optim, total_steps=total_steps)
             save_every = config.trainer.get("save_freq", 20)
             eval_every = config.trainer.get("test_freq", 10)
-
-            train_dataset.preflight(
-                label="train",
-                planned_batches=(
-                    (epoch_idx, batch_idx)
-                    for _step, epoch_idx, batch_idx in iter_training_batches(
-                        n_batches=n_batches,
-                        total_epochs=total_epochs,
-                        max_steps=max_steps,
-                    )
-                ),
-            )
-            if val_dataset is not None:
-                val_dataset.preflight(label="validation")
 
             infra = self._provision(config, api_key, base_url)
             try:

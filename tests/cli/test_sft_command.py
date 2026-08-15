@@ -67,6 +67,21 @@ def test_sft_registered_in_cli():
     assert "Fine-tune a model" in result.output
 
 
+def test_sft_preflight_checks_without_training(runner, tmp_rllm_home, monkeypatch):
+    from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
+
+    calls: list[str] = []
+    monkeypatch.setattr(AgentSFTTrainer, "preflight", lambda self: calls.append("preflight"))
+    monkeypatch.setattr(AgentSFTTrainer, "train", lambda self: pytest.fail("--preflight must not train"))
+
+    name = _register_toy("preflight-toy")
+    result = runner.invoke(cli, ["sft", name, "--backend", "tinker", "--preflight", "--no-ui"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["preflight"]
+    assert "Preflight passed" in result.output
+
+
 def test_sft_requires_a_source(runner, tmp_rllm_home):
     result = runner.invoke(cli, ["sft"])
     assert result.exit_code == 1

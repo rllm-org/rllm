@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-from collections.abc import Iterable
 from typing import Literal
 
 import datasets
@@ -118,6 +117,7 @@ def conversation_to_datum(
     tools: list[dict] | None = None,
     overlength_policy: Literal["error", "truncate"] = "truncate",
     loss_reduction: Literal["none", "sequence_mean", "token_mean"] = "none",
+    validate_prefix_stability: bool = False,
 ) -> tinker.Datum:
     """Convert a conversation (list of messages) to a Tinker Datum.
 
@@ -129,7 +129,8 @@ def conversation_to_datum(
     the default for source rows without a complete explicit mask.
 
     Schema/validation failures are re-raised as :class:`SFTConfigError` with the
-    failing row's context.
+    failing row's context. Prefix-stability rerenders are disabled unless an
+    explicit dataset preflight requests them.
     """
     default_trainable = "last" if last_only else "all"
     try:
@@ -141,13 +142,14 @@ def conversation_to_datum(
             tools=renderer_tools,
         )
         _validate_rendered_attribution(rendered, len(messages))
-        _validate_trainable_targets_represented(
-            renderer,
-            renderer_messages,
-            messages,
-            rendered,
-            tools=renderer_tools,
-        )
+        if validate_prefix_stability:
+            _validate_trainable_targets_represented(
+                renderer,
+                renderer_messages,
+                messages,
+                rendered,
+                tools=renderer_tools,
+            )
     except SFTSchemaError as e:
         raise SFTConfigError(f"SFT row failed schema normalization: {e}\n  row={_row_context(conversation)}") from e
     except (TypeError, ValueError) as e:
@@ -339,7 +341,7 @@ class TinkerSFTDataset(SupervisedDataset):
             loss_reduction,
         )
 
-    def get_batch(self, index: int) -> list[tinker.Datum]:
+    def get_batch(self, index: int, *, validate_prefix_stability: bool = False) -> list[tinker.Datum]:
         start_idx = index * self.batch_size
         end_idx = min(start_idx + self.batch_size, len(self.dataset))
         datums = []
@@ -355,6 +357,7 @@ class TinkerSFTDataset(SupervisedDataset):
                         tools=row.get("tools"),
                         overlength_policy=self.overlength_policy,
                         loss_reduction=self.loss_reduction,
+                        validate_prefix_stability=validate_prefix_stability,
                     )
                 )
             except SFTConfigError as e:
@@ -363,38 +366,16 @@ class TinkerSFTDataset(SupervisedDataset):
             _normalize_token_mean(datums)
         return datums
 
-    def preflight(
-        self,
-        *,
-        label: str,
-        planned_batches: Iterable[tuple[int, int]] | None = None,
-    ) -> None:
-        """Render planned batches without changing the order used for training."""
+    def preflight(self, *, label: str) -> None:
+        """Render every dataset batch once."""
         if len(self) == 0:
             raise SFTConfigError(f"{label} preflight failed: dataset contains no batches.")
-        original_dataset = self.dataset
-        try:
-            if planned_batches is None:
-                for batch_idx in range(len(self)):
-                    try:
-                        if not self.get_batch(batch_idx):
-                            raise SFTConfigError("rendered batch is empty")
-                    except SFTConfigError as e:
-                        raise SFTConfigError(f"{label} preflight failed at batch {batch_idx}: {e}") from e
-                return
-
-            current_epoch: int | None = None
-            for epoch_idx, batch_idx in planned_batches:
-                if epoch_idx != current_epoch:
-                    self.set_epoch(seed=epoch_idx)
-                    current_epoch = epoch_idx
-                try:
-                    if not self.get_batch(batch_idx):
-                        raise SFTConfigError("rendered batch is empty")
-                except SFTConfigError as e:
-                    raise SFTConfigError(f"{label} preflight failed at epoch {epoch_idx}, batch {batch_idx}: {e}") from e
-        finally:
-            self.dataset = original_dataset
+        for batch_idx in range(len(self)):
+            try:
+                if not self.get_batch(batch_idx, validate_prefix_stability=True):
+                    raise SFTConfigError("rendered batch is empty")
+            except SFTConfigError as e:
+                raise SFTConfigError(f"{label} preflight failed at batch {batch_idx}: {e}") from e
 
     def set_epoch(self, seed: int = 0):
         self.dataset = self._source_dataset.shuffle(seed=seed)
