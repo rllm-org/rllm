@@ -56,6 +56,11 @@
       "function": "OracleHarness",
       "description": "Run the task's reference solution (solution/solve.sh) without an LLM. Smoke-test for verifier + image."
     },
+    "nop": {
+      "module": "rllm.harnesses.nop",
+      "function": "NopHarness",
+      "description": "Make no agent-side changes and grade the untouched sandbox."
+    },
     "zeroclaw": {
       "module": "rllm.harnesses.zeroclaw",
       "function": "ZeroClawHarness",
