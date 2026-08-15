@@ -23,12 +23,12 @@ python -u train_debug.py \
     rllm/backend=fireworks \
     model.name=accounts/fireworks/models/qwen3p5-35b-a3b \
     model.tokenizer_model=Qwen/Qwen3.5-35B-A3B \
-    model.lora_rank=0 \
-    fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3p6-35b-a3b-256k \
+    model.lora_rank=128 \
+    fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3p6-35b-a3b-256k-lora \
     fireworks_config.policy_trainer_replica_count=1 \
     fireworks_config.rollout_deployment_replica_count=2 \
     training.group_size=16 \
-    training.learning_rate=1e-6 \
+    training.learning_rate=8e-5 \
     training.beta2=0.999 \
     training.max_length=67584 \
     rllm.rollout.train.temperature=1.0 \
@@ -56,7 +56,7 @@ python -u train_debug.py \
     rllm.workflow.n_parallel_tasks=192 \
     rllm.workflow.raise_on_error=false \
     rllm.rejection_sample.filter_uniform_groups=true \
-    rllm.gateway.tunnel=http://5.78.144.17:19090 \
+    rllm.gateway.tunnel=https://mortgage-prospects-ban-room.trycloudflare.com \
     rllm.gateway.port=9200 \
     rllm.gateway.num_workers=4 \
     rllm.gateway.cumulative_token_mode=true \
@@ -71,5 +71,5 @@ python -u train_debug.py \
     rllm.trainer.experiment_name='qwen3p5-35b-a3b-tb-v2-debug' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=-1 \
-    rllm.trainer.save_freq=20 \
+    rllm.trainer.save_freq=10 \
     "$@"
