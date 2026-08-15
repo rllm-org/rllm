@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import sys
-import types
-
 import pytest
 
 tinker = pytest.importorskip("tinker")
@@ -82,6 +78,46 @@ def test_preflight_renders_the_exact_planned_training_order():
     assert renderer.seen == preflight_order
 
 
+def test_training_batch_skips_prefix_stability_preflight():
+    class _PrefixRenderer:
+        def __init__(self):
+            self.seen: list[int] = []
+
+        def render(self, messages, *, tools=None, add_generation_prompt=False):
+            from rllm.renderers.types import RenderedTokens
+
+            del tools, add_generation_prompt
+            self.seen.append(len(messages))
+            return RenderedTokens(
+                token_ids=list(range(len(messages))),
+                message_indices=list(range(len(messages))),
+            )
+
+    source = Dataset(
+        data=[
+            {
+                "messages": [
+                    {"role": "user", "content": "q1", "trainable": False},
+                    {"role": "assistant", "content": "a1", "trainable": True},
+                    {"role": "user", "content": "q2", "trainable": False},
+                    {"role": "assistant", "content": "a2", "trainable": True},
+                ]
+            }
+        ],
+        name="prefixes",
+        split="train",
+    )
+    renderer = _PrefixRenderer()
+    dataset = TinkerSFTDataset(source, renderer=renderer, batch_size=1)
+
+    dataset.get_batch(0)
+    assert renderer.seen == [4]
+
+    renderer.seen.clear()
+    dataset.preflight(label="train")
+    assert renderer.seen == [4, 2]
+
+
 def test_validation_preflight_checks_every_batch():
     dataset = TinkerSFTDataset(
         _dataset([2, 20]),
@@ -95,9 +131,7 @@ def test_validation_preflight_checks_every_batch():
         dataset.preflight(label="validation")
 
 
-def test_tinker_preflight_failure_precedes_service_client(monkeypatch, tmp_path):
-    from tinker_cookbook import checkpoint_utils
-
+def test_tinker_explicit_preflight_does_not_create_service_client(monkeypatch, tmp_path):
     import rllm.trainer.sft.tinker_backend as backend_module
 
     train = TinkerSFTDataset(
@@ -106,7 +140,6 @@ def test_tinker_preflight_failure_precedes_service_client(monkeypatch, tmp_path)
         batch_size=2,
     )
     monkeypatch.setattr(backend_module, "build_sft_data", lambda *_: (object(), train, None))
-    monkeypatch.setattr(checkpoint_utils, "get_last_checkpoint", lambda *_: None)
     monkeypatch.setattr(tinker, "ServiceClient", lambda **_: pytest.fail("provider client must not be created"))
 
     backend = TinkerSFTBackend(
@@ -119,13 +152,12 @@ def test_tinker_preflight_failure_precedes_service_client(monkeypatch, tmp_path)
     )
     backend.build_config()
 
-    with pytest.raises(SFTConfigError, match="train preflight.*epoch 0.*batch 0"):
-        asyncio.run(backend._fit_async())
+    with pytest.raises(SFTConfigError, match="train preflight.*batch 0"):
+        backend.preflight()
 
 
-def test_fireworks_preflight_failure_precedes_provision(monkeypatch, tmp_path):
-    import rllm.trainer.sft.fireworks_backend as backend_module
-    import rllm.utils.tracking as tracking_module
+def test_fireworks_explicit_preflight_does_not_provision(monkeypatch, tmp_path):
+    import rllm.trainer.sft.tinker_backend as backend_module
 
     train = TinkerSFTDataset(
         _dataset([0, 2, 0, 2]),
@@ -142,27 +174,8 @@ def test_fireworks_preflight_failure_precedes_provision(monkeypatch, tmp_path):
     )
     backend.build_config()
 
-    class _Tracking:
-        def __init__(self, **_kwargs):
-            pass
-
-        def finish(self):
-            pass
-
-    monkeypatch.setenv("FIREWORKS_API_KEY", "fake")
-    training = types.ModuleType("training")
-    training_utils = types.ModuleType("training.utils")
-    checkpoints = types.ModuleType("training.utils.checkpoints")
-    checkpoints.TrainingCheckpoints = object
-    client = types.ModuleType("training.utils.client")
-    client.DEFAULT_TIMEOUT_S = 1
-    monkeypatch.setitem(sys.modules, "training", training)
-    monkeypatch.setitem(sys.modules, "training.utils", training_utils)
-    monkeypatch.setitem(sys.modules, "training.utils.checkpoints", checkpoints)
-    monkeypatch.setitem(sys.modules, "training.utils.client", client)
-    monkeypatch.setattr(tracking_module, "Tracking", _Tracking)
     monkeypatch.setattr(backend_module, "build_sft_data", lambda *_: (None, train, None))
     monkeypatch.setattr(backend, "_provision", lambda *_: pytest.fail("provider trainer must not be provisioned"))
 
-    with pytest.raises(SFTConfigError, match="train preflight.*epoch 0.*batch 0"):
-        backend.fit()
+    with pytest.raises(SFTConfigError, match="train preflight.*batch 0"):
+        backend.preflight()

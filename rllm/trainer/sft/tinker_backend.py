@@ -424,6 +424,19 @@ class TinkerSFTBackend(SFTBackend):
         # Tinker consumes the in-memory Dataset objects directly; nothing to do.
         pass
 
+    def preflight(self) -> None:
+        """Render each hosted-SFT row once without starting a trainer."""
+        if self._config is None:
+            self.build_config()
+        _tokenizer, train_dataset, val_dataset = build_sft_data(
+            self._config,
+            self.spec.train_dataset,
+            self.spec.val_dataset,
+        )
+        train_dataset.preflight(label="train")
+        if val_dataset is not None:
+            val_dataset.preflight(label="validation")
+
     @property
     def checkpoint_dir(self) -> str:
         cfg = self._config or self.build_config()
@@ -461,22 +474,6 @@ class TinkerSFTBackend(SFTBackend):
         optimizer = resolve_sft_optimizer_settings(config.get("optim", {}), total_steps=total_steps)
         save_every = config.trainer.get("save_freq", 20)
         eval_every = config.trainer.get("test_freq", 10)
-
-        train_dataset.preflight(
-            label="train",
-            planned_batches=(
-                (epoch_idx, batch_idx)
-                for _step, epoch_idx, batch_idx in iter_training_batches(
-                    n_batches=n_batches,
-                    total_epochs=total_epochs,
-                    start_epoch=start_epoch,
-                    start_batch=start_batch,
-                    max_steps=max_steps,
-                )
-            ),
-        )
-        if val_dataset is not None:
-            val_dataset.preflight(label="validation")
 
         service_client = tinker.ServiceClient(base_url=config.get("tinker_base_url", None))
 
