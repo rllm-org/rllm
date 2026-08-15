@@ -275,6 +275,35 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         ],
         base_url=TINKER_OAI_BASE_URL,
     ),
+    # --- OrcaRouter — OpenAI-compatible routing gateway ---
+    ProviderInfo(
+        id="orcarouter",
+        label="OrcaRouter",
+        # Route through LiteLLM's OpenAI-compatible adapter pinned to
+        # OrcaRouter's api_base (same pattern as Tinker). OrcaRouter exposes
+        # 150+ router-prefixed model ids (openai/gpt-5.5, anthropic/...,
+        # deepseek/...) behind one endpoint; ``litellm_prefix="openai"`` sends
+        # the namespaced id verbatim to the gateway.
+        litellm_prefix="openai",
+        env_key="ORCAROUTER_API_KEY",
+        default_model="openai/gpt-5.5",
+        models=[
+            "openai/gpt-5.5",
+            "openai/gpt-5.2",
+            "anthropic/claude-sonnet-4.6",
+            "anthropic/claude-opus-4.6",
+            "anthropic/claude-haiku-4.5",
+            "deepseek/deepseek-v4-pro",
+            "deepseek/deepseek-v4-flash",
+            "google/gemini-3.1-pro-preview",
+            "qwen/qwen3.5-plus",
+            "minimax/minimax-m2.7",
+            "z-ai/glm-5.1",
+            "kimi/kimi-k2.6",
+            "grok/grok-4.3",
+        ],
+        base_url="https://api.orcarouter.ai/v1",
+    ),
     # --- Custom endpoint (last) ---
     ProviderInfo(
         id="custom",
