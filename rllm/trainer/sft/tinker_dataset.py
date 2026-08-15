@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-from collections.abc import Iterable
 from typing import Literal
 
 import datasets
@@ -367,38 +366,16 @@ class TinkerSFTDataset(SupervisedDataset):
             _normalize_token_mean(datums)
         return datums
 
-    def preflight(
-        self,
-        *,
-        label: str,
-        planned_batches: Iterable[tuple[int, int]] | None = None,
-    ) -> None:
-        """Render planned batches without changing the order used for training."""
+    def preflight(self, *, label: str) -> None:
+        """Render every dataset batch once."""
         if len(self) == 0:
             raise SFTConfigError(f"{label} preflight failed: dataset contains no batches.")
-        original_dataset = self.dataset
-        try:
-            if planned_batches is None:
-                for batch_idx in range(len(self)):
-                    try:
-                        if not self.get_batch(batch_idx, validate_prefix_stability=True):
-                            raise SFTConfigError("rendered batch is empty")
-                    except SFTConfigError as e:
-                        raise SFTConfigError(f"{label} preflight failed at batch {batch_idx}: {e}") from e
-                return
-
-            current_epoch: int | None = None
-            for epoch_idx, batch_idx in planned_batches:
-                if epoch_idx != current_epoch:
-                    self.set_epoch(seed=epoch_idx)
-                    current_epoch = epoch_idx
-                try:
-                    if not self.get_batch(batch_idx, validate_prefix_stability=True):
-                        raise SFTConfigError("rendered batch is empty")
-                except SFTConfigError as e:
-                    raise SFTConfigError(f"{label} preflight failed at epoch {epoch_idx}, batch {batch_idx}: {e}") from e
-        finally:
-            self.dataset = original_dataset
+        for batch_idx in range(len(self)):
+            try:
+                if not self.get_batch(batch_idx, validate_prefix_stability=True):
+                    raise SFTConfigError("rendered batch is empty")
+            except SFTConfigError as e:
+                raise SFTConfigError(f"{label} preflight failed at batch {batch_idx}: {e}") from e
 
     def set_epoch(self, seed: int = 0):
         self.dataset = self._source_dataset.shuffle(seed=seed)

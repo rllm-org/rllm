@@ -47,37 +47,6 @@ def _dataset(lengths):
     )
 
 
-def test_preflight_checks_planned_shuffle_and_restores_source_order():
-    source = _dataset([0, 2, 0, 2])
-    dataset = TinkerSFTDataset(source, renderer=_TokenRenderer(), batch_size=2)
-
-    with pytest.raises(SFTConfigError, match="train preflight.*epoch 0.*batch 0"):
-        dataset.preflight(label="train", planned_batches=[(0, 0), (0, 1)])
-
-    assert dataset.dataset is source
-
-
-def test_preflight_renders_the_exact_planned_training_order():
-    source = _dataset([2, 3, 4, 5])
-    renderer = _TokenRenderer()
-    dataset = TinkerSFTDataset(source, renderer=renderer, batch_size=2)
-    plan = [(0, 0), (0, 1), (1, 0)]
-
-    dataset.preflight(label="train", planned_batches=plan)
-    preflight_order = renderer.seen.copy()
-    assert dataset.dataset is source
-
-    renderer.seen.clear()
-    current_epoch = None
-    for epoch_idx, batch_idx in plan:
-        if epoch_idx != current_epoch:
-            dataset.set_epoch(seed=epoch_idx)
-            current_epoch = epoch_idx
-        dataset.get_batch(batch_idx)
-
-    assert renderer.seen == preflight_order
-
-
 def test_training_batch_skips_prefix_stability_preflight():
     class _PrefixRenderer:
         def __init__(self):
