@@ -1,12 +1,4 @@
-# terminal-RL operations notes
-
-Operational companion to `README.md` (which covers what the recipe *is*). This
-covers running it: launch overrides that are effectively required, naming rules,
-and failure modes that present as healthy runs.
-
-Agent tooling note: this repo gitignores `CLAUDE.md`, so keep a local copy if
-you want it auto-loaded:
-`cp cookbooks/terminal-rl/OPERATIONS.md cookbooks/terminal-rl/CLAUDE.md`
+# terminal-RL cookbook — working notes
 
 Agentic RL on terminal-bench tasks. The local machine is a **coordinator**, not
 a trainer: weights, optimizer state and checkpoints live on Fireworks, rollouts
