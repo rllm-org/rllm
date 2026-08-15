@@ -1,0 +1,45 @@
+# systemd user unit: keeps the terminal-RL sweep running across reboots.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp terminal-rl-sweep.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now terminal-rl-sweep
+#   loginctl enable-linger $USER      # required, else it stops at logout
+#
+# Swap ExecStart to deploy/supervisor.sh for a single long run instead of a sweep.
+
+[Unit]
+Description=terminal-RL hyperparameter sweep (Fireworks + Modal coordinator)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash %h/rllm/cookbooks/terminal-rl/deploy/sweep.sh
+WorkingDirectory=%h/rllm/cookbooks/terminal-rl
+
+# Restart on abnormal exit only. A completed sweep exits 0 and must NOT be
+# relaunched, or it would loop re-reporting finished configs forever.
+Restart=on-failure
+RestartSec=60
+
+# Credentials are sourced from ~/.rllm/terminal-rl-auto.env by the script
+# itself, so no secrets appear in this unit or in `systemctl show` output.
+Environment=PATH=%h/miniconda3/envs/verl/bin:/usr/local/bin:/usr/bin:/bin
+Environment=TERMINAL_RL_REPO=%h/rllm
+
+StandardOutput=append:%h/.rllm/terminal-rl-logs/sweep.log
+StandardError=append:%h/.rllm/terminal-rl-logs/sweep.log
+
+# The coordinator drives ~192 concurrent sandboxes and 4 gateway workers; it is
+# I/O bound, not CPU bound. Raise the fd limit for the socket fan-out.
+LimitNOFILE=65535
+
+# Never let systemd kill the training children when the unit restarts; the
+# script cleans them up itself (including gateway workers, which outlive
+# their parent and would otherwise hold the gateway port).
+KillMode=mixed
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

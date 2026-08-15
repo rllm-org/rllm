@@ -226,3 +226,6 @@ gcp-key.json
 
 # IDE
 .vscode/
+
+# terminal-RL episode/backend-batch logs (multi-GB, regenerated per run)
+cookbooks/terminal-rl/train_batches/
