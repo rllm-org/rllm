@@ -281,6 +281,41 @@ def test_llm_free_harness_opts_out_of_the_empty_completion_canary():
     assert getattr(MiniSweAgentHarness, "makes_llm_calls", True) is True
 
 
+@pytest.mark.parametrize(("makes_llm_calls", "warns"), [(None, True), (False, False), (True, True)])
+def test_empty_completion_progress_canary_respects_llm_free_flows(monkeypatch, makes_llm_calls, warns):
+    from rllm.types import Step
+
+    agent = _Agent()
+    if makes_llm_calls is not None:
+        agent.makes_llm_calls = makes_llm_calls
+    gateway = _Gateway()
+    engine = AgentFlowEngine(
+        agent_flow=agent,
+        evaluator=_Evaluator(),
+        gateway=gateway,
+        model="test-model",
+        n_parallel_tasks=1,
+    )
+    episode = Episode(
+        id="task:0",
+        trajectories=[Trajectory(name="solver", steps=[Step(output="[model-free diagnostic]")])],
+    )
+
+    async def process_task_with_retry(task, task_id, rollout_idx, result_idx, is_validation=False):
+        return task_id, rollout_idx, result_idx, episode
+
+    engine.process_task_with_retry = process_task_with_retry
+    warnings = []
+    monkeypatch.setattr("rllm.engine.agentflow_engine.colorful_print", lambda message, **kwargs: warnings.append(message))
+
+    try:
+        asyncio.run(engine.execute_tasks([task_from_row({"question": "q"}, "task")], task_ids=["task"]))
+    finally:
+        engine.shutdown()
+
+    assert bool(warnings) is warns
+
+
 def test_infra_taxonomy_membership_and_mapping():
     from rllm.types import INFRA_ERROR_REASONS, TerminationReason, termination_reason_from_error
 

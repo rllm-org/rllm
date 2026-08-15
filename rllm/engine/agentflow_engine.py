@@ -518,7 +518,7 @@ class AgentFlowEngine:
                 # upstream returned nothing (dead litellm proxy, gateway "no healthy
                 # workers", or the model itself). Surface it loudly — otherwise the
                 # run silently produces garbage (every rollout scores 0).
-                if episode is not None:
+                if episode is not None and getattr(self.agent_flow, "makes_llm_calls", True):
                     _steps = [s for t in (episode.trajectories or []) for s in (t.steps or [])]
                     if _steps and all(not (s.model_response or "").strip() for s in _steps):
                         n_empty_rollouts += 1
