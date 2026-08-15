@@ -37,7 +37,11 @@ GATEWAY_MODE="${TERMINAL_RL_GATEWAY_MODE:-cloudflared}"
 GATEWAY_PORT="${TERMINAL_RL_GATEWAY_PORT:-9200}"
 
 # ---- sweep grid -------------------------------------------------------------
-LORA_RANK="${TERMINAL_RL_LORA_RANK:-128}"
+# Cartesian product RANKS x LRS, run sequentially (one trainer job at a time).
+# NOTE: lora_alpha is a fixed 32 unless overridden, so changing rank also changes
+# the scaling alpha/r (1.0 at r32, 0.25 at r128). To vary capacity while holding
+# scaling constant, set +model.lora_alpha=2*rank per config instead.
+RANKS="${TERMINAL_RL_RANKS:-${TERMINAL_RL_LORA_RANK:-128}}"
 TARGET_STEPS="${TERMINAL_RL_TARGET_STEPS:-150}"
 LRS="${TERMINAL_RL_LRS:-5e-5 1.5e-4}"
 EXTRA_ARGS="${TERMINAL_RL_EXTRA_ARGS:-}"   # e.g. "+model.lora_alpha=256"
@@ -155,20 +159,22 @@ training_alive() {
 slug() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr '.' 'p' | tr -cd 'a-z0-9-'; }
 
 experiment_name() {
-    local lr="$1" name alpha
-    name="$(slug "$EXP_BASE")-r${LORA_RANK}-lr$(slug "$lr")"
+    local rank="$1" lr="$2" name alpha
+    name="$(slug "$EXP_BASE")-r${rank}-lr$(slug "$lr")"
     alpha=$(printf '%s' "$EXTRA_ARGS" | grep -oE 'lora_alpha=[0-9]+' | cut -d= -f2)
     [ -n "$alpha" ] && name="${name}-a${alpha}"
     [ -n "$HOST_TAG" ] && name="${name}-$(slug "$HOST_TAG")"
     printf '%s' "$name"
 }
 
-steps_for_lr() { cat "$LOGS"/sweep_lr"$1"_*.log 2>/dev/null | grep -c "time/optim_step"; }
-eps_for_lr()   { cat "$LOGS"/sweep_lr"$1"_*.log 2>/dev/null | grep -c "Rewards:"; }
-ones_for_lr()  { cat "$LOGS"/sweep_lr"$1"_*.log 2>/dev/null | grep -o "mini-swe-agent: 1.0" | wc -l | tr -d ' '; }
+cfg_logs()   { printf '%s' "$LOGS/sweep_r$1_lr$2_"; }
+steps_for()  { cat "$(cfg_logs "$1" "$2")"*.log 2>/dev/null | grep -c "time/optim_step"; }
+eps_for()    { cat "$(cfg_logs "$1" "$2")"*.log 2>/dev/null | grep -c "Rewards:"; }
+ones_for()   { cat "$(cfg_logs "$1" "$2")"*.log 2>/dev/null | grep -o "mini-swe-agent: 1.0" | wc -l | tr -d ' '; }
 
-log "sweep starting: rank=$LORA_RANK target=$TARGET_STEPS lrs=[$LRS] gateway=$GATEWAY_MODE extra='$EXTRA_ARGS'"
+log "sweep starting: ranks=[$RANKS] lrs=[$LRS] target=$TARGET_STEPS gateway=$GATEWAY_MODE extra='$EXTRA_ARGS'"
 
+for LORA_RANK in $RANKS; do
 for LR in $LRS; do
     cfg_start=$(date +%s)
     attempts=0
@@ -176,7 +182,7 @@ for LR in $LRS; do
     note=ok
 
     while :; do
-        steps=$(steps_for_lr "$LR")
+        steps=$(steps_for "$LORA_RANK" "$LR")
         [ "$steps" -ge "$TARGET_STEPS" ] && { note=ok; break; }
         [ "$attempts" -ge "$MAX_ATTEMPTS" ] && { note="gave-up-after-${attempts}-attempts"; break; }
         [ $(( ($(date +%s) - cfg_start) / 3600 )) -ge "$MAX_HOURS" ] && { note="wall-clock-${MAX_HOURS}h"; break; }
@@ -189,8 +195,8 @@ for LR in $LRS; do
         fi
 
         attempts=$((attempts + 1))
-        RUNLOG="$LOGS/sweep_lr${LR}_$(date +%Y%m%d_%H%M%S).log"
-        EXP_NAME="$(experiment_name "$LR")"
+        RUNLOG="$LOGS/sweep_r${LORA_RANK}_lr${LR}_$(date +%Y%m%d_%H%M%S).log"
+        EXP_NAME="$(experiment_name "$LORA_RANK" "$LR")"
         cd "$CB" || { log "cannot cd $CB"; exit 1; }
         # shellcheck disable=SC2086
         nohup bash train_fireworks_debug.sh \
@@ -203,7 +209,7 @@ for LR in $LRS; do
             rllm.episode_logging.episode_log_dir="train_batches/$EXP_NAME" \
             rllm.episode_logging.backend_batch_log_dir="train_batches/$EXP_NAME" \
             $EXTRA_ARGS > "$RUNLOG" 2>&1 &
-        log "lr=$LR attempt $attempts/$MAX_ATTEMPTS exp=$EXP_NAME (steps so far: $steps/$TARGET_STEPS) log=$RUNLOG"
+        log "r$LORA_RANK lr=$LR attempt $attempts/$MAX_ATTEMPTS exp=$EXP_NAME (steps so far: $steps/$TARGET_STEPS) log=$RUNLOG"
         ln -sfn "$RUNLOG" "$LOGS/current_run.log"
 
         launched=$(date +%s)
@@ -214,14 +220,14 @@ for LR in $LRS; do
 
             if [ "$placed" = no ] && grep -q "healthz=OK" "$RUNLOG" 2>/dev/null; then
                 placed=yes
-                log "lr=$LR placed after $(( ($(date +%s) - launched) / 60 ))m"
+                log "r$LORA_RANK lr=$LR placed after $(( ($(date +%s) - launched) / 60 ))m"
             fi
             if [ "$placed" = no ] && [ $(( ($(date +%s) - launched) / 60 )) -ge "$PLACE_LIMIT_MIN" ]; then
-                log "lr=$LR never placed in ${PLACE_LIMIT_MIN}m - abandoning attempt"
+                log "r$LORA_RANK lr=$LR never placed in ${PLACE_LIMIT_MIN}m - abandoning attempt"
                 break
             fi
-            [ "$(steps_for_lr "$LR")" -ge "$TARGET_STEPS" ] && { log "lr=$LR reached $TARGET_STEPS steps"; break; }
-            training_alive || { log "lr=$LR run exited (steps now $(steps_for_lr "$LR"))"; break; }
+            [ "$(steps_for "$LORA_RANK" "$LR")" -ge "$TARGET_STEPS" ] && { log "r$LORA_RANK lr=$LR reached $TARGET_STEPS steps"; break; }
+            training_alive || { log "r$LORA_RANK lr=$LR run exited (steps now $(steps_for "$LORA_RANK" "$LR"))"; break; }
             [ $(( ($(date +%s) - cfg_start) / 3600 )) -ge "$MAX_HOURS" ] && break
         done
 
@@ -231,11 +237,12 @@ for LR in $LRS; do
         [ -n "$J" ] && delete_job "$J"
     done
 
-    S=$(steps_for_lr "$LR"); E=$(eps_for_lr "$LR"); O=$(ones_for_lr "$LR")
+    S=$(steps_for "$LORA_RANK" "$LR"); E=$(eps_for "$LORA_RANK" "$LR"); O=$(ones_for "$LORA_RANK" "$LR")
     RM=$(python3 -c "print(f'{$O/$E:.3f}' if $E else 'n/a')" 2>/dev/null)
     printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
         "$(date '+%F %T')" "$LR" "$LORA_RANK" "$S" "$TARGET_STEPS" "$E" "$RM" "$attempts" "${jobs# }" "$note" >> "$RESULTS"
-    log "lr=$LR FINISHED: steps=$S/$TARGET_STEPS episodes=$E reward_mean=$RM attempts=$attempts note=$note"
+    log "r$LORA_RANK lr=$LR FINISHED: steps=$S/$TARGET_STEPS episodes=$E reward_mean=$RM attempts=$attempts note=$note"
+done
 done
 
 log "sweep complete -> $RESULTS"
