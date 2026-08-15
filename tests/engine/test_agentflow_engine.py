@@ -2,9 +2,9 @@ import asyncio
 
 import pytest
 
-from rllm.agents.agent import Episode, Trajectory
+from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.data.utils import task_from_row
-from rllm.engine.agentflow_engine import AgentFlowEngine
+from rllm.engine.agentflow_engine import AgentFlowEngine, EnrichMismatchError, enrich_episode_with_traces
 from rllm.eval.types import EvalOutput
 from rllm.workflows.workflow import TerminationReason
 
@@ -75,21 +75,82 @@ def test_run_single_passes_validation_flag_and_preserves_termination_reason():
     assert episode.termination_reason == TerminationReason.ERROR
 
 
-def _empty_token_trace(session_id: str):
+def _trace(
+    session_id: str,
+    index: int,
+    *,
+    prompt_token_ids: list[int] | None = None,
+    completion_token_ids: list[int] | None = None,
+):
     from rllm_model_gateway.models import TraceRecord
 
+    prompt_ids = [index + 1] if prompt_token_ids is None else prompt_token_ids
+    completion_ids = [index + 11] if completion_token_ids is None else completion_token_ids
     return TraceRecord(
-        trace_id=f"t-{session_id}",
+        trace_id=f"trace-{index}",
         session_id=session_id,
         model="m",
         messages=[{"role": "user", "content": "Q"}],
-        response_message={"role": "assistant", "content": "A"},
-        prompt_token_ids=[],  # empty → corrupts loss math if it reaches training
-        completion_token_ids=[],
-        logprobs=[],
+        response_message={"role": "assistant", "content": f"A{index}"},
+        prompt_token_ids=prompt_ids,
+        completion_token_ids=completion_ids,
+        logprobs=[-0.1] * len(completion_ids),
         finish_reason="stop",
         metadata={},
     )
+
+
+def _empty_token_trace(session_id: str):
+    return _trace(session_id, 0, prompt_token_ids=[], completion_token_ids=[])
+
+
+@pytest.mark.parametrize("strict", [True, False])
+def test_enrichment_rejects_extra_valid_trace_when_all_trajectories_have_steps(strict):
+    episode = Episode(trajectories=[Trajectory(name="solver", steps=[Step()])])
+
+    with pytest.raises(EnrichMismatchError, match=r"traces=2 agent_steps=1"):
+        enrich_episode_with_traces(
+            episode,
+            [_trace("session", 0), _trace("session", 1)],
+            "session",
+            {},
+            strict=strict,
+        )
+
+
+def test_enrichment_drops_trailing_malformed_trace():
+    episode = Episode(trajectories=[Trajectory(name="solver", steps=[Step()])])
+
+    enriched = enrich_episode_with_traces(
+        episode,
+        [
+            _trace("session", 0),
+            _trace("session", 1, prompt_token_ids=[], completion_token_ids=[]),
+        ],
+        "session",
+        {},
+    )
+
+    assert [step.id for step in enriched.trajectories[0].steps] == ["trace-0"]
+
+
+def test_enrichment_assigns_extra_traces_to_trajectory_without_steps():
+    episode = Episode(
+        trajectories=[
+            Trajectory(name="reported", steps=[Step()]),
+            Trajectory(name="trace-driven"),
+        ]
+    )
+
+    enriched = enrich_episode_with_traces(
+        episode,
+        [_trace("session", 0), _trace("session", 1), _trace("session", 2)],
+        "session",
+        {},
+    )
+
+    assert [step.id for step in enriched.trajectories[0].steps] == ["trace-0"]
+    assert [step.id for step in enriched.trajectories[1].steps] == ["trace-1", "trace-2"]
 
 
 @pytest.mark.parametrize("is_validation", [False, True])
@@ -119,8 +180,6 @@ def test_strict_enrichment_follows_is_validation(is_validation):
             episode = asyncio.run(engine._run_single(task, "task:0", is_validation=True))
             assert episode is not None
         else:
-            from rllm.engine.agentflow_engine import EnrichMismatchError
-
             with pytest.raises(EnrichMismatchError):
                 asyncio.run(engine._run_single(task, "task:0", is_validation=False))
     finally:
