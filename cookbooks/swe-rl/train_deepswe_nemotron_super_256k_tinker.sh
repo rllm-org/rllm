@@ -74,7 +74,10 @@ else
     MAX_STEPS="${DEEPSWE_SUPER_TINKER_MAX_STEPS:-25}"
 fi
 
-[[ "${BATCH_SIZE}" == 1 || "${BATCH_SIZE}" == 2 ]] || { echo "only batch sizes 1 and 2 are supported by this 256K recipe" >&2; exit 1; }
+case "${BATCH_SIZE}" in
+    1|2|4|8) ;;
+    *) echo "DEEPSWE_SUPER_TINKER_BATCH_SIZE must be one of: 1, 2, 4, 8" >&2; exit 2 ;;
+esac
 [[ "${WANDB_ENABLED}" == 0 || "${WANDB_ENABLED}" == 1 ]] || { echo "DEEPSWE_SUPER_TINKER_WANDB must be 0 or 1" >&2; exit 2; }
 [[ -z "${MAX_STEPS}" || "${MAX_STEPS}" =~ ^[1-9][0-9]*$ ]] || { echo "DEEPSWE_SUPER_TINKER_MAX_STEPS must be a positive integer" >&2; exit 2; }
 
@@ -139,7 +142,7 @@ printf 'run config: output=%q max_steps=%s warmup_steps=%s\n' "${OUTPUT_DIR}" "$
 printf 'tracking: wandb=%s project=%q experiment=%q\n' "${WANDB_ENABLED}" "${PROJECT}" "${EXPERIMENT}"
 
 if [[ "${DEEPSWE_SUPER_TINKER_DRY_RUN:-0}" == 1 ]]; then
-    "${RLLM_PYTHON}" - "${RUN_CONFIG_PATH}" "${CANARY_PATH}" <<'PY'
+    "${RLLM_PYTHON}" - "${RUN_CONFIG_PATH}" "${CANARY_PATH}" "${TRAIN_PATH}" "${BATCH_SIZE}" <<'PY'
 import sys
 from omegaconf import OmegaConf
 from rllm.data import Dataset
@@ -147,17 +150,19 @@ from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
 from rllm.trainer.sft import SFTSpec
 from rllm.trainer.sft.tinker_backend import build_sft_data
 
-config_path, canary_path = sys.argv[1:]
-train = Dataset.load_data(canary_path)
+config_path, canary_path, train_path, batch_size = sys.argv[1:]
+batch_size = int(batch_size)
+dataset_path = canary_path if batch_size <= 2 else train_path
+train = Dataset.load_data(dataset_path)
 overrides = OmegaConf.to_container(OmegaConf.load(config_path), resolve=False)
-spec = SFTSpec(model="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16:peft:262144", train_dataset=train, lr=2e-4, epochs=1, batch_size=2, max_length=262144, tokenize_method="cumulative", lora_rank=32, save_freq=-1, val_freq=-1, project="rllm-deepswe-sft", experiment="tinker-local-preflight", output_dir="/tmp/deepswe-super-tinker-local-preflight", overrides=overrides)
+spec = SFTSpec(model="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16:peft:262144", train_dataset=train, lr=2e-4, epochs=1, batch_size=batch_size, max_length=262144, tokenize_method="cumulative", lora_rank=32, save_freq=-1, val_freq=-1, project="rllm-deepswe-sft", experiment="tinker-local-preflight", output_dir="/tmp/deepswe-super-tinker-local-preflight", overrides=overrides)
 backend = AgentSFTTrainer(spec, backend="tinker").prepare()
 _, dataset, _ = build_sft_data(backend.config, train, None)
 dataset.preflight(label="canary", planned_batches=[(0, 0)])
 batch = dataset.get_batch(0)
 lengths = [datum.model_input.length for datum in batch]
 weight_mass = sum(float(weight) for datum in batch for weight in datum.loss_fn_inputs["weights"].data)
-if len(batch) != 2 or max(lengths) >= 262144 or not 0.999999 <= weight_mass <= 1.000001:
+if len(batch) != batch_size or max(lengths) >= 262144 or not 0.999999 <= weight_mass <= 1.000001:
     raise SystemExit(f"Tinker local preflight failed: {len(batch)=}, {lengths=}, {weight_mass=}")
 print(f"Tinker local preflight: lengths={lengths}, weight_mass={weight_mass}")
 PY
