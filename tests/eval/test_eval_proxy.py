@@ -94,3 +94,14 @@ class TestEvalProxyManager:
         r = repr(pm)
         assert "minimax" in r
         assert "MiniMax-M2.7" in r
+
+    def test_build_proxy_config_orcarouter(self):
+        """OrcaRouter should route through the OpenAI adapter pinned to its api_base."""
+        pm = EvalProxyManager(provider="orcarouter", model_name="openai/gpt-5.5", api_key="ok-orca-key")
+        config = pm.build_proxy_config()
+
+        entry = config["model_list"][0]
+        assert entry["model_name"] == "openai/gpt-5.5"
+        assert entry["litellm_params"]["model"] == "openai/openai/gpt-5.5"
+        assert entry["litellm_params"]["api_key"] == "ok-orca-key"
+        assert entry["litellm_params"]["api_base"] == "https://api.orcarouter.ai/v1"
