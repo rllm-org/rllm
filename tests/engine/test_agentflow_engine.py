@@ -281,12 +281,13 @@ def test_llm_free_harness_opts_out_of_the_empty_completion_canary():
     assert getattr(MiniSweAgentHarness, "makes_llm_calls", True) is True
 
 
-@pytest.mark.parametrize(("makes_llm_calls", "warns"), [(False, False), (True, True)])
+@pytest.mark.parametrize(("makes_llm_calls", "warns"), [(None, True), (False, False), (True, True)])
 def test_empty_completion_progress_canary_respects_llm_free_flows(monkeypatch, makes_llm_calls, warns):
     from rllm.types import Step
 
     agent = _Agent()
-    agent.makes_llm_calls = makes_llm_calls
+    if makes_llm_calls is not None:
+        agent.makes_llm_calls = makes_llm_calls
     gateway = _Gateway()
     engine = AgentFlowEngine(
         agent_flow=agent,
