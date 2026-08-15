@@ -10,7 +10,6 @@ class NopHarness(SandboxedAgentFlow):
     """Make no agent-side changes before the task evaluator runs."""
 
     name = "nop"
-    sandbox_backend = "docker"
     makes_llm_calls = False
 
     def run(self, task: Task, config: AgentConfig, *, env) -> Episode:
