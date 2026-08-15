@@ -25,8 +25,11 @@ ENV_FILE="${TERMINAL_RL_ENV:-$HOME/.rllm/terminal-rl-auto.env}"
 REPO="${TERMINAL_RL_REPO:-$HOME/rllm}"
 CB="$REPO/cookbooks/terminal-rl"
 LOGS="${TERMINAL_RL_LOGS:-$HOME/.rllm/terminal-rl-logs}"
-EXP="${TERMINAL_RL_EXPERIMENT:-qwen3p5-35b-a3b-tb-v2-debug}"
-D="$CB/train_batches/$EXP"
+EXP_BASE="${TERMINAL_RL_EXPERIMENT:-qwen3p5-35b-a3b-tb-v2-debug}"
+# Prune the whole tree: each config now writes to its own per-experiment dir.
+D="$CB/train_batches"
+# Optional suffix to distinguish coordinators when two hosts share an account.
+HOST_TAG="${TERMINAL_RL_HOST_TAG:-}"
 TSTATE="$HOME/.rllm/tunnel.json"
 RESULTS="$LOGS/sweep_results.tsv"
 ACCT="${TERMINAL_RL_ACCOUNT:-research}"
@@ -144,6 +147,22 @@ training_alive() {
     return 1
 }
 
+# Fireworks builds promoted-model ids as "<experiment_name>-step-<n>", so the
+# experiment name has to be id-safe: lowercase, hyphens, no dots
+# (1.5e-4 -> 1p5e-4). Encoding rank/lr/alpha in the name also keeps two
+# coordinators from overwriting each other's promoted checkpoints, and keeps
+# wandb runs and episode-log dirs separate per config.
+slug() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr '.' 'p' | tr -cd 'a-z0-9-'; }
+
+experiment_name() {
+    local lr="$1" name alpha
+    name="$(slug "$EXP_BASE")-r${LORA_RANK}-lr$(slug "$lr")"
+    alpha=$(printf '%s' "$EXTRA_ARGS" | grep -oE 'lora_alpha=[0-9]+' | cut -d= -f2)
+    [ -n "$alpha" ] && name="${name}-a${alpha}"
+    [ -n "$HOST_TAG" ] && name="${name}-$(slug "$HOST_TAG")"
+    printf '%s' "$name"
+}
+
 steps_for_lr() { cat "$LOGS"/sweep_lr"$1"_*.log 2>/dev/null | grep -c "time/optim_step"; }
 eps_for_lr()   { cat "$LOGS"/sweep_lr"$1"_*.log 2>/dev/null | grep -c "Rewards:"; }
 ones_for_lr()  { cat "$LOGS"/sweep_lr"$1"_*.log 2>/dev/null | grep -o "mini-swe-agent: 1.0" | wc -l | tr -d ' '; }
@@ -171,6 +190,7 @@ for LR in $LRS; do
 
         attempts=$((attempts + 1))
         RUNLOG="$LOGS/sweep_lr${LR}_$(date +%Y%m%d_%H%M%S).log"
+        EXP_NAME="$(experiment_name "$LR")"
         cd "$CB" || { log "cannot cd $CB"; exit 1; }
         # shellcheck disable=SC2086
         nohup bash train_fireworks_debug.sh \
@@ -179,8 +199,11 @@ for LR in $LRS; do
             model.lora_rank="$LORA_RANK" \
             training.learning_rate="$LR" \
             rllm.trainer.save_freq=10 \
+            rllm.trainer.experiment_name="$EXP_NAME" \
+            rllm.episode_logging.episode_log_dir="train_batches/$EXP_NAME" \
+            rllm.episode_logging.backend_batch_log_dir="train_batches/$EXP_NAME" \
             $EXTRA_ARGS > "$RUNLOG" 2>&1 &
-        log "lr=$LR attempt $attempts/$MAX_ATTEMPTS (steps so far: $steps/$TARGET_STEPS) log=$RUNLOG"
+        log "lr=$LR attempt $attempts/$MAX_ATTEMPTS exp=$EXP_NAME (steps so far: $steps/$TARGET_STEPS) log=$RUNLOG"
         ln -sfn "$RUNLOG" "$LOGS/current_run.log"
 
         launched=$(date +%s)

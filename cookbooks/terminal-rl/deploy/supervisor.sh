@@ -15,8 +15,9 @@ ENV_FILE="${TERMINAL_RL_ENV:-$HOME/.rllm/terminal-rl-auto.env}"
 REPO="${TERMINAL_RL_REPO:-$HOME/rllm}"
 CB="$REPO/cookbooks/terminal-rl"
 LOGS="${TERMINAL_RL_LOGS:-$HOME/.rllm/terminal-rl-logs}"
-EXP="${TERMINAL_RL_EXPERIMENT:-qwen3p5-35b-a3b-tb-v2-debug}"
-D="$CB/train_batches/$EXP"
+EXP_BASE="${TERMINAL_RL_EXPERIMENT:-qwen3p5-35b-a3b-tb-v2-debug}"
+D="$CB/train_batches"
+HOST_TAG="${TERMINAL_RL_HOST_TAG:-}"
 TSTATE="$HOME/.rllm/tunnel.json"
 GATEWAY_MODE="${TERMINAL_RL_GATEWAY_MODE:-cloudflared}"
 GATEWAY_PORT="${TERMINAL_RL_GATEWAY_PORT:-9200}"
@@ -43,9 +44,19 @@ avail_gb() {
     else df -BG "$REPO" 2>/dev/null | tail -1 | awk '{gsub(/G/,"",$4); print $4}'; fi
 }
 
+# Fireworks builds promoted-model ids as "<experiment_name>-step-<n>", so the
+# name must be id-safe: lowercase, hyphens, no dots (1.5e-4 -> 1p5e-4).
+# Encoding rank/lr/alpha also stops two coordinators from overwriting each
+# other's promoted checkpoints and keeps wandb runs separate.
+slug() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr '.' 'p' | tr -cd 'a-z0-9-'; }
+EXP_NAME="$(slug "$EXP_BASE")-r${LORA_RANK}-lr$(slug "$LR")"
+_alpha=$(printf '%s' "$EXTRA_ARGS" | grep -oE 'lora_alpha=[0-9]+' | cut -d= -f2)
+[ -n "$_alpha" ] && EXP_NAME="${EXP_NAME}-a${_alpha}"
+[ -n "$HOST_TAG" ] && EXP_NAME="${EXP_NAME}-$(slug "$HOST_TAG")"
+
 last_launch=0
 fastfails=0
-log "supervisor started (pid $$) rank=$LORA_RANK lr=$LR gateway=$GATEWAY_MODE"
+log "supervisor started (pid $$) exp=$EXP_NAME rank=$LORA_RANK lr=$LR gateway=$GATEWAY_MODE"
 
 while true; do
     # ---- prune trained-through episode logs (files only; removing empty dirs
@@ -124,6 +135,9 @@ while true; do
         model.lora_rank="$LORA_RANK" \
         training.learning_rate="$LR" \
         rllm.trainer.save_freq=10 \
+        rllm.trainer.experiment_name="$EXP_NAME" \
+        rllm.episode_logging.episode_log_dir="train_batches/$EXP_NAME" \
+        rllm.episode_logging.backend_batch_log_dir="train_batches/$EXP_NAME" \
         $EXTRA_ARGS > "$RUNLOG" 2>&1 &
     last_launch=$(date +%s)
     log "launched training pid=$! log=$RUNLOG url=$URL"
