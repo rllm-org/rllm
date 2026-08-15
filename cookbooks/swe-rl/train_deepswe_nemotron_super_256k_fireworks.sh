@@ -159,9 +159,13 @@ if [[ "${BATCH_SIZE}" != 1 && "${BATCH_SIZE}" != 2 ]]; then
     exit 1
 fi
 STEPS_PER_EPOCH=$(((222 + BATCH_SIZE - 1) / BATCH_SIZE))
-VAL_FREQ="${DEEPSWE_SUPER_VAL_FREQ:-${STEPS_PER_EPOCH}}"
+# A full 26-row 256K validation takes about 3--4 minutes.  Keep a dense curve
+# for early stopping instead of waiting for a whole 111-step epoch.
+VAL_FREQ="${DEEPSWE_SUPER_VAL_FREQ:-25}"
 SAVE_FREQ="${DEEPSWE_SUPER_SAVE_FREQ:-${STEPS_PER_EPOCH}}"
 JOB_ID="${DEEPSWE_SUPER_JOB_ID:-}"
+PROJECT="${DEEPSWE_SUPER_PROJECT:-rllm-deepswe-sft}"
+WANDB_ENABLED="${DEEPSWE_SUPER_WANDB:-1}"
 DATA_ARGS=(--train-file "${TRAIN_FILE}" --val-file "${VALIDATION_PATH}")
 EXTRA_ARGS=()
 if [[ "${DEEPSWE_SUPER_CANARY:-0}" == 1 ]]; then
@@ -174,7 +178,11 @@ if [[ "${DEEPSWE_SUPER_CANARY:-0}" == 1 ]]; then
     SAVE_FREQ=-1
     DATA_ARGS=(--train-file "${TRAIN_FILE}" --max-examples 2)
 fi
-if [[ "${DEEPSWE_SUPER_WANDB:-0}" == 1 ]]; then
+if [[ "${WANDB_ENABLED}" != 0 && "${WANDB_ENABLED}" != 1 ]]; then
+    echo "DEEPSWE_SUPER_WANDB must be 0 or 1" >&2
+    exit 2
+fi
+if [[ "${WANDB_ENABLED}" == 1 ]]; then
     EXTRA_ARGS+=(--logger wandb)
 fi
 
@@ -227,7 +235,7 @@ COMMAND=(
     --lr-schedule "${LR_SCHEDULE}"
     --val-freq "${VAL_FREQ}"
     --save-freq "${SAVE_FREQ}"
-    --project rllm-deepswe-sft
+    --project "${PROJECT}"
     --experiment "${EXPERIMENT}"
     --no-ui
     --output "${OUTPUT_DIR}"
@@ -240,6 +248,8 @@ printf ' %q' "${COMMAND[@]}"
 printf '\n'
 printf 'run config: output=%q max_steps=%s warmup_steps=%s%s\n' \
     "${OUTPUT_DIR}" "${MAX_STEPS:-null}" "${WARMUP_STEPS}" "${JOB_ID:+ resume_job=${JOB_ID}}"
+printf 'tracking: wandb=%s project=%q experiment=%q\n' \
+    "${WANDB_ENABLED}" "${PROJECT}" "${EXPERIMENT}"
 if [[ "${DEEPSWE_SUPER_DRY_RUN:-0}" == 1 ]]; then
     "${RLLM_PYTHON}" - "${RUN_CONFIG_PATH}" "${CANARY_PATH}" <<'PY'
 from omegaconf import OmegaConf
