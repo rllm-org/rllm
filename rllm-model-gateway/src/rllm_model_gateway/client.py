@@ -7,6 +7,50 @@ import httpx
 from rllm_model_gateway.models import TraceRecord, WorkerInfo
 
 
+def _expand_compact_traces(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rebuild full per-trace message lists from a compact traces payload.
+
+    Nodes are materialized once and *shared*: every trace whose conversation
+    contains node X references the same message dict, so client memory stays
+    linear in unique messages even though the expanded lists repeat them.
+    Reconstruction is exact — parity-tested byte-for-byte against the default
+    format on real eval dumps.
+    """
+    nodes = payload.get("nodes", {})
+    out: list[dict[str, Any]] = []
+    # leaf -> materialized path cache, so shared prefixes walk once.
+    paths: dict[str | None, list[dict[str, Any]]] = {None: []}
+
+    def _path(leaf: str | None) -> list[dict[str, Any]]:
+        cached = paths.get(leaf)
+        if cached is not None:
+            return cached
+        chain: list[str] = []
+        node_id = leaf
+        while node_id is not None and node_id not in paths:
+            chain.append(node_id)
+            node_id = nodes[node_id]["p"]
+        base = paths[node_id] if node_id is not None else paths[None]
+        for nid in reversed(chain):
+            base = base + [nodes[nid]["m"]]
+            paths[nid] = base
+        return paths[leaf] if leaf is not None else []
+
+    for trace in payload.get("traces", []):
+        ref = trace.get("messages_ref")
+        if ref is None:
+            out.append(trace)
+            continue
+        leaf, length = ref
+        messages = _path(leaf)
+        assert len(messages) == length, f"compact chain length {len(messages)} != recorded {length}"
+        expanded = dict(trace)
+        expanded.pop("messages_ref", None)
+        expanded["messages"] = messages
+        out.append(expanded)
+    return out
+
+
 class GatewayClient:
     """Synchronous client for the rllm-model-gateway REST API.
 
@@ -88,15 +132,20 @@ class GatewayClient:
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
+        format: str | None = None,
     ) -> list[TraceRecord]:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
         if limit is not None:
             params["limit"] = limit
+        if format is not None:
+            params["format"] = format
         resp = self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
         data = resp.json()
+        if isinstance(data, dict) and data.get("format") == "compact":
+            data = _expand_compact_traces(data)
         return [TraceRecord(**t) for t in data]
 
     def get_trace(self, trace_id: str) -> TraceRecord:
@@ -236,15 +285,20 @@ class AsyncGatewayClient:
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
+        format: str | None = None,
     ) -> list[TraceRecord]:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
         if limit is not None:
             params["limit"] = limit
+        if format is not None:
+            params["format"] = format
         resp = await self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
         data = resp.json()
+        if isinstance(data, dict) and data.get("format") == "compact":
+            data = _expand_compact_traces(data)
         return [TraceRecord(**t) for t in data]
 
     async def get_trace(self, trace_id: str) -> TraceRecord:

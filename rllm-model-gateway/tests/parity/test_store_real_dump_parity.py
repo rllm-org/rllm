@@ -90,3 +90,44 @@ def test_real_dump_parity_compact_vs_default():
 
     assert episodes_checked > 0, "dumps discovered but no episode had messages"
     print(f"[parity] total episodes byte-identical in both modes: {episodes_checked}")
+
+
+def _replay_and_check_fetch(seqs: list[list[dict]], compact_store: bool) -> None:
+    """Fetch-path parity: compact wire payload expands byte-identical to default."""
+    from rllm_model_gateway.client import _expand_compact_traces
+
+    store = MemoryTraceStore(compact=compact_store)
+    for i, cc in enumerate(seqs):
+        _run(store.store_trace(f"t{i}", "s", {"messages": cc, "response_message": {}}))
+
+    default_form = [t["messages"] for t in _run(store.get_session_traces("s"))]
+    payload = _run(store.get_session_traces_compact("s"))
+    # Simulate the wire: what the client sees is the JSON round-trip.
+    payload = json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+    expanded = [t["messages"] for t in _expand_compact_traces(payload)]
+
+    assert _canonical(expanded) == _canonical(seqs), f"compact fetch (store compact={compact_store}) != original"
+    assert _canonical(expanded) == _canonical(default_form), f"compact fetch (store compact={compact_store}) != default fetch"
+
+
+def test_real_dump_fetch_parity_compact_vs_default():
+    dumps = _discover_dumps()
+    if not dumps:
+        pytest.skip("no real eval dumps on this machine")
+    limit = int(os.environ.get("RLLM_PARITY_LIMIT", "6"))
+
+    episodes_checked = 0
+    for dump in dumps:
+        files = sorted(glob.glob(os.path.join(dump, "*.json")))
+        if limit:
+            stride = max(1, len(files) // limit)
+            files = files[::stride][:limit]
+        for path in files:
+            seqs = _episode_step_messages(path)
+            if not any(seqs):
+                continue
+            _replay_and_check_fetch(seqs, compact_store=True)
+            _replay_and_check_fetch(seqs, compact_store=False)
+            episodes_checked += 1
+    assert episodes_checked > 0
+    print(f"[parity-fetch] total episodes byte-identical (both store modes, over JSON wire): {episodes_checked}")

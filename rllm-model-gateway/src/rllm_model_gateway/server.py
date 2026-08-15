@@ -279,7 +279,14 @@ def create_app(
         session_id: str,
         since: float | None = Query(None),
         limit: int | None = Query(None),
+        format: str = Query("default"),
     ):
+        # "compact" ships each unique message once (node table + leaf refs) —
+        # the expanded legacy list is quadratic in turns for agentic sessions.
+        # Only stores that implement the compact read support it; others keep
+        # serving the default form regardless of the requested format.
+        if format == "compact" and hasattr(store, "get_session_traces_compact"):
+            return await store.get_session_traces_compact(session_id, since=since, limit=limit)
         traces = await store.get_session_traces(session_id, since=since, limit=limit)
         return traces
 

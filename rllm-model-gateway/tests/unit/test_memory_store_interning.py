@@ -194,3 +194,19 @@ def test_delete_session_rematerializes_shared_traces():
     assert got["prompt_token_ids"] == [1, 2, 3]
     traces = _run(store.get_session_traces("s1"))
     assert traces and traces[0]["messages"] == msgs
+
+def test_compact_fetch_shares_node_objects_and_matches_default():
+    """Compact fetch expands to the same content; shared prefixes share dicts."""
+    from rllm_model_gateway.client import _expand_compact_traces
+
+    for compact in (True, False):
+        store = MemoryTraceStore(compact=compact)
+        for turn in range(1, 4):
+            _run(store.store_trace(f"t{turn}", "s1", _trace(_convo(turn))))
+        default = [t["messages"] for t in _run(store.get_session_traces("s1"))]
+        payload = _run(store.get_session_traces_compact("s1"))
+        expanded = [t["messages"] for t in _expand_compact_traces(payload)]
+        assert expanded == default
+        # prefix sharing: trace 2's first message IS trace 1's first message
+        assert expanded[1][0] is expanded[0][0]
+        assert expanded[2][0] is expanded[0][0]

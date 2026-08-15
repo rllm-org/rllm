@@ -241,6 +241,78 @@ class MemoryTraceStore:
         memo: dict[str, list[int]] = {}
         return [self._expand_prompt_ids(tid, self._expand_messages(_unpack(d)), memo) for tid, d in results]
 
+    async def get_session_traces_compact(
+        self,
+        session_id: str,
+        since: float | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Session traces in compact wire form: a node table plus leaf refs.
+
+        Wire shape: ``{"format": "compact", "nodes": {id: {"p": parent|None,
+        "m": message}}, "traces": [...]}`` where each trace carries
+        ``messages_ref: [leaf_id|None, length]`` instead of ``messages``.
+        Works in both store modes — a default-mode store interns into an
+        ephemeral table at read time — so fetch format is independent of how
+        the store holds traces. The expanded and compact forms reconstruct
+        identically (see client._expand_compact_traces and the parity tests).
+        """
+        ids = self._session_index.get(session_id, [])
+        raw: list[dict[str, Any]] = []
+        for tid in ids:
+            ts = self._timestamps.get(tid, 0.0)
+            if since is not None and ts < since:
+                continue
+            data = self._traces.get(tid)
+            if data is not None:
+                raw.append(data)
+        if limit is not None:
+            raw = raw[:limit]
+
+        nodes_out: dict[str, dict[str, Any]] = {}
+        session_nodes = self._session_nodes.get(session_id, {})
+        # Ephemeral interner for traces stored verbatim (default mode).
+        eph_nodes: dict[str, tuple[str | None, dict[str, Any]]] = {}
+        eph_chain: dict[tuple[str | None, str], str] = {}
+
+        def _collect(leaf: str | None, table: dict[str, tuple[str | None, dict[str, Any]]]) -> None:
+            node_id = leaf
+            while node_id is not None and node_id not in nodes_out:
+                parent, message = table[node_id]
+                nodes_out[node_id] = {"p": parent, "m": message}
+                node_id = parent
+
+        traces_out: list[dict[str, Any]] = []
+        for data in raw:
+            data = _unpack(data)
+            marker = data.get("messages")
+            if type(marker) is dict and _INTERNED_KEY in marker:
+                _, leaf, length = marker[_INTERNED_KEY]
+                _collect(leaf, session_nodes)
+            else:
+                messages = marker
+                if type(messages) is not list or not all(isinstance(m, dict) for m in (messages or [])):
+                    # unknown shape: ship verbatim, no ref
+                    traces_out.append(data)
+                    continue
+                parent: str | None = None
+                for message in messages:
+                    key = (parent, _message_fp(message))
+                    node_id = eph_chain.get(key)
+                    if node_id is None:
+                        node_id = hashlib.sha256(f"{parent}:{key[1]}".encode()).hexdigest()
+                        eph_nodes[node_id] = (parent, message)
+                        eph_chain[key] = node_id
+                    parent = node_id
+                leaf, length = parent, len(messages)
+                _collect(leaf, eph_nodes)
+            out = dict(data)
+            out.pop("messages", None)
+            out["messages_ref"] = [leaf, length]
+            traces_out.append(out)
+
+        return {"format": "compact", "nodes": nodes_out, "traces": traces_out}
+
     async def delete_session(self, session_id: str) -> int:
         ids = self._session_index.pop(session_id, [])
         # Collect trace_ids referenced by other sessions
