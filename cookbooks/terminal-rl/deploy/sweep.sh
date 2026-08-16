@@ -178,9 +178,11 @@ experiment_name() {
 cfg_logs()   { printf '%s' "$LOGS/sweep_r$1_lr$2_"; }
 base_file()  { printf '%s' "$LOGS/.base_r$1_lr$2"; }
 
-# Highest DCP checkpoint a log reached; snapshots are named "step-<n>".
-last_ckpt()  { grep -oE "DCP checkpoint saved: step-[0-9]+" "$1" 2>/dev/null \
-                 | grep -oE "[0-9]+$" | sort -n | tail -1; }
+# Checkpoints appear as: Promoting checkpoint 'step-20-73f522a0'
+# The name carries a run suffix, so match the quoted name, not "step-<n>".
+last_ckpt()  { grep -oE "Promoting checkpoint '[^']+'" "$1" 2>/dev/null \
+                 | tail -1 | sed "s/.*'\\(.*\\)'/\\1/"; }
+ckpt_step()  { printf '%s' "$1" | grep -oE '^step-[0-9]+' | grep -oE '[0-9]+$'; }
 
 # Progress = where the resumed-from checkpoint left off, plus steps taken since.
 # Do NOT sum optimizer steps across attempts: without resume each attempt starts
@@ -200,14 +202,36 @@ ones_for()   { cat "$(cfg_logs "$1" "$2")"*.log 2>/dev/null | grep -o "mini-swe-
 # Checkpoints survive job deletion (archived jobs retain them), so this works
 # even after the sweep cleans up the trainer job.
 resume_args() {
-    local rank="$1" lr="$2" prev ckpt job
-    prev=$(ls -t "$(cfg_logs "$rank" "$lr")"*.log 2>/dev/null | head -1)
-    [ -n "$prev" ] || return 0
-    ckpt=$(last_ckpt "$prev")
-    [ -n "$ckpt" ] || return 0
-    job=$(grep -oE "training-api-service-[0-9a-f]+" "$prev" 2>/dev/null | head -1)
-    [ -n "$job" ] || return 0
-    printf 'training.resume_from_dcp_checkpoint=step-%s training.resume_from_fireworks_job_id=%s' "$ckpt" "$job"
+    # Scan EVERY attempt log for this config, not just the newest: after a
+    # relaunch the newest log is the fresh attempt, which has no checkpoint yet.
+    local rank="$1" lr="$2" f name n best="" bestn=0 bestjob=""
+    for f in $(ls -t "$(cfg_logs "$rank" "$lr")"*.log 2>/dev/null); do
+        name=$(last_ckpt "$f")
+        [ -n "$name" ] || continue
+        n=$(ckpt_step "$name"); n=${n:-0}
+        if [ "$n" -gt "$bestn" ]; then
+            bestn=$n; best=$name
+            bestjob=$(grep -oE "training-api-service-[0-9a-f]+" "$f" 2>/dev/null | head -1)
+        fi
+    done
+    [ -n "$bestjob" ] || return 0
+    # Pass ONLY the source job. The trainer then lists that job's checkpoints and
+    # resumes from the latest (fireworks_policy_trainer.py:314-320). Do not pass
+    # resume_from_dcp_checkpoint: the DCP save name ("step-20") differs from the
+    # promoted model name ("step-20-73f522a0"), and guessing wrong fails the load.
+    # $best/$bestn are still used for progress accounting.
+    printf 'training.resume_from_fireworks_job_id=%s' "$bestjob"
+}
+
+# Step of the newest checkpoint for this config, for progress accounting.
+resume_base_step() {
+    local rank="$1" lr="$2" f name n best=0
+    for f in $(ls -t "$(cfg_logs "$rank" "$lr")"*.log 2>/dev/null); do
+        name=$(last_ckpt "$f"); [ -n "$name" ] || continue
+        n=$(ckpt_step "$name"); n=${n:-0}
+        [ "$n" -gt "$best" ] && best=$n
+    done
+    echo "$best"
 }
 
 log "sweep starting: ranks=[$RANKS] lrs=[$LRS] target=$TARGET_STEPS gateway=$GATEWAY_MODE extra='$EXTRA_ARGS'"
@@ -235,7 +259,7 @@ for LR in $LRS; do
         attempts=$((attempts + 1))
         RESUME="$(resume_args "$LORA_RANK" "$LR")"
         if [ -n "$RESUME" ]; then
-            NEW_BASE=$(printf '%s' "$RESUME" | grep -oE 'dcp_checkpoint=step-[0-9]+' | grep -oE '[0-9]+$')
+            NEW_BASE=$(resume_base_step "$LORA_RANK" "$LR")
             echo "${NEW_BASE:-0}" > "$(base_file "$LORA_RANK" "$LR")"
             log "r$LORA_RANK lr=$LR resuming from step-$NEW_BASE"
         else
