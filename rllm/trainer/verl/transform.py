@@ -310,10 +310,14 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
     traj_reward = 0.0 if trajectory.reward is None else trajectory.reward
 
     # Drop steps without valid model_output up-front; the merge logic below
-    # assumes every entry has prompt_ids and completion_ids.
+    # assumes every entry has prompt_ids and completion_ids. A step may carry
+    # its prompt as the compact delta marker on ``step.prompt_ids`` instead of
+    # a full list on ``model_output.prompt_ids``; model_output is still
+    # required for the response side (completion_ids, logprobs, ...).
     valid_steps = []
     for step_idx, step in enumerate(trajectory.steps):
-        if step.model_output is None or step.model_output.prompt_ids is None:
+        has_delta = isinstance(step.prompt_ids, dict) and "__prompt_ids_delta__" in step.prompt_ids
+        if step.model_output is None or (step.model_output.prompt_ids is None and not has_delta):
             logger.warning(f"Step {step_idx} in trajectory {trajectory_id} has no valid model_output, skipping")
             continue
         valid_steps.append(step)
@@ -336,8 +340,8 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
     # that segment. ``full_seq`` tracks prompt+all-action-and-obs tokens
     # so we can detect prefix-extension on the next step.
 
-    def _new_segment(step):
-        prompt = list(step.model_output.prompt_ids)
+    def _new_segment(step, prompt):
+        prompt = list(prompt)
         action = list(step.model_output.completion_ids)
         action_lp = list(step.model_output.logprobs or [])
         # If logprobs missing/short, pad to action length with zeros so
@@ -393,13 +397,50 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
 
     def _merge_lineage(steps) -> int:
         """Linear-merge one lineage's steps into segments; return rows emitted."""
-        seg = _new_segment(steps[0])
+        # ``cur_prompt`` is the one incremental prompt buffer for the lineage,
+        # so delta-form steps ({"__prompt_ids_delta__": [lcp, suffix]} on
+        # step.prompt_ids) resolve without materializing O(n^2) prompt lists.
+        # Invariant after each step: full_seq == cur_prompt + that step's action.
+        cur_prompt: list = []
+        prev_action: list | None = None
+
+        def _step_prompt(step):
+            """Resolve this step's prompt. Returns (prompt, delta_suffix) where
+            delta_suffix is non-None iff the step arrived in delta form and
+            purely extends the previous prompt (the O(new) merge case)."""
+            nonlocal cur_prompt
+            raw = step.prompt_ids
+            if isinstance(raw, dict) and "__prompt_ids_delta__" in raw:
+                lcp, suffix = raw["__prompt_ids_delta__"]
+                if lcp > len(cur_prompt):
+                    raise ValueError(f"prompt delta lcp {lcp} exceeds previous prompt length {len(cur_prompt)}")
+                if lcp == len(cur_prompt):
+                    delta_suffix = list(suffix)
+                    cur_prompt.extend(suffix)
+                    return cur_prompt, delta_suffix
+                cur_prompt = cur_prompt[:lcp] + list(suffix)
+                return cur_prompt, None
+            prompt_ids = list(step.model_output.prompt_ids)
+            cur_prompt = prompt_ids
+            return prompt_ids, None
+
+        first_prompt, _ = _step_prompt(steps[0])
+        seg = _new_segment(steps[0], first_prompt)
+        prev_action = list(steps[0].model_output.completion_ids)
         emitted = 0
         for step in steps[1:]:
-            prompt_ids = list(step.model_output.prompt_ids)
-            if len(prompt_ids) >= len(seg["full_seq"]) and prompt_ids[: len(seg["full_seq"])] == seg["full_seq"]:
+            prompt_ids, delta_suffix = _step_prompt(step)
+            if delta_suffix is not None:
+                # Delta fast path, O(new tokens): full_seq is
+                # prev_prompt + prev_action and this prompt is
+                # prev_prompt + delta_suffix, so it extends full_seq iff the
+                # suffix begins with the previous action — no full compare.
+                extends = len(delta_suffix) >= len(prev_action) and delta_suffix[: len(prev_action)] == prev_action
+            else:
+                extends = len(prompt_ids) >= len(seg["full_seq"]) and prompt_ids[: len(seg["full_seq"])] == seg["full_seq"]
+            if extends:
                 # Cumulative — extend the current segment.
-                delta_obs = prompt_ids[len(seg["full_seq"]) :]
+                delta_obs = delta_suffix[len(prev_action) :] if delta_suffix is not None else prompt_ids[len(seg["full_seq"]) :]
                 action = list(step.model_output.completion_ids)
                 action_lp = list(step.model_output.logprobs or [])
                 if action_lp and len(action_lp) != len(action):
@@ -420,7 +461,8 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
                 # Non-cumulative — close out current segment, start a new one.
                 _emit(seg)
                 emitted += 1
-                seg = _new_segment(step)
+                seg = _new_segment(step, prompt_ids)
+            prev_action = list(step.model_output.completion_ids)
         _emit(seg)
         emitted += 1
         return emitted
