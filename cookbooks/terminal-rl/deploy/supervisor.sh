@@ -25,6 +25,12 @@ GATEWAY_PORT="${TERMINAL_RL_GATEWAY_PORT:-9200}"
 LORA_RANK="${TERMINAL_RL_LORA_RANK:-32}"
 LR="${TERMINAL_RL_LR:-8e-5}"
 EXTRA_ARGS="${TERMINAL_RL_EXTRA_ARGS:-}"
+# Rollout concurrency. The script ships 192, which saturates a 2-replica
+# rollout deployment: observed 2815 permanent "429 Too Many Requests" sampling
+# failures across 2418 episodes -- more than one per episode -- dragging reward
+# well below the ~0.45-0.50 baseline. Those are inference-side 429s from
+# api.fireworks.ai, not tunnel throttling.
+N_PARALLEL="${TERMINAL_RL_N_PARALLEL:-96}"
 
 mkdir -p "$LOGS"
 log() { echo "$(date '+%F %T') $*"; }
@@ -134,6 +140,7 @@ while true; do
         rllm.gateway.port="$GATEWAY_PORT" \
         model.lora_rank="$LORA_RANK" \
         training.learning_rate="$LR" \
+        rllm.workflow.n_parallel_tasks="$N_PARALLEL" \
         rllm.trainer.save_freq=10 \
         rllm.trainer.experiment_name="$EXP_NAME" \
         rllm.episode_logging.episode_log_dir="train_batches/$EXP_NAME" \
