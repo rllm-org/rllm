@@ -221,3 +221,87 @@ def test_unknown_compact_version_rejected():
     ep["compact_version"] = 999
     with pytest.raises(ValueError, match="unsupported"):
         expand_episode(ep)
+
+
+# ---------------------------------------------------------------------------
+# Compact-native model
+# ---------------------------------------------------------------------------
+
+
+def _model_episode(n_steps=4):
+    convo = [{"role": "system", "content": "sys"}]
+    ccs = []
+    for i in range(n_steps):
+        convo = convo + [{"role": "user", "content": f"u{i}"}, {"role": "assistant", "content": f"a{i}"}]
+        ccs.append(list(convo))
+    return _episode(ccs), ccs
+
+
+def test_compact_episode_stores_native_and_exports_legacy():
+    from rllm.eval.episode_compact import CompactEpisode
+
+    ep, _ = _model_episode()
+    model = CompactEpisode.from_dict(json.loads(json.dumps(ep)))
+    # native storage: the compact dict, unique nodes only
+    assert model.to_dict()["episode_format"] == "compact"
+    assert len(model.to_dict()["trajectories"][0]["message_nodes"]) == 9  # unique msgs
+    # legacy export on demand, lossless
+    assert _canonical(model.to_legacy()) == _canonical(ep)
+    # loading an already-compact dict is identity (no rework)
+    again = CompactEpisode.from_dict(model.to_dict())
+    assert again.to_dict() is model.to_dict()
+
+
+def test_message_history_op_matrix_matches_lists():
+    """Every operation consumers perform must equal the eager-list result."""
+    from rllm.eval.episode_compact import CompactEpisode, MessageHistory
+
+    ep, ccs = _model_episode()
+    model = CompactEpisode.from_dict(ep)
+    for i, expected in enumerate(ccs):
+        h = model.history(0, i)
+        assert isinstance(h, MessageHistory)
+        assert len(h) == len(expected)  # len
+        assert h == expected  # equality vs list
+        assert h[-1] == expected[-1] and h[0] == expected[0]  # indexing
+        assert list(h) == expected  # iteration
+        assert list(reversed(h)) == list(reversed(expected))  # reversed
+        assert h[:-1] == expected[:-1]  # distill's slice
+        assert h.to_list() == expected  # explicit materialization
+        assert json.dumps(h.to_list()) == json.dumps(expected)
+
+
+def test_message_history_prefix_slice_is_a_view_not_a_copy():
+    from rllm.eval.episode_compact import CompactEpisode, MessageHistory
+
+    ep, ccs = _model_episode()
+    h = CompactEpisode.from_dict(ep).history(0, -1)
+    prefix = h[:-1]
+    assert isinstance(prefix, MessageHistory)  # a view, not a list
+    assert prefix._cache is None  # and it materialized nothing
+    assert prefix == ccs[-1][:-1]
+
+
+def test_history_laziness_and_step_sharing():
+    """len/prefix operations must not materialize; shared prefixes share dicts."""
+    from rllm.eval.episode_compact import CompactEpisode
+
+    ep, _ = _model_episode()
+    model = CompactEpisode.from_dict(ep)
+    h_last = model.history(0, -1)
+    assert h_last._cache is None
+    _ = len(h_last)
+    _ = h_last[:-2]
+    assert h_last._cache is None  # still nothing materialized
+    # steps share the actual message dict objects through the node table
+    a, b = model.history(0, 0), model.history(0, -1)
+    assert a[0] is b[0]
+
+
+def test_history_guards_cycles_and_dangling():
+    from rllm.eval.episode_compact import MessageHistory
+
+    with pytest.raises(ValueError, match="cycle"):
+        MessageHistory({"a": {"p": "a", "m": {}}}, "a", 1).to_list()
+    with pytest.raises(ValueError, match="dangling"):
+        MessageHistory({}, "missing", 1).to_list()

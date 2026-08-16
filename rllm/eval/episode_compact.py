@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from typing import Any
 
 # Episode-level format tag. Absent means the legacy verbatim format.
@@ -191,3 +192,148 @@ def expand_episode(data: dict[str, Any]) -> dict[str, Any]:
     if "trajectories" in data:
         out["trajectories"] = out_trajectories
     return out
+
+
+# ---------------------------------------------------------------------------
+# Compact-native episode model
+# ---------------------------------------------------------------------------
+
+
+class MessageHistory(Sequence):
+    """A step's conversation as a lazy view into a node table.
+
+    Sequence-compatible stand-in for the eager ``list[dict]`` a step used to
+    carry: ``len`` is O(1), iteration walks the chain once and caches,
+    ``history[:-k]`` returns another O(k) view (an ancestor reference — no
+    copy), and equality works against plain lists. Materialization
+    (:meth:`to_list`) happens only when a consumer genuinely needs a list,
+    e.g. serializing one step — never as a side effect of construction.
+    """
+
+    __slots__ = ("_nodes", "_leaf", "_length", "_cache")
+
+    def __init__(self, nodes: dict[str, dict[str, Any]], leaf: str | None, length: int) -> None:
+        self._nodes = nodes
+        self._leaf = leaf
+        self._length = length
+        self._cache: tuple | None = None
+
+    def _walk(self) -> tuple:
+        if self._cache is None:
+            out: list[dict[str, Any]] = []
+            node_id, seen = self._leaf, set()
+            while node_id is not None:
+                if node_id in seen:
+                    raise ValueError(f"message node cycle at {node_id!r}")
+                seen.add(node_id)
+                node = self._nodes.get(node_id)
+                if node is None:
+                    raise ValueError(f"dangling message node reference {node_id!r}")
+                out.append(node["m"])
+                node_id = node["p"]
+            out.reverse()
+            if len(out) != self._length:
+                raise ValueError(f"chain length {len(out)} != recorded {self._length}")
+            self._cache = tuple(out)
+        return self._cache
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            start, stop, stride = index.indices(self._length)
+            if start == 0 and stride == 1:
+                # Prefix slice: walk UP (length - stop) parents — O(suffix),
+                # so the common ``history[:-1]`` is O(1) and copies nothing.
+                node_id, up = self._leaf, self._length - stop
+                for _ in range(up):
+                    node_id = self._nodes[node_id]["p"] if node_id is not None else None
+                return MessageHistory(self._nodes, node_id, stop)
+            return list(self._walk()[index])
+        return self._walk()[index]
+
+    def __iter__(self):
+        return iter(self._walk())
+
+    def __reversed__(self):
+        node_id = self._leaf
+        while node_id is not None:
+            node = self._nodes[node_id]
+            yield node["m"]
+            node_id = node["p"]
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, MessageHistory):
+            if other._leaf == self._leaf and other._length == self._length:
+                return True
+            other = other.to_list()
+        if isinstance(other, list | tuple):
+            return len(other) == self._length and list(self._walk()) == list(other)
+        return NotImplemented
+
+    def __repr__(self) -> str:
+        return f"MessageHistory(len={self._length})"
+
+    def to_list(self) -> list[dict[str, Any]]:
+        return list(self._walk())
+
+
+class CompactEpisode:
+    """An episode held natively in the compact format.
+
+    Wraps the compact dict form (the same shape the file format uses): each
+    unique message is one node, each step holds a leaf reference. Loading a
+    compact file materializes nothing; histories are served as
+    :class:`MessageHistory` views on demand; and the legacy representation
+    exists only when explicitly exported.
+
+    - :meth:`from_dict` accepts either format (legacy input is compacted).
+    - :meth:`to_dict` returns the compact form — what should be persisted.
+    - :meth:`to_legacy` exports the old format losslessly (the existing
+      converter pair, so every parity guarantee carries over verbatim).
+    """
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        if data.get(FORMAT_KEY) != COMPACT_FORMAT:
+            data = compact_episode(data)
+        self._data = data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CompactEpisode:
+        return cls(data)
+
+    @classmethod
+    def load(cls, path) -> CompactEpisode:
+        with open(path, encoding="utf-8") as f:
+            return cls(json.load(f))
+
+    def to_dict(self) -> dict[str, Any]:
+        return self._data
+
+    def to_legacy(self) -> dict[str, Any]:
+        return expand_episode(self._data)
+
+    # -- native, expansion-free access -----------------------------------
+
+    @property
+    def trajectories(self) -> list[dict[str, Any]]:
+        return self._data.get("trajectories") or []
+
+    def steps(self, trajectory: int = 0) -> list[dict[str, Any]]:
+        trajs = self.trajectories
+        return (trajs[trajectory].get("steps") or []) if trajectory < len(trajs) else []
+
+    def history(self, trajectory: int = 0, step: int = -1) -> MessageHistory | list:
+        """The conversation of one step as a lazy view (no expansion).
+
+        Falls back to the plain list for steps stored verbatim (legacy
+        trajectories that refused compaction keep eager lists).
+        """
+        traj = self.trajectories[trajectory]
+        st = (traj.get("steps") or [])[step]
+        cc = st.get("chat_completions")
+        if type(cc) is dict and _REF_MARKER in cc:
+            leaf, length = cc[_REF_MARKER]
+            return MessageHistory(traj.get(_NODES_KEY) or {}, leaf, length)
+        return cc if isinstance(cc, list) else []
