@@ -215,7 +215,10 @@ class Step(BaseModel):
     metadata: dict | None = None
 
     # Training-side payloads
-    prompt_ids: list[int] | list[Any] = Field(default_factory=list)
+    # prompt_ids may also carry a compact delta marker
+    # {"__prompt_ids_delta__": [lcp, suffix]} instead of the full token list;
+    # packed trainers consume it without materializing the O(n^2) expansion.
+    prompt_ids: list[int] | list[Any] | dict[str, Any] = Field(default_factory=list)
     response_ids: list[int] = Field(default_factory=list)
     logprobs: list[float] = Field(default_factory=list)
     routing_matrices: list[str] | None = None  # per-token routing matrices (R3, transient)

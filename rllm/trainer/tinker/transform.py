@@ -141,9 +141,31 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
     data: list[tinker.Datum] = []
     for lineage_steps in _partition_steps_by_lineage(traj.steps):
         SequenceAccumulator.clear()  # each lineage merges independently
+        # The lineage's latest full prompt, maintained INCREMENTALLY: a delta
+        # step extends it in place (O(new tokens)), so no step ever needs a
+        # materialized full-prefix list and no full-sequence prefix compare
+        # runs. Delta form: prompt_ids == {"__prompt_ids_delta__": [lcp,
+        # suffix]} relative to this lineage's previous step prompt — the same
+        # structure the compact store/wire already carry.
+        cur_prompt: list = []
+        prev_response: list | None = None
         for step in lineage_steps:
-            token_input = cast(TinkerTokenInput, step.prompt_ids)
-            token_input_flat = _flatten_token_input(token_input)
+            raw = step.prompt_ids
+            delta_suffix: list | None = None
+            if isinstance(raw, dict) and "__prompt_ids_delta__" in raw:
+                lcp, suffix = raw["__prompt_ids_delta__"]
+                if lcp > len(cur_prompt):
+                    raise ValueError(f"prompt delta lcp {lcp} exceeds previous prompt length {len(cur_prompt)}")
+                if lcp == len(cur_prompt):
+                    delta_suffix = list(suffix)  # pure extension of the previous prompt
+                    cur_prompt.extend(suffix)
+                else:
+                    cur_prompt = cur_prompt[:lcp] + list(suffix)
+                token_input_flat = cur_prompt
+            else:
+                token_input = cast(TinkerTokenInput, raw)
+                token_input_flat = _flatten_token_input(token_input)
+                cur_prompt = token_input_flat if isinstance(token_input_flat, list) else list(token_input_flat)
 
             output_token_ids, output_logprobs = step.response_ids, step.logprobs
             assert len(output_logprobs) > 0, "output_logprobs is empty. Cannot build Tinker Datum for training."
@@ -158,6 +180,13 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
 
             if len(SequenceAccumulator.full_sequence) == 0:
                 delta_token_input_flat = token_input_flat
+            elif delta_suffix is not None and prev_response is not None and len(delta_suffix) >= len(prev_response) and delta_suffix[: len(prev_response)] == prev_response:
+                # Delta fast path, O(new tokens): the accumulated stream is
+                # prev_prompt + prev_response; this step's prompt is
+                # prev_prompt + delta_suffix, so it prefix-extends the stream
+                # iff the suffix starts with the previous response — no
+                # full-sequence comparison, no materialized prefix.
+                delta_token_input_flat = delta_suffix[len(prev_response) :]
             elif _is_prefix(SequenceAccumulator.full_sequence, token_input_flat):
                 delta_token_input_flat = token_input_flat[len(SequenceAccumulator.full_sequence) :]
             else:
@@ -171,6 +200,7 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
             SequenceAccumulator.sampled_logprobs.extend([0.0] * delta_token_input_length + output_logprobs)
             SequenceAccumulator.advantages.extend([0] * delta_token_input_length + advantages)
             SequenceAccumulator.mask.extend([0.0] * delta_token_input_length + [1.0] * len(output_token_ids))
+            prev_response = list(output_token_ids)
             if router_replay:
                 step_rm = step.routing_matrices or []
                 SequenceAccumulator.routing_matrices.extend([""] * delta_token_input_length + (list(step_rm) if step_rm else [""] * len(output_token_ids)))
