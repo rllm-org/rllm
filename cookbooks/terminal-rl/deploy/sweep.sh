@@ -2,8 +2,10 @@
 # Sequential hyperparameter sweep for terminal-RL, portable across macOS and
 # Linux. Runs ONE training job at a time.
 #
-# Each config accumulates TARGET_STEPS optimizer steps, counted across restarts,
-# so a crash mid-config resumes the count instead of starting over. Each
+# Each config trains to TARGET_STEPS optimizer steps. A crash mid-config RESUMES
+# from the last DCP checkpoint (save_freq=10) rather than restarting from base
+# weights, and progress is measured as resumed-step + steps-since, so the number
+# reflects consecutive training rather than a sum of independent attempts. Each
 # config's trainer job -- and only its own -- is deleted when the config ends,
 # so nothing is left billing on a shared account.
 #
@@ -174,9 +176,39 @@ experiment_name() {
 }
 
 cfg_logs()   { printf '%s' "$LOGS/sweep_r$1_lr$2_"; }
-steps_for()  { cat "$(cfg_logs "$1" "$2")"*.log 2>/dev/null | grep -c "time/optim_step"; }
+base_file()  { printf '%s' "$LOGS/.base_r$1_lr$2"; }
+
+# Highest DCP checkpoint a log reached; snapshots are named "step-<n>".
+last_ckpt()  { grep -oE "DCP checkpoint saved: step-[0-9]+" "$1" 2>/dev/null \
+                 | grep -oE "[0-9]+$" | sort -n | tail -1; }
+
+# Progress = where the resumed-from checkpoint left off, plus steps taken since.
+# Do NOT sum optimizer steps across attempts: without resume each attempt starts
+# from base weights, so a config that died at 100 and reran 50 would report 150
+# while the final model had only ever seen 50 consecutive steps.
+steps_for() {
+    local base newest
+    base=$(cat "$(base_file "$1" "$2")" 2>/dev/null); base=${base:-0}
+    newest=$(ls -t "$(cfg_logs "$1" "$2")"*.log 2>/dev/null | head -1)
+    [ -n "$newest" ] || { echo "$base"; return; }
+    echo $(( base + $(grep -c "time/optim_step" "$newest" 2>/dev/null) ))
+}
 eps_for()    { cat "$(cfg_logs "$1" "$2")"*.log 2>/dev/null | grep -c "Rewards:"; }
 ones_for()   { cat "$(cfg_logs "$1" "$2")"*.log 2>/dev/null | grep -o "mini-swe-agent: 1.0" | wc -l | tr -d ' '; }
+
+# Resume the next attempt from the last checkpoint of the previous one.
+# Checkpoints survive job deletion (archived jobs retain them), so this works
+# even after the sweep cleans up the trainer job.
+resume_args() {
+    local rank="$1" lr="$2" prev ckpt job
+    prev=$(ls -t "$(cfg_logs "$rank" "$lr")"*.log 2>/dev/null | head -1)
+    [ -n "$prev" ] || return 0
+    ckpt=$(last_ckpt "$prev")
+    [ -n "$ckpt" ] || return 0
+    job=$(grep -oE "training-api-service-[0-9a-f]+" "$prev" 2>/dev/null | head -1)
+    [ -n "$job" ] || return 0
+    printf 'training.resume_from_dcp_checkpoint=step-%s training.resume_from_fireworks_job_id=%s' "$ckpt" "$job"
+}
 
 log "sweep starting: ranks=[$RANKS] lrs=[$LRS] target=$TARGET_STEPS gateway=$GATEWAY_MODE extra='$EXTRA_ARGS'"
 
@@ -201,6 +233,15 @@ for LR in $LRS; do
         fi
 
         attempts=$((attempts + 1))
+        RESUME="$(resume_args "$LORA_RANK" "$LR")"
+        if [ -n "$RESUME" ]; then
+            NEW_BASE=$(printf '%s' "$RESUME" | grep -oE 'dcp_checkpoint=step-[0-9]+' | grep -oE '[0-9]+$')
+            echo "${NEW_BASE:-0}" > "$(base_file "$LORA_RANK" "$LR")"
+            log "r$LORA_RANK lr=$LR resuming from step-$NEW_BASE"
+        else
+            echo 0 > "$(base_file "$LORA_RANK" "$LR")"
+            [ "$attempts" -gt 1 ] && log "r$LORA_RANK lr=$LR no checkpoint to resume - restarting from base weights"
+        fi
         RUNLOG="$LOGS/sweep_r${LORA_RANK}_lr${LR}_$(date +%Y%m%d_%H%M%S).log"
         EXP_NAME="$(experiment_name "$LORA_RANK" "$LR")"
         cd "$CB" || { log "cannot cd $CB"; exit 1; }
@@ -211,6 +252,7 @@ for LR in $LRS; do
             model.lora_rank="$LORA_RANK" \
             training.learning_rate="$LR" \
             rllm.workflow.n_parallel_tasks="$N_PARALLEL" \
+            $RESUME \
         rllm.trainer.save_freq=10 \
             rllm.trainer.experiment_name="$EXP_NAME" \
             rllm.episode_logging.episode_log_dir="train_batches/$EXP_NAME" \
