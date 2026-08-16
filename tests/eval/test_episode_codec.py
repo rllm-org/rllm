@@ -112,6 +112,10 @@ def test_real_dump_episode_parity():
         for path in files:
             with open(path, encoding="utf-8") as f:
                 ep = json.load(f)
+            # A dump may itself be schema-2 (written with RLLM_EPISODE_SCHEMA=2).
+            # compact is identity on those, so round-trip through the EXPANDED
+            # form — the invariant is expand(compact(x)) == x for schema-1 x.
+            ep = expand_episode(ep)
             compacted = compact_episode(ep)
             restored = expand_episode(compacted)
             assert _canonical(restored) == _canonical(ep), f"not lossless: {path}"
