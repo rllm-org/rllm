@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from rllm_model_gateway.models import TraceRecord, WorkerInfo
+from rllm_model_gateway.models import TraceGraph, TraceRecord, WorkerInfo
 
 
 class GatewayClient:
@@ -88,15 +88,22 @@ class GatewayClient:
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
+        format: str | None = None,
     ) -> list[TraceRecord]:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
         if limit is not None:
             params["limit"] = limit
+        if format is not None:
+            params["format"] = format
         resp = self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
         data = resp.json()
+        if isinstance(data, dict):
+            # A dict payload is a TraceGraph — the compact wire contract (see
+            # its model docstring). Validate it as such and flatten.
+            return TraceGraph.model_validate(data).flatten()
         return [TraceRecord(**t) for t in data]
 
     def get_trace(self, trace_id: str) -> TraceRecord:
@@ -236,15 +243,21 @@ class AsyncGatewayClient:
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
+        format: str | None = None,
     ) -> list[TraceRecord]:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
         if limit is not None:
             params["limit"] = limit
+        if format is not None:
+            params["format"] = format
         resp = await self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
         data = resp.json()
+        if isinstance(data, dict):
+            # A dict payload is a TraceGraph (see its model docstring).
+            return TraceGraph.model_validate(data).flatten()
         return [TraceRecord(**t) for t in data]
 
     async def get_trace(self, trace_id: str) -> TraceRecord:

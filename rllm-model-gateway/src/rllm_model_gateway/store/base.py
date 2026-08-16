@@ -28,6 +28,21 @@ class TraceStore(Protocol):
         """Get all traces for a session, ordered by timestamp ascending."""
         ...
 
+    async def get_session_traces_compact(
+        self,
+        session_id: str,
+        since: float | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Session traces as a serialized TraceGraph (the compact wire
+        contract). Only compact-capable stores serve this; the server gates
+        dispatch on the store's ``_compact`` flag."""
+        ...
+
+    async def count_session_traces(self, session_id: str) -> int:
+        """Number of traces in a session, without materializing them."""
+        ...
+
     async def delete_session(self, session_id: str) -> int:
         """Delete all traces for a session.  Returns count deleted."""
         ...

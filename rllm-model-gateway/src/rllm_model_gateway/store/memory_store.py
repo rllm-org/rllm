@@ -5,6 +5,10 @@ import time
 from collections import defaultdict
 from typing import Any
 
+from rllm_model_gateway.models import TraceGraph, TraceRecord
+
+_COMPACT_REQUIRED = frozenset({"messages", "response_message"})
+
 # Token-id / logprob lists dominate trace memory. As Python list[int]/list[float]
 # each element costs ~32-36 B (an 8 B pointer plus a boxed int/float object) since
 # vocab ids exceed CPython's small-int intern cap (256). Packed into array.array
@@ -53,26 +57,57 @@ def _unpack(data: dict[str, Any]) -> dict[str, Any]:
 class MemoryTraceStore:
     """Ephemeral in-memory store.  Useful for tests and short-lived processes."""
 
-    def __init__(self) -> None:
-        # trace_id -> data dict
+    def __init__(self, compact: bool = False) -> None:
+        self._compact = compact
         self._traces: dict[str, dict[str, Any]] = {}
-        # trace_id -> created_at
         self._timestamps: dict[str, float] = {}
-        # session_id -> list[trace_id]  (insertion order)
         self._session_index: dict[str, list[str]] = defaultdict(list)
+        self._session_seen: dict[str, set[str]] = defaultdict(set)
+        self._graphs: dict[str, TraceGraph] = {}
+        self._trace_session: dict[str, str] = {}
+
+    @staticmethod
+    def _record_from(trace_id: str, session_id: str, data: dict[str, Any]) -> TraceRecord:
+        missing = _COMPACT_REQUIRED - data.keys()
+        if missing:
+            raise ValueError(f"compact trace missing required fields: {', '.join(sorted(missing))}")
+        return TraceRecord.model_validate({**data, "trace_id": trace_id, "session_id": session_id})
 
     async def store_trace(self, trace_id: str, session_id: str, data: dict[str, Any]) -> None:
         now = time.time()
+        if self._compact:
+            record = self._record_from(trace_id, session_id, data)
+            existing_session = self._trace_session.get(trace_id)
+            if existing_session is not None and existing_session != session_id:
+                raise ValueError(f"trace id {trace_id!r} belongs to another session")
+            graph = self._graphs.get(session_id)
+            if graph is None:
+                graph = self._graphs[session_id] = TraceGraph(format="compact", version=1, deltas=[])
+            if existing_session is not None:
+                graph.replace_leaf(record)
+                return
+            graph.add(record)
+            self._trace_session[trace_id] = session_id
+            self._timestamps[trace_id] = now
+            self._session_index[session_id].append(trace_id)
+            return
         self._traces[trace_id] = _pack(data)
         if trace_id not in self._timestamps:
             self._timestamps[trace_id] = now
-        idx = self._session_index[session_id]
-        if trace_id not in idx:
-            idx.append(trace_id)
+        if trace_id not in self._session_seen[session_id]:
+            self._session_seen[session_id].add(trace_id)
+            self._session_index[session_id].append(trace_id)
 
     async def get_trace(self, trace_id: str) -> dict[str, Any] | None:
+        if self._compact:
+            session_id = self._trace_session.get(trace_id)
+            return None if session_id is None else self._graphs[session_id].resolve(trace_id).model_dump()
         data = self._traces.get(trace_id)
         return _unpack(data) if data is not None else None
+
+    def _select(self, session_id: str, since: float | None, limit: int | None) -> list[str]:
+        tids = [tid for tid in self._session_index.get(session_id, []) if since is None or self._timestamps.get(tid, 0.0) >= since]
+        return tids[:limit]
 
     async def get_session_traces(
         self,
@@ -80,21 +115,38 @@ class MemoryTraceStore:
         since: float | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        ids = self._session_index.get(session_id, [])
-        results: list[dict[str, Any]] = []
-        for tid in ids:
-            ts = self._timestamps.get(tid, 0.0)
-            if since is not None and ts < since:
-                continue
-            data = self._traces.get(tid)
-            if data is not None:
-                results.append(data)
-        if limit is not None:
-            results = results[:limit]
-        return [_unpack(d) for d in results]
+        if self._compact:
+            graph = self._graphs.get(session_id)
+            return [] if graph is None else [graph.resolve(tid).model_dump() for tid in self._select(session_id, since, limit)]
+        return [_unpack(self._traces[tid]) for tid in self._select(session_id, since, limit) if tid in self._traces]
+
+    async def get_session_traces_compact(
+        self,
+        session_id: str,
+        since: float | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Return the compact session graph, optionally sliced."""
+        if not self._compact:
+            raise ValueError("compact traces require MemoryTraceStore(compact=True)")
+        tids = self._select(session_id, since, limit)
+        graph = self._graphs.get(session_id)
+        if graph is None:
+            graph = TraceGraph(format="compact", version=1, deltas=[])
+        return graph.slice(tids).model_dump()
+
+    async def count_session_traces(self, session_id: str) -> int:
+        return len(self._session_index.get(session_id, []))
 
     async def delete_session(self, session_id: str) -> int:
         ids = self._session_index.pop(session_id, [])
+        self._session_seen.pop(session_id, None)
+        if self._compact:
+            self._graphs.pop(session_id, None)
+            for tid in ids:
+                self._trace_session.pop(tid, None)
+                self._timestamps.pop(tid, None)
+            return len(ids)
         # Collect trace_ids referenced by other sessions
         referenced: set[str] = set()
         for sid, tids in self._session_index.items():

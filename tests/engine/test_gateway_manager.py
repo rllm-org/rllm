@@ -37,7 +37,7 @@ class TestGatewayStoreSelection:
 
 class TestGatewayStoreValidation:
     def test_unknown_store_raises(self):
-        with pytest.raises(ValueError, match="must be 'memory' or 'sqlite'"):
+        with pytest.raises(ValueError, match="must be 'memory', 'compact' or 'sqlite'"):
             GatewayManager(_make_config(store="postgres"), mode="thread")
 
     def test_memory_with_db_path_raises(self):
