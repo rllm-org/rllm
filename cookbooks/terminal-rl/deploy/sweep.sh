@@ -214,13 +214,12 @@ resume_args() {
             bestjob=$(grep -oE "training-api-service-[0-9a-f]+" "$f" 2>/dev/null | head -1)
         fi
     done
-    [ -n "$bestjob" ] || return 0
-    # Pass ONLY the source job. The trainer then lists that job's checkpoints and
-    # resumes from the latest (fireworks_policy_trainer.py:314-320). Do not pass
-    # resume_from_dcp_checkpoint: the DCP save name ("step-20") differs from the
-    # promoted model name ("step-20-73f522a0"), and guessing wrong fails the load.
-    # $best/$bestn are still used for progress accounting.
-    printf 'training.resume_from_fireworks_job_id=%s' "$bestjob"
+    [ -n "$bestjob" ] && [ "$bestn" -gt 0 ] || return 0
+    # The DCP checkpoint is "step-<n>" (save_dcp_checkpoint uses f"step-{step}").
+    # The suffixed form seen in logs -- "step-20-73f522a0" -- is the PROMOTED
+    # MODEL name, not the checkpoint. Pass the checkpoint explicitly so we resume
+    # from a known step rather than whatever the trainer considers "latest".
+    printf 'training.resume_from_dcp_checkpoint=step-%s training.resume_from_fireworks_job_id=%s' "$bestn" "$bestjob"
 }
 
 # Step of the newest checkpoint for this config, for progress accounting.
