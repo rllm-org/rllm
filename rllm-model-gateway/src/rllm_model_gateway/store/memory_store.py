@@ -56,6 +56,16 @@ def _unpack(data: dict[str, Any]) -> dict[str, Any]:
 # Present only inside the store; readers always see the expanded list.
 _INTERNED_KEY = "__interned_messages__"
 
+# Sentinel for delta-stored prompt token ids: [prev_trace_id | None, lcp, suffix].
+# Messages were only half the quadratic — every trace also carries the FULL
+# prompt token ids of its call (up to ~128k ids), which repeat the previous
+# call's ids almost entirely. Compact mode stores only the suffix beyond the
+# longest common prefix with the session's previous trace; reads rebuild the
+# full list by walking the chain. LCP against the actual previous ids makes
+# this lossless regardless of renderer behavior: a non-extending prompt just
+# gets lcp=0 and stores verbatim.
+_IDS_KEY = "__interned_prompt_ids__"
+
 
 def _message_fp(message: dict[str, Any]) -> str:
     """Stable content fingerprint of one message (canonical JSON → sha256)."""
@@ -95,6 +105,9 @@ class MemoryTraceStore:
         # session_id -> {(parent_node_id | None, content_fp): node_id} — O(1)
         # re-interning of prefixes without walking or re-storing them.
         self._session_chain: dict[str, dict[tuple[str | None, str], str]] = defaultdict(dict)
+        # session_id -> (trace_id, full prompt ids of the session's latest
+        # trace) — the LCP reference for prompt-id delta storage.
+        self._session_prev_ids: dict[str, tuple[str, list[int]]] = {}
 
     def _intern_messages(self, session_id: str, data: dict[str, Any]) -> dict[str, Any]:
         """Return ``data`` with ``messages`` replaced by a leaf reference."""
@@ -131,15 +144,70 @@ class MemoryTraceStore:
             messages.append(message)
             node_id = parent
         messages.reverse()
-        assert len(messages) == length, f"interned chain length {len(messages)} != recorded {length}"
+        if len(messages) != length:
+            raise ValueError(f"interned chain length {len(messages)} != recorded {length}")
         out = dict(data)
         out["messages"] = messages
+        return out
+
+    def _intern_prompt_ids(self, session_id: str, trace_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Store only the suffix of ``prompt_token_ids`` beyond the previous trace's."""
+        ids = data.get("prompt_token_ids")
+        if type(ids) is not list or not ids:
+            return data
+        prev = self._session_prev_ids.get(session_id)
+        out = dict(data)
+        if prev is not None and prev[0] != trace_id:  # a re-stored trace must not chain to itself
+            prev_tid, prev_ids = prev
+            lcp = 0
+            n = min(len(ids), len(prev_ids))
+            while lcp < n and ids[lcp] == prev_ids[lcp]:
+                lcp += 1
+            if lcp > 0:
+                out["prompt_token_ids"] = {_IDS_KEY: [prev_tid, lcp, ids[lcp:]]}
+        self._session_prev_ids[session_id] = (trace_id, ids)
+        return out
+
+    def _materialize_prompt_ids(self, trace_id: str, memo: dict[str, list[int]]) -> list[int]:
+        """Full prompt ids of *trace_id*, resolving delta chains iteratively."""
+        if trace_id in memo:
+            return memo[trace_id]
+        # Walk back to the first non-delta ancestor, then rebuild forward.
+        chain: list[str] = []
+        tid = trace_id
+        while tid not in memo:
+            data = self._traces.get(tid)
+            marker = None if data is None else data.get("prompt_token_ids")
+            if type(marker) is not dict or _IDS_KEY not in marker:
+                base = _unpack(data or {}).get("prompt_token_ids") or []
+                memo[tid] = base if isinstance(base, list) else list(base)
+                break
+            chain.append(tid)
+            tid = marker[_IDS_KEY][0]
+            if tid is None:
+                memo[None] = []  # type: ignore[index]
+                break
+        for tid in reversed(chain):
+            prev_tid, lcp, suffix = self._traces[tid]["prompt_token_ids"][_IDS_KEY]
+            prev_full = memo[prev_tid]
+            if lcp > len(prev_full):
+                raise ValueError(f"prompt-id delta lcp {lcp} exceeds ancestor length {len(prev_full)}")
+            memo[tid] = prev_full[:lcp] + list(suffix)
+        return memo[trace_id]
+
+    def _expand_prompt_ids(self, trace_id: str, data: dict[str, Any], memo: dict[str, list[int]] | None = None) -> dict[str, Any]:
+        """Inverse of :meth:`_intern_prompt_ids` for one trace dict."""
+        marker = data.get("prompt_token_ids")
+        if type(marker) is not dict or _IDS_KEY not in marker:
+            return data
+        out = dict(data)
+        out["prompt_token_ids"] = self._materialize_prompt_ids(trace_id, {} if memo is None else memo)
         return out
 
     async def store_trace(self, trace_id: str, session_id: str, data: dict[str, Any]) -> None:
         now = time.time()
         if self._compact:
-            data = self._intern_messages(session_id, data)
+            data = self._intern_prompt_ids(session_id, trace_id, self._intern_messages(session_id, data))
         self._traces[trace_id] = _pack(data)
         if trace_id not in self._timestamps:
             self._timestamps[trace_id] = now
@@ -149,7 +217,9 @@ class MemoryTraceStore:
 
     async def get_trace(self, trace_id: str) -> dict[str, Any] | None:
         data = self._traces.get(trace_id)
-        return self._expand_messages(_unpack(data)) if data is not None else None
+        if data is None:
+            return None
+        return self._expand_prompt_ids(trace_id, self._expand_messages(_unpack(data)))
 
     async def get_session_traces(
         self,
@@ -158,26 +228,36 @@ class MemoryTraceStore:
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         ids = self._session_index.get(session_id, [])
-        results: list[dict[str, Any]] = []
+        results: list[tuple[str, dict[str, Any]]] = []
         for tid in ids:
             ts = self._timestamps.get(tid, 0.0)
             if since is not None and ts < since:
                 continue
             data = self._traces.get(tid)
             if data is not None:
-                results.append(data)
+                results.append((tid, data))
         if limit is not None:
             results = results[:limit]
-        return [self._expand_messages(_unpack(d)) for d in results]
+        memo: dict[str, list[int]] = {}
+        return [self._expand_prompt_ids(tid, self._expand_messages(_unpack(d)), memo) for tid, d in results]
 
     async def delete_session(self, session_id: str) -> int:
         ids = self._session_index.pop(session_id, [])
-        self._session_nodes.pop(session_id, None)
-        self._session_chain.pop(session_id, None)
         # Collect trace_ids referenced by other sessions
         referenced: set[str] = set()
         for sid, tids in self._session_index.items():
             referenced.update(tids)
+        # Traces surviving via another session may hold markers into the
+        # tables about to be dropped (a trace_id re-stored under two sessions
+        # points at whichever session stored it last). Re-materialize them to
+        # verbatim form first, or they would be unreadable afterwards.
+        memo: dict[str, list[int]] = {}
+        for tid in ids:
+            if tid in referenced and tid in self._traces:
+                self._traces[tid] = _pack(self._expand_prompt_ids(tid, self._expand_messages(_unpack(self._traces[tid])), memo))
+        self._session_nodes.pop(session_id, None)
+        self._session_chain.pop(session_id, None)
+        self._session_prev_ids.pop(session_id, None)
         deleted = 0
         for tid in ids:
             if tid not in referenced:

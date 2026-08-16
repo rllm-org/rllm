@@ -136,3 +136,61 @@ def test_default_mode_stores_verbatim_and_builds_no_tables():
     assert len(store._session_chain) == 0
     # internal representation is the verbatim list, not a leaf marker
     assert isinstance(store._traces["t1"]["messages"], list)
+
+
+def _trace_ids(messages, prompt_ids):
+    d = _trace(messages)
+    d["prompt_token_ids"] = prompt_ids
+    return d
+
+
+def test_prompt_ids_delta_roundtrip_and_dedup():
+    """Prompt token ids repeat the previous call's — compact stores suffixes only."""
+    store = MemoryTraceStore(compact=True)
+    full = []
+    originals = []
+    for turn in range(1, 6):
+        full = full + list(range((turn - 1) * 100, turn * 100))
+        originals.append(list(full))
+        _run(store.store_trace(f"t{turn}", "s1", _trace_ids(_convo(turn), list(full))))
+    # every read reconstructs the full ids
+    for turn, ids in enumerate(originals, start=1):
+        assert _run(store.get_trace(f"t{turn}"))["prompt_token_ids"] == ids
+    bulk = _run(store.get_session_traces("s1"))
+    assert [t["prompt_token_ids"] for t in bulk] == originals
+    # storage is linear: traces 2..5 hold only 100-id suffixes
+    for turn in range(2, 6):
+        marker = store._traces[f"t{turn}"]["prompt_token_ids"]
+        assert isinstance(marker, dict)
+        _, lcp, suffix = marker["__interned_prompt_ids__"]
+        assert lcp == (turn - 1) * 100 and len(suffix) == 100
+
+
+def test_prompt_ids_non_prefix_falls_back_verbatim():
+    """A rewritten prompt (no shared prefix) stores verbatim — lossless always."""
+    store = MemoryTraceStore(compact=True)
+    _run(store.store_trace("t1", "s1", _trace_ids(_convo(1), [1, 2, 3])))
+    _run(store.store_trace("t2", "s1", _trace_ids(_convo(2), [9, 8, 7, 6])))
+    assert _run(store.get_trace("t1"))["prompt_token_ids"] == [1, 2, 3]
+    assert _run(store.get_trace("t2"))["prompt_token_ids"] == [9, 8, 7, 6]
+
+
+def test_restore_same_trace_id_does_not_self_chain():
+    store = MemoryTraceStore(compact=True)
+    _run(store.store_trace("t1", "s1", _trace_ids(_convo(1), [1, 2, 3])))
+    _run(store.store_trace("t1", "s1", _trace_ids(_convo(1), [1, 2, 3, 4])))  # retry re-store
+    assert _run(store.get_trace("t1"))["prompt_token_ids"] == [1, 2, 3, 4]
+
+
+def test_delete_session_rematerializes_shared_traces():
+    """Audit repro: trace stored under two sessions must survive either deletion."""
+    store = MemoryTraceStore(compact=True)
+    msgs = _convo(2)
+    _run(store.store_trace("shared", "s1", _trace_ids(msgs, [1, 2, 3])))
+    _run(store.store_trace("shared", "s2", _trace_ids(msgs, [1, 2, 3])))  # re-store repoints markers at s2
+    _run(store.delete_session("s2"))
+    got = _run(store.get_trace("shared"))  # must not KeyError into s2's dropped tables
+    assert got["messages"] == msgs
+    assert got["prompt_token_ids"] == [1, 2, 3]
+    traces = _run(store.get_session_traces("s1"))
+    assert traces and traces[0]["messages"] == msgs
