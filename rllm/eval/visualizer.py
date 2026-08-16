@@ -139,11 +139,23 @@ def _scan_runs(root: Path) -> list[dict[str, Any]]:
     return out
 
 
+# path -> ((mtime_ns, size), index_row). Parsing a 400 MB episode file for
+# five headline fields on EVERY index request was the audit's per-request
+# quadratic; rows are immutable for a finished episode, so cache by stat.
+_INDEX_CACHE: dict[Path, tuple[tuple[int, int], dict[str, Any]]] = {}
+
+
 def _build_episode_index(episodes_dir: Path) -> list[dict[str, Any]]:
     """Read just the headline fields from every episode file in a run."""
     index = []
     for path in sorted(episodes_dir.glob("episode_*.json")):
         try:
+            st = path.stat()
+            stamp = (st.st_mtime_ns, st.st_size)
+            cached = _INDEX_CACHE.get(path)
+            if cached is not None and cached[0] == stamp:
+                index.append(cached[1])
+                continue
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
@@ -152,19 +164,19 @@ def _build_episode_index(episodes_dir: Path) -> list[dict[str, Any]]:
         n_steps = sum(len(t.get("steps") or []) for t in (data.get("trajectories") or []))
         rewards = [t.get("reward") for t in (data.get("trajectories") or []) if t.get("reward") is not None]
         avg_reward = sum(rewards) / len(rewards) if rewards else None
-        index.append(
-            {
-                "filename": path.name,
-                "eval_idx": data.get("eval_idx"),
-                "task_id": task.get("id") if isinstance(task, dict) else None,
-                "is_correct": data.get("is_correct"),
-                "termination_reason": data.get("termination_reason"),
-                "n_trajectories": len(data.get("trajectories") or []),
-                "n_steps": n_steps,
-                "reward": avg_reward,
-                "instruction_preview": _preview(task.get("instruction") if isinstance(task, dict) else None),
-            }
-        )
+        row = {
+            "filename": path.name,
+            "eval_idx": data.get("eval_idx"),
+            "task_id": task.get("id") if isinstance(task, dict) else None,
+            "is_correct": data.get("is_correct"),
+            "termination_reason": data.get("termination_reason"),
+            "n_trajectories": len(data.get("trajectories") or []),
+            "n_steps": n_steps,
+            "reward": avg_reward,
+            "instruction_preview": _preview(task.get("instruction") if isinstance(task, dict) else None),
+        }
+        _INDEX_CACHE[path] = (stamp, row)
+        index.append(row)
     return index
 
 
@@ -908,6 +920,14 @@ def _make_handler(root_path: Path, html_factory):
             except OSError:
                 self.send_error(404, "Not Found")
                 return
+            # Compact (compact-format) episodes must be expanded for the browser —
+            # its renderer reads step.chat_completions. Legacy files stream
+            # untouched; the needle probe keeps the fast path parse-free, and
+            # a false hit is harmless (expand_episode is identity on legacy).
+            if b'"episode_format"' in data:
+                from rllm.eval.episode_compact import expand_episode
+
+                data = json.dumps(expand_episode(json.loads(data))).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))

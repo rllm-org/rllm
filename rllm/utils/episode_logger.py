@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -128,6 +129,12 @@ class EpisodeLogger:
         filename = self.get_episode_filename(episode, step)
         filepath = step_dir / filename
 
+        # Same opt-in as eval dumps: the compact format stores each unique
+        # message once (a training debug episode is otherwise quadratic in steps).
+        if os.environ.get("RLLM_GATEWAY_STORE") == "compact":
+            from rllm.eval.episode_compact import compact_episode
+
+            episode_data = compact_episode(episode_data)
         try:
             with open(filepath, "w") as f:
                 json_str = json.dumps(episode_data, indent=2, default=str)
