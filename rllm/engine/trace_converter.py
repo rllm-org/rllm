@@ -60,15 +60,27 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
     raw_tool_calls = trace.response_message.get("tool_calls")
     tool_calls = _parse_openai_tool_calls(raw_tool_calls) if raw_tool_calls else None
 
+    # In compact mode the client keeps prompt ids as the step-form delta
+    # marker {"__prompt_ids_delta__": [lcp, suffix]} instead of the full
+    # list — the marker rides on step.prompt_ids and model_output carries
+    # only the exact length; nothing here materializes the expansion.
+    raw_prompt_ids = trace.prompt_token_ids
+    ids_delta = raw_prompt_ids.get("__prompt_ids_delta__") if isinstance(raw_prompt_ids, dict) else None
+    if ids_delta is not None:
+        lcp, suffix = ids_delta
+        full_prompt_ids, prompt_length = None, lcp + len(suffix)
+    else:
+        full_prompt_ids, prompt_length = raw_prompt_ids, len(raw_prompt_ids)
+
     model_output = ModelOutput(
         content=content,
         reasoning=reasoning,
         tool_calls=tool_calls,
-        prompt_ids=trace.prompt_token_ids,
+        prompt_ids=full_prompt_ids,
         completion_ids=trace.completion_token_ids,
         logprobs=trace.logprobs or [],
         routing_matrices=trace.routing_matrices,
-        prompt_length=len(trace.prompt_token_ids),
+        prompt_length=prompt_length,
         completion_length=len(trace.completion_token_ids),
         finish_reason=trace.finish_reason,
         weight_version=trace.weight_version,
@@ -93,6 +105,7 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
     # history type is the planned enforcement (native-compact follow-up).
     step = Step(
         id=trace.trace_id,
+        prompt_ids=raw_prompt_ids if ids_delta is not None else [],
         # Assigned below, AFTER construction: pydantic field validation copies
         # each message dict, which would re-materialize the full conversation
         # prefix per step even with the deepcopy skipped (audit: the root
@@ -112,7 +125,7 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
 def compute_step_metrics(trajectories: list[Trajectory]) -> dict:
     """Standard training metrics from trajectories (shared by local and remote engines)."""
     all_response_lens = [len(s.response_ids) for t in trajectories for s in t.steps]
-    all_prompt_lens = [len(s.prompt_ids) for t in trajectories for s in t.steps]
+    all_prompt_lens = [s.prompt_len for t in trajectories for s in t.steps]
     return {
         "traj_per_episode": len(trajectories),
         "steps_used": sum(len(t.steps) for t in trajectories),

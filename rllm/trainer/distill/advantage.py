@@ -117,6 +117,8 @@ async def compute_step_distill_advantage(
     student_completion_ids = step.response_ids
     student_logprobs = step.logprobs
 
+    if step.prompt_delta is not None:
+        raise NotImplementedError("Distillation requires full prompt_ids; compact delta-form steps are not supported here — run with RLLM_GATEWAY_STORE unset for distillation.")
     if not student_prompt_ids:
         raise ValueError("Missing prompt_ids on step for distillation.")
     if not student_completion_ids or not student_logprobs:

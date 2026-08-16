@@ -391,7 +391,7 @@ class TrajectoryGroupBuffer:
 
             # Episode-level totals across all trajectories
             total_turns = sum(len(traj.steps) for traj in ep.trajectories)
-            total_prompt_tokens = sum(len(s.prompt_ids) for traj in ep.trajectories for s in traj.steps)
+            total_prompt_tokens = sum(s.prompt_len for traj in ep.trajectories for s in traj.steps)
             total_response_tokens = sum(len(s.response_ids) for traj in ep.trajectories for s in traj.steps)
             self._aggregator.record("episode/num_turns", total_turns)
             self._aggregator.record("episode/prompt_tokens", total_prompt_tokens)
@@ -461,11 +461,31 @@ class TrajectoryGroupBuffer:
         """
         full: list[int] | None = None
         segments = 0
+        have_prev = False
+        prev_prompt_len = 0
+        prev_response: list | None = None
         for step in traj.steps:
-            ids = list(step.prompt_ids)
-            if full is None or ids[: len(full)] != full:
-                segments += 1
-            full = ids + list(step.response_ids)
+            delta = step.prompt_delta
+            if delta is not None:
+                # Delta-form step: extends the running sequence iff it purely
+                # extends the previous prompt and its suffix begins with the
+                # previous response — same rule as the packed builders.
+                lcp, suffix = delta
+                extends = have_prev and lcp == prev_prompt_len and prev_response is not None and len(suffix) >= len(prev_response) and list(suffix[: len(prev_response)]) == list(prev_response)
+                if not extends:
+                    segments += 1
+                full = None  # content untracked past a delta step
+            else:
+                ids = list(step.prompt_ids)
+                if full is None or ids[: len(full)] != full:
+                    # full is also None right after a delta step: a full-list
+                    # step there conservatively starts a new segment (mixed
+                    # forms don't occur in one fetched trajectory).
+                    segments += 1
+                full = ids + list(step.response_ids)
+            have_prev = True
+            prev_prompt_len = step.prompt_len
+            prev_response = list(step.response_ids)
         return max(segments, 1)
 
     def _log_prompt_group_finished(

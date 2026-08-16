@@ -232,6 +232,25 @@ class Step(BaseModel):
     weight_version: int | None = None  # weight version at time of generation (async staleness)
 
     @property
+    def prompt_delta(self) -> tuple[int, list] | None:
+        """(lcp, suffix) when prompt_ids is the compact delta marker, else None."""
+        raw = self.prompt_ids
+        if isinstance(raw, dict):
+            delta = raw.get("__prompt_ids_delta__")
+            if delta is not None:
+                lcp, suffix = delta
+                return lcp, suffix
+        return None
+
+    @property
+    def prompt_len(self) -> int:
+        """Full prompt length in tokens, delta-form or not."""
+        delta = self.prompt_delta
+        if delta is not None:
+            return delta[0] + len(delta[1])
+        return len(self.prompt_ids)
+
+    @property
     def info(self) -> dict:
         """Alias for metadata. Auto-initializes to {} if None so mutation works."""
         if self.metadata is None:

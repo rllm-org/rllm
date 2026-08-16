@@ -161,6 +161,23 @@ def _format_token(token: str, style: dict[str, Any]) -> str:
     return click.style(display_token, **style)
 
 
+def _resolve_prompt_ids(trajectory) -> list:
+    """Full prompt ids of a trajectory's last step, resolving compact
+    delta-form steps by replaying the trajectory (display-time only)."""
+    last_step = trajectory.steps[-1]
+    if last_step.prompt_delta is None:
+        return last_step.prompt_ids
+    cur: list = []
+    for step in trajectory.steps:
+        delta = step.prompt_delta
+        if delta is None:
+            cur = list(step.prompt_ids)
+        else:
+            lcp, suffix = delta
+            cur = cur[: min(lcp, len(cur))] + list(suffix)
+    return cur
+
+
 def _visualize_metadata(trajectory: Trajectory, metadata: dict, config: VisualizationConfig):
     """
     Visualizes workflow metadata for a given trajectory.
@@ -234,7 +251,7 @@ def visualize_trajectory_last_steps(
         # 3. Render Prompt and Response
         last_step = trajectory.steps[-1]
         # extract the prompt and response
-        prompt_ids = last_step.prompt_ids
+        prompt_ids = _resolve_prompt_ids(trajectory)
         response_ids = last_step.response_ids
 
         # special handling for prompt ids, we will skip any non-int elements

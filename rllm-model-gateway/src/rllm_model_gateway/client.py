@@ -7,7 +7,7 @@ import httpx
 from rllm_model_gateway.models import TraceRecord, WorkerInfo
 
 
-def _expand_compact_traces(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _expand_compact_traces(payload: dict[str, Any], *, expand_prompt_ids: bool = True) -> list[dict[str, Any]]:
     """Rebuild full per-trace message lists from a compact traces payload.
 
     Nodes are materialized once and *shared*: every trace whose conversation
@@ -15,6 +15,13 @@ def _expand_compact_traces(payload: dict[str, Any]) -> list[dict[str, Any]]:
     linear in unique messages even though the expanded lists repeat them.
     Reconstruction is exact — parity-tested byte-for-byte against the default
     format on real eval dumps.
+
+    With ``expand_prompt_ids=False`` the per-trace prompt token lists are NOT
+    materialized (that materialization is the remaining O(n^2)): a trace whose
+    ids arrived as a delta keeps them as the step-form marker
+    ``{"__prompt_ids_delta__": [lcp, suffix]}`` relative to the previous trace
+    of the same lineage, which is what the packed trainers consume natively.
+    Only prompt lengths are tracked, so validation stays exact.
     """
     nodes = payload.get("nodes", {})
     out: list[dict[str, Any]] = []
@@ -46,6 +53,29 @@ def _expand_compact_traces(payload: dict[str, Any]) -> list[dict[str, Any]]:
         return base
 
     ids_memo: dict[str | None, list[int]] = {None: []}
+    # Delta-keeping state: full prompt lengths per trace (exact validation
+    # without materialization), recorded deltas for the rare rebase walk, and
+    # the previous trace id per lineage (step-form deltas resolve against the
+    # lineage predecessor, which the store's chain predecessor always is —
+    # verified per trace, rebased if ever not).
+    len_memo: dict[str | None, int] = {None: 0}
+    delta_memo: dict[str, tuple[str | None, int, list[int]]] = {}
+    prev_in_lineage: dict[Any, str | None] = {}
+
+    def _materialize(tid: str | None) -> list[int]:
+        """Rebuild one trace's full prompt ids from recorded deltas (rebase
+        fallback only — never runs on the store's chain order)."""
+        chain: list[tuple[int, list[int]]] = []
+        cursor = tid
+        while cursor is not None and cursor not in ids_memo:
+            prev, lcp, suffix = delta_memo[cursor]
+            chain.append((lcp, suffix))
+            cursor = prev
+        full = list(ids_memo.get(cursor, []))
+        for lcp, suffix in reversed(chain):
+            full = full[:lcp] + list(suffix)
+        return full
+
     for trace in payload.get("traces", []):
         ref = trace.get("messages_ref")
         if ref is None:
@@ -59,16 +89,34 @@ def _expand_compact_traces(payload: dict[str, Any]) -> list[dict[str, Any]]:
         expanded.pop("messages_ref", None)
         expanded["messages"] = messages
         ids_ref = expanded.pop("prompt_ids_delta", None)
+        tid = expanded.pop("_tid", None) or expanded.get("trace_id")
         if ids_ref is not None:
             # Delta against an earlier trace in this payload: prefix + suffix.
             prev_tid, lcp, suffix = ids_ref
-            prev_full = ids_memo.get(prev_tid)
-            if prev_full is None or lcp > len(prev_full):
-                raise ValueError(f"prompt-id delta references unknown/short ancestor {prev_tid!r}")
-            expanded["prompt_token_ids"] = prev_full[:lcp] + list(suffix)
-        tid = expanded.pop("_tid", None) or expanded.get("trace_id")
+            if expand_prompt_ids:
+                prev_full = ids_memo.get(prev_tid)
+                if prev_full is None or lcp > len(prev_full):
+                    raise ValueError(f"prompt-id delta references unknown/short ancestor {prev_tid!r}")
+                expanded["prompt_token_ids"] = prev_full[:lcp] + list(suffix)
+            else:
+                prev_len = len_memo.get(prev_tid)
+                if prev_len is None or lcp > prev_len:
+                    raise ValueError(f"prompt-id delta references unknown/short ancestor {prev_tid!r}")
+                lineage = expanded.get("lineage_id")
+                if prev_in_lineage.get(lineage) == prev_tid:
+                    expanded["prompt_token_ids"] = {"__prompt_ids_delta__": [lcp, list(suffix)]}
+                else:
+                    # Chain predecessor is not this lineage's previous trace:
+                    # rebase to a full list so step-form consumers stay exact.
+                    expanded["prompt_token_ids"] = _materialize(prev_tid)[:lcp] + list(suffix)
+                if tid is not None:
+                    len_memo[tid] = lcp + len(suffix)
+                    delta_memo[tid] = (prev_tid, lcp, list(suffix))
         if tid is not None and isinstance(expanded.get("prompt_token_ids"), list):
             ids_memo[tid] = expanded["prompt_token_ids"]
+            len_memo[tid] = len(expanded["prompt_token_ids"])
+        if tid is not None:
+            prev_in_lineage[expanded.get("lineage_id")] = tid
         out.append(expanded)
     return out
 
@@ -155,6 +203,7 @@ class GatewayClient:
         since: float | None = None,
         limit: int | None = None,
         format: str | None = None,
+        expand_prompt_ids: bool = True,
     ) -> list[TraceRecord]:
         params: dict[str, Any] = {}
         if since is not None:
@@ -171,7 +220,7 @@ class GatewayClient:
             # every message dict and destroy the cross-trace sharing the
             # expansion just built. The payload is gateway-produced, not user
             # input, so skipping validation is safe here.
-            return [TraceRecord.model_construct(**t) for t in _expand_compact_traces(data)]
+            return [TraceRecord.model_construct(**t) for t in _expand_compact_traces(data, expand_prompt_ids=expand_prompt_ids)]
         return [TraceRecord(**t) for t in data]
 
     def get_trace(self, trace_id: str) -> TraceRecord:
@@ -312,6 +361,7 @@ class AsyncGatewayClient:
         since: float | None = None,
         limit: int | None = None,
         format: str | None = None,
+        expand_prompt_ids: bool = True,
     ) -> list[TraceRecord]:
         params: dict[str, Any] = {}
         if since is not None:
@@ -326,7 +376,7 @@ class AsyncGatewayClient:
         if isinstance(data, dict) and data.get("format") == "compact":
             # See the sync client: model_construct preserves the shared node
             # dicts that validation would copy away.
-            return [TraceRecord.model_construct(**t) for t in _expand_compact_traces(data)]
+            return [TraceRecord.model_construct(**t) for t in _expand_compact_traces(data, expand_prompt_ids=expand_prompt_ids)]
         return [TraceRecord(**t) for t in data]
 
     async def get_trace(self, trace_id: str) -> TraceRecord:

@@ -381,7 +381,10 @@ class GatewayManager:
 
     def get_traces(self, session_id: str) -> list[TraceRecord]:
         self.client.flush()
-        return self.client.get_session_traces(session_id, format=self._trace_format)
+        # Compact mode keeps prompt-id deltas in step form instead of
+        # materializing the O(n^2) per-trace token lists; the packed trainers
+        # consume them natively.
+        return self.client.get_session_traces(session_id, format=self._trace_format, expand_prompt_ids=self._trace_format != "compact")
 
     # -- Async session / trace API -------------------------------------------
 
@@ -391,7 +394,7 @@ class GatewayManager:
 
     async def aget_traces(self, session_id: str) -> list[TraceRecord]:
         await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
-        return await self.async_client.get_session_traces(session_id, format=self._trace_format)
+        return await self.async_client.get_session_traces(session_id, format=self._trace_format, expand_prompt_ids=self._trace_format != "compact")
 
     async def adelete_session(self, session_id: str) -> int:
         """Delete a session and all its accumulated traces. Returns count removed."""

@@ -197,7 +197,7 @@ def enrich_episode_with_traces(
     # rollout — at high MAX_TURNS the failure rate would exhaust retries.
     if agent_populates_steps and len(training_steps) > n_agent_steps:
         extra = training_steps[n_agent_steps:]
-        extras_all_malformed = all(not s.model_output.prompt_ids or not s.model_output.completion_ids for s in extra)
+        extras_all_malformed = all((not s.model_output.prompt_ids and s.prompt_delta is None) or not s.model_output.completion_ids for s in extra)
         if extras_all_malformed:
             logger.warning(
                 "[%s] dropping %d trailing malformed trace(s); keeping %d aligned with agent_steps",
@@ -207,7 +207,7 @@ def enrich_episode_with_traces(
             )
             training_steps = training_steps[:n_agent_steps]
 
-    empty_prompt = sum(1 for s in training_steps if not s.model_output.prompt_ids)
+    empty_prompt = sum(1 for s in training_steps if not s.model_output.prompt_ids and s.prompt_delta is None)
     empty_compl = sum(1 for s in training_steps if not s.model_output.completion_ids)
     # Only enforce step-count parity when the agent actually populates steps.
     # Trajectories with no agent steps absorb remaining traces wholesale
