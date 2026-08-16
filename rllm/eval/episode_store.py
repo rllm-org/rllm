@@ -107,10 +107,15 @@ class EvalEpisodeStore:
         # 113-task run); schema 2 stores each unique message once. Readers
         # (visualizer, curation) expand transparently; conversion back is
         # lossless (see rllm.eval.episode_codec and its real-dump parity test).
+        indent: int | None = 2
         if os.environ.get("RLLM_EPISODE_SCHEMA") == "2":
             from rllm.eval.episode_codec import compact_episode
 
             data = compact_episode(data)
+            # indent=2 disables CPython's C encoder (audit: multi-second
+            # event-loop stalls on 100 MB+ dumps). Compact files are small and
+            # machine-read; write them dense. Legacy stays indent=2 byte-for-byte.
+            indent = None
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, default=_json_default)
+            json.dump(data, f, indent=indent, default=_json_default)
         return path

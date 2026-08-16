@@ -176,7 +176,6 @@ async def run_dataset(
     # Aggregate per-rollout EvalItems for the report; with attempts > 1 the
     # expanded index folds back to (task index, attempt).
     items: list[EvalItem] = []
-    surviving_episodes: list = []
     for idx, episode in enumerate(episodes):
         task_idx, attempt = divmod(idx, attempts) if attempts > 1 else (idx, 0)
         if episode is None:
@@ -219,7 +218,7 @@ async def run_dataset(
                 termination_reason=reason.value if reason is not None else None,
             )
         )
-        if error_msg is None:
-            surviving_episodes.append(episode)
-
-    return (EvalResult.from_items(dataset_name, model, agent_name, items, attempts=attempts), surviving_episodes)
+    # NOTE: episodes are persisted/streamed via on_episode_complete; retaining
+    # them here doubled the run's peak RSS for a return value the CLI never
+    # read (audit finding). The second element stays for signature stability.
+    return (EvalResult.from_items(dataset_name, model, agent_name, items, attempts=attempts), [])

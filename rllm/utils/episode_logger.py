@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -128,9 +129,17 @@ class EpisodeLogger:
         filename = self.get_episode_filename(episode, step)
         filepath = step_dir / filename
 
+        # Same opt-in as eval dumps: schema-2 stores each unique message once
+        # (a training debug episode is otherwise quadratic in steps).
+        indent: int | None = 2
+        if os.environ.get("RLLM_EPISODE_SCHEMA") == "2":
+            from rllm.eval.episode_codec import compact_episode
+
+            episode_data = compact_episode(episode_data)
+            indent = None
         try:
             with open(filepath, "w") as f:
-                json_str = json.dumps(episode_data, indent=2, default=str)
+                json_str = json.dumps(episode_data, indent=indent, default=str)
                 f.write(json_str + "\n")
                 f.flush()  # Ensure data is written to disk
         except Exception as e:

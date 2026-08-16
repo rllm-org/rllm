@@ -139,11 +139,23 @@ def _scan_runs(root: Path) -> list[dict[str, Any]]:
     return out
 
 
+# path -> ((mtime_ns, size), index_row). Parsing a 400 MB episode file for
+# five headline fields on EVERY index request was the audit's per-request
+# quadratic; rows are immutable for a finished episode, so cache by stat.
+_INDEX_CACHE: dict[Path, tuple[tuple[int, int], dict[str, Any]]] = {}
+
+
 def _build_episode_index(episodes_dir: Path) -> list[dict[str, Any]]:
     """Read just the headline fields from every episode file in a run."""
     index = []
     for path in sorted(episodes_dir.glob("episode_*.json")):
         try:
+            st = path.stat()
+            stamp = (st.st_mtime_ns, st.st_size)
+            cached = _INDEX_CACHE.get(path)
+            if cached is not None and cached[0] == stamp:
+                index.append(cached[1])
+                continue
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
@@ -152,7 +164,7 @@ def _build_episode_index(episodes_dir: Path) -> list[dict[str, Any]]:
         n_steps = sum(len(t.get("steps") or []) for t in (data.get("trajectories") or []))
         rewards = [t.get("reward") for t in (data.get("trajectories") or []) if t.get("reward") is not None]
         avg_reward = sum(rewards) / len(rewards) if rewards else None
-        index.append(
+        row = (
             {
                 "filename": path.name,
                 "eval_idx": data.get("eval_idx"),
@@ -165,6 +177,8 @@ def _build_episode_index(episodes_dir: Path) -> list[dict[str, Any]]:
                 "instruction_preview": _preview(task.get("instruction") if isinstance(task, dict) else None),
             }
         )
+        _INDEX_CACHE[path] = (stamp, row)
+        index.append(row)
     return index
 
 
