@@ -88,6 +88,12 @@ def create_store(config: GatewayConfig) -> TraceStore:
         from rllm_model_gateway.store.memory_store import MemoryTraceStore
 
         return MemoryTraceStore()
+    elif worker == "compact":
+        # Message-compaction variant — see MemoryTraceStore(compact=True).
+        # Same external contract as "memory"; opt-in via RLLM_GATEWAY_STORE.
+        from rllm_model_gateway.store.memory_store import MemoryTraceStore
+
+        return MemoryTraceStore(compact=True)
     else:
         raise ValueError(f"Unknown store worker: {worker}")
 
@@ -273,7 +279,14 @@ def create_app(
         session_id: str,
         since: float | None = Query(None),
         limit: int | None = Query(None),
+        format: str = Query("default"),
     ):
+        # "compact" ships each unique message once (node table + leaf refs) —
+        # the expanded legacy list is quadratic in turns for agentic sessions.
+        # Only stores that implement the compact read support it; others keep
+        # serving the default form regardless of the requested format.
+        if format == "compact" and hasattr(store, "get_session_traces_compact"):
+            return await store.get_session_traces_compact(session_id, since=since, limit=limit)
         traces = await store.get_session_traces(session_id, since=since, limit=limit)
         return traces
 
@@ -522,7 +535,7 @@ def main() -> None:
         help="Worker URL (can be repeated)",
     )
     parser.add_argument("--db-path", type=str, default=None)
-    parser.add_argument("--store", type=str, default=None, choices=["sqlite", "memory"])
+    parser.add_argument("--store", type=str, default=None, choices=["sqlite", "memory", "compact"])
     parser.add_argument("--log-level", type=str, default=None)
     parser.add_argument(
         "--model",

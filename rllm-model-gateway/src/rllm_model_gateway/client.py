@@ -7,6 +7,72 @@ import httpx
 from rllm_model_gateway.models import TraceRecord, WorkerInfo
 
 
+def _expand_compact_traces(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rebuild full per-trace message lists from a compact traces payload.
+
+    Nodes are materialized once and *shared*: every trace whose conversation
+    contains node X references the same message dict, so client memory stays
+    linear in unique messages even though the expanded lists repeat them.
+    Reconstruction is exact — parity-tested byte-for-byte against the default
+    format on real eval dumps.
+    """
+    nodes = payload.get("nodes", {})
+    out: list[dict[str, Any]] = []
+    # Cache only REQUESTED leaves: caching every intermediate prefix made a
+    # single deep chain cost O(M^2) allocations (review); walking to the
+    # nearest cached ancestor and extending once keeps shared-prefix reuse
+    # while a lone leaf costs O(M).
+    paths: dict[str | None, list[dict[str, Any]]] = {None: []}
+
+    def _path(leaf: str | None) -> list[dict[str, Any]]:
+        cached = paths.get(leaf)
+        if cached is not None:
+            return cached
+        chain: list[str] = []
+        node_id = leaf
+        seen: set[str] = set()
+        while node_id is not None and node_id not in paths:
+            if node_id in seen:
+                raise ValueError(f"message node cycle at {node_id!r}")
+            seen.add(node_id)
+            chain.append(node_id)
+            entry = nodes.get(node_id)
+            if entry is None:
+                raise ValueError(f"dangling message node reference {node_id!r}")
+            node_id = entry["p"]
+        base = list(paths[node_id] if node_id is not None else paths[None])
+        base.extend(nodes[nid]["m"] for nid in reversed(chain))
+        paths[leaf] = base
+        return base
+
+    ids_memo: dict[str | None, list[int]] = {None: []}
+    for trace in payload.get("traces", []):
+        ref = trace.get("messages_ref")
+        if ref is None:
+            out.append(trace)
+            continue
+        leaf, length = ref
+        messages = _path(leaf)
+        if len(messages) != length:
+            raise ValueError(f"compact chain length {len(messages)} != recorded {length}")
+        expanded = dict(trace)
+        expanded.pop("messages_ref", None)
+        expanded["messages"] = messages
+        ids_ref = expanded.pop("prompt_ids_delta", None)
+        if ids_ref is not None:
+            # Delta against an earlier trace in this payload: prefix + suffix.
+            prev_tid, lcp, suffix = ids_ref
+            prev_full = ids_memo.get(prev_tid)
+            if prev_full is None or lcp > len(prev_full):
+                raise ValueError(f"prompt-id delta references unknown/short ancestor {prev_tid!r}")
+            expanded["prompt_token_ids"] = prev_full[:lcp] + list(suffix)
+        tid = expanded.pop("_tid", None) or expanded.get("trace_id")
+        if tid is not None and isinstance(expanded.get("prompt_token_ids"), list):
+            ids_memo[tid] = expanded["prompt_token_ids"]
+        out.append(expanded)
+    return out
+
+
 class GatewayClient:
     """Synchronous client for the rllm-model-gateway REST API.
 
@@ -88,15 +154,24 @@ class GatewayClient:
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
+        format: str | None = None,
     ) -> list[TraceRecord]:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
         if limit is not None:
             params["limit"] = limit
+        if format is not None:
+            params["format"] = format
         resp = self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
         data = resp.json()
+        if isinstance(data, dict) and data.get("format") == "compact":
+            # model_construct skips validation, which would otherwise re-create
+            # every message dict and destroy the cross-trace sharing the
+            # expansion just built. The payload is gateway-produced, not user
+            # input, so skipping validation is safe here.
+            return [TraceRecord.model_construct(**t) for t in _expand_compact_traces(data)]
         return [TraceRecord(**t) for t in data]
 
     def get_trace(self, trace_id: str) -> TraceRecord:
@@ -236,15 +311,22 @@ class AsyncGatewayClient:
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
+        format: str | None = None,
     ) -> list[TraceRecord]:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
         if limit is not None:
             params["limit"] = limit
+        if format is not None:
+            params["format"] = format
         resp = await self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
         data = resp.json()
+        if isinstance(data, dict) and data.get("format") == "compact":
+            # See the sync client: model_construct preserves the shared node
+            # dicts that validation would copy away.
+            return [TraceRecord.model_construct(**t) for t in _expand_compact_traces(data)]
         return [TraceRecord(**t) for t in data]
 
     async def get_trace(self, trace_id: str) -> TraceRecord:
