@@ -20,6 +20,7 @@ The store is consumed by :mod:`rllm.eval.visualizer` for read-back.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -101,6 +102,20 @@ class EvalEpisodeStore:
         # Stamp the eval-time idx into the saved episode so consumers
         # (e.g. the visualizer) can cross-reference EvalResult.items.
         data["eval_idx"] = idx
+        # Opt-in compact schema: per-step chat_completions snapshots repeat
+        # every conversation prefix (quadratic in steps — 9.3 GB for one
+        # 113-task run); compact format stores each unique message once. Readers
+        # (visualizer, curation) expand transparently; conversion back is
+        # lossless (see rllm.eval.episode_compact and its real-dump parity test).
+        indent: int | None = 2
+        if os.environ.get("RLLM_GATEWAY_STORE") == "compact":
+            from rllm.eval.episode_compact import compact_episode
+
+            data = compact_episode(data)
+            # indent=2 disables CPython's C encoder (audit: multi-second
+            # event-loop stalls on 100 MB+ dumps). Compact files are small and
+            # machine-read; write them dense. Legacy stays indent=2 byte-for-byte.
+            indent = None
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, default=_json_default)
+            json.dump(data, f, indent=indent, default=_json_default)
         return path
