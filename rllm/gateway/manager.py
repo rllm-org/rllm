@@ -196,10 +196,12 @@ class GatewayManager:
         self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
         configured_port = gw_cfg.get("port", None)
         self.port: int = int(configured_port) if configured_port is not None else (_find_free_port() if self.tunnel_backend else DEFAULT_GATEWAY_PORT)
-        self.store: str = gw_cfg.get("store", "memory")
+        # RLLM_GATEWAY_STORE overrides the config so a single env var opts a
+        # whole run into the compact store, matching the gateway's own CLI/env.
+        self.store: str = os.environ.get("RLLM_GATEWAY_STORE") or gw_cfg.get("store", "memory")
         self.db_path: str | None = gw_cfg.get("db_path", None)
-        if self.store not in ("memory", "sqlite"):
-            raise ValueError(f"rllm.gateway.store must be 'memory' or 'sqlite', got {self.store!r}")
+        if self.store not in ("memory", "memory-compact", "sqlite"):
+            raise ValueError(f"rllm.gateway.store must be 'memory', 'memory-compact' or 'sqlite', got {self.store!r}")
         if self.store == "memory" and self.db_path:
             raise ValueError("rllm.gateway.db_path is set but store='memory'; set store='sqlite' or clear db_path")
         _model_cfg = config.get("model", {})
@@ -363,9 +365,20 @@ class GatewayManager:
             return f"{base}/sessions/{session_id}/v1"
         return self.client.get_session_url(session_id)
 
+    # Traces fetch format: "compact" ships each unique message/token-id run
+    # once (linear in conversation, vs quadratic for the default list) and the
+    # client expands transparently. Enabled with the compact store, or forced
+    # either way with RLLM_COMPACT_TRACES=1/0.
+    @property
+    def _trace_format(self) -> str | None:
+        env = os.environ.get("RLLM_COMPACT_TRACES")
+        if env is not None:
+            return "compact" if env not in ("0", "false", "") else None
+        return "compact" if self.store == "memory-compact" else None
+
     def get_traces(self, session_id: str) -> list[TraceRecord]:
         self.client.flush()
-        return self.client.get_session_traces(session_id)
+        return self.client.get_session_traces(session_id, format=self._trace_format)
 
     # -- Async session / trace API -------------------------------------------
 
@@ -375,7 +388,7 @@ class GatewayManager:
 
     async def aget_traces(self, session_id: str) -> list[TraceRecord]:
         await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
-        return await self.async_client.get_session_traces(session_id)
+        return await self.async_client.get_session_traces(session_id, format=self._trace_format)
 
     async def adelete_session(self, session_id: str) -> int:
         """Delete a session and all its accumulated traces. Returns count removed."""

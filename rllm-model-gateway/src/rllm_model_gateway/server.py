@@ -535,7 +535,7 @@ def main() -> None:
         help="Worker URL (can be repeated)",
     )
     parser.add_argument("--db-path", type=str, default=None)
-    parser.add_argument("--store", type=str, default=None, choices=["sqlite", "memory"])
+    parser.add_argument("--store", type=str, default=None, choices=["sqlite", "memory", "memory-compact"])
     parser.add_argument("--log-level", type=str, default=None)
     parser.add_argument(
         "--model",
