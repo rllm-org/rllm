@@ -210,3 +210,38 @@ def test_compact_fetch_shares_node_objects_and_matches_default():
         # prefix sharing: trace 2's first message IS trace 1's first message
         assert expanded[1][0] is expanded[0][0]
         assert expanded[2][0] is expanded[0][0]
+
+
+def test_compact_fetch_ships_prompt_id_deltas_and_expands():
+    """Wire carries id suffixes, not full ids; client rebuilds chains exactly."""
+    import json as _json
+
+    from rllm_model_gateway.client import _expand_compact_traces
+
+    store = MemoryTraceStore(compact=True)
+    full = []
+    originals = []
+    for turn in range(1, 5):
+        full = full + list(range((turn - 1) * 50, turn * 50))
+        originals.append(list(full))
+        _run(store.store_trace(f"t{turn}", "s1", _trace_ids(_convo(turn), list(full))))
+    payload = _json.loads(_json.dumps(_run(store.get_session_traces_compact("s1"))))
+    # deltas on the wire: traces 2..4 ship 50-id suffixes
+    assert all("prompt_ids_ref" in t for t in payload["traces"][1:])
+    assert all(len(t["prompt_ids_ref"][2]) == 50 for t in payload["traces"][1:])
+    expanded = _expand_compact_traces(payload)
+    assert [t["prompt_token_ids"] for t in expanded] == originals
+    assert all("_tid" not in t for t in expanded)
+
+
+def test_compact_fetch_resolves_markers_across_sessions():
+    """Audit repro at the fetch layer: marker owned by another session must resolve."""
+    from rllm_model_gateway.client import _expand_compact_traces
+
+    store = MemoryTraceStore(compact=True)
+    msgs = _convo(2)
+    _run(store.store_trace("shared", "s1", _trace(msgs)))
+    _run(store.store_trace("shared", "s2", _trace(msgs)))  # marker now points at s2's table
+    payload = _run(store.get_session_traces_compact("s1"))  # fetch via s1 must not KeyError
+    expanded = _expand_compact_traces(payload)
+    assert expanded and expanded[0]["messages"] == msgs

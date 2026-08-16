@@ -1,6 +1,7 @@
 """In-memory trace store for testing and embedded usage."""
 
 import array
+import asyncio
 import hashlib
 import json
 import time
@@ -258,22 +259,22 @@ class MemoryTraceStore:
         identically (see client._expand_compact_traces and the parity tests).
         """
         ids = self._session_index.get(session_id, [])
-        raw: list[dict[str, Any]] = []
+        raw: list[tuple[str, dict[str, Any]]] = []
         for tid in ids:
             ts = self._timestamps.get(tid, 0.0)
             if since is not None and ts < since:
                 continue
             data = self._traces.get(tid)
             if data is not None:
-                raw.append(data)
+                raw.append((tid, data))
         if limit is not None:
             raw = raw[:limit]
 
         nodes_out: dict[str, dict[str, Any]] = {}
-        session_nodes = self._session_nodes.get(session_id, {})
         # Ephemeral interner for traces stored verbatim (default mode).
         eph_nodes: dict[str, tuple[str | None, dict[str, Any]]] = {}
         eph_chain: dict[tuple[str | None, str], str] = {}
+        interned = 0  # messages interned since the last event-loop yield
 
         def _collect(leaf: str | None, table: dict[str, tuple[str | None, dict[str, Any]]]) -> None:
             node_id = leaf
@@ -283,12 +284,15 @@ class MemoryTraceStore:
                 node_id = parent
 
         traces_out: list[dict[str, Any]] = []
-        for data in raw:
+        for tid, data in raw:
             data = _unpack(data)
             marker = data.get("messages")
             if type(marker) is dict and _INTERNED_KEY in marker:
-                _, leaf, length = marker[_INTERNED_KEY]
-                _collect(leaf, session_nodes)
+                # The marker records which session's node table owns its chain —
+                # a trace_id re-stored under another session points there, not
+                # at the requested session (matching _expand_messages).
+                marker_sid, leaf, length = marker[_INTERNED_KEY]
+                _collect(leaf, self._session_nodes.get(marker_sid, {}))
             else:
                 messages = marker
                 if type(messages) is not list or not all(isinstance(m, dict) for m in (messages or [])):
@@ -304,11 +308,23 @@ class MemoryTraceStore:
                         eph_nodes[node_id] = (parent, message)
                         eph_chain[key] = node_id
                     parent = node_id
+                    # Fingerprinting a long session is hundreds of MB of hashing;
+                    # yield periodically so in-flight proxying is never starved.
+                    interned += 1
+                    if interned % 512 == 0:
+                        await asyncio.sleep(0)
                 leaf, length = parent, len(messages)
                 _collect(leaf, eph_nodes)
             out = dict(data)
             out.pop("messages", None)
             out["messages_ref"] = [leaf, length]
+            out["_tid"] = tid  # chain anchor for prompt_ids_ref; client strips it
+            ids_marker = out.get("prompt_token_ids")
+            if type(ids_marker) is dict and _IDS_KEY in ids_marker:
+                # Ship the delta itself; the client rebuilds chains in order
+                # (prev refs always point to an earlier trace in the payload).
+                out.pop("prompt_token_ids", None)
+                out["prompt_ids_ref"] = list(ids_marker[_IDS_KEY])
             traces_out.append(out)
 
         return {"format": "compact", "nodes": nodes_out, "traces": traces_out}

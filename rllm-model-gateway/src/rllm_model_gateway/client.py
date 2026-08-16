@@ -36,6 +36,7 @@ def _expand_compact_traces(payload: dict[str, Any]) -> list[dict[str, Any]]:
             paths[nid] = base
         return paths[leaf] if leaf is not None else []
 
+    ids_memo: dict[str | None, list[int]] = {None: []}
     for trace in payload.get("traces", []):
         ref = trace.get("messages_ref")
         if ref is None:
@@ -43,10 +44,22 @@ def _expand_compact_traces(payload: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         leaf, length = ref
         messages = _path(leaf)
-        assert len(messages) == length, f"compact chain length {len(messages)} != recorded {length}"
+        if len(messages) != length:
+            raise ValueError(f"compact chain length {len(messages)} != recorded {length}")
         expanded = dict(trace)
         expanded.pop("messages_ref", None)
         expanded["messages"] = messages
+        ids_ref = expanded.pop("prompt_ids_ref", None)
+        if ids_ref is not None:
+            # Delta against an earlier trace in this payload: prefix + suffix.
+            prev_tid, lcp, suffix = ids_ref
+            prev_full = ids_memo.get(prev_tid)
+            if prev_full is None or lcp > len(prev_full):
+                raise ValueError(f"prompt-id delta references unknown/short ancestor {prev_tid!r}")
+            expanded["prompt_token_ids"] = prev_full[:lcp] + list(suffix)
+        tid = expanded.pop("_tid", None) or expanded.get("trace_id")
+        if tid is not None and isinstance(expanded.get("prompt_token_ids"), list):
+            ids_memo[tid] = expanded["prompt_token_ids"]
         out.append(expanded)
     return out
 
