@@ -86,9 +86,18 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
     if lineage_id is not None:
         metadata["lineage_id"] = lineage_id
 
-    return Step(
+    # CONTRACT (review): the assigned message dicts are SHARED across every
+    # Step whose conversation contains them. They must be treated as
+    # immutable — mutating one through any Step mutates the shared prefix of
+    # all later Steps. No engine/trainer path mutates them today; a frozen
+    # history type is the planned enforcement (native-compact follow-up).
+    step = Step(
         id=trace.trace_id,
-        chat_completions=chat_completions,
+        # Assigned below, AFTER construction: pydantic field validation copies
+        # each message dict, which would re-materialize the full conversation
+        # prefix per step even with the deepcopy skipped (audit: the root
+        # amplifier). Plain attribute assignment keeps the shared references.
+        chat_completions=[],
         model_output=model_output,
         model_response=content,
         output=content,
@@ -96,6 +105,8 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
         metadata=metadata,
         weight_version=trace.weight_version,
     )
+    step.chat_completions = chat_completions
+    return step
 
 
 def compute_step_metrics(trajectories: list[Trajectory]) -> dict:
