@@ -10,9 +10,9 @@ Uses a fake engine so no Tinker service / model is required.
 """
 
 import asyncio
-from types import SimpleNamespace
 
 from rllm.gateway.tinker_adapter import _to_openai_tool_calls, create_tinker_handler
+from rllm.tools.tool_base import ToolCall
 
 
 class _ModelOutput:
@@ -101,21 +101,17 @@ def test_non_int_prompt_falls_through_to_chat():
 # ---------------------------------------------------------------------------
 
 
-def test_to_openai_tool_calls_handles_all_producer_shapes():
-    # prime-rl nested shape (the one that used to yield name="").
-    assert _to_openai_tool_calls([{"function": {"name": "bash", "arguments": {"command": "ls"}}}]) == [
+def test_to_openai_tool_calls_converts_canonical_tool_call():
+    assert _to_openai_tool_calls([ToolCall(name="bash", arguments={"command": "ls"})]) == [
         {"id": "call_0", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}}
     ]
-    # flat dict and ToolCall object still work.
-    assert _to_openai_tool_calls([{"name": "edit", "arguments": {"p": 1}}])[0]["function"]["name"] == "edit"
-    assert _to_openai_tool_calls([SimpleNamespace(name="read", arguments={"f": "x"})])[0]["function"]["name"] == "read"
 
 
 class _ToolModelOutput(_ModelOutput):
     content = ""  # parse-stripped when the whole turn is a tool call
     text = "<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>"
     reasoning = "let me think"
-    tool_calls = [{"function": {"name": "bash", "arguments": {"command": "ls"}}}]  # prime-rl nested
+    tool_calls = [ToolCall(name="bash", arguments={"command": "ls"})]
 
 
 class _ToolEngine(_FakeEngine):

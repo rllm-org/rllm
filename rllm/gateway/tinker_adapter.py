@@ -17,42 +17,22 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from rllm.engine.rollout.tinker_engine import TinkerEngine
+from rllm.tools.tool_base import ToolCall
 from rllm.types import TerminationEvent, TerminationReason
 
 logger = logging.getLogger(__name__)
 
 
-def _to_openai_tool_calls(tool_calls: list) -> list[dict[str, Any]]:
-    """Convert tool calls from any producer shape to the OpenAI wire format.
-
-    ``ModelOutput.tool_calls`` arrives in one of three shapes depending on which parser
-    ``assemble_model_output`` used:
-
-    * prime-rl ``renderers`` (the unified renderer, e.g. ``parse_qwen35``): a **nested**
-      dict ``{"function": {"name", "arguments"}}`` — the OpenAI-ish shape.
-    * rLLM ``ToolCall`` object: ``.name`` / ``.arguments`` attributes.
-    * flat dict: ``{"name", "arguments"}``.
-
-    The nested form is easy to mis-read: pulling top-level ``name``/``arguments`` off it
-    yields empty tool calls (name=""), which is exactly what broke OpenAI function-calling
-    clients like opencode — they received a structurally-present but empty tool call and
-    took no action. Extract ``function`` first, then object attrs, then flat keys.
-    """
+def _to_openai_tool_calls(tool_calls: list[ToolCall]) -> list[dict[str, Any]]:
+    """Convert canonical rLLM tool calls to the OpenAI wire format."""
     result = []
     for i, tc in enumerate(tool_calls):
-        fn = tc.get("function") if isinstance(tc, dict) else None
-        if isinstance(fn, dict):  # prime-rl nested shape
-            name, args = fn.get("name", ""), fn.get("arguments", {})
-        elif isinstance(tc, dict):  # flat dict
-            name, args = tc.get("name", ""), tc.get("arguments", {})
-        else:  # rLLM ToolCall object
-            name, args = getattr(tc, "name", ""), getattr(tc, "arguments", {})
-        args_str = json.dumps(args) if isinstance(args, dict) else str(args)
+        args_str = json.dumps(tc.arguments)
         result.append(
             {
                 "id": f"call_{i}",
                 "type": "function",
-                "function": {"name": name, "arguments": args_str},
+                "function": {"name": tc.name, "arguments": args_str},
             }
         )
     return result

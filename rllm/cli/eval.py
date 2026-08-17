@@ -133,6 +133,7 @@ def _run_eval(
     warm_queue_size: int = 0,
     sampling_config=None,
     attempts: int = 1,
+    gateway_port: int | None = None,
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
@@ -516,6 +517,7 @@ def _run_eval(
             evaluator=evaluator,
             sampling_params=(sampling_config.as_dict() if sampling_config is not None else None),
             attempts=attempts,
+            gateway_port=gateway_port,
         )
     )
 
@@ -591,6 +593,7 @@ def _run_eval(
 @click.option(
     "--proxy-port", "proxy_port", default=None, type=int, help="Pin the auto-started LiteLLM proxy to this port. Default: a free port is picked automatically (so concurrent eval jobs don't collide)."
 )
+@click.option("--gateway-port", default=None, type=int, help="Local model-gateway port. Set this when an existing tunnel forwards to a fixed local port.")
 @click.option("--model", default=None, help="Model name to evaluate. Defaults to configured model from 'rllm setup'.")
 @click.option("--split", default=None, help="Dataset split (default: from catalog eval_split).")
 @click.option("--concurrency", default=64, type=int, help="Number of parallel requests.")
@@ -637,12 +640,27 @@ def _run_eval(
         "Default 3600. Sandbox lifetimes are sized to outlast this, so the environment isn't torn down mid-rollout."
     ),
 )
+@click.option("--agent-max-turns", default=None, type=int, help="Maximum model turns per rollout for agents that support it (e.g. mini-swe-agent).")
+@click.option(
+    "--agent-max-consecutive-format-errors",
+    default=None,
+    type=int,
+    help="Maximum consecutive malformed model responses for agents that support it (e.g. mini-swe-agent).",
+)
+@click.option(
+    "--agent-command-timeout",
+    default=None,
+    type=int,
+    metavar="SECONDS",
+    help="Per-command timeout for agents that support it (e.g. mini-swe-agent).",
+)
 def eval_cmd(
     benchmark: str,
     agent_name: str | None,
     evaluator_name: str | None,
     base_url: str | None,
     proxy_port: int | None,
+    gateway_port: int | None,
     model: str | None,
     split: str | None,
     concurrency: int,
@@ -662,6 +680,9 @@ def eval_cmd(
     top_p: float | None,
     max_tokens: int | None,
     agent_timeout: int | None,
+    agent_max_turns: int | None,
+    agent_max_consecutive_format_errors: int | None,
+    agent_command_timeout: int | None,
 ):
     """Evaluate a model on a benchmark dataset."""
     from rllm.cli._sampling import resolve_eval_sampling
@@ -765,6 +786,18 @@ def eval_cmd(
         import os
 
         os.environ["RLLM_HARNESS_RUN_TIMEOUT_S"] = str(agent_timeout)
+    if agent_max_turns is not None:
+        if agent_max_turns < 1:
+            fail("--agent-max-turns must be >= 1.")
+        agent_metadata["max_turns"] = agent_max_turns
+    if agent_max_consecutive_format_errors is not None:
+        if agent_max_consecutive_format_errors < 0:
+            fail("--agent-max-consecutive-format-errors must be >= 0.")
+        agent_metadata["max_consecutive_format_errors"] = agent_max_consecutive_format_errors
+    if agent_command_timeout is not None:
+        if agent_command_timeout < 1:
+            fail("--agent-command-timeout must be >= 1 second.")
+        agent_metadata["command_timeout"] = agent_command_timeout
 
     parsed_indices = parse_index_spec(task_indices) if task_indices is not None else None
 
@@ -788,6 +821,7 @@ def eval_cmd(
             warm_queue_size=warm_queue_size,
             sampling_config=sampling_config,
             attempts=attempts,
+            gateway_port=gateway_port,
         )
     finally:
         if proxy_manager is not None:

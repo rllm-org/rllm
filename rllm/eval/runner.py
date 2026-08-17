@@ -42,6 +42,7 @@ async def run_dataset(
     gateway: GatewayManager | None = None,
     sampling_params: dict | None = None,
     attempts: int = 1,
+    gateway_port: int | None = None,
 ) -> tuple[EvalResult, list]:
     """Run a list of :class:`rllm.types.Task` objects through :class:`AgentFlowEngine`.
 
@@ -99,7 +100,7 @@ async def run_dataset(
         # non-streaming LLM calls (CF 524) — a configured ngrok tunnel avoids
         # that, so eval must honor it, not just training.
         gateway_tunnel: str | None = None
-        gateway_port: int | None = None
+        resolved_gateway_port = gateway_port
         if not is_local_sandbox_backend(sandbox_backend):
             from rllm.gateway.tunnel import resolve_auto_tunnel
 
@@ -118,17 +119,18 @@ async def run_dataset(
 
                 state = live_tunnel() or {}
                 upstream = state.get("upstream") if state.get("url") == gateway_tunnel else None
-                gateway_port = urlparse(upstream).port if upstream else None
-                if gateway_port is None:
+                if resolved_gateway_port is None:
+                    resolved_gateway_port = urlparse(upstream).port if upstream else None
+                if resolved_gateway_port is None:
                     from rllm.eval.config import load_tunnel_config
 
-                    gateway_port = int(load_tunnel_config().get("port") or 9090)
+                    resolved_gateway_port = int(load_tunnel_config().get("port") or 9090)
                     logger.warning(
                         "Tunnel URL %s has no matching daemon state; binding the gateway to port %d from the tunnel config — it must match the port that URL forwards to.",
                         gateway_tunnel,
-                        gateway_port,
+                        resolved_gateway_port,
                     )
-        gateway = EvalGatewayManager(upstream_url=base_url, model=model, tunnel=gateway_tunnel, port=gateway_port)
+        gateway = EvalGatewayManager(upstream_url=base_url, model=model, tunnel=gateway_tunnel, port=resolved_gateway_port)
         gateway.start()
 
     hooks = SandboxTaskHooks(evaluation=FixedEvaluation(evaluator) if evaluator is not None else None, sandbox_backend=sandbox_backend, use_snapshot=use_snapshot)

@@ -238,6 +238,12 @@ class BaseCliHarness(SandboxedAgentFlow):
         segment isn't in ``_LITELLM_PROVIDER_SLUGS``, the org is dropped
         and the provider is re-inferred from the model id.
         """
+        # Fireworks resource names are OpenAI-compatible model identifiers, not
+        # provider-qualified LiteLLM names. In particular, inferring the
+        # provider from ``accounts/fireworks/models/deepseek-*`` would select
+        # the native DeepSeek transport instead of the configured gateway.
+        if model_name.startswith("accounts/"):
+            return "openai", model_name, f"openai/{model_name}"
         if "/" in model_name:
             head, rest = model_name.split("/", 1)
             if head.lower() in cls._LITELLM_PROVIDER_SLUGS:

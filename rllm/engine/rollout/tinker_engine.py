@@ -1,5 +1,6 @@
 import json
 import logging
+from collections.abc import Mapping
 from typing import Any, cast
 
 import tinker
@@ -114,7 +115,45 @@ def _prepare_messages_with_tools(
     return prefix + remaining
 
 
-def _parse_tinker_message(message: Message) -> tuple[str, str, list[Any]]:
+def _to_rllm_tool_calls(raw_tool_calls: list[Any]) -> list[ToolCall]:
+    """Normalize every renderer's tool-call shape into rLLM ``ToolCall`` objects."""
+    tool_calls = []
+    for tc in raw_tool_calls:
+        if isinstance(tc, ToolCall):
+            tool_calls.append(tc)
+            continue
+
+        if isinstance(tc, Mapping):
+            call = tc.get("function", tc)
+        else:
+            call = getattr(tc, "function", tc)
+
+        if isinstance(call, Mapping):
+            name = call.get("name")
+            arguments = call.get("arguments", {})
+        elif hasattr(call, "name") and hasattr(call, "arguments"):
+            name = call.name
+            arguments = call.arguments
+        else:
+            raise TypeError(f"Unrecognized tool_call type: {type(tc)}")
+
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {"raw": arguments}
+        elif isinstance(arguments, Mapping):
+            arguments = dict(arguments)
+        elif arguments is None:
+            arguments = {}
+        else:
+            arguments = {"value": arguments}
+
+        tool_calls.append(ToolCall(name=str(name or ""), arguments=arguments))
+    return tool_calls
+
+
+def _parse_tinker_message(message: Message) -> tuple[str, str, list[ToolCall]]:
     tinker_content = message["content"]
     if isinstance(tinker_content, list):
         text_parts, think_parts = [], []
@@ -128,21 +167,7 @@ def _parse_tinker_message(message: Message) -> tuple[str, str, list[Any]]:
     else:  # no reasoning parsed
         content = tinker_content
         reasoning = ""
-    # Convert tinker-cookbook ToolCall (function.name/function.arguments) to rllm ToolCall (name/arguments)
-    raw_tool_calls = message.get("tool_calls", [])
-    tool_calls = []
-    for tc in raw_tool_calls:
-        if hasattr(tc, "function"):
-            # tinker-cookbook ToolCall: ToolCall(function=FunctionBody(name, arguments), id)
-            args = tc.function.arguments
-            tool_calls.append(ToolCall(name=tc.function.name, arguments=json.loads(args) if isinstance(args, str) else args))
-        elif isinstance(tc, ToolCall):
-            tool_calls.append(tc)
-        elif isinstance(tc, dict):
-            tool_calls.append(ToolCall(name=tc.get("name", ""), arguments=tc.get("arguments", {})))
-        else:
-            raise TypeError(f"Unrecognized tool_call type: {type(tc)}")
-    return content, reasoning, tool_calls
+    return content, reasoning, _to_rllm_tool_calls(message.get("tool_calls", []))
 
 
 class TinkerEngine(RolloutEngine):
@@ -407,13 +432,13 @@ class TinkerEngine(RolloutEngine):
             parsed = self.unified_renderer.parse_response(response_tokens)
             content = parsed.content or ""
             reasoning = parsed.reasoning_content or ""
-            tool_calls = parsed.tool_calls or []
+            tool_calls = _to_rllm_tool_calls(parsed.tool_calls or [])
         elif self.bypass_render_with_parser:
             assert self.chat_parser is not None, "chat_parser must be set when bypass_render_with_parser=True"
             parsed_output = self.chat_parser.parse_completion(response_tokens)
             content = parsed_output.get("content", "")
             reasoning = parsed_output.get("reasoning", "")
-            tool_calls = parsed_output.get("tool_calls", [])
+            tool_calls = _to_rllm_tool_calls(parsed_output.get("tool_calls", []))
         else:
             assert isinstance(self.renderer, renderers.Renderer), "self.renderer must be a valid Tinker Renderer"
             response_message, _ = self.renderer.parse_response(response_tokens)

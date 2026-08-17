@@ -109,6 +109,14 @@ class MiniSweAgentHarness(BaseCliHarness):
     cost_limit: float | None = None
     trajectory_output_path: str = "/tmp/rllm-mini-swe-trajectory.json"
 
+    def configure(self, overrides: dict) -> dict:
+        leftovers = super().configure(overrides)
+        for name in ("max_turns", "max_consecutive_format_errors", "command_timeout"):
+            value = leftovers.pop(name, None)
+            if value is not None:
+                setattr(self, name, int(value))
+        return leftovers
+
     def install_script(self) -> str:
         return _INSTALL_SCRIPT
 

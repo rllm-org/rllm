@@ -11,6 +11,7 @@ from rllm.engine.rollout.tinker_engine import (
     _convert_openai_messages,
     _parse_tinker_message,
     _prepare_messages_with_tools,
+    _to_rllm_tool_calls,
 )
 from rllm.tools.tool_base import ToolCall as RllmToolCall
 
@@ -158,6 +159,10 @@ class TestPrepareMessagesWithTools:
 
 
 class TestParseTinkerMessage:
+    def test_renderer_tool_calls_normalized_to_rllm(self):
+        tc = _make_tinker_tool_call("bash", '{"command":"pwd"}')
+        assert _to_rllm_tool_calls([tc]) == [RllmToolCall(name="bash", arguments={"command": "pwd"})]
+
     def test_tinker_tool_calls_converted_to_rllm(self):
         """Tinker ToolCall(function=FunctionBody(...)) should become rllm ToolCall(name, arguments)."""
         tc = _make_tinker_tool_call()

@@ -214,6 +214,11 @@ class ModalSandbox:
         # A stored snapshot ref is a bare Modal image id ("im-…", no registry/tag);
         # the ":" / "/" guard keeps real docker images off the from_id path.
         from_snapshot = isinstance(image, str) and image.startswith("im-") and ":" not in image and "/" not in image
+        # App lookup may create the per-run App and is subject to the same
+        # account-wide create limit as Sandbox.create. Pace the whole create
+        # sequence so a concurrent batch cannot stampede AppGetOrCreate before
+        # reaching the limiter below.
+        _CREATE_LIMITER.acquire()
         self._app = modal.App.lookup(self._app_name, create_if_missing=True)
 
         # A missing snapshot surfaces as NotFoundError either at from_id (if it
@@ -251,8 +256,6 @@ class ModalSandbox:
             # ``entrypoint`` kwarg.
             entrypoint = kwargs.pop("entrypoint", ["sh", "-c", "sleep infinity"])
 
-            # Pace creates under Modal's account-wide rate cap (see _CreateRateLimiter).
-            _CREATE_LIMITER.acquire()
             self._sandbox = modal.Sandbox.create(*entrypoint, **create_kwargs)
         except modal.exception.NotFoundError as e:
             if from_snapshot:
