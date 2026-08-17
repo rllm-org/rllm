@@ -6,6 +6,7 @@ from rllm.agents.agent import Episode, Trajectory
 from rllm.data.utils import task_from_row
 from rllm.engine.agentflow_engine import AgentFlowEngine
 from rllm.eval.types import EvalOutput
+from rllm.gateway.types import GatewaySession
 from rllm.workflows.workflow import TerminationReason
 
 
@@ -36,7 +37,8 @@ class _Gateway:
         self._traces = traces or []
 
     async def acreate_session(self, session_id, sampling_params=None):
-        self.created = (session_id, is_validation)
+        self.created = (session_id, sampling_params)
+        return GatewaySession(session_id=session_id, api_key="EMPTY")
 
     def get_session_url(self, session_id, public=True):
         return f"http://gateway/{session_id}"
@@ -69,7 +71,7 @@ def test_run_single_passes_validation_flag_and_preserves_termination_reason():
     finally:
         engine.shutdown()
 
-    assert gateway.created == ("task:0", True)
+    assert gateway.created == ("task:0", {"temperature": 0.1})
     assert agent.config.is_validation is True
     assert agent.config.session_uid == "task:0"
     assert episode.termination_reason == TerminationReason.ERROR

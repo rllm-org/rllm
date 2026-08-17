@@ -318,16 +318,13 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
         prompt = list(step.model_output.prompt_ids)
         action = list(step.model_output.completion_ids)
         action_lp = list(step.model_output.logprobs or [])
-        # If logprobs missing/short, pad to action length with zeros so
-        # accumulator lists stay aligned. add_step skips logprobs entirely
-        # when the list is empty, but we keep parity with action_tokens.
-        if action_lp and len(action_lp) != len(action):
-            action_lp = list(action_lp) + [0.0] * (len(action) - len(action_lp))
+        has_complete_logprobs = len(action_lp) == len(action)
         return {
             "prompt": prompt,
             "response": list(action),
             "mask": [1] * len(action),
-            "logprobs": list(action_lp),
+            "logprobs": list(action_lp) if has_complete_logprobs else [],
+            "has_complete_logprobs": has_complete_logprobs,
             "full_seq": list(prompt) + list(action),
             "multi_modal": step.model_output.multi_modal_inputs or {},
             "routing": _step_routing(step, len(action)),
@@ -352,7 +349,7 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             step_id=trajectory.uid,
             multi_modal_inputs=seg["multi_modal"],
             advantage=None,
-            logprobs=seg["logprobs"] if seg["logprobs"] else None,
+            logprobs=seg["logprobs"] if seg["has_complete_logprobs"] else None,
             routing_matrices=routing_t,
         )
         accumulated.add_step(
@@ -373,15 +370,18 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             delta_obs = prompt_ids[len(seg["full_seq"]) :]
             action = list(step.model_output.completion_ids)
             action_lp = list(step.model_output.logprobs or [])
-            if action_lp and len(action_lp) != len(action):
-                action_lp = list(action_lp) + [0.0] * (len(action) - len(action_lp))
+            has_complete_logprobs = len(action_lp) == len(action)
 
             seg["response"].extend(delta_obs)
             seg["response"].extend(action)
             seg["mask"].extend([0] * len(delta_obs))
             seg["mask"].extend([1] * len(action))
-            seg["logprobs"].extend([0.0] * len(delta_obs))
-            seg["logprobs"].extend(action_lp)
+            if seg["has_complete_logprobs"] and has_complete_logprobs:
+                seg["logprobs"].extend([0.0] * len(delta_obs))
+                seg["logprobs"].extend(action_lp)
+            else:
+                seg["logprobs"] = []
+                seg["has_complete_logprobs"] = False
             seg["full_seq"].extend(delta_obs)
             seg["full_seq"].extend(action)
             seg["routing"].extend([""] * len(delta_obs))

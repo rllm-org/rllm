@@ -13,13 +13,14 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from omegaconf import DictConfig
-from rllm_model_gateway.v2 import InferenceClientClass
 
 from rllm.engine.rollout import RolloutEngine
 from rllm.trainer.algorithms.advantage import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
 from rllm.types import Episode
 
 if TYPE_CHECKING:
+    from rllm_model_gateway.v2 import InferenceClientClass
+
     from rllm.engine.unified_workflow_engine import UnifiedWorkflowEngine
     from rllm.trainer.unified_trainer import TrainerState
 

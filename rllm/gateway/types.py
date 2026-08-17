@@ -1,8 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
-
-if TYPE_CHECKING:
-    from rllm.engine.rollout import RolloutEngine
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
@@ -12,8 +9,6 @@ class GatewaySession:
 
 
 class GatewayManagerProtocol(Protocol):
-    def start(self, rollout_engine: "RolloutEngine") -> None: ...
-
     def stop(self) -> None: ...
 
     async def astop(self) -> None: ...

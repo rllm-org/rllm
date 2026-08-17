@@ -6,7 +6,6 @@ import time
 from typing import Any
 
 import httpx
-
 from rllm_model_gateway.v2 import GatewayError, TokenInput, TokenOutput
 
 _MAX_ATTEMPTS = 5
@@ -87,19 +86,12 @@ class FireworksInferenceClient:
                 completion_ids = list((choice.get("raw_output") or {}).get("completion_token_ids") or [])
                 if not completion_ids:
                     raise RuntimeError("Fireworks response included empty completion token IDs")
-                metrics = (
-                    {key: value for key, value in dataclasses.asdict(server_metrics).items() if value is not None}
-                    if server_metrics
-                    else {}
-                )
+                metrics = {key: value for key, value in dataclasses.asdict(server_metrics).items() if value is not None} if server_metrics else {}
                 break
             except Exception as exc:
                 error = str(exc)
                 error_type = exc.__class__.__name__
-                transient = (
-                    isinstance(exc, httpx.TimeoutException | httpx.TransportError | ssl.SSLError)
-                    or any(marker in error or marker in error_type for marker in _TRANSIENT_ERRORS)
-                )
+                transient = isinstance(exc, httpx.TimeoutException | httpx.TransportError | ssl.SSLError) or any(marker in error or marker in error_type for marker in _TRANSIENT_ERRORS)
                 now = time.monotonic()
                 if first_failure_at is None:
                     first_failure_at = now
@@ -141,9 +133,15 @@ class FireworksInferenceClient:
                     raise GatewayError(str(exc), 429, "rate_limit_error") from exc
                 if status_code == 408:
                     raise GatewayError("Fireworks generation timed out", 504, "timeout_error") from exc
+                if status_code == 504:
+                    raise GatewayError("Fireworks generation timed out", 504, "timeout_error") from exc
+                if status_code in (502, 503):
+                    raise GatewayError("Fireworks inference service is unavailable", 503, "server_error") from exc
                 if isinstance(exc, httpx.TimeoutException):
                     raise GatewayError("Fireworks generation timed out", 504, "timeout_error") from exc
                 if isinstance(exc, httpx.TransportError | ssl.SSLError):
+                    raise GatewayError("Fireworks inference service is unavailable", 503, "server_error") from exc
+                if transient and "empty completion token IDs" not in error:
                     raise GatewayError("Fireworks inference service is unavailable", 503, "server_error") from exc
                 raise
         else:

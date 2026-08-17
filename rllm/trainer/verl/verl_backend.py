@@ -294,8 +294,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         from rllm.trainer.verl.verl_inference_client import VerlInferenceClient
 
         server_client = self._server_client()
+        ray_address = getattr(ray.get_runtime_context(), "gcs_address", None) or "auto"
         return VerlInferenceClient, {
             "sampling_client": ray.cloudpickle.dumps(server_client),
+            "ray_address": ray_address,
             "weight_version": weight_version,
             "max_prompt_length": self.config.data.max_prompt_length,
             "max_response_length": self.config.data.max_response_length,
@@ -868,6 +870,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         await self.checkpoint_manager.update_weights(self.global_steps)
         # we need to set trainer's global_steps to sync with the loaded checkpoint
         trainer_state.global_step = self.global_steps
+        trainer_state.weight_version = self.global_steps
         trainer_state.epoch = trainer_state.train_dataloader.epoch if trainer_state.train_dataloader is not None else 0
 
     async def on_batch_start(self, trainer_state: TrainerState) -> None:

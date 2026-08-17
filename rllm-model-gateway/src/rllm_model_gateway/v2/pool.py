@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from multiprocessing.process import BaseProcess
 from typing import Any
 
@@ -17,10 +18,17 @@ logger = logging.getLogger(__name__)
 
 
 class WorkerPool:
-    def __init__(self, config: GatewayConfig, inference_client_cls: InferenceClientClass, inference_client_kwargs: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        config: GatewayConfig,
+        inference_client_cls: InferenceClientClass,
+        inference_client_kwargs: dict[str, Any],
+        fatal_callback: Callable[[], None],
+    ) -> None:
         self._config = config
         self._inference_client_cls = inference_client_cls
         self._inference_client_kwargs = inference_client_kwargs
+        self._fatal_callback = fatal_callback
         self._context = multiprocessing.get_context("spawn")
         self._request_queues: list[Any] = []
         self._response_queue: Any = None
@@ -99,17 +107,21 @@ class WorkerPool:
             raise
 
     async def update_inference_client(self, update: dict[str, Any]) -> None:
-        await asyncio.gather(
-            *[
-                self.call_worker(
-                    worker_id,
-                    "update_inference_client",
-                    {"update": update},
-                    timeout_seconds=self._config.update_timeout_seconds,
-                )
-                for worker_id in range(self.num_workers)
-            ]
-        )
+        try:
+            await asyncio.gather(
+                *[
+                    self.call_worker(
+                        worker_id,
+                        "update_inference_client",
+                        {"update": update},
+                        timeout_seconds=self._config.update_timeout_seconds,
+                    )
+                    for worker_id in range(self.num_workers)
+                ]
+            )
+        except Exception as exc:
+            self._fail_gateway(None, f"inference-client update failed: {exc}")
+            raise
 
     async def delete_session(self, session_id: str, payload: dict[str, Any]) -> None:
         worker_id = self.owner(session_id)
@@ -235,6 +247,9 @@ class WorkerPool:
                 loop.call_soon_threadsafe(_resolve_future, future, result.get("value"))
             else:
                 error = result.get("error") or {}
+                error_traceback = error.get("traceback")
+                if error_traceback:
+                    logger.error("gateway worker request failed:\n%s", error_traceback)
                 exc = GatewayError(
                     str(error.get("message", "worker request failed")),
                     int(error.get("status_code", 500)),
@@ -254,16 +269,20 @@ class WorkerPool:
             reason = f"exited with code {exit_code}"
         self._fail_gateway(worker_id, reason)
 
-    def _fail_gateway(self, worker_id: int, reason: str) -> None:
-        logger.error("gateway worker %d failed: %s", worker_id, reason)
+    def _fail_gateway(self, worker_id: int | None, reason: str) -> None:
+        if worker_id is None:
+            logger.error("gateway failed: %s", reason)
+        else:
+            logger.error("gateway worker %d failed: %s", worker_id, reason)
         if self._fatal_error is not None:
             return
-        self._fatal_error = WorkerUnavailableError(worker_id)
+        self._fatal_error = WorkerUnavailableError(worker_id) if worker_id is not None else GatewayError("gateway inference-client update failed", 503, "server_error")
         with self._pending_lock:
             failures = list(self._pending.values())
             self._pending.clear()
         for _, _, _, loop, future in failures:
             loop.call_soon_threadsafe(_fail_future, future, self._fatal_error)
+        self._fatal_callback()
 
     def _fail_session_generations(self, session_id: str) -> None:
         failures: list[tuple[int, str | None, str, asyncio.AbstractEventLoop, asyncio.Future[Any]]] = []

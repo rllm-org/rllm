@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from rllm_model_gateway.v2.inference import InferenceClient
+from rllm_model_gateway.v2.protocols import PROTOCOL_ONLY_FIELDS
 from rllm_model_gateway.v2.tokenization import TokenizationService
 from rllm_model_gateway.v2.types import (
     GatewayError,
@@ -53,6 +54,8 @@ class GatewayService:
         output_count = sampling_params.pop("n", 1)
         if isinstance(output_count, bool) or not isinstance(output_count, int) or output_count != 1:
             raise GatewayError("requests require n=1")
+        for field_name in PROTOCOL_ONLY_FIELDS:
+            sampling_params.pop(field_name, None)
         stop_token_ids = self._tokenization.stop_token_ids()
         if stop_token_ids:
             sampling_params["stop_token_ids"] = stop_token_ids
@@ -68,14 +71,22 @@ class GatewayService:
             sampling_params=sampling_params,
         )
         token_output: TokenOutput = await self._inference_client.generate(token_input)
-        parsed = self._tokenization.parse_completion(token_output.completion_token_ids, request.tools)
-        tool_calls = parsed["tool_calls"]
+        text = self._tokenization.decode(token_output.completion_token_ids)
+        if request.messages:
+            parsed = self._tokenization.parse_completion(token_output.completion_token_ids, request.tools)
+            content = parsed["content"]
+            reasoning_content = parsed["reasoning_content"]
+            tool_calls = parsed["tool_calls"]
+        else:
+            content = None
+            reasoning_content = None
+            tool_calls = []
         finish_reason = "tool_calls" if tool_calls else token_output.finish_reason
         response = GatewayResponse(
             request_id=request.request_id,
-            text=self._tokenization.decode(token_output.completion_token_ids),
-            content=parsed["content"],
-            reasoning_content=parsed["reasoning_content"],
+            text=text,
+            content=content,
+            reasoning_content=reasoning_content,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             prompt_tokens=len(prompt_token_ids),
@@ -115,6 +126,8 @@ class GatewayService:
         if request.prompt is not None:
             return self._tokenization.encode(request.prompt)
 
+        # Cumulative mode intentionally follows the most recent matching trace.
+        # Concurrent identical contexts can therefore choose the wrong branch.
         if self._cumulative and state.traces.traces:
             previous = state.traces.traces[-1]
             if 0 < state.message_count < len(request.messages) and _fingerprint({"messages": request.messages[: state.message_count], "tools": request.tools}) == state.render_context_hash:

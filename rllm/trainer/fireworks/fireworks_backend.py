@@ -362,6 +362,7 @@ class FireworksBackend(TinkerBackend):
             resume_from_checkpoint=True,
         )
         trainer_state.global_step = start_step
+        trainer_state.weight_version = start_step
 
     async def _save_and_sync(
         self,

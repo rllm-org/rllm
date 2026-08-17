@@ -5,7 +5,20 @@ from typing import Any
 
 from rllm_model_gateway.v2.types import APIProtocol, GatewayError, GatewayRequest, GatewayResponse
 
-_HEAD_FIELDS = {"model", "stream", "stream_options", "prompt", "messages", "tools"}
+PROTOCOL_ONLY_FIELDS = {
+    "model",
+    "stream",
+    "stream_options",
+    "prompt",
+    "messages",
+    "tools",
+    "user",
+    "store",
+    "metadata",
+    "tool_choice",
+    "logprobs",
+    "top_logprobs",
+}
 
 
 def normalize_request(
@@ -14,35 +27,62 @@ def normalize_request(
     body: dict[str, Any],
 ) -> GatewayRequest:
     request_id = f"req_{uuid.uuid4().hex}"
-    sampling = {key: value for key, value in body.items() if key not in _HEAD_FIELDS}
-    tools = body.get("tools") or []
-    if not isinstance(tools, list) or any(not isinstance(tool, dict) for tool in tools):
-        raise GatewayError("tools must be an array of objects")
+    sampling = {key: value for key, value in body.items() if key not in PROTOCOL_ONLY_FIELDS}
 
     common: dict[str, Any] = {
         "request_id": request_id,
         "session_id": session_id,
         "sampling_params": sampling,
-        "tools": tools,
     }
 
     if protocol == APIProtocol.COMPLETIONS:
+        if "messages" in body:
+            raise GatewayError("completions do not accept messages")
+        if "tools" in body:
+            raise GatewayError("completions do not accept tools")
         prompt = body.get("prompt")
         if isinstance(prompt, str):
-            return GatewayRequest(prompt=prompt, **common)
+            return GatewayRequest(prompt=prompt, tools=[], **common)
         if isinstance(prompt, list) and all(isinstance(token_id, int) and not isinstance(token_id, bool) for token_id in prompt):
-            return GatewayRequest(prompt_token_ids=prompt, **common)
+            return GatewayRequest(prompt_token_ids=prompt, tools=[], **common)
         raise GatewayError("completions require one string or token-id prompt")
 
     if protocol == APIProtocol.CHAT_COMPLETIONS:
+        if "prompt" in body:
+            raise GatewayError("chat completions do not accept prompt")
         messages = body.get("messages")
         if not isinstance(messages, list) or not messages:
             raise GatewayError("messages must be a non-empty array")
         if any(not isinstance(message, dict) or not isinstance(message.get("role"), str) for message in messages):
             raise GatewayError("each message must be an object with a role")
-        return GatewayRequest(messages=messages, **common)
+        return GatewayRequest(messages=messages, tools=_validate_tools(body.get("tools")), **common)
 
     raise GatewayError(f"unsupported protocol: {protocol}")
+
+
+def _validate_tools(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise GatewayError("tools must be an array")
+    tools: list[dict[str, Any]] = []
+    for index, tool in enumerate(value):
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            raise GatewayError(f"tools[{index}] must be a function tool")
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            raise GatewayError(f"tools[{index}].function must be an object")
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            raise GatewayError(f"tools[{index}].function.name must be a non-empty string")
+        description = function.get("description")
+        if description is not None and not isinstance(description, str):
+            raise GatewayError(f"tools[{index}].function.description must be a string")
+        parameters = function.get("parameters")
+        if parameters is not None and not isinstance(parameters, dict):
+            raise GatewayError(f"tools[{index}].function.parameters must be an object")
+        tools.append(tool)
+    return tools
 
 
 def response_payload(

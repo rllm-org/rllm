@@ -31,7 +31,7 @@ def create_app(
     gateway_connection: Any,
     shutdown: Callable[[], None],
 ) -> FastAPI:
-    worker_pool = WorkerPool(config, inference_client_cls, inference_client_kwargs)
+    worker_pool = WorkerPool(config, inference_client_cls, inference_client_kwargs, shutdown)
     auth = GatewayAuth(config.admin_key)
 
     async def process_control_requests() -> None:
@@ -67,7 +67,7 @@ def create_app(
             gateway_connection.close()
             worker_pool.stop()
 
-    app = FastAPI(title="rllm-model-gateway", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="rllm-model-gateway", version="0.2.0", lifespan=lifespan)
 
     @app.exception_handler(GatewayError)
     async def handle_gateway_error(_: Request, exc: GatewayError) -> JSONResponse:

@@ -122,6 +122,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         }
 
     def initialize(self, **kwargs) -> None:
+        self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)
         self.policy_trainer = TinkerPolicyTrainer(
             config=self.full_config,
             service_client=self.service_client,
@@ -134,8 +135,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         if self.policy_trainer is None:
             raise RuntimeError("Tinker backend is not initialized")
 
-        # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been initialized yet
-        self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)
+        if self.tokenizer is None:
+            raise RuntimeError("Tinker tokenizer is not initialized")
 
         # Load image processor for vision-language models.
         # For VLM models, the tinker renderer requires an image_processor to
@@ -402,6 +403,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         # Update trainer state with the start batch from checkpoint
         trainer_state.global_step = start_batch
+        trainer_state.weight_version = start_batch
         if dataloader_state is not None and trainer_state.train_dataloader is not None:
             trainer_state.train_dataloader.load_state_dict(dataloader_state)
 

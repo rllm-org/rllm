@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import threading
 import traceback
 from multiprocessing.queues import Queue
@@ -9,6 +10,8 @@ from rllm_model_gateway.v2.inference import InferenceClientClass
 from rllm_model_gateway.v2.service import GatewayService
 from rllm_model_gateway.v2.tokenization import TokenizationService
 from rllm_model_gateway.v2.types import GatewayError, GatewayRequest
+
+logger = logging.getLogger(__name__)
 
 
 class WorkerRuntime:
@@ -70,10 +73,17 @@ async def _serve(
                 "error": {"message": str(exc), "status_code": exc.status_code, "error_type": exc.error_type},
             }
         except Exception as exc:
+            error_traceback = traceback.format_exc()
+            logger.error("gateway worker %d request failed:\n%s", worker_id, error_traceback)
             result = {
                 "call_id": item["call_id"],
                 "ok": False,
-                "error": {"message": f"worker error: {exc}", "status_code": 500, "error_type": "server_error"},
+                "error": {
+                    "message": f"worker error: {exc}",
+                    "status_code": 500,
+                    "error_type": "server_error",
+                    "traceback": error_traceback,
+                },
             }
         await asyncio.to_thread(response_queue.put, result)
 

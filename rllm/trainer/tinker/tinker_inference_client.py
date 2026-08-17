@@ -2,7 +2,6 @@ import pickle
 from typing import Any
 
 import tinker
-
 from rllm_model_gateway.v2 import GatewayError, TokenInput, TokenOutput
 
 
@@ -39,12 +38,13 @@ class TinkerInferenceClient:
             raise GatewayError("prompt exceeds the model context length")
         stop = sampling_params.pop("stop_token_ids", None)
         sampling_params.pop("stop", None)
+        sampling_client = self._sampling_client
         try:
             params = tinker.types.SamplingParams(max_tokens=max_tokens, stop=stop, **sampling_params)
         except (TypeError, ValueError) as exc:
             raise GatewayError(f"invalid sampling parameters: {exc}") from exc
         try:
-            response = await self._sampling_client.sample_async(
+            response = await sampling_client.sample_async(
                 prompt=tinker.types.ModelInput.from_ints(request.prompt_token_ids),
                 num_samples=1,
                 sampling_params=params,
@@ -56,6 +56,8 @@ class TinkerInferenceClient:
         except tinker.APITimeoutError as exc:
             raise GatewayError("Tinker generation timed out", 504, "timeout_error") from exc
         except tinker.APIConnectionError as exc:
+            raise GatewayError("Tinker inference service is unavailable", 503, "server_error") from exc
+        except (tinker.InternalServerError, tinker.SidecarError) as exc:
             raise GatewayError("Tinker inference service is unavailable", 503, "server_error") from exc
         if not response.sequences:
             raise RuntimeError("Tinker returned no sequences")

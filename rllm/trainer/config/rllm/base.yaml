@@ -152,7 +152,7 @@ gateway:
   port: 9090
   host: null          # Auto-detects routable IP; set explicitly to override
   num_workers: null   # v2 generation workers; null defaults to 1
-  tunnel: null        # Existing public URL or managed backend, e.g. "cloudflared" or "ngrok"
+  tunnel: null        # Existing public URL or managed backend: "cloudflared"
   worker_startup_timeout_seconds: 300  # v2 only
   update_timeout_seconds: 300          # v2 only
   request_timeout_seconds: 3600        # v2 only

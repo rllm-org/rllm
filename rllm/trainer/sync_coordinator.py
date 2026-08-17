@@ -27,10 +27,10 @@ class SyncCoordinator:
     when staleness_threshold=0.
     """
 
-    def __init__(self, config: SyncCoordinatorConfig):
+    def __init__(self, config: SyncCoordinatorConfig, initial_weight_version: int = 0):
         self.config = config
 
-        self._weight_version: int = 0
+        self._weight_version = initial_weight_version
         self._quota_used: int = 0  # groups counting toward current sync window quota (includes carryover)
         self._in_flight: int = 0  # groups dispatched but not yet consumed/filtered
         self._steps_since_sync: int = 0

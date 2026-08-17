@@ -23,6 +23,7 @@ from rllm_model_gateway.models import TraceRecord
 import rllm
 from rllm.engine.agentflow_engine import AgentFlowEngine
 from rllm.eval.types import EvalOutput
+from rllm.gateway.types import GatewaySession
 from rllm.hooks import FixedEvaluation, SandboxTaskHooks
 from rllm.types import AgentConfig, Episode, Task
 
@@ -65,9 +66,9 @@ class _FakeGateway:
         self.create_calls: list[str] = []
         self.delete_calls: list[str] = []
 
-    async def acreate_session(self, session_id: str, sampling_params: dict | None = None) -> str:
+    async def acreate_session(self, session_id: str, sampling_params: dict | None = None) -> GatewaySession:
         self.create_calls.append(session_id)
-        return session_id
+        return GatewaySession(session_id=session_id, api_key="EMPTY")
 
     def get_session_url(self, session_id: str, public: bool = True) -> str:
         return f"http://fake-gateway/sessions/{session_id}/v1"

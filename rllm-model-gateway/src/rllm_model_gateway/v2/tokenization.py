@@ -49,7 +49,7 @@ class TokenizationService:
         return list(rendered.token_ids)
 
     def decode(self, token_ids: Sequence[int]) -> str:
-        return self._tokenizer.decode(list(token_ids), skip_special_tokens=False)
+        return self._tokenizer.decode(list(token_ids), skip_special_tokens=True)
 
     def parse_completion(self, token_ids: list[int], tools: list[dict[str, Any]]) -> dict[str, Any]:
         parsed = self._renderer.parse_response(token_ids, tools=_to_renderer_tools(tools))
