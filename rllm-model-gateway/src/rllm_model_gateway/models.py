@@ -81,6 +81,8 @@ class TraceDelta(BaseModel):
         cls,
         record: TraceRecord,
         parent: TraceRecord | None,
+        *,
+        _prefix_verified: bool = False,
     ) -> "TraceDelta":
         if record.raw_request is not None or record.raw_response is not None:
             raise ValueError(f"trace {record.trace_id!r}: raw_request/raw_response cannot be delta-stored; use the default store for raw capture")
@@ -95,8 +97,8 @@ class TraceDelta(BaseModel):
             parent is not None
             and parent.session_id == record.session_id
             and parent.lineage_id == record.lineage_id
-            and _messages_start_with(record.messages, messages)
-            and record.prompt_token_ids[: len(prompt_ids)] == prompt_ids
+            and (_prefix_verified or _messages_start_with(record.messages, messages))
+            and (_prefix_verified or record.prompt_token_ids[: len(prompt_ids)] == prompt_ids)
         )
         if not child:
             parent = None
@@ -194,7 +196,8 @@ class TraceGraph(BaseModel):
         return parent if record.prompt_token_ids[: len(prompt_ids)] == prompt_ids else None
 
     def add(self, record: TraceRecord) -> TraceDelta:
-        delta = TraceDelta.against(record, self._find_parent(record))
+        parent = self._find_parent(record)
+        delta = TraceDelta.against(record, parent, _prefix_verified=parent is not None)
         self.append(delta)
         return delta
 
