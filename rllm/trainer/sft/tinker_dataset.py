@@ -296,6 +296,7 @@ class TinkerSFTDataset(SupervisedDataset):
         max_samples: int = -1,
         overlength_policy: Literal["error", "truncate"] = "truncate",
         loss_reduction: Literal["none", "sequence_mean", "token_mean"] = "none",
+        drop_last: bool = True,
     ):
         self.renderer = renderer
         if batch_size <= 0:
@@ -311,6 +312,7 @@ class TinkerSFTDataset(SupervisedDataset):
         self.last_only = last_only
         self.overlength_policy = overlength_policy
         self.loss_reduction = loss_reduction
+        self.drop_last = drop_last
 
         if isinstance(dataset_or_files, str | list):
             if isinstance(dataset_or_files, str):
@@ -335,8 +337,9 @@ class TinkerSFTDataset(SupervisedDataset):
         logger.info(f"Loaded {len(self.dataset)} examples from {source}")
         logger.info(f"Masking: CUSTOMIZED (derive last_only={last_only} for flag-less rows)")
         logger.info(
-            "Batching: batch_size=%d, final partial batch included; overlength=%s; loss_reduction=%s",
+            "Batching: batch_size=%d, drop_last=%s; overlength=%s; loss_reduction=%s",
             batch_size,
+            drop_last,
             overlength_policy,
             loss_reduction,
         )
@@ -382,6 +385,8 @@ class TinkerSFTDataset(SupervisedDataset):
         logger.info(f"Shuffled dataset with seed {seed} ({len(self.dataset)} samples)")
 
     def __len__(self) -> int:
+        if self.drop_last:
+            return len(self.dataset) // self.batch_size
         return math.ceil(len(self.dataset) / self.batch_size)
 
 
@@ -424,6 +429,7 @@ def create_tinker_sft_datasets(
             max_samples=max_val_samples,
             overlength_policy=overlength_policy,
             loss_reduction="none",
+            drop_last=False,
         )
 
     return train_dataset, val_dataset
