@@ -306,6 +306,15 @@ class EvalProxyManager(_ProxyManagerBase):
 
         def _monitor() -> None:
             rc = proc.wait()  # blocks until the proxy process exits
+            # A terminal Ctrl+C signals the whole foreground process group, so
+            # the proxy usually exits (cleanly, code 0) BEFORE the parent's
+            # interrupt handling reaches shutdown_proxy() and sets the flag.
+            # Give teardown a moment to declare itself before alarming.
+            deadline = time.monotonic() + 3.0
+            while not getattr(self, "_shutting_down", False):
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
             if getattr(self, "_shutting_down", False):
                 return  # expected teardown at end of run
             tail = self._read_stderr_tail(max_lines=60)
