@@ -94,15 +94,21 @@ def build_sft_data(config, train_data, val_data):
     # Training and serving resolve through the same production renderer layer
     # with the same template-faithful history policy.
     explicit = config.data.get("renderer_name", None)
+    chat_template_kwargs = config.data.get("chat_template_kwargs", None)
     try:
         if explicit:
             resolution = resolve(
                 tokenizer_name,
                 tokenizer,
                 renderer_name=explicit,
+                chat_template_kwargs=chat_template_kwargs,
             )
         else:
-            resolution = resolve(tokenizer_name, tokenizer)
+            resolution = resolve(
+                tokenizer_name,
+                tokenizer,
+                chat_template_kwargs=chat_template_kwargs,
+            )
     except Exception as e:  # noqa: BLE001 - surface renderer setup as config
         raise SFTConfigError(f"Could not initialize SFT renderer for {tokenizer_name!r}: {e}") from e
     _guard_renderer_capability(resolution.name, resolution.source, train_data)
