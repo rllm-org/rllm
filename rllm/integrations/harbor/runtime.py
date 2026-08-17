@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 from rllm.env import env_float
@@ -24,6 +25,13 @@ from rllm.integrations.harbor.trial_helper import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SESSION_TIMEOUT_S = env_float("RLLM_HARBOR_SESSION_TIMEOUT_S", 900.0)  # set env var: export RLLM_HARBOR_SESSION_TIMEOUT_S=xxx
+
+
+def _sanitize_trial_name(name: str) -> str:
+    """Harbor uses trial_name as the environment session id; Modal rejects the
+    ``:`` in rLLM's ``<task_id>:<attempt>``. Same character class rLLM already
+    applies to its own sandbox names (eval/_resolution.py)."""
+    return re.sub(r"[^a-zA-Z0-9_.-]", "-", name)
 
 
 class HarborRuntime:
@@ -122,7 +130,7 @@ class HarborRuntime:
             verifier_timeout_multiplier=self.verifier_timeout_multiplier,
             agent_setup_timeout_multiplier=self.agent_setup_timeout_multiplier,
             environment_build_timeout_multiplier=self.environment_build_timeout_multiplier,
-            trial_name=trial_name,
+            trial_name=_sanitize_trial_name(trial_name),
             timeout=timeout,
         )
 
