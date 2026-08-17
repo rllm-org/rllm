@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import gc
+import json
 import logging
 import os
 import uuid
@@ -25,6 +26,14 @@ from rllm_model_gateway.session_router import SessionRouter
 from rllm_model_gateway.store.base import TraceStore
 
 logger = logging.getLogger(__name__)
+
+
+class SurrogateSafeJSONResponse(JSONResponse):
+    """Render the stdlib JSON dialect while escaping lone surrogates."""
+
+    def render(self, content: Any) -> bytes:
+        rendered = json.dumps(content, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        return rendered.encode("utf-8", errors="backslashreplace")
 
 
 # ------------------------------------------------------------------
@@ -208,7 +217,7 @@ def create_app(
         await proxy.stop()
         await store.close()
 
-    app = FastAPI(title="rllm-model-gateway", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="rllm-model-gateway", version="0.1.0", lifespan=lifespan, default_response_class=SurrogateSafeJSONResponse)
 
     # -- Middleware ---------------------------------------------------------
 
