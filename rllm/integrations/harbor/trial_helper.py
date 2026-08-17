@@ -104,6 +104,29 @@ def _infer_provider_prefix(model_name: str) -> str:
     return f"openai/{model_name}"
 
 
+def _litellm_routable(model_name: str) -> str:
+    """Make *model_name* parseable by the litellm inside the Harbor agent.
+
+    litellm reads the text before the first "/" as the provider. Served model
+    names like ``nvidia/nemotron-3-ultra-550b-a55b`` carry a first segment that
+    is NOT a litellm provider, so the agent fails before making any request
+    ("LLM Provider NOT provided"). Wrapping as ``openai/<name>`` routes the
+    call to ``LLM_BASE_URL`` (rLLM's proxy/tunnel) with the FULL name on the
+    wire — which is exactly the name the proxy serves. Names whose first
+    segment is a real provider (``anthropic/``, ``openai/``, ...) keep their
+    existing routing.
+    """
+    if "/" not in model_name:
+        return _infer_provider_prefix(model_name)
+    first = model_name.split("/", 1)[0]
+    try:
+        from litellm import provider_list
+    except ImportError:  # litellm always ships with the eval extra; be safe
+        return model_name
+    known = {str(getattr(p, "value", p)) for p in provider_list}
+    return model_name if first in known else f"openai/{model_name}"
+
+
 def build_harbor_trial_config(
     task_path: str,
     agent_name: str,
@@ -150,9 +173,9 @@ def build_harbor_trial_config(
         TrialConfig,
     )
 
-    # Ensure model_name has provider/ prefix (Harbor agents require it)
-    if model_name and "/" not in model_name:
-        model_name = _infer_provider_prefix(model_name)
+    # Ensure model_name is litellm-routable (Harbor agents call through litellm)
+    if model_name:
+        model_name = _litellm_routable(model_name)
 
     env: dict[str, str] = {}
     if inference_url:
