@@ -41,6 +41,14 @@ class HarborRuntime:
     # Used by run_dataset / Runner to cap concurrency.
     max_concurrent: int = 64
 
+    # Harbor installed agents run their LLM client INSIDE the sandbox, so the
+    # engine must hand them the publicly-reachable gateway URL (the tunnel on
+    # remote backends). Without this the default host-local URL gets the
+    # docker-only host.docker.internal rewrite, which does not resolve on
+    # modal/daytona/e2b — the agent fails its first LLM call with
+    # "OpenAIException - Connection error".
+    llm_inside_env: bool = True
+
     def __init__(
         self,
         agent_name: str = "mini-swe-agent",
