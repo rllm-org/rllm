@@ -9,6 +9,7 @@ from rllm_model_gateway.v2.types import (
     SessionTraces,
     TokenInput,
     TokenOutput,
+    TraceLineage,
     TraceRecord,
 )
 
@@ -25,6 +26,7 @@ __all__ = [
     "SessionTraces",
     "TokenInput",
     "TokenOutput",
+    "TraceLineage",
     "TraceRecord",
     "create_app",
 ]

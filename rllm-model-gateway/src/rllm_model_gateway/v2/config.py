@@ -4,7 +4,6 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class WorkerProcessConfig(BaseModel):
-    cumulative: bool = False
     tokenizer_model: str
     renderer: str = "auto"
     renderer_kwargs: dict[str, Any] = Field(default_factory=dict)
@@ -20,7 +19,6 @@ class GatewayConfig(BaseModel):
     heartbeat_initial_delay_seconds: float = Field(default=60.0, gt=0)
     heartbeat_interval_seconds: float = Field(default=10.0, gt=0)
     admin_key: str
-    cumulative: bool = False
     tokenizer_model: str
     renderer: str = "auto"
     renderer_kwargs: dict[str, Any] = Field(default_factory=dict)
@@ -33,7 +31,6 @@ class GatewayConfig(BaseModel):
 
     def worker_config(self) -> WorkerProcessConfig:
         return WorkerProcessConfig(
-            cumulative=self.cumulative,
             tokenizer_model=self.tokenizer_model,
             renderer=self.renderer,
             renderer_kwargs=self.renderer_kwargs,

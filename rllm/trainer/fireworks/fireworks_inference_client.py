@@ -68,7 +68,7 @@ class FireworksInferenceClient:
             raise GatewayError("prompt exceeds the model context length")
         sampling_params.pop("stop_token_ids", None)
         sampling_params["logprobs"] = True
-        sampling_params["user"] = request.session_id
+        sampling_params["user"] = request.routing_key
         sampling_params["include_routing_matrix"] = self._router_replay
 
         started_at = time.monotonic()

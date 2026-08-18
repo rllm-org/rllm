@@ -1,11 +1,9 @@
-import hashlib
-import json
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from rllm_model_gateway.v2.inference import InferenceClient
-from rllm_model_gateway.v2.protocols import PROTOCOL_ONLY_FIELDS
 from rllm_model_gateway.v2.tokenization import TokenizationService
 from rllm_model_gateway.v2.types import (
     GatewayError,
@@ -14,23 +12,23 @@ from rllm_model_gateway.v2.types import (
     SessionTraces,
     TokenInput,
     TokenOutput,
+    TraceLineage,
     TraceRecord,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class SessionState:
     traces: SessionTraces
     sampling_params: dict[str, Any] = field(default_factory=dict)
-    message_count: int = 0
-    render_context_hash: str | None = None
 
 
 class GatewayService:
-    def __init__(self, tokenization: TokenizationService, inference_client: InferenceClient, cumulative: bool = False) -> None:
+    def __init__(self, tokenization: TokenizationService, inference_client: InferenceClient) -> None:
         self._tokenization = tokenization
         self._inference_client = inference_client
-        self._cumulative = cumulative
         self._sessions: dict[str, SessionState] = {}
 
     def create_session(
@@ -54,19 +52,17 @@ class GatewayService:
         output_count = sampling_params.pop("n", 1)
         if isinstance(output_count, bool) or not isinstance(output_count, int) or output_count != 1:
             raise GatewayError("requests require n=1")
-        for field_name in PROTOCOL_ONLY_FIELDS:
-            sampling_params.pop(field_name, None)
         stop_token_ids = self._tokenization.stop_token_ids()
         if stop_token_ids:
             sampling_params["stop_token_ids"] = stop_token_ids
         try:
-            prompt_token_ids = self._get_prompt_token_ids(state, request)
+            prompt_token_ids, lineage = self._get_prompt(state, request)
         except GatewayError:
             raise
         except (TypeError, ValueError) as exc:
             raise GatewayError(f"invalid request: {exc}") from exc
         token_input = TokenInput(
-            session_id=request.session_id,
+            routing_key=request.session_id,
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
         )
@@ -93,6 +89,7 @@ class GatewayService:
             completion_tokens=len(token_output.completion_token_ids),
         )
         trace = TraceRecord(
+            lineage=lineage,
             request=request,
             response=response,
             input=token_input,
@@ -101,12 +98,6 @@ class GatewayService:
             completed_at=time.time(),
         )
         state.traces.traces.append(trace)
-        if self._cumulative and request.messages:
-            state.message_count = len(request.messages)
-            state.render_context_hash = _fingerprint({"messages": request.messages, "tools": request.tools})
-        else:
-            state.message_count = 0
-            state.render_context_hash = None
         return response
 
     def get_session_traces(self, session_id: str) -> dict[str, Any]:
@@ -120,29 +111,27 @@ class GatewayService:
     async def close(self) -> None:
         await self._inference_client.close()
 
-    def _get_prompt_token_ids(self, state: SessionState, request: GatewayRequest) -> list[int]:
+    def _get_prompt(self, state: SessionState, request: GatewayRequest) -> tuple[list[int], TraceLineage]:
         if request.prompt_token_ids is not None:
-            return list(request.prompt_token_ids)
+            return list(request.prompt_token_ids), _build_lineage(request.request_id, None)
         if request.prompt is not None:
-            return self._tokenization.encode(request.prompt)
+            return self._tokenization.encode(request.prompt), _build_lineage(request.request_id, None)
 
-        # Cumulative mode intentionally follows the most recent matching trace.
-        # Concurrent identical contexts can therefore choose the wrong branch.
-        if self._cumulative and state.traces.traces:
-            previous = state.traces.traces[-1]
-            if 0 < state.message_count < len(request.messages) and _fingerprint({"messages": request.messages[: state.message_count], "tools": request.tools}) == state.render_context_hash:
-                new_messages = [message for message in request.messages[state.message_count :] if message.get("role") != "assistant"]
-                if new_messages:
-                    bridged = self._tokenization.bridge(
-                        previous.input.prompt_token_ids,
-                        previous.output.completion_token_ids,
-                        new_messages,
-                        request.tools,
-                    )
-                    if bridged is not None:
-                        return bridged
+        matched_trace = _match_trace(state.traces.traces, request)
+        if matched_trace is not None:
+            new_messages = request.messages[len(matched_trace.request.messages) + 1 :]
+            if new_messages:
+                bridged = self._tokenization.bridge(
+                    matched_trace.input.prompt_token_ids,
+                    matched_trace.output.completion_token_ids,
+                    new_messages,
+                    request.tools,
+                )
+                if bridged is not None:
+                    return bridged, _build_lineage(request.request_id, matched_trace)
 
-        return self._tokenization.render(request.messages, request.tools)
+        prompt_token_ids = self._tokenization.render(request.messages, request.tools)
+        return prompt_token_ids, _build_lineage(request.request_id, None)
 
     def _require_session(self, session_id: str) -> SessionState:
         state = self._sessions.get(session_id)
@@ -151,6 +140,57 @@ class GatewayService:
         return state
 
 
-def _fingerprint(value: Any) -> str:
-    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+def _build_lineage(request_id: str, parent: TraceRecord | None) -> TraceLineage:
+    if parent is None:
+        return TraceLineage(
+            parent_request_id=None,
+            root_request_id=request_id,
+        )
+    return TraceLineage(
+        parent_request_id=parent.request.request_id,
+        root_request_id=parent.lineage.root_request_id,
+    )
+
+
+def _match_trace(traces: list[TraceRecord], request: GatewayRequest) -> TraceRecord | None:
+    matches: list[tuple[int, TraceRecord]] = []
+    for trace in traces:
+        if not trace.request.messages or trace.request.tools != request.tools:
+            continue
+        previous_length = len(trace.request.messages)
+        if previous_length >= len(request.messages) or request.messages[:previous_length] != trace.request.messages:
+            continue
+        assistant_message = request.messages[previous_length]
+        if not _matches_response(assistant_message, trace.response):
+            continue
+        matches.append((previous_length, trace))
+
+    if not matches:
+        return None
+    longest_message_count = max(message_count for message_count, _ in matches)
+    longest_matches = [trace for message_count, trace in matches if message_count == longest_message_count]
+    if len(longest_matches) > 1:
+        logger.warning(
+            "Request %s in session %s has %d lineage matches with the same message length (%d); creating a new root",
+            request.request_id,
+            request.session_id,
+            len(longest_matches),
+            longest_message_count,
+        )
+        return None
+    return longest_matches[0]
+
+
+def _matches_response(message: dict[str, Any], response: GatewayResponse) -> bool:
+    if message.get("role") != "assistant":
+        return False
+    if not any(field in message for field in ("content", "reasoning_content", "tool_calls")):
+        return False
+    if "content" in message and message["content"] != response.content:
+        return False
+    reasoning = message.get("reasoning_content")
+    if reasoning is not None and reasoning != response.reasoning_content:
+        return False
+    if "tool_calls" in message and message["tool_calls"] != response.tool_calls:
+        return False
+    return True

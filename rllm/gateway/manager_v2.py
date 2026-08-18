@@ -74,7 +74,6 @@ class GatewayManagerV2:
             heartbeat_initial_delay_seconds=float(config.get("heartbeat_initial_delay_seconds", 60.0)),
             heartbeat_interval_seconds=float(config.get("heartbeat_interval_seconds", 10.0)),
             admin_key=secrets.token_urlsafe(32),
-            cumulative=bool(config.get("cumulative_token_mode", False)),
             tokenizer_model=str(tokenizer_model),
             renderer=str(config.get("renderer_family", "auto")),
             renderer_kwargs=dict(config.get("renderer_kwargs", {})),

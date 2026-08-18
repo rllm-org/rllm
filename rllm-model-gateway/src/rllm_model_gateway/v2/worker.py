@@ -19,7 +19,7 @@ class WorkerRuntime:
         self.worker_id = worker_id
         tokenization = TokenizationService(config.tokenizer_model, config.renderer, config.renderer_kwargs)
         self._inference_client = inference_client_cls(**inference_client_kwargs)
-        self._service = GatewayService(tokenization, self._inference_client, cumulative=config.cumulative)
+        self._service = GatewayService(tokenization, self._inference_client)
 
     async def handle(self, operation: str, payload: dict[str, Any]) -> Any:
         if operation == "create_session":

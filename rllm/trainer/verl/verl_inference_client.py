@@ -39,7 +39,7 @@ class VerlInferenceClient:
         sampling_params["logprobs"] = 1
         try:
             raw = await self._sampling_client.generate(
-                request_id=request.session_id,
+                request_id=request.routing_key,
                 prompt_ids=request.prompt_token_ids,
                 sampling_params=sampling_params,
             )

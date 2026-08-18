@@ -51,7 +51,7 @@ class GatewayResponse(BaseModel):
 
 
 class TokenInput(BaseModel):
-    session_id: str
+    routing_key: str
     prompt_token_ids: list[int]
     sampling_params: dict[str, Any] = Field(default_factory=dict)
 
@@ -65,11 +65,17 @@ class TokenOutput(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class TraceLineage(BaseModel):
+    parent_request_id: str | None = None
+    root_request_id: str
+
+
 class TraceRecord(BaseModel):
     request: GatewayRequest
     response: GatewayResponse
     input: TokenInput
     output: TokenOutput
+    lineage: TraceLineage
     started_at: float
     completed_at: float
 
