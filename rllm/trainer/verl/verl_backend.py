@@ -405,8 +405,8 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         router_replay_mode = self.config.rllm.algorithm.get("router_replay", "disabled")
         if router_replay_mode != "disabled":
             strategy = self.config.actor_rollout_ref.actor.strategy
-            if strategy not in ("megatron", "veomni"):
-                raise ValueError(f"router_replay={router_replay_mode!r} requires actor.strategy 'megatron' or 'veomni', got {strategy!r}")
+            if strategy != "megatron":
+                raise ValueError(f"router_replay={router_replay_mode!r} requires actor.strategy='megatron', got {strategy!r}")
 
     async def generate_episodes(self, batch: Any, agent_workflow_engine: UnifiedWorkflowEngine, is_validation: bool = False, **kwargs) -> list[Episode]:
         """Generate episodes using the workflow engine.
@@ -870,7 +870,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         await self.checkpoint_manager.update_weights(self.global_steps)
         # we need to set trainer's global_steps to sync with the loaded checkpoint
         trainer_state.global_step = self.global_steps
-        trainer_state.weight_version = self.global_steps
         trainer_state.epoch = trainer_state.train_dataloader.epoch if trainer_state.train_dataloader is not None else 0
 
     async def on_batch_start(self, trainer_state: TrainerState) -> None:

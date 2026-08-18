@@ -21,7 +21,7 @@ N_SOLUTIONS = 2
 @rllm.rollout(name="solver-judge")
 async def solver_judge_flow(task: Task, config: AgentConfig) -> Episode:
     """AgentFlow: solver generates N solutions, judge picks the best."""
-    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key or "EMPTY")
+    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key)
     problem = _format_countdown_problem(task)
 
     # Step 1: Solver generates N solutions in parallel

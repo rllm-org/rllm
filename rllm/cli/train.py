@@ -439,15 +439,8 @@ def _run_train(
         ("Train data", f"[val]{train_ds_name}[/]  [dim]({train_split}, {len(train_dataset)} examples)[/]"),
         ("Val data", val_info),
     ]
-    gateway_cfg = config.rllm.get("gateway", {}) or {}
-    sandbox_row = _describe_sandbox_routing(
-        agent_flow,
-        train_dataset,
-        val_dataset,
-        sandbox_backend,
-        sandbox_concurrency,
-        gateway_cfg.get("tunnel"),
-    )
+    tunnel_cfg = (config.rllm.get("gateway", {}) or {}).get("tunnel")
+    sandbox_row = _describe_sandbox_routing(agent_flow, train_dataset, val_dataset, sandbox_backend, sandbox_concurrency, tunnel_cfg)
     if sandbox_row is not None:
         rows.append(("Sandbox", sandbox_row))
     train_sp = train_sc.as_dict()
@@ -505,10 +498,8 @@ def _describe_sandbox_routing(
         public_url, tunnel_backend = parse_tunnel(tunnel)
         if public_url:
             gateway_note = f"public_url={public_url}"
-        elif tunnel_backend:
-            gateway_note = f"{tunnel_backend} tunnel"
         else:
-            gateway_note = "direct (discovered gateway address)"
+            gateway_note = f"{tunnel_backend or 'cloudflared'} tunnel (auto-spawn)"
     concurrency_note = f", concurrency={sandbox_concurrency}" if sandbox_concurrency is not None else ""
     return f"[val]{backend}[/]  [dim]· gateway: {gateway_note}{concurrency_note}[/]"
 
@@ -591,7 +582,7 @@ def _load_or_pull_dataset(name: str, split: str, catalog: dict, catalog_entry_ov
     "sandbox_backend",
     default=None,
     type=click.Choice(["docker", "local", "modal", "daytona", "e2b", "runloop", "gke", "apple-container"], case_sensitive=False),
-    help="Sandbox backend for SandboxedAgentFlow harnesses (default: per-task or docker).",
+    help="Sandbox backend for SandboxedAgentFlow harnesses (default: per-task or docker). Remote backends auto-spawn a cloudflared tunnel for the gateway.",
 )
 @click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent — usually 64).")
 # Sampling options (resolved into rollout.{train,val}; gateway-enforced)

@@ -27,7 +27,7 @@ async def openai_agents_math(task: Task, config: AgentConfig) -> None:
     framework auto-builds the Episode; the evaluator reads the answer
     from the trajectory's last assistant message.
     """
-    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key or "EMPTY")
+    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key)
     model = OpenAIChatCompletionsModel(model=config.model, openai_client=client)
     agent = Agent(
         name="solver",

@@ -28,7 +28,6 @@ For Tinker backends, an in-process handler is injected into the gateway
 
 from __future__ import annotations
 
-import errno
 import logging
 import re
 import socket
@@ -55,23 +54,6 @@ _HEALTH_POLL_INTERVAL = 0.5
 _HEALTH_POLL_TIMEOUT = env_float("RLLM_GATEWAY_HEALTH_TIMEOUT_S", 30.0)  # set env var: export RLLM_GATEWAY_HEALTH_TIMEOUT_S=xxx
 _TRACE_API_TIMEOUT = 600.0
 DEFAULT_GATEWAY_PORT = 9090
-
-
-class GatewayPortInUseError(RuntimeError):
-    pass
-
-
-def preflight_gateway_port(port: int) -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind(("0.0.0.0", port))
-        except OSError as exc:
-            if exc.errno != errno.EADDRINUSE:
-                raise
-            raise GatewayPortInUseError(
-                f"Gateway port {port} is already in use. Choose another with rllm.gateway.port=<port>."
-            ) from exc
 
 
 def _find_free_port() -> int:
@@ -199,8 +181,6 @@ class GatewayManager:
         self._async_client: AsyncGatewayClient | None = None
         self._tunnel: Any = None  # CloudflaredTunnel when tunnel_backend is set
 
-        # Per-mode sampling params (extracted from rollout engine in start())
-
     @property
     def gateway_url(self) -> str:
         return f"http://{self.host}:{self.port}"
@@ -248,16 +228,17 @@ class GatewayManager:
         else:
             logger.warning("Unknown engine type %s — no workers registered", engine_cls)
 
-        # Extract per-mode sampling params from the rollout engine
-
         if self.tunnel_backend and not self.public_url:
             self._start_tunnel()
 
     def _start_tunnel(self) -> None:
         """Spawn the named tunnel backend and pin its public URL onto ``self.public_url``."""
-        from rllm.gateway.tunnel import create_tunnel
+        if self.tunnel_backend != "cloudflared":
+            raise ValueError(f"Unsupported gateway tunnel backend: {self.tunnel_backend!r}. Supported: 'cloudflared', or pass an http(s):// URL.")
 
-        tunnel = create_tunnel(self.tunnel_backend, self.gateway_url)
+        from rllm.gateway.tunnel import CloudflaredTunnel
+
+        tunnel = CloudflaredTunnel(self.gateway_url)
         self.public_url = tunnel.start()
         self._tunnel = tunnel
 

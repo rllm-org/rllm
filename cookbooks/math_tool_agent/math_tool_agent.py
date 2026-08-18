@@ -241,7 +241,7 @@ def _msg_to_dict(msg) -> dict:
 @rllm.rollout(name="math-tool-agent")
 async def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
     """Multi-turn agent that solves math problems using a calculator tool."""
-    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key or "EMPTY")
+    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key)
     question = task.instruction
 
     messages: list[dict] = [

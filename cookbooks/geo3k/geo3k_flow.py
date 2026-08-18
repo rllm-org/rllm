@@ -30,7 +30,7 @@ For example: The answer is \\boxed{42}."""
 @rllm.rollout
 async def geo3k_flow(task: Task, config: AgentConfig) -> Episode:
     """Single-turn VLM geometry solver."""
-    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key or "EMPTY")
+    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key)
     question = task.instruction
     images = task.metadata.get("images") or []
 

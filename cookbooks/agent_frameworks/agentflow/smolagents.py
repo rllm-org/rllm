@@ -35,7 +35,7 @@ def smolagents_math(task: Task, config: AgentConfig) -> None:
     model = OpenAIServerModel(
         model_id=config.model,
         api_base=config.base_url,
-        api_key=config.api_key or "EMPTY",
+        api_key=config.api_key,
     )
     agent = ToolCallingAgent(tools=[calculate], model=model)
     agent.run(SYSTEM_PROMPT + "\n\n" + str(task.instruction))

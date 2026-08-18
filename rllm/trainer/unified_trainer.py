@@ -164,12 +164,6 @@ class UnifiedTrainer:
         remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)
         if not has_agent_flow and not remote_runtime_enabled:
             assert workflow_class is not None, "Either workflow_class, (agent_flow AND (evaluator OR hooks)), or remote_runtime must be provided"
-        if has_agent_flow or remote_runtime_enabled:
-            from rllm.gateway.manager import DEFAULT_GATEWAY_PORT, preflight_gateway_port
-
-            gateway_config = config.rllm.get("gateway", {}) or {}
-            preflight_gateway_port(int(gateway_config.get("port", DEFAULT_GATEWAY_PORT)))
-
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
         self.store = store
@@ -626,7 +620,7 @@ class UnifiedTrainer:
             staleness_threshold=self.async_config.staleness_threshold,
             trigger_parameter_sync_step=self.async_config.trigger_parameter_sync_step,
         )
-        coordinator = SyncCoordinator(coord_config, initial_weight_version=trainer_state.weight_version)
+        coordinator = SyncCoordinator(coord_config)
         aggregator = MetricsAggregator()
         buffer = TrajectoryGroupBuffer(
             group_size=self.rllm_config.rollout.n,
@@ -1023,14 +1017,15 @@ class AgentTrainer:
     Provide exactly one of ``workflow_class`` or ``agent_flow``. When the run
     needs sandboxes (the flow declares ``needs_env``, or any dataset row
     carries an environment — see :func:`rllm.hooks.scan_env_requirements`),
-    :class:`rllm.hooks.SandboxTaskHooks` and local Docker gateway routing are
+    :class:`rllm.hooks.SandboxTaskHooks` and gateway loopback/tunnel are
     auto-wired. A passed ``evaluator`` becomes the hooks' FixedEvaluation
     policy (it does not disable the sandbox lifecycle); pass ``hooks=``
     explicitly to take over per-task setup entirely.
 
     Args:
         sandbox_backend: Backend for the auto-wired sandbox hooks
-            (``"docker"`` / ``"local"`` / ``"modal"`` / …).
+            (``"docker"`` / ``"local"`` / ``"modal"`` / …). Remote backends
+            auto-spawn a cloudflared tunnel.
         sandbox_concurrency: Override ``max_concurrent`` on a
             :class:`SandboxedAgentFlow` agent.
     """
@@ -1051,13 +1046,14 @@ class AgentTrainer:
         store: Store | None = None,
         **kwargs,
     ):
-        # Local Docker loopback pinning must happen here, before the launcher
+        # Loopback/tunnel pinning must happen here, before the launcher
         # constructs GatewayManager, and applies to explicitly-passed hooks too.
         if agent_flow is not None:
             from rllm.gateway.tunnel import is_local_sandbox_backend
             from rllm.hooks import (
                 FixedEvaluation,
                 SandboxTaskHooks,
+                enable_gateway_tunnel,
                 pin_gateway_host_loopback,
                 scan_env_requirements,
             )
@@ -1070,9 +1066,13 @@ class AgentTrainer:
                 )
                 evaluator = None
             if hooks is not None and scan.needs_env:
+                config = pin_gateway_host_loopback(config)
+                # The hooks-backend clause matters only for explicitly-passed
+                # hooks; auto-wired hooks share `sandbox_backend`, already
+                # folded into `scan.any_remote`.
                 hooks_backend = getattr(hooks, "sandbox_backend", None)
-                if not scan.any_remote and is_local_sandbox_backend(hooks_backend):
-                    config = pin_gateway_host_loopback(config)
+                if scan.any_remote or not is_local_sandbox_backend(hooks_backend):
+                    config = enable_gateway_tunnel(config)
 
         # Forward CLI overrides through the flow's configure(); the wiring
         # warns about anything it returns unconsumed.

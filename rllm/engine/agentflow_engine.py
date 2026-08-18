@@ -472,7 +472,7 @@ class AgentFlowEngine:
                     try:
                         await self.gateway.adelete_session(uid)
                     except Exception as cleanup_err:
-                        logger.debug("[%s] retry cleanup did not remove a session: %s", uid, cleanup_err)
+                        logger.warning("[%s] failed to clear prior traces before retry: %s", uid, cleanup_err)
                 try:
                     episode = await self._run_single(task_obj, uid, is_validation=is_validation)
                     episode.id = uid

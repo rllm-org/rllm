@@ -403,7 +403,6 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         # Update trainer state with the start batch from checkpoint
         trainer_state.global_step = start_batch
-        trainer_state.weight_version = start_batch
         if dataloader_state is not None and trainer_state.train_dataloader is not None:
             trainer_state.train_dataloader.load_state_dict(dataloader_state)
 
