@@ -186,7 +186,7 @@ class TestF1Evaluator:
 
 
 def test_agent_config_defaults():
-    config = AgentConfig(base_url="http://localhost:8000", model="test-model", session_uid="s1")
+    config = AgentConfig(base_url="http://localhost:8000", model="test-model", session_uid="s1", api_key="test-key")
     assert config.metadata == {}
     assert config.is_validation is False
 

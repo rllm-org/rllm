@@ -237,9 +237,3 @@ class CloudflaredTunnel:
 def _is_transient(stderr_tail: str) -> bool:
     """Whether a cloudflared stderr tail looks like a Cloudflare-side blip."""
     return any(p.search(stderr_tail) for p in _TRANSIENT_PATTERNS)
-
-
-def create_tunnel(backend: str, upstream_url: str) -> CloudflaredTunnel:
-    if backend == "cloudflared":
-        return CloudflaredTunnel(upstream_url)
-    raise ValueError(f"Unsupported gateway tunnel backend: {backend!r}. Supported: 'cloudflared'.")

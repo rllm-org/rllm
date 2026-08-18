@@ -83,7 +83,7 @@ class CodexHarness(BaseCliHarness):
             "CODEX_HOME": _CODEX_HOME,
             # OPENAI_API_KEY is still required for some code paths even when
             # auth.json is present — keep it in sync with the auth file.
-            "OPENAI_API_KEY": self.gateway_api_key(config, "OPENAI_API_KEY"),
+            "OPENAI_API_KEY": config.api_key,
             # Codex 0.118+ ignores this env var (reads openai_base_url from
             # config.toml instead) but earlier versions honored it — set both
             # for forward/backward compat.
@@ -109,7 +109,7 @@ class CodexHarness(BaseCliHarness):
           versions of this harness).
         """
         gateway_url = config.base_url
-        api_key = env.get("OPENAI_API_KEY", self.gateway_api_key(config, "OPENAI_API_KEY"))
+        api_key = config.api_key
 
         # JSON has to be escaped enough to survive a single-quoted heredoc
         # marker. The key has no quotes/backslashes in practice (it's a

@@ -421,7 +421,7 @@ class AgentConfig:
     base_url: str
     model: str
     session_uid: str
-    api_key: str | None = None
+    api_key: str
     metadata: dict = field(default_factory=dict)
     is_validation: bool = False
     # Informational copy of the gateway-enforced sampling config; not authoritative

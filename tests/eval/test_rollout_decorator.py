@@ -31,7 +31,7 @@ def task():
 
 @pytest.fixture()
 def config():
-    return AgentConfig(base_url="http://localhost:4000/v1", model="test-model", session_uid="test-uid")
+    return AgentConfig(base_url="http://localhost:4000/v1", model="test-model", session_uid="test-uid", api_key="test-key")
 
 
 # ---------------------------------------------------------------------------

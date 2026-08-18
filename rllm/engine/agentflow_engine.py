@@ -7,9 +7,10 @@ Single execution engine for both training and eval. Each rollout:
    is wrapped in :class:`rllm.hooks.FixedEvaluatorHooks` so the engine has
    exactly one execution path.
 2. The agent flow runs against the gateway session URL.
-3. Traces are fetched and the gateway session is deleted.
-4. The Episode is enriched with token-level Steps and evaluated.
-5. Reward is written back and the hook context is torn down.
+3. Traces are fetched and the Episode is enriched with token-level Steps.
+4. The hook-resolved evaluator scores the enriched Episode.
+5. Reward is written back and the hook context is torn down. V1 sessions are
+   batch-deleted after the step; V2 sessions are deleted individually.
 
 Eval and training differ only in which hooks they install — the per-task
 pipeline in :meth:`_run_single` is identical.
@@ -421,9 +422,11 @@ class AgentFlowEngine:
         task_id_counter: dict[str, int] = defaultdict(int)
 
         futures = []
+        uids: list[str] = []
         for idx, (task, task_id) in enumerate(zip(tasks, task_ids, strict=True)):
             rollout_idx = task_id_counter[task_id]
             task_id_counter[task_id] += 1
+            uids.append(f"{task_id}:{rollout_idx}")
             futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
 
         results: list[Episode | None] = [None] * len(tasks)
@@ -434,6 +437,13 @@ class AgentFlowEngine:
                 pbar.update(1)
 
         ordered_results: list[Episode] = results  # type: ignore[assignment]
+
+        delete_sessions = getattr(self.gateway, "adelete_sessions", None)
+        if delete_sessions is not None and uids:
+            try:
+                await delete_sessions(uids)
+            except Exception:
+                logger.exception("Batch session delete failed; sessions may linger in the trace store")
 
         if self.episode_logger is not None:
             try:
@@ -540,10 +550,11 @@ class AgentFlowEngine:
             try:
                 traces = await self.gateway.aget_traces(uid)
             finally:
-                try:
-                    await self.gateway.adelete_session(uid)
-                except Exception:
-                    logger.warning("[%s] failed to delete gateway session", uid, exc_info=True)
+                if not hasattr(self.gateway, "adelete_sessions"):
+                    try:
+                        await self.gateway.adelete_session(uid)
+                    except Exception:
+                        logger.warning("[%s] failed to delete gateway session", uid, exc_info=True)
             timings["time/traces_s"] = time.perf_counter() - t
 
             enriched = await self._finish_episode(
@@ -632,7 +643,7 @@ class AgentFlowEngine:
             logger.debug("[%s] Agent flow completed, %d trajectories", uid, len(episode.trajectories))
             return episode, ctx
         except BaseException:
-            if session_created:
+            if session_created and not hasattr(self.gateway, "adelete_sessions"):
                 try:
                     await self.gateway.adelete_session(uid)
                 except Exception:

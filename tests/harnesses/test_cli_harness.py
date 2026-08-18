@@ -73,7 +73,7 @@ def _make_task(workdir: str | None = None) -> Task:
 
 
 def _make_config(base_url: str = "http://gw:8000/sessions/eval-0/v1", model: str = "openai/gpt-4o") -> AgentConfig:
-    return AgentConfig(base_url=base_url, model=model, session_uid="eval-0")
+    return AgentConfig(base_url=base_url, model=model, session_uid="eval-0", api_key="test-gateway-key")
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +186,7 @@ def test_opencode_writes_config_with_custom_provider_to_bypass_models_dev():
         base_url="http://gw:8000/sessions/eval-0/v1",
         model="openai/gpt-4o",
         session_uid="eval-0",
-        metadata={"gateway_auth_token": "tok-xyz"},
+        api_key="tok-xyz",
     )
     env = h.build_env(_make_task(), config)
 
@@ -211,7 +211,7 @@ def test_opencode_writes_config_with_custom_provider_to_bypass_models_dev():
     assert '"npm": "@ai-sdk/openai-compatible"' in written
     # baseURL nested under provider.<name>.options.
     assert '"baseURL": "http://gw:8000/sessions/eval-0/v1"' in written
-    # Gateway bearer token from config.metadata flows into apiKey.
+    # Gateway bearer token from AgentConfig flows into apiKey.
     assert '"apiKey": "tok-xyz"' in written
 
 
@@ -551,31 +551,3 @@ def test_kimi_cli_invocation_pipes_jsonrpc_prompt_and_breaks_loop_on_response_id
     assert "kill 0" in cmd
     # SIGTERM → exit 0 so docker exec / engine see success.
     assert "trap 'exit 0' TERM" in cmd
-
-
-# ---------------------------------------------------------------------------
-# Gateway auth: bearer token from config.metadata wins over env fallback
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("metadata", "env_value", "expected"),
-    [
-        # metadata token wins even when the env var is set.
-        ({"gateway_auth_token": "tok-abc"}, "sk-real-user-key", "tok-abc"),
-        # No metadata → fall back to the env var.
-        ({}, "sk-real-user-key", "sk-real-user-key"),
-        # Neither → placeholder so the CLI still starts.
-        ({}, None, "sk-rllm-gateway"),
-    ],
-)
-def test_gateway_api_key_resolution(monkeypatch, metadata: dict, env_value: str | None, expected: str):
-    from rllm.harnesses.cli_harness import BaseCliHarness
-
-    if env_value is None:
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    else:
-        monkeypatch.setenv("OPENAI_API_KEY", env_value)
-    config = AgentConfig(base_url="http://gw/v1", model="gpt-4o", session_uid="eval-0", metadata=metadata)
-
-    assert BaseCliHarness.gateway_api_key(config, "OPENAI_API_KEY") == expected

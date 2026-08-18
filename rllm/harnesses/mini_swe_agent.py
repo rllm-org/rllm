@@ -102,7 +102,7 @@ class MiniSweAgentHarness(BaseCliHarness):
         # gateway requires inbound auth, this becomes the bearer token
         # (gateway re-stamps with the real upstream key).
         api_var = _provider_key_var(config.model)
-        env[api_var] = self.gateway_api_key(config, api_var)
+        env[api_var] = config.api_key
         return env
 
     def write_configs(
@@ -121,7 +121,7 @@ class MiniSweAgentHarness(BaseCliHarness):
         """
         _, _, qualified = self.ensure_provider_prefix(config.model)
         api_var = _provider_key_var(config.model)
-        api_key = env.get(api_var, self.gateway_api_key(config, api_var))
+        api_key = config.api_key
 
         # Dotenv lines mini-swe-agent v2 reads on startup. The base
         # URL must live HERE (not just in process env) because v2 loads

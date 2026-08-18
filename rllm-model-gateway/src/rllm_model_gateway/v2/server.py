@@ -67,7 +67,7 @@ def create_app(
             gateway_connection.close()
             worker_pool.stop()
 
-    app = FastAPI(title="rllm-model-gateway", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="rllm-model-gateway", version="0.1.0", lifespan=lifespan)
 
     @app.exception_handler(GatewayError)
     async def handle_gateway_error(_: Request, exc: GatewayError) -> JSONResponse:

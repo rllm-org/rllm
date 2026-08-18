@@ -53,7 +53,6 @@ logger = logging.getLogger(__name__)
 _HEALTH_POLL_INTERVAL = 0.5
 _HEALTH_POLL_TIMEOUT = env_float("RLLM_GATEWAY_HEALTH_TIMEOUT_S", 30.0)  # set env var: export RLLM_GATEWAY_HEALTH_TIMEOUT_S=xxx
 _TRACE_API_TIMEOUT = 600.0
-DEFAULT_GATEWAY_PORT = 9090
 
 
 def _find_free_port() -> int:
@@ -151,7 +150,7 @@ class GatewayManager:
         gw_cfg = config.rllm.get("gateway", {})
         configured_host = gw_cfg.get("host", None)
         self.host: str = configured_host if configured_host else _get_routable_ip()
-        self.port: int = gw_cfg.get("port", DEFAULT_GATEWAY_PORT)
+        self.port: int = gw_cfg.get("port", 9090)
         self.store: str = gw_cfg.get("store", "memory")
         self.db_path: str | None = gw_cfg.get("db_path", None)
         if self.store not in ("memory", "sqlite"):

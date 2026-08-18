@@ -224,9 +224,9 @@ class GatewayManagerV2:
         self.stop()
 
     def _start_tunnel(self) -> None:
-        from rllm.gateway.tunnel import create_tunnel
+        from rllm.gateway.tunnel import CloudflaredTunnel
 
-        tunnel = create_tunnel(self.tunnel_backend, self.gateway_url)
+        tunnel = CloudflaredTunnel(self.gateway_url)
         self.public_url = tunnel.start()
         self._tunnel = tunnel
 

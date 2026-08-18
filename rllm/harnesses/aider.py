@@ -73,7 +73,7 @@ class AiderHarness(BaseCliHarness):
     def build_env(self, task: Task, config: AgentConfig) -> dict[str, str]:
         gateway_url = config.base_url
         provider, _, _ = self.ensure_provider_prefix(config.model)
-        api_key = self.gateway_api_key(config, _PROVIDER_KEY_VAR.get(provider, "OPENAI_API_KEY"))
+        api_key = config.api_key
 
         env: dict[str, str] = {
             # litellm reads OPENAI_API_BASE; aider also reads OPENAI_BASE_URL.

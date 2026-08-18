@@ -52,7 +52,7 @@ class _StubAgent:
 
 @pytest.fixture
 def cfg():
-    return AgentConfig(base_url="http://stub", model="stub-m", session_uid="s")
+    return AgentConfig(base_url="http://stub", model="stub-m", session_uid="s", api_key="test-key")
 
 
 def _write_data_dataset(root: Path, *, verifier_block: str) -> Path:

@@ -118,25 +118,6 @@ class BaseCliHarness(SandboxedAgentFlow):
             return "openai"  # Qwen via OpenAI-compatible endpoints
         return "openai"
 
-    @staticmethod
-    def gateway_api_key(config: AgentConfig, fallback_env_var: str) -> str:
-        """Return the API key to inject into the sandbox for *fallback_env_var*.
-
-        Training gateways provide a session-scoped ``config.api_key``.
-        Eval gateways may instead stamp their inbound token on
-        ``config.metadata["gateway_auth_token"]``. Every provider key the
-        harness writes into the sandbox must use that gateway credential.
-
-        Loopback gateways (no token) keep the current behaviour: pass
-        the user's real key through, or a placeholder if unset.
-        """
-        token = config.api_key or (config.metadata or {}).get("gateway_auth_token")
-        if token:
-            return token
-        import os
-
-        return os.environ.get(fallback_env_var, "sk-rllm-gateway")
-
     # Provider slugs litellm accepts as the request prefix.
     _LITELLM_PROVIDER_SLUGS = frozenset(
         {

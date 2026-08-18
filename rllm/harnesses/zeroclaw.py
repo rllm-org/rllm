@@ -85,7 +85,7 @@ class ZeroClawHarness(BaseCliHarness):
         # env vars (OPENAI_API_KEY/OPENAI_BASE_URL) → fallbacks. We set both:
         # config.toml is authoritative, these env vars are belt-and-suspenders.
         gateway_url = config.base_url
-        api_key = self.gateway_api_key(config, "OPENAI_API_KEY")
+        api_key = config.api_key
         return {
             "OPENAI_API_KEY": api_key,
             "OPENAI_BASE_URL": gateway_url,
@@ -103,7 +103,7 @@ class ZeroClawHarness(BaseCliHarness):
         switch to ``uri`` (older docs used that name).
         """
         gateway_url = config.base_url
-        api_key = self.gateway_api_key(config, "OPENAI_API_KEY")
+        api_key = config.api_key
         model = config.model
         return "\n".join(
             [

@@ -112,7 +112,7 @@ class Terminus2Harness(BaseCliHarness):
             # passed explicitly to the agent, but set both for belt-and-braces.
             "OPENAI_API_BASE": gateway_url,
             "OPENAI_BASE_URL": gateway_url,
-            "OPENAI_API_KEY": self.gateway_api_key(config, "OPENAI_API_KEY"),
+            "OPENAI_API_KEY": config.api_key,
             # Driver inputs.
             "RLLM_TERMINUS_MODEL": terminus_model,
             "RLLM_TERMINUS_API_BASE": gateway_url,

@@ -105,7 +105,7 @@ def mock_upstream():
 async def e2e_flow(task: Task, config) -> Episode:
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key or "EMPTY")
+    client = AsyncOpenAI(base_url=config.base_url, api_key=config.api_key)
     resp = await client.chat.completions.create(
         model=config.model,
         messages=[{"role": "user", "content": str(task.instruction)}],

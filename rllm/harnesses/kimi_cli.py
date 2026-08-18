@@ -76,7 +76,7 @@ class KimiCliHarness(BaseCliHarness):
         # drops the kimi shim). Auth lives in the JSON config we write
         # below — these env vars are present as a fallback for code
         # paths inside kimi-cli that read them directly.
-        api_key = self.gateway_api_key(config, "OPENAI_API_KEY")
+        api_key = config.api_key
         return {
             "OPENAI_API_KEY": api_key,
             "MOONSHOT_API_KEY": api_key,
@@ -93,7 +93,7 @@ class KimiCliHarness(BaseCliHarness):
         """Write kimi-cli's config JSON pointing at the gateway as a custom provider."""
         gateway_url = config.base_url
         _, model_id, _ = self.ensure_provider_prefix(config.model)
-        api_key = env.get("OPENAI_API_KEY", self.gateway_api_key(config, "OPENAI_API_KEY"))
+        api_key = config.api_key
 
         # ``type=openai_legacy`` is kimi's name for a plain OpenAI-
         # compatible ``/v1/chat/completions`` endpoint, which is what

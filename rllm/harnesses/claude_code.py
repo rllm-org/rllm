@@ -112,7 +112,7 @@ class ClaudeCodeHarness(BaseCliHarness):
         # trailing ``/v1`` from the gateway URL or it doubles up.
         gateway_url = config.base_url
         anthropic_url = gateway_url.rstrip("/").removesuffix("/v1") or gateway_url
-        api_key = self.gateway_api_key(config, "ANTHROPIC_API_KEY")
+        api_key = config.api_key
         model = config.model
 
         env: dict[str, str] = {

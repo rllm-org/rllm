@@ -68,7 +68,7 @@ class QwenCodeHarness(BaseCliHarness):
         # the gateway routes by model name, not by env var.
         _, model_id, _ = self.ensure_provider_prefix(config.model)
         return {
-            "OPENAI_API_KEY": self.gateway_api_key(config, "OPENAI_API_KEY"),
+            "OPENAI_API_KEY": config.api_key,
             "OPENAI_BASE_URL": gateway_url,
             "OPENAI_MODEL": model_id,
         }
