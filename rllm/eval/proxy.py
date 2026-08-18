@@ -224,6 +224,13 @@ class EvalProxyManager(_ProxyManagerBase):
             raise RuntimeError("Config snapshot not available. Cannot start proxy.")
 
         env = os.environ.copy()
+        # Anthropic-protocol clients (claude-code) echo thinking blocks back on
+        # later turns; strict OpenAI-compatible providers (Fireworks) 400 on the
+        # translated thinking_blocks field, killing the agent loop after its
+        # first tool call. Anthropic itself needs them, so strip only for
+        # non-Anthropic downstreams. Consumed by rllm.eval._litellm_server.
+        if self.provider != "anthropic":
+            env["RLLM_EVAL_PROXY_STRIP_THINKING"] = "1"
         try:
             import certifi
 

@@ -113,9 +113,16 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
     ProviderInfo(
         id="openrouter",
         label="OpenRouter",
-        litellm_prefix="openrouter",
+        # Route through the openai/ adapter pinned to OpenRouter's endpoint:
+        # litellm's native openrouter/ provider forwards the prefixed model id
+        # verbatim on the Anthropic /v1/messages path (400 "not a valid model
+        # ID"), which breaks Anthropic-protocol CLIs (claude-code); the openai
+        # adapter strips its prefix on every path. Chat completions verified
+        # to behave identically either way.
+        litellm_prefix="openai",
         env_key="OPENROUTER_API_KEY",
         default_model="anthropic/claude-opus-4-8",
+        base_url="https://openrouter.ai/api/v1",
         models=[
             "anthropic/claude-opus-4-8",
             "anthropic/claude-sonnet-4-6",

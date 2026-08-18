@@ -60,6 +60,12 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
     raw_tool_calls = trace.response_message.get("tool_calls")
     tool_calls = _parse_openai_tool_calls(raw_tool_calls) if raw_tool_calls else None
 
+    # Anthropic-protocol traces (claude-code via LiteLLM /v1/messages) carry no
+    # token ids; fall back to the recorded usage counts so cost metrics work.
+    token_counts = trace.token_counts or {}
+    prompt_length = len(trace.prompt_token_ids) or token_counts.get("prompt", 0)
+    completion_length = len(trace.completion_token_ids) or token_counts.get("completion", 0)
+
     model_output = ModelOutput(
         content=content,
         reasoning=reasoning,
@@ -68,8 +74,8 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
         completion_ids=trace.completion_token_ids,
         logprobs=trace.logprobs or [],
         routing_matrices=trace.routing_matrices,
-        prompt_length=len(trace.prompt_token_ids),
-        completion_length=len(trace.completion_token_ids),
+        prompt_length=prompt_length,
+        completion_length=completion_length,
         finish_reason=trace.finish_reason,
         weight_version=trace.weight_version,
     )
