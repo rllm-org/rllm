@@ -7,6 +7,12 @@ import httpx
 from rllm_model_gateway.models import TraceGraph, TraceRecord, WorkerInfo
 
 
+def _parse_traces(data: Any) -> list[TraceRecord]:
+    if isinstance(data, dict):
+        return TraceGraph.model_validate(data).flatten()
+    return [TraceRecord(**trace) for trace in data]
+
+
 class GatewayClient:
     """Synchronous client for the rllm-model-gateway REST API.
 
@@ -99,12 +105,7 @@ class GatewayClient:
             params["format"] = format
         resp = self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict):
-            # A dict payload is a TraceGraph — the compact wire contract (see
-            # its model docstring). Validate it as such and flatten.
-            return TraceGraph.model_validate(data).flatten()
-        return [TraceRecord(**t) for t in data]
+        return _parse_traces(resp.json())
 
     def get_trace(self, trace_id: str) -> TraceRecord:
         resp = self._http.get(f"{self.gateway_url}/traces/{trace_id}")
@@ -254,11 +255,7 @@ class AsyncGatewayClient:
             params["format"] = format
         resp = await self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict):
-            # A dict payload is a TraceGraph (see its model docstring).
-            return TraceGraph.model_validate(data).flatten()
-        return [TraceRecord(**t) for t in data]
+        return _parse_traces(resp.json())
 
     async def get_trace(self, trace_id: str) -> TraceRecord:
         resp = await self._http.get(f"{self.gateway_url}/traces/{trace_id}")

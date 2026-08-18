@@ -87,20 +87,16 @@ class TraceDelta(BaseModel):
         if record.raw_request is not None or record.raw_response is not None:
             raise ValueError(f"trace {record.trace_id!r}: raw_request/raw_response cannot be delta-stored; use the default store for raw capture")
 
-        messages: list[dict[str, Any]] = []
-        prompt_ids: list[int] = []
-        if parent is not None:
-            messages = [*parent.messages, parent.response_message]
-            prompt_ids = [*parent.prompt_token_ids, *parent.completion_token_ids]
+        messages = [] if parent is None else [*parent.messages, parent.response_message]
+        prompt_ids = [] if parent is None else [*parent.prompt_token_ids, *parent.completion_token_ids]
 
-        child = (
+        if not (
             parent is not None
             and parent.session_id == record.session_id
             and parent.lineage_id == record.lineage_id
             and (_prefix_verified or _messages_start_with(record.messages, messages))
             and (_prefix_verified or record.prompt_token_ids[: len(prompt_ids)] == prompt_ids)
-        )
-        if not child:
+        ):
             parent = None
             messages = []
             prompt_ids = []
@@ -123,6 +119,9 @@ class TraceDelta(BaseModel):
             timestamp=record.timestamp,
             metadata=record.metadata,
         )
+
+
+_SHARED_TRACE_FIELDS = TraceRecord.model_fields.keys() & TraceDelta.model_fields.keys()
 
 
 class TraceGraph(BaseModel):
@@ -167,9 +166,7 @@ class TraceGraph(BaseModel):
 
     def _intern_message(self, node: int, message: dict[str, Any]) -> int:
         key = (node, _message_key(message))
-        if key not in self._message_children:
-            self._message_children[key] = len(self._message_children) + 1
-        return self._message_children[key]
+        return self._message_children.setdefault(key, len(self._message_children) + 1)
 
     def _index_delta_states(self, delta: TraceDelta) -> None:
         node = 0 if delta.parent_trace_id is None else self._completed_nodes[delta.parent_trace_id]
@@ -228,30 +225,6 @@ class TraceGraph(BaseModel):
         at = self._trace_positions.get(trace_id)
         return None if at is None else self.deltas[at]
 
-    @staticmethod
-    def _materialize_trace_record(delta: TraceDelta, messages: list[dict[str, Any]], prompt_ids: list[int]) -> TraceRecord:
-        """Build the legacy flat view after graph validation and resolution."""
-        return TraceRecord.model_construct(
-            trace_id=delta.trace_id,
-            session_id=delta.session_id,
-            lineage_id=delta.lineage_id,
-            model=delta.model,
-            messages=messages,
-            prompt_token_ids=prompt_ids,
-            response_message=delta.response_message,
-            completion_token_ids=delta.completion_token_ids,
-            logprobs=delta.logprobs,
-            routing_matrices=delta.routing_matrices,
-            finish_reason=delta.finish_reason,
-            weight_version=delta.weight_version,
-            latency_ms=delta.latency_ms,
-            token_counts=delta.token_counts,
-            timestamp=delta.timestamp,
-            metadata=delta.metadata,
-            raw_request=None,
-            raw_response=None,
-        )
-
     def resolve(self, trace_id: str, memo: dict[str, TraceRecord] | None = None) -> TraceRecord:
         memo = {} if memo is None else memo
         if trace_id in memo:
@@ -287,7 +260,13 @@ class TraceGraph(BaseModel):
             messages.extend(delta.messages_suffix)
             prompt_ids.extend(delta.prompt_ids_suffix)
             previous = delta
-        record = self._materialize_trace_record(leaf, messages, prompt_ids)
+        record = TraceRecord.model_construct(
+            **{name: getattr(leaf, name) for name in _SHARED_TRACE_FIELDS},
+            messages=messages,
+            prompt_token_ids=prompt_ids,
+            raw_request=None,
+            raw_response=None,
+        )
         memo[trace_id] = record
         return record
 

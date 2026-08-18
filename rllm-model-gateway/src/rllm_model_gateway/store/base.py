@@ -34,9 +34,7 @@ class TraceStore(Protocol):
         since: float | None = None,
         limit: int | None = None,
     ) -> dict[str, Any]:
-        """Session traces as a serialized TraceGraph (the compact wire
-        contract). Only compact-capable stores serve this; the server gates
-        dispatch on the store's ``_compact`` flag."""
+        """Session traces as a serialized TraceGraph."""
         ...
 
     async def count_session_traces(self, session_id: str) -> int:

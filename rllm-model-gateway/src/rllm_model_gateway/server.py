@@ -84,18 +84,11 @@ def create_store(config: GatewayConfig) -> TraceStore:
         from rllm_model_gateway.store.sqlite_store import SqliteTraceStore
 
         return SqliteTraceStore(db_path=config.db_path)
-    elif worker == "memory":
+    if worker in ("memory", "compact"):
         from rllm_model_gateway.store.memory_store import MemoryTraceStore
 
-        return MemoryTraceStore()
-    elif worker == "compact":
-        # Message-compaction variant — see MemoryTraceStore(compact=True).
-        # Same external contract as "memory"; opt-in via RLLM_GATEWAY_STORE.
-        from rllm_model_gateway.store.memory_store import MemoryTraceStore
-
-        return MemoryTraceStore(compact=True)
-    else:
-        raise ValueError(f"Unknown store worker: {worker}")
+        return MemoryTraceStore(compact=worker == "compact")
+    raise ValueError(f"Unknown store worker: {worker}")
 
 
 # ------------------------------------------------------------------
@@ -281,11 +274,7 @@ def create_app(
         limit: int | None = Query(None),
         format: str = Query("default"),
     ):
-        # "compact" ships the session as a TraceGraph of TraceDeltas — linear
-        # in conversation, vs quadratic for the legacy list. Served ONLY by a
-        # compact store: without the RLLM_GATEWAY_STORE=compact trigger the
-        # endpoint behaves exactly as before this feature (the query param is
-        # ignored, legacy list returned).
+        # Only compact stores serve the graph; other stores retain the legacy list.
         if format == "compact" and getattr(store, "_compact", False):
             return await store.get_session_traces_compact(session_id, since=since, limit=limit)
         traces = await store.get_session_traces(session_id, since=since, limit=limit)

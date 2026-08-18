@@ -63,26 +63,20 @@ class MemoryTraceStore:
         self._timestamps: dict[str, float] = {}
         self._session_index: dict[str, list[str]] = defaultdict(list)
         self._session_seen: dict[str, set[str]] = defaultdict(set)
-        self._graphs: dict[str, TraceGraph] = {}
+        self._graphs: dict[str, TraceGraph] = defaultdict(lambda: TraceGraph(format="compact", version=1, deltas=[]))
         self._trace_session: dict[str, str] = {}
-
-    @staticmethod
-    def _record_from(trace_id: str, session_id: str, data: dict[str, Any]) -> TraceRecord:
-        missing = _COMPACT_REQUIRED - data.keys()
-        if missing:
-            raise ValueError(f"compact trace missing required fields: {', '.join(sorted(missing))}")
-        return TraceRecord.model_validate({**data, "trace_id": trace_id, "session_id": session_id})
 
     async def store_trace(self, trace_id: str, session_id: str, data: dict[str, Any]) -> None:
         now = time.time()
         if self._compact:
-            record = self._record_from(trace_id, session_id, data)
+            missing = _COMPACT_REQUIRED - data.keys()
+            if missing:
+                raise ValueError(f"compact trace missing required fields: {', '.join(sorted(missing))}")
+            record = TraceRecord.model_validate({**data, "trace_id": trace_id, "session_id": session_id})
             existing_session = self._trace_session.get(trace_id)
             if existing_session is not None and existing_session != session_id:
                 raise ValueError(f"trace id {trace_id!r} belongs to another session")
-            graph = self._graphs.get(session_id)
-            if graph is None:
-                graph = self._graphs[session_id] = TraceGraph(format="compact", version=1, deltas=[])
+            graph = self._graphs[session_id]
             if existing_session is not None:
                 graph.replace_leaf(record)
                 return

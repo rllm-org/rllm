@@ -196,9 +196,7 @@ class GatewayManager:
         self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
         configured_port = gw_cfg.get("port", None)
         self.port: int = int(configured_port) if configured_port is not None else (_find_free_port() if self.tunnel_backend else DEFAULT_GATEWAY_PORT)
-        # RLLM_GATEWAY_STORE=compact is the single opt-in trigger. ONLY that
-        # exact value overrides the config — any other env value is ignored,
-        # so legacy store selection is untouched without the trigger.
+        # Only the exact env value "compact" overrides the configured store.
         self.store: str = "compact" if os.environ.get("RLLM_GATEWAY_STORE") == "compact" else gw_cfg.get("store", "memory")
         self.db_path: str | None = gw_cfg.get("db_path", None)
         if self.store not in ("memory", "compact", "sqlite"):
@@ -366,11 +364,6 @@ class GatewayManager:
             return f"{base}/sessions/{session_id}/v1"
         return self.client.get_session_url(session_id)
 
-    # Traces fetch format: "compact" ships each unique message/token-id run
-    # once (linear in conversation, vs quadratic for the default list) and the
-    # client expands transparently. There is exactly ONE trigger for the whole
-    # compact pipeline — RLLM_GATEWAY_STORE=compact (or gateway.store config);
-    # with it unset, store, wire and fetch behave byte-for-byte as before.
     @property
     def _trace_format(self) -> str | None:
         return "compact" if self.store == "compact" else None
