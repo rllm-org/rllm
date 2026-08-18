@@ -26,6 +26,11 @@
       "function": "MiniSweAgentHarness",
       "description": "Run mini-swe-agent inside the sandbox."
     },
+    "swebench-pro-mini": {
+      "module": "rllm.harnesses.swebench_pro_mini",
+      "function": "SwebenchProMiniHarness",
+      "description": "Run the official SWE-bench Pro mini-swe-agent revision and 250-step profile."
+    },
     "terminus2": {
       "module": "rllm.harnesses.terminus2",
       "function": "Terminus2Harness",

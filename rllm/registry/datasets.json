@@ -769,7 +769,7 @@
         "test"
       ],
       "eval_split": "test",
-      "default_agent": "mini-swe-agent"
+      "default_agent": "swebench-pro-mini"
     },
     "deepswe": {
       "description": "DeepSWE: 113 long-horizon SWE tasks across 91 repos in 5 languages (Harbor format; per-task tests/test.sh verifier)",
