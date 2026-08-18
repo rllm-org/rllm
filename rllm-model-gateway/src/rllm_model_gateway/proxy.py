@@ -389,7 +389,7 @@ class ReverseProxy:
 
     async def start(self) -> None:
         self._http = httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout=None),  # no timeout — LLM calls can be long
+            timeout=httpx.Timeout(connect=10.0, read=600.0, write=600.0, pool=600.0),
             limits=httpx.Limits(max_connections=500, max_keepalive_connections=100),
             follow_redirects=True,
         )
@@ -1443,11 +1443,11 @@ class ReverseProxy:
         for attempt in range(1 + self.max_retries):
             try:
                 resp = await self._http.request(method, url, content=content, headers=headers)
-            except httpx.ConnectError as exc:
+            except httpx.TransportError as exc:
                 last_exc = exc
                 if attempt < self.max_retries:
                     logger.warning(
-                        "Connection error (attempt %d/%d): %s",
+                        "Transport error (attempt %d/%d): %s",
                         attempt + 1,
                         self.max_retries + 1,
                         exc,
