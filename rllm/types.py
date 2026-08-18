@@ -480,6 +480,24 @@ class Trajectory(BaseModel):
         return True
 
 
+class TrajectoryDelta(BaseModel):
+    """A gateway-produced trajectory whose growing steps use delta storage."""
+
+    uid: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = _DEFAULT_TRAJ_NAME
+    task: Any = None
+    steps: list[StepDelta] = Field(default_factory=list)
+    reward: float | None = None
+    input: dict | None = None
+    output: Any = None
+    signals: dict[str, float] = Field(default_factory=dict)
+    metadata: dict | None = None
+
+    def resolve(self) -> Trajectory:
+        """Reconstruct the flat trajectory, following explicit parent ids."""
+        return Trajectory(**(vars(self) | {"steps": resolve_step_deltas(self.steps)}))
+
+
 class Episode(BaseModel):
     """A rollout episode containing one or more Trajectories."""
 
