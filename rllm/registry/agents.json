@@ -26,6 +26,11 @@
       "function": "MiniSweAgentHarness",
       "description": "Run mini-swe-agent inside the sandbox."
     },
+    "openhands": {
+      "module": "rllm.harnesses.openhands",
+      "function": "OpenHandsHarness",
+      "description": "Run the OpenHands Software Agent SDK inside the sandbox."
+    },
     "terminus2": {
       "module": "rllm.harnesses.terminus2",
       "function": "Terminus2Harness",
