@@ -3,11 +3,11 @@
 import json
 from typing import Any
 
-from rllm_model_gateway.models import TraceRecord
+from rllm_model_gateway.models import TraceDelta, TraceRecord
 
 from rllm.engine.rollout import ModelOutput
 from rllm.tools.tool_base import ToolCall
-from rllm.types import Step, Trajectory
+from rllm.types import Step, StepDelta, Trajectory
 
 
 def is_empty_response_trace(trace: TraceRecord) -> bool:
@@ -45,6 +45,31 @@ def _parse_openai_tool_calls(raw_tool_calls: list[dict[str, Any]]) -> list[ToolC
     return result
 
 
+def trace_to_model_output(
+    trace: TraceRecord | StepDelta,
+    response_message: dict[str, Any],
+    prompt_ids: list[Any],
+    completion_ids: list[int],
+    logprobs: list[float] | None,
+    routing_matrices: list[str] | None,
+) -> ModelOutput:
+    """Build the legacy ``ModelOutput`` view from a flat or compact trace."""
+    raw_tool_calls = response_message.get("tool_calls")
+    return ModelOutput(
+        content=response_message.get("content", "") or "",
+        reasoning=response_message.get("reasoning", "") or "",
+        tool_calls=_parse_openai_tool_calls(raw_tool_calls) if raw_tool_calls else None,
+        prompt_ids=prompt_ids,
+        completion_ids=completion_ids,
+        logprobs=logprobs or [],
+        routing_matrices=routing_matrices,
+        prompt_length=len(prompt_ids),
+        completion_length=len(completion_ids),
+        finish_reason=trace.finish_reason,
+        weight_version=trace.weight_version,
+    )
+
+
 def trace_record_to_step(trace: TraceRecord) -> Step:
     """Convert a gateway TraceRecord to a training Step.
 
@@ -53,26 +78,9 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
     - completion_token_ids
     - logprobs (per-token)
     """
-    content = trace.response_message.get("content", "") or ""
-    reasoning = trace.response_message.get("reasoning", "") or ""
-
-    # Extract tool_calls from response message (OpenAI format)
-    raw_tool_calls = trace.response_message.get("tool_calls")
-    tool_calls = _parse_openai_tool_calls(raw_tool_calls) if raw_tool_calls else None
-
-    model_output = ModelOutput(
-        content=content,
-        reasoning=reasoning,
-        tool_calls=tool_calls,
-        prompt_ids=trace.prompt_token_ids,
-        completion_ids=trace.completion_token_ids,
-        logprobs=trace.logprobs or [],
-        routing_matrices=trace.routing_matrices,
-        prompt_length=len(trace.prompt_token_ids),
-        completion_length=len(trace.completion_token_ids),
-        finish_reason=trace.finish_reason,
-        weight_version=trace.weight_version,
-    )
+    model_output = trace_to_model_output(trace, trace.response_message, trace.prompt_token_ids, trace.completion_token_ids, trace.logprobs, trace.routing_matrices)
+    content = model_output.content or ""
+    reasoning = model_output.reasoning or ""
 
     # Build chat_completions: input messages + assistant response
     chat_completions = list(trace.messages)
@@ -94,6 +102,28 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
         output=content,
         thought=reasoning,
         metadata=metadata,
+        weight_version=trace.weight_version,
+    )
+
+
+def trace_delta_to_step_delta(trace: TraceDelta) -> StepDelta:
+    """Map the compact gateway contract to the compact training contract."""
+    content = trace.response_message.get("content", "") or ""
+    reasoning = trace.response_message.get("reasoning", "") or ""
+    metadata = trace.metadata | ({"lineage_id": trace.lineage_id} if trace.lineage_id is not None else {})
+    return StepDelta(
+        id=trace.trace_id,
+        parent_step_id=trace.parent_trace_id,
+        output=content,
+        metadata=metadata,
+        prompt_ids_suffix=trace.prompt_ids_suffix,
+        chat_completions_suffix=[*trace.messages_suffix, trace.response_message],
+        response_ids=trace.completion_token_ids,
+        logprobs=trace.logprobs or [],
+        routing_matrices=trace.routing_matrices,
+        thought=reasoning,
+        model_response=content,
+        finish_reason=trace.finish_reason,
         weight_version=trace.weight_version,
     )
 

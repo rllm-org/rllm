@@ -331,6 +331,79 @@ class Step(BaseModel):
         )
 
 
+class StepDelta(BaseModel):
+    """One gateway-produced training step stored against its completed parent.
+
+    For a child delta ``d`` and its named parent ``p``::
+
+        prompt_ids       = p.prompt_ids + p.response_ids + d.prompt_ids_suffix
+        chat_completions = p.chat_completions + d.chat_completions_suffix
+
+    A root stores both inputs in full. ``model_output`` is deliberately absent
+    because its prompt fields duplicate the growing token list. Its finish
+    reason is retained so the legacy view can be reconstructed.
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    parent_step_id: str | None
+    input: Any | None = None
+    output: Any | None = None
+    action: Any | None = None
+    reward: float = 0.0
+    done: bool = False
+    metadata: dict | None = None
+
+    prompt_ids_suffix: list[int]
+    chat_completions_suffix: list[dict[str, Any]]
+    response_ids: list[int] = Field(default_factory=list)
+    logprobs: list[float] = Field(default_factory=list)
+    routing_matrices: list[str] | None = None
+    observation: Any = None
+    thought: str = ""
+    model_response: str = ""
+    finish_reason: str | None = None
+
+    mc_return: float = 0.0
+    advantage: list[float] | float | None = None
+    weight_version: int | None = None
+
+
+def resolve_step_deltas(deltas: list[StepDelta]) -> list[Step]:
+    """Resolve a topologically ordered StepDelta forest into flat Steps.
+
+    Newly added values are copied from compact storage once. Descendants share
+    their parents' message objects, so chat messages in the returned batch must
+    be treated as read-only.
+    """
+    from rllm.engine.trace_converter import trace_to_model_output
+
+    by_id: dict[str, Step] = {}
+    for delta in deltas:
+        if delta.id in by_id:
+            raise ValueError(f"duplicate step id {delta.id!r}")
+        parent = None if delta.parent_step_id is None else by_id.get(delta.parent_step_id)
+        if delta.parent_step_id is not None and parent is None:
+            raise ValueError(f"step {delta.id!r}: parent {delta.parent_step_id!r} is not earlier")
+        prompt_ids = list(delta.prompt_ids_suffix)
+        chat = deepcopy(delta.chat_completions_suffix)
+        if parent is not None:
+            prompt_ids = [*parent.prompt_ids, *parent.response_ids, *prompt_ids]
+            chat = [*parent.chat_completions, *chat]
+        step_values = deepcopy({name: value for name, value in vars(delta).items() if name in Step.model_fields})
+
+        model_output = trace_to_model_output(delta, chat[-1] if chat else {}, prompt_ids, step_values["response_ids"], step_values["logprobs"], step_values["routing_matrices"])
+
+        step = Step.model_construct(
+            **step_values,
+            prompt_ids=prompt_ids,
+            chat_completions=[],
+            model_output=model_output,
+        )
+        step.chat_completions = chat
+        by_id[delta.id] = step
+    return list(by_id.values())
+
+
 class Trajectory(BaseModel):
     """A sequence of Steps forming one agent trajectory."""
 
