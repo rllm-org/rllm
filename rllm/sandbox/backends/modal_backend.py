@@ -25,6 +25,7 @@ import uuid
 import weakref
 
 from rllm.env import env_float, env_int, rllm_run_id, sandbox_timeout_override_s
+from rllm.sandbox.artifacts import extract_regular_files
 from rllm.sandbox.protocol import SandboxCommandTimeout, SnapshotNotFound
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,10 @@ def _attach_run_tags(sandbox, tags: dict[str, str], name: str) -> None:
     except Exception:
         logger.debug("could not tag sandbox %s", name, exc_info=True)
 
+
+# Wall-clock allowed for capturing a snapshot. Scales with image size, so the
+# SDK's 55s default is far too tight for anything but a minimal image.
+_SNAPSHOT_TIMEOUT = env_int("RLLM_MODAL_SNAPSHOT_TIMEOUT_S", 15 * 60)
 
 # Modal caps an exec's total argv at 64 KiB (ARG_MAX); payloads above this go
 # through a chunked temp-file path instead of being inlined in the command.
@@ -470,6 +475,31 @@ class ModalSandbox:
         self._push_b64(b64, f"base64 -d | tar xzf - --no-same-owner -C {remote_parent}")
         logger.debug("Uploaded dir %s -> %s in sandbox %s (base64 fallback)", local_path, remote_path, self.name)
 
+    def download_dir(self, remote_path: str, local_path: str) -> list[str]:
+        """Download regular files from a Modal sandbox directory.
+
+        Modal's binary exec mode keeps the tar stream byte-for-byte intact.
+        Files are extracted through the shared sandbox artifact helper, which
+        rejects links and paths that could escape ``local_path``.
+        """
+        normalized = remote_path.rstrip("/")
+        remote_parent = os.path.dirname(normalized) or "/"
+        remote_name = os.path.basename(normalized)
+        if not remote_name:
+            raise ValueError("download_dir requires a directory other than the filesystem root")
+
+        process = self._sandbox.exec("tar", "czf", "-", "-C", remote_parent, remote_name, text=False)
+        archive_bytes = process.stdout.read()
+        stderr = process.stderr.read()
+        process.wait()
+        if process.returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"Failed to download {remote_path} from Modal sandbox {self.name}: {detail}")
+
+        downloaded = extract_regular_files(io.BytesIO(archive_bytes), local_path, root_name=remote_name)
+        logger.debug("Downloaded %d file(s) from %s in sandbox %s", len(downloaded), remote_path, self.name)
+        return downloaded
+
     def is_alive(self) -> bool:
         """One API call: ``poll()`` returns ``None`` while the sandbox is still running.
 
@@ -588,12 +618,14 @@ def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force:
 
     # Size the build sandbox's lifetime to the worst-case replay: each RUN is
     # bounded at 900s (a step that hangs against a prebuilt image burns its
-    # full bound), plus the install bound and pull/capture slack — floored at
-    # the rollout default. Without this floor, two hung steps killed the
-    # sandbox mid-build. A from_dockerfile build replays nothing.
+    # full bound), plus the install bound, the snapshot capture, and pull
+    # slack — floored at the rollout default. Without this floor, two hung
+    # steps killed the sandbox mid-build; without the capture budget the
+    # sandbox can expire during the snapshot, which is the thing being
+    # captured. A from_dockerfile build replays nothing.
     install_budget = env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 900) if install_script else 0
     n_replay = 0 if dockerfile is not None else (len(_dockerfile_run_commands(task)) if _should_replay_dockerfile(task) else 0)
-    build_timeout = max(_default_sandbox_timeout(), 900 * n_replay + install_budget + 600)
+    build_timeout = max(_default_sandbox_timeout(), 900 * n_replay + install_budget + _SNAPSHOT_TIMEOUT + 600)
     sb = _create_base_sandbox(
         task,
         "modal",
@@ -606,7 +638,10 @@ def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force:
             _replay_dockerfile(task, sb, "modal")
         if install_script:
             sb.exec(install_script, timeout=env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 900), user="root")
-        image = sb._sandbox.snapshot_filesystem()  # noqa: SLF001 — modal.Image
+        # snapshot_filesystem() defaults to a 55s bound, which only ever fits a
+        # small image — a multi-GB one blows it and surfaces as a bare
+        # "Timeout expired" with no indication of which phase failed.
+        image = sb._sandbox.snapshot_filesystem(timeout=_SNAPSHOT_TIMEOUT)  # noqa: SLF001 — modal.Image
         logger.info("modal snapshot built: %s -> %s", key, image.object_id)
         return image.object_id
     finally:

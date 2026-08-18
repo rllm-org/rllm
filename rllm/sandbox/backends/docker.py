@@ -7,6 +7,8 @@ import logging
 import os
 import tarfile
 
+from rllm.sandbox.artifacts import extract_regular_files
+
 logger = logging.getLogger(__name__)
 
 
@@ -16,8 +18,7 @@ class DockerSandbox:
     Creates a container with ``sleep infinity``, uploads files via tar archives,
     executes commands via ``exec_run()``, and runs agent processes with ``nohup``.
 
-    Requires the ``docker`` Python package (not in ``[sdk]`` extra — install
-    separately when using ``backend=docker``).
+    Requires the ``docker`` Python package, installed with rLLM.
     """
 
     def __init__(self, name: str, image: str = "python:3.11-slim", **kwargs):
@@ -113,6 +114,18 @@ class DockerSandbox:
             tar.add(local_path, arcname=remote_name)
         tar_stream.seek(0)
         self._container.put_archive(remote_parent, tar_stream)
+
+    def download_dir(self, remote_path: str, local_path: str) -> list[str]:
+        """Download regular files from a container directory.
+
+        Docker returns a tar stream rooted at the requested directory name.
+        Extract files manually so path traversal entries and links are never
+        written to the host.
+        """
+        chunks, _ = self._container.get_archive(remote_path)
+        archive = io.BytesIO(b"".join(chunks))
+        root_name = os.path.basename(remote_path.rstrip("/"))
+        return extract_regular_files(archive, local_path, root_name=root_name)
 
     def is_alive(self) -> bool:
         """Refresh container state from the Docker daemon and check it is running."""
