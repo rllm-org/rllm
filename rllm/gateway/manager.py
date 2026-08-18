@@ -40,7 +40,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from rllm_model_gateway.client import AsyncGatewayClient, GatewayClient
-from rllm_model_gateway.models import TraceRecord
+from rllm_model_gateway.models import TraceGraph, TraceRecord
 
 from rllm.env import env_float
 
@@ -372,6 +372,10 @@ class GatewayManager:
         self.client.flush()
         return self.client.get_session_traces(session_id, format=self._trace_format)
 
+    def get_trace_graph(self, session_id: str) -> TraceGraph:
+        self.client.flush()
+        return self.client.get_session_traces(session_id, format="compact", flatten=False)
+
     # -- Async session / trace API -------------------------------------------
 
     async def acreate_session(self, session_id: str, is_validation: bool = False, sampling_params: dict[str, Any] | None = None) -> str:
@@ -381,6 +385,10 @@ class GatewayManager:
     async def aget_traces(self, session_id: str) -> list[TraceRecord]:
         await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
         return await self.async_client.get_session_traces(session_id, format=self._trace_format)
+
+    async def aget_trace_graph(self, session_id: str) -> TraceGraph:
+        await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
+        return await self.async_client.get_session_traces(session_id, format="compact", flatten=False)
 
     async def adelete_session(self, session_id: str) -> int:
         """Delete a session and all its accumulated traces. Returns count removed."""

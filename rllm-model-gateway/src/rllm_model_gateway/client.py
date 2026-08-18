@@ -1,15 +1,18 @@
 """Training-side client for interacting with the model gateway."""
 
-from typing import Any
+from typing import Any, Literal, overload
 
 import httpx
 
 from rllm_model_gateway.models import TraceGraph, TraceRecord, WorkerInfo
 
 
-def _parse_traces(data: Any) -> list[TraceRecord]:
+def _parse_traces(data: Any, flatten: bool = True) -> list[TraceRecord] | TraceGraph:
     if isinstance(data, dict):
-        return TraceGraph.model_validate(data).flatten()
+        graph = TraceGraph.model_validate(data)
+        return graph.flatten() if flatten else graph
+    if not flatten:
+        raise ValueError("gateway did not return a compact trace graph")
     return [TraceRecord(**trace) for trace in data]
 
 
@@ -89,13 +92,21 @@ class GatewayClient:
 
     # -- Trace retrieval ---------------------------------------------------
 
+    @overload
+    def get_session_traces(self, session_id: str, since: float | None = None, limit: int | None = None, format: str | None = None, *, flatten: Literal[True] = True) -> list[TraceRecord]: ...
+
+    @overload
+    def get_session_traces(self, session_id: str, since: float | None = None, limit: int | None = None, format: str | None = None, *, flatten: Literal[False]) -> TraceGraph: ...
+
     def get_session_traces(
         self,
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
         format: str | None = None,
-    ) -> list[TraceRecord]:
+        *,
+        flatten: bool = True,
+    ) -> list[TraceRecord] | TraceGraph:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
@@ -105,7 +116,7 @@ class GatewayClient:
             params["format"] = format
         resp = self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
-        return _parse_traces(resp.json())
+        return _parse_traces(resp.json(), flatten)
 
     def get_trace(self, trace_id: str) -> TraceRecord:
         resp = self._http.get(f"{self.gateway_url}/traces/{trace_id}")
@@ -239,13 +250,21 @@ class AsyncGatewayClient:
 
     # -- Trace retrieval ---------------------------------------------------
 
+    @overload
+    async def get_session_traces(self, session_id: str, since: float | None = None, limit: int | None = None, format: str | None = None, *, flatten: Literal[True] = True) -> list[TraceRecord]: ...
+
+    @overload
+    async def get_session_traces(self, session_id: str, since: float | None = None, limit: int | None = None, format: str | None = None, *, flatten: Literal[False]) -> TraceGraph: ...
+
     async def get_session_traces(
         self,
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
         format: str | None = None,
-    ) -> list[TraceRecord]:
+        *,
+        flatten: bool = True,
+    ) -> list[TraceRecord] | TraceGraph:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
@@ -255,7 +274,7 @@ class AsyncGatewayClient:
             params["format"] = format
         resp = await self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
-        return _parse_traces(resp.json())
+        return _parse_traces(resp.json(), flatten)
 
     async def get_trace(self, trace_id: str) -> TraceRecord:
         resp = await self._http.get(f"{self.gateway_url}/traces/{trace_id}")
