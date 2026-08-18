@@ -101,23 +101,10 @@ class TraceDelta(BaseModel):
             messages = []
             prompt_ids = []
         return cls(
-            trace_id=record.trace_id,
-            session_id=record.session_id,
+            **{name: getattr(record, name) for name in _SHARED_TRACE_FIELDS},
             parent_trace_id=None if parent is None else parent.trace_id,
-            lineage_id=record.lineage_id,
-            model=record.model,
             messages_suffix=record.messages[len(messages) :],
             prompt_ids_suffix=record.prompt_token_ids[len(prompt_ids) :],
-            response_message=record.response_message,
-            completion_token_ids=record.completion_token_ids,
-            logprobs=record.logprobs,
-            routing_matrices=record.routing_matrices,
-            finish_reason=record.finish_reason,
-            weight_version=record.weight_version,
-            latency_ms=record.latency_ms,
-            token_counts=record.token_counts,
-            timestamp=record.timestamp,
-            metadata=record.metadata,
         )
 
 
