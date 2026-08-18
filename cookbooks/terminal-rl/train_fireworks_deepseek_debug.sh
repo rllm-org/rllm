@@ -26,9 +26,9 @@ python -u train_debug.py \
     model.lora_rank=128 \
     fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/deepseek-v4-flash-0731-256k-lora \
     fireworks_config.policy_trainer_replica_count=2 \
-    fireworks_config.rollout_deployment_replica_count=4  \
+    fireworks_config.rollout_deployment_replica_count=3  \
     training.group_size=16 \
-    training.learning_rate=5e-5 \
+    training.learning_rate=1e-4 \
     training.grad_clip_norm=0.0 \
     training.beta2=0.999 \
     training.eps=1e-10 \
@@ -69,7 +69,7 @@ python -u train_debug.py \
     rllm.episode_logging.log_episodes=true \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='terminal-rl' \
-    rllm.trainer.experiment_name='deepseek-v4-flash-0731-lora-rank-128-lr-5e-5-eps-1e-10-tb-v2-debug' \
+    rllm.trainer.experiment_name='dsv4-flash-0731-rank-128-lr-1e-4-eps-1e-10-tb-v2-debug' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=-1 \
     rllm.trainer.save_freq=20 \
