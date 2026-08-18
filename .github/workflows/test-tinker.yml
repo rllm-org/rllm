@@ -2,7 +2,7 @@ name: Test Tinker engine
 
 on:
   push:
-    branches: [main, step-deepcopy-skip]
+    branches: [main, terminal-rl]
     paths:
       - "rllm/engine/rollout/**"
       - "rllm/engine/agentflow_engine.py"
@@ -21,7 +21,7 @@ on:
       - "tests/trainer/test_datum_dataproto_delta.py"
       - ".github/workflows/test-tinker.yml"
   pull_request:
-    branches: [main, step-deepcopy-skip]
+    branches: [main, terminal-rl]
     paths:
       - "rllm/engine/rollout/**"
       - "rllm/engine/agentflow_engine.py"
