@@ -112,8 +112,11 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             transform_config=kwargs.get("transform_config"),
             algorithm_config=kwargs.get("algorithm_config"),
         )
-        # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been initialized yet
-        self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)
+        # Fireworks model resource names are not HuggingFace-resolvable, so
+        # backends compatible with Tinker can provide a tokenizer_model.
+        tokenizer_name = self.full_config.model.get("tokenizer_model") or self.full_config.model.name
+        if self.tokenizer is None:
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
         # Load image processor for vision-language models.
         # For VLM models, the tinker renderer requires an image_processor to
@@ -146,7 +149,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         self.rollout_engine = TinkerEngine(
             base_url=self.full_config.tinker_base_url,
-            model_name=self.full_config.model.name,
+            model_name=tokenizer_name,
             service_client=self.service_client,
             tokenizer=self.tokenizer,
             max_prompt_length=self.full_config.data.max_prompt_length,
@@ -358,7 +361,15 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
                 beta2=self.beta2,
                 eps=self.eps,
             )
-            await optim_step_future.result_async()
+            optim_result = await optim_step_future.result_async()
+            optim_metrics = getattr(optim_result, "metrics", None) or {}
+            for key, value in optim_metrics.items():
+                if key.startswith("clock_cycle"):
+                    continue
+                bare_key = key.removesuffix(":last")
+                if key.endswith(":last") and bare_key in optim_metrics:
+                    continue
+                trainer_state.metrics[f"train/{bare_key.replace(':', '/')}"] = value
             trainer_state.extra_info["scheduled_learning_rate"] = scheduled_learning_rate
 
     # =========================================================================
