@@ -45,8 +45,57 @@ def _message_key(message: dict[str, Any]) -> str:
     return key
 
 
-def _messages_start_with(values: list[dict[str, Any]], prefix: list[dict[str, Any]]) -> bool:
-    return len(prefix) <= len(values) and all(_message_key(a) == _message_key(b) for a, b in zip(values[: len(prefix)], prefix, strict=True))
+def canonicalize_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Convert equivalent chat-message wire shapes to one stable form.
+
+    The gateway response uses ``reasoning`` while LiteLLM resends that same
+    assistant turn as ``reasoning_content`` and duplicates it under
+    ``provider_specific_fields.reasoning``. A null refusal is another
+    transport-added default. Normalize only those known aliases; retain every
+    other provider-specific field so materially different messages stay
+    different.
+
+    TraceRecord remains the untouched capture format. TraceDelta calls this at
+    the raw-record-to-graph boundary, so the graph has one stable message shape.
+    """
+    normalized = json.loads(_message_key(message))
+    provider_fields = normalized.get("provider_specific_fields")
+    if provider_fields is None:
+        normalized.pop("provider_specific_fields", None)
+        provider_fields = None
+
+    reasoning_values = [value for value in (normalized.get("reasoning"), normalized.get("reasoning_content")) if value is not None]
+    if reasoning_values and all(value == reasoning_values[0] for value in reasoning_values[1:]):
+        normalized.pop("reasoning", None)
+        normalized.pop("reasoning_content", None)
+        normalized["reasoning_content"] = reasoning_values[0]
+        if isinstance(provider_fields, dict) and provider_fields.get("reasoning") == reasoning_values[0]:
+            provider_fields.pop("reasoning", None)
+    elif not reasoning_values:
+        if normalized.get("reasoning") is None:
+            normalized.pop("reasoning", None)
+        if normalized.get("reasoning_content") is None:
+            normalized.pop("reasoning_content", None)
+        if isinstance(provider_fields, dict) and provider_fields.get("reasoning") is None:
+            provider_fields.pop("reasoning", None)
+
+    if normalized.get("refusal") is None:
+        normalized.pop("refusal", None)
+    if isinstance(provider_fields, dict):
+        if provider_fields.get("refusal") is None:
+            provider_fields.pop("refusal", None)
+        if not provider_fields:
+            normalized.pop("provider_specific_fields", None)
+    return json.loads(json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False))
+
+
+def _canonical_message_key(message: dict[str, Any]) -> str:
+    """Stable identity for parent discovery, independent of wire aliases."""
+    return _message_key(canonicalize_message(message))
+
+
+def _canonical_messages_start_with(values: list[dict[str, Any]], prefix: list[dict[str, Any]]) -> bool:
+    return len(prefix) <= len(values) and all(_canonical_message_key(value) == _canonical_message_key(expected) for value, expected in zip(values[: len(prefix)], prefix, strict=True))
 
 
 class TraceDelta(BaseModel):
@@ -71,9 +120,9 @@ class TraceDelta(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def _validate_messages(self) -> "TraceDelta":
-        for message in [*self.messages_suffix, self.response_message]:
-            _message_key(message)
+    def _canonicalize_messages(self) -> "TraceDelta":
+        self.messages_suffix = [canonicalize_message(message) for message in self.messages_suffix]
+        self.response_message = canonicalize_message(self.response_message)
         return self
 
     @classmethod
@@ -94,7 +143,7 @@ class TraceDelta(BaseModel):
             parent is not None
             and parent.session_id == record.session_id
             and parent.lineage_id == record.lineage_id
-            and (_prefix_verified or _messages_start_with(record.messages, messages))
+            and (_prefix_verified or _canonical_messages_start_with(record.messages, messages))
             and (_prefix_verified or record.prompt_token_ids[: len(prompt_ids)] == prompt_ids)
         ):
             parent = None
@@ -167,7 +216,7 @@ class TraceGraph(BaseModel):
         node = 0
         completed_trace_id = None
         for message in record.messages:
-            next_node = self._message_children.get((node, _message_key(message)))
+            next_node = self._message_children.get((node, _canonical_message_key(message)))
             if next_node is None:
                 break
             node = next_node
