@@ -156,6 +156,75 @@ def _valid_token_trace(session_id: str):
     )
 
 
+def test_verify_only_on_env_done_skips_nonterminal_rollout_grading():
+    class _CountingEvaluator:
+        calls = 0
+
+        def evaluate(self, task, episode):
+            self.calls += 1
+            return EvalOutput(reward=1.0, is_correct=True)
+
+    evaluator = _CountingEvaluator()
+    gateway = _Gateway(traces=[_valid_token_trace("task:0")])
+    engine = AgentFlowEngine(
+        agent_flow=_Agent(),
+        evaluator=evaluator,
+        gateway=gateway,
+        model="test-model",
+        n_parallel_tasks=1,
+        verify_only_on_env_done=True,
+    )
+    task = task_from_row({"question": "q"}, "task")
+
+    try:
+        episode = asyncio.run(engine._run_single(task, "task:0"))
+    finally:
+        engine.shutdown()
+
+    assert evaluator.calls == 0
+    assert episode.metrics["verifier_skipped"] == 1.0
+    assert episode.is_correct is False
+    assert episode.termination_reason == TerminationReason.ERROR
+
+
+def test_verify_only_on_env_done_still_grades_completed_rollout():
+    class _DoneAgent:
+        async def arun(self, task, config):
+            return Episode(
+                id=task.id,
+                termination_reason=TerminationReason.ENV_DONE,
+                trajectories=[Trajectory(name="solver")],
+            )
+
+    class _CountingEvaluator:
+        calls = 0
+
+        def evaluate(self, task, episode):
+            self.calls += 1
+            return EvalOutput(reward=1.0, is_correct=True)
+
+    evaluator = _CountingEvaluator()
+    gateway = _Gateway(traces=[_valid_token_trace("task:0")])
+    engine = AgentFlowEngine(
+        agent_flow=_DoneAgent(),
+        evaluator=evaluator,
+        gateway=gateway,
+        model="test-model",
+        n_parallel_tasks=1,
+        verify_only_on_env_done=True,
+    )
+    task = task_from_row({"question": "q"}, "task")
+
+    try:
+        episode = asyncio.run(engine._run_single(task, "task:0"))
+    finally:
+        engine.shutdown()
+
+    assert evaluator.calls == 1
+    assert episode.metrics["verifier_skipped"] == 0.0
+    assert episode.is_correct is True
+
+
 def test_empty_response_retries_are_filtered_before_strict_enrichment():
     """Transient API attempts have no response envelope and must not poison
     the successful same-turn retry that follows them."""

@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 class TerminationReason(Enum):
     MAX_PROMPT_LENGTH_EXCEEDED = "max_prompt_length_exceeded"
     MAX_RESPONSE_LENGTH_EXCEEDED = "max_response_length_exceeded"
+    FORMAT_ERROR = "format_error"
     ENV_DONE = "env_done"
     MAX_TURNS_EXCEEDED = "max_turns_exceeded"
     TIMEOUT = "timeout"  # agent execution wall-clock budget — reward is still graded on partial state
@@ -84,6 +85,7 @@ _ERROR_TYPE_TO_REASON: dict[str, TerminationReason] = {
     "VerifierTimeoutError": TerminationReason.VERIFIER_TIMEOUT,
     # Model/context (harbor.llms.base)
     "ContextLengthExceededError": TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,
+    "ContextWindowExceededError": TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,
     "OutputLengthExceededError": TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED,
     # Agent process (harbor.agents.installed.base)
     "NonZeroAgentExitCodeError": TerminationReason.ERROR,

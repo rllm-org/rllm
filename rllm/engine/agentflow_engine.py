@@ -406,6 +406,7 @@ class AgentFlowEngine:
         n_parallel_tasks: int = 128,
         retry_limit: int = 3,
         raise_on_error: bool = True,
+        verify_only_on_env_done: bool = False,
         episode_logger: EpisodeLogger | None = None,
         hooks: TaskHooks | None = None,
         train_sampling_params: dict | None = None,
@@ -428,6 +429,7 @@ class AgentFlowEngine:
         self.n_parallel_tasks = n_parallel_tasks
         self.retry_limit = retry_limit
         self.raise_on_error = raise_on_error
+        self.verify_only_on_env_done = verify_only_on_env_done
         self.episode_logger = episode_logger
         self.hooks = hooks
         self.train_sampling_params = train_sampling_params
@@ -833,16 +835,24 @@ class AgentFlowEngine:
             strict=not is_validation,
         )
 
-        # The hook-resolved evaluator always receives the Task (legacy
-        # dict-style evaluators are adapted at hook-construction time).
         t = time.perf_counter()
         evaluation_episode = _materialize_trajectory_deltas(enriched)
-        eval_output: EvalOutput = await loop.run_in_executor(
-            self.executor,
-            ctx.evaluator.evaluate,
-            task_obj,
-            evaluation_episode,
-        )
+        if self.verify_only_on_env_done and enriched.termination_reason != TerminationReason.ENV_DONE:
+            eval_output = EvalOutput(
+                reward=0.0,
+                is_correct=False,
+                metadata={"verifier_skipped": 1.0},
+            )
+        else:
+            # The hook-resolved evaluator always receives the Task (legacy
+            # dict-style evaluators are adapted at hook-construction time).
+            eval_output = await loop.run_in_executor(
+                self.executor,
+                ctx.evaluator.evaluate,
+                task_obj,
+                evaluation_episode,
+            )
+            eval_output.metadata.setdefault("verifier_skipped", 0.0)
         if _timings is not None:
             _timings["time/evaluator_s"] = time.perf_counter() - t
             _agentflow_s = _timings.get("time/agentflow_s", 0.0)

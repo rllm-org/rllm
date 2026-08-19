@@ -36,6 +36,8 @@ workflow:
   n_parallel_tasks: 256
   retry_limit: 3
   raise_on_error: true
+  # Skip grading unless the agent explicitly completed its environment protocol.
+  verify_only_on_env_done: false
   # Sandbox warm-pool prefetch for training (mirrors eval): 0 disables,
   # negative matches the sandbox-creation frontier, positive = literal cap.
   warm_queue_size: -1
