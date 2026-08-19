@@ -29,7 +29,7 @@
 #   rllm dataset pull harbor:terminal-bench@2.0
 #
 # Raw records and graphs default to:
-#   /data/home/thw/trace-dumps/z6xi3xkh-parity-001
+#   /data/home/thw/trace-dumps/z6xi3xkh-parity-002
 # Set RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR only to override that path.
 #
 # With a registered wildcard, do not run `rllm tunnel up` and do not pass a
@@ -54,7 +54,7 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
 
-export RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR="${RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR:-/data/home/thw/trace-dumps/z6xi3xkh-parity-001}"
+export RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR="${RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR:-/data/home/thw/trace-dumps/z6xi3xkh-parity-002}"
 
 if [[ "$RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR" != /* ]]; then
     echo "RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR must be an absolute path" >&2
