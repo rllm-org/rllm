@@ -36,6 +36,8 @@ workflow:
   n_parallel_tasks: 256
   retry_limit: 3
   raise_on_error: true
+  # Skip grading unless the agent explicitly completed its environment protocol.
+  verify_only_on_env_done: false
   # Sandbox warm-pool prefetch for training (mirrors eval): 0 disables,
   # negative matches the sandbox-creation frontier, positive = literal cap.
   warm_queue_size: -1
@@ -177,6 +179,10 @@ gateway:
                       # `rllm tunnel setup` can reserve a wildcard for isolated per-run ngrok URLs.
   store: compact      # "compact" (default) | "memory" (legacy) | "sqlite" (persistent)
   db_path: null       # Only used when store=sqlite; null → auto-resolved path (logged at startup)
+  # Diagnostic only. With store=compact, writes full pre-compaction TraceRecord JSONL plus
+  # the eventual TraceGraph JSON for offline exact-parity verification. Use a unique local
+  # directory per run; this is intentionally expensive and may contain sensitive prompts.
+  trace_parity_dump_dir: null
   # Sampling params attached to a session overwrite those keys on every LLM call;
   # keys not set pass through untouched.
   cumulative_token_mode: false   # Drift-free multi-turn token forwarding: rewrites turn 2+ to

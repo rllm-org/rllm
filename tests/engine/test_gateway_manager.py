@@ -18,6 +18,7 @@ def _make_config(**gateway_overrides):
 def _unset_store_env(monkeypatch):
     # Store selection reads RLLM_GATEWAY_STORE; keep the ambient value out.
     monkeypatch.delenv("RLLM_GATEWAY_STORE", raising=False)
+    monkeypatch.delenv("RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR", raising=False)
 
 
 class TestGatewayStoreSelection:
@@ -55,6 +56,10 @@ class TestGatewayStoreValidation:
         with pytest.raises(ValueError, match="db_path is set but store='memory'"):
             GatewayManager(_make_config(store="memory", db_path="/tmp/x.db"), mode="thread")
 
+    def test_trace_parity_dump_requires_compact_store(self, tmp_path):
+        with pytest.raises(ValueError, match="trace_parity_dump_dir requires"):
+            GatewayManager(_make_config(store="memory", trace_parity_dump_dir=str(tmp_path)), mode="thread")
+
 
 class TestCompactStoreDefault:
     @pytest.mark.parametrize(
@@ -82,6 +87,12 @@ class TestCompactStoreDefault:
     def test_compact_with_db_path_raises(self):
         with pytest.raises(ValueError, match="db_path is set but store='compact'"):
             GatewayManager(_make_config(store="compact", db_path="/tmp/x.db"), mode="thread")
+
+    def test_trace_parity_dump_is_passed_only_to_gateway_workers(self, tmp_path):
+        gw = GatewayManager(_make_config(store="compact", trace_parity_dump_dir=str(tmp_path)), mode="thread")
+        assert gw.trace_parity_dump_dir == str(tmp_path.resolve())
+        assert gw._gateway_cmd(9091)[-2:] == ["--trace-parity-dump-dir", str(tmp_path.resolve())]
+        assert "--trace-parity-dump-dir" not in gw._gateway_cmd(9091, front=True, worker_urls=["http://127.0.0.1:9092"])
 
 
 class TestContainerReachableUrl:

@@ -443,6 +443,40 @@ def test_mini_swe_agent_invocation_uses_qualified_model():
     assert "--exit-immediately" in cmd
 
 
+def test_mini_swe_agent_reproduction_options_reach_cli():
+    h = MiniSweAgentHarness(
+        max_turns=64,
+        max_consecutive_format_errors=1,
+        command_timeout=300,
+        capture_exit_status=True,
+        cost_limit=0.0,
+    )
+
+    cmd = h.build_invocation("hi", _make_task(), _make_config(model="gpt-4o"))
+
+    assert "--config=mini.yaml" in cmd
+    assert "--config=agent.cost_limit=0.0" in cmd
+    assert "--config=agent.step_limit=64" in cmd
+    assert "--config=agent.max_consecutive_format_errors=1" in cmd
+    assert "--config=environment.timeout=300" in cmd
+    assert "--output=/tmp/rllm-mini-swe-trajectory.json" in cmd
+
+
+@pytest.mark.parametrize(
+    ("status", "finish_reason", "expected"),
+    [
+        ("Submitted", None, TerminationReason.ENV_DONE),
+        ("LimitsExceeded", None, TerminationReason.MAX_TURNS_EXCEEDED),
+        ("TimeExceeded", None, TerminationReason.TIMEOUT),
+        ("RepeatedFormatError", "length", TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED),
+        ("RepeatedFormatError", None, TerminationReason.FORMAT_ERROR),
+        ("UserInterruption", None, TerminationReason.UNKNOWN),
+    ],
+)
+def test_mini_swe_agent_maps_recorded_exit_status(status, finish_reason, expected):
+    assert MiniSweAgentHarness._map_exit_status(status, finish_reason) == expected
+
+
 # ---------------------------------------------------------------------------
 # ClaudeCodeHarness — bypassPermissions sandbox mode
 # ---------------------------------------------------------------------------

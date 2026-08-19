@@ -87,7 +87,10 @@ def create_store(config: GatewayConfig) -> TraceStore:
     if worker in ("memory", "compact"):
         from rllm_model_gateway.store.memory_store import MemoryTraceStore
 
-        return MemoryTraceStore(compact=worker == "compact")
+        return MemoryTraceStore(
+            compact=worker == "compact",
+            trace_parity_dump_dir=config.trace_parity_dump_dir,
+        )
     raise ValueError(f"Unknown store worker: {worker}")
 
 
@@ -473,6 +476,7 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         "RLLM_GATEWAY_DB_PATH": "db_path",
         "RLLM_GATEWAY_LOG_LEVEL": "log_level",
         "RLLM_GATEWAY_STORE": "store_worker",
+        "RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR": "trace_parity_dump_dir",
     }
     for env_key, config_key in env_map.items():
         val = os.environ.get(env_key)
@@ -493,6 +497,8 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         data["log_level"] = args.log_level
     if getattr(args, "store", None) is not None:
         data["store_worker"] = args.store
+    if getattr(args, "trace_parity_dump_dir", None) is not None:
+        data["trace_parity_dump_dir"] = args.trace_parity_dump_dir
     if getattr(args, "model", None) is not None:
         data["model"] = args.model
     if getattr(args, "cumulative_token_mode", False):
@@ -526,6 +532,12 @@ def main() -> None:
     )
     parser.add_argument("--db-path", type=str, default=None)
     parser.add_argument("--store", type=str, default=None, choices=["sqlite", "memory", "compact"])
+    parser.add_argument(
+        "--trace-parity-dump-dir",
+        type=str,
+        default=None,
+        help="Diagnostic-only directory for pre-compaction TraceRecord JSONL and final TraceGraph JSON (compact store only).",
+    )
     parser.add_argument("--log-level", type=str, default=None)
     parser.add_argument(
         "--model",

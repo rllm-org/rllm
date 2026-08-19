@@ -407,6 +407,9 @@ class GatewayConfig(BaseModel):
     workers: list[WorkerConfig] = Field(default_factory=list)
     db_path: str | None = None
     store_worker: str = "memory"
+    # Diagnostic-only: write each full TraceRecord before compaction and the
+    # final TraceGraph for exact offline parity checks.
+    trace_parity_dump_dir: str | None = None
     add_logprobs: bool = True
     add_return_token_ids: bool = True
     strip_vllm_fields: bool = True

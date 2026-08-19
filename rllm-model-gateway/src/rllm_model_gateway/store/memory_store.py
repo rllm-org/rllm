@@ -1,8 +1,12 @@
 """In-memory trace store for testing and embedded usage."""
 
 import array
+import hashlib
+import json
+import os
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 from rllm_model_gateway.models import TraceGraph, TraceRecord
@@ -57,14 +61,62 @@ def _unpack(data: dict[str, Any]) -> dict[str, Any]:
 class MemoryTraceStore:
     """Ephemeral in-memory store.  Useful for tests and short-lived processes."""
 
-    def __init__(self, compact: bool = False) -> None:
+    def __init__(self, compact: bool = False, trace_parity_dump_dir: str | None = None) -> None:
+        if trace_parity_dump_dir is not None and not compact:
+            raise ValueError("trace parity dumps require MemoryTraceStore(compact=True)")
         self._compact = compact
+        self._trace_parity_dump_root = Path(trace_parity_dump_dir).expanduser().resolve() if trace_parity_dump_dir else None
+        if self._trace_parity_dump_root is not None:
+            self._trace_parity_dump_root.mkdir(parents=True, exist_ok=True)
+        # A retry deletes and recreates the same gateway session id. Keep each
+        # deleted incarnation separate so its raw inputs are compared only with
+        # the graph built from those inputs.
+        self._trace_parity_generations: dict[str, int] = defaultdict(int)
         self._traces: dict[str, dict[str, Any]] = {}
         self._timestamps: dict[str, float] = {}
         self._session_index: dict[str, list[str]] = defaultdict(list)
         self._session_seen: dict[str, set[str]] = defaultdict(set)
         self._graphs: dict[str, TraceGraph] = defaultdict(lambda: TraceGraph(format="compact", version=1, deltas=[]))
         self._trace_session: dict[str, str] = {}
+
+    def _trace_parity_generation_dir(self, session_id: str) -> Path:
+        root = self._trace_parity_dump_root
+        if root is None:
+            raise RuntimeError("trace parity dumping is disabled")
+        session_key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:20]
+        session_dir = root / f"session-{session_key}"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = session_dir / "session.json"
+        if not manifest_path.exists():
+            manifest_path.write_text(json.dumps({"session_id": session_id}, ensure_ascii=False) + "\n", encoding="utf-8")
+        generation = self._trace_parity_generations[session_id]
+        generation_dir = session_dir / f"generation-{generation:04d}"
+        generation_dir.mkdir(parents=True, exist_ok=True)
+        return generation_dir
+
+    def _dump_raw_trace_record(self, record: TraceRecord) -> None:
+        if self._trace_parity_dump_root is None:
+            return
+        path = self._trace_parity_generation_dir(record.session_id) / "raw_trace_records.jsonl"
+        # Deliberately synchronous: this is an opt-in diagnostic path, and a
+        # single event-loop worker must preserve store-call order exactly.
+        with path.open("a", encoding="utf-8") as f:
+            f.write(record.model_dump_json())
+            f.write("\n")
+
+    def _dump_trace_graph(self, session_id: str, graph: TraceGraph) -> None:
+        if self._trace_parity_dump_root is None:
+            return
+        path = self._trace_parity_generation_dir(session_id) / "trace_graph.json"
+        tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        try:
+            tmp_path.write_text(graph.model_dump_json() + "\n", encoding="utf-8")
+            os.replace(tmp_path, path)
+        finally:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
 
     async def store_trace(self, trace_id: str, session_id: str, data: dict[str, Any]) -> None:
         now = time.time()
@@ -73,6 +125,10 @@ class MemoryTraceStore:
             if missing:
                 raise ValueError(f"compact trace missing required fields: {', '.join(sorted(missing))}")
             record = TraceRecord.model_validate({**data, "trace_id": trace_id, "session_id": session_id})
+            # Capture the full, pre-compaction record. This is intentionally
+            # before graph validation so a rejected/lost input is visible to
+            # the parity checker instead of disappearing silently.
+            self._dump_raw_trace_record(record)
             existing_session = self._trace_session.get(trace_id)
             if existing_session is not None and existing_session != session_id:
                 raise ValueError(f"trace id {trace_id!r} belongs to another session")
@@ -127,7 +183,10 @@ class MemoryTraceStore:
         graph = self._graphs.get(session_id)
         if graph is None:
             graph = TraceGraph(format="compact", version=1, deltas=[])
-        return graph.slice(tids).model_dump()
+        selected = graph.slice(tids)
+        if since is None and limit is None:
+            self._dump_trace_graph(session_id, selected)
+        return selected.model_dump()
 
     async def count_session_traces(self, session_id: str) -> int:
         return len(self._session_index.get(session_id, []))
@@ -136,10 +195,17 @@ class MemoryTraceStore:
         ids = self._session_index.pop(session_id, [])
         self._session_seen.pop(session_id, None)
         if self._compact:
-            self._graphs.pop(session_id, None)
+            graph = self._graphs.get(session_id)
+            if graph is not None:
+                # Ensure failed flows and retry attempts also get an eventual
+                # graph, even when the engine never reached its trace fetch.
+                self._dump_trace_graph(session_id, graph)
+                self._graphs.pop(session_id, None)
             for tid in ids:
                 self._trace_session.pop(tid, None)
                 self._timestamps.pop(tid, None)
+            if graph is not None or ids:
+                self._trace_parity_generations[session_id] += 1
             return len(ids)
         # Collect trace_ids referenced by other sessions
         referenced: set[str] = set()
