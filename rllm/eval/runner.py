@@ -25,6 +25,66 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def episodes_to_eval_result(
+    episodes: list,
+    *,
+    dataset_name: str,
+    model: str,
+    agent_name: str,
+    attempts: int = 1,
+) -> tuple[EvalResult, list]:
+    """Convert task-major rollout episodes into the public eval result format.
+
+    Both the gateway-backed AgentFlow engine and Harbor's native Job runtime
+    use this adapter.  Keeping aggregation here makes Harbor responsible only
+    for execution and artifact production while rLLM remains responsible for
+    its result schema.
+    """
+    items: list[EvalItem] = []
+    surviving_episodes: list = []
+    for idx, episode in enumerate(episodes):
+        task_idx, attempt = divmod(idx, attempts) if attempts > 1 else (idx, 0)
+        if episode is None:
+            items.append(EvalItem(idx=task_idx, attempt=attempt, reward=0.0, is_correct=False, error="missing episode"))
+            continue
+
+        # An infra/grading failure (sandbox/setup/verifier/grading) means the
+        # reward isn't a real task score. Agent TIMEOUT is graded on partial
+        # state, so its reward still stands.
+        reason = episode.termination_reason
+        error_msg = None
+        if reason in INFRA_ERROR_REASONS:
+            err = (episode.metadata or {}).get("error") or {}
+            if isinstance(err, dict):
+                error_msg = err.get("error_type") or err.get("message") or reason.value
+            else:
+                error_msg = str(err) or reason.value
+
+        signals: dict[str, float] = {}
+        if episode.trajectories:
+            signals = dict(episode.trajectories[0].signals or {})
+
+        reward = 0.0
+        if episode.trajectories and episode.trajectories[0].reward is not None:
+            reward = float(episode.trajectories[0].reward)
+
+        items.append(
+            EvalItem(
+                idx=task_idx,
+                attempt=attempt,
+                reward=reward,
+                is_correct=bool(episode.is_correct),
+                signals=signals,
+                error=error_msg,
+                termination_reason=reason.value if reason is not None else None,
+            )
+        )
+        if error_msg is None:
+            surviving_episodes.append(episode)
+
+    return (EvalResult.from_items(dataset_name, model, agent_name, items, attempts=attempts), surviving_episodes)
+
+
 async def run_dataset(
     tasks: list,  # list[rllm.types.Task]
     agent_flow: AgentFlow,
@@ -177,53 +237,13 @@ async def run_dataset(
             except Exception:
                 logger.exception("gateway.stop() raised; suppressing")
 
-    # Aggregate per-rollout EvalItems for the report; with attempts > 1 the
-    # expanded index folds back to (task index, attempt).
-    items: list[EvalItem] = []
-    surviving_episodes: list = []
-    for idx, episode in enumerate(episodes):
-        task_idx, attempt = divmod(idx, attempts) if attempts > 1 else (idx, 0)
-        if episode is None:
-            items.append(EvalItem(idx=task_idx, attempt=attempt, reward=0.0, is_correct=False, error="missing episode"))
-            continue
-
-        # An infra/grading failure (sandbox/setup/verifier/grading) means the
-        # reward isn't a real task score — surface it as an error so it's counted
-        # separately from genuine task failures. An agent TIMEOUT is NOT an error
-        # here: it's graded on partial state, so its reward stands.
-        reason = episode.termination_reason
-        error_msg = None
-        if reason in INFRA_ERROR_REASONS:
-            err = (episode.metadata or {}).get("error") or {}
-            if isinstance(err, dict):
-                error_msg = err.get("error_type") or err.get("message") or reason.value
-            else:
-                error_msg = str(err) or reason.value
-
-        signals: dict[str, float] = {}
-        if episode.trajectories:
-            signals = dict(episode.trajectories[0].signals or {})
-
-        reward = 0.0
-        if episode.trajectories and episode.trajectories[0].reward is not None:
-            reward = float(episode.trajectories[0].reward)
-
-        # NOTE: on_episode_complete is now invoked *streaming* inside
-        # engine.execute_tasks (as each rollout finishes), not here — so UI
-        # uploads + local writes happen progressively instead of in a burst.
-
-        items.append(
-            EvalItem(
-                idx=task_idx,
-                attempt=attempt,
-                reward=reward,
-                is_correct=bool(episode.is_correct),
-                signals=signals,
-                error=error_msg,
-                termination_reason=reason.value if reason is not None else None,
-            )
-        )
-        if error_msg is None:
-            surviving_episodes.append(episode)
-
-    return (EvalResult.from_items(dataset_name, model, agent_name, items, attempts=attempts), surviving_episodes)
+    # NOTE: on_episode_complete is invoked *streaming* inside
+    # engine.execute_tasks. Harbor's job adapter invokes the same callback
+    # while converting completed Harbor artifacts.
+    return episodes_to_eval_result(
+        episodes,
+        dataset_name=dataset_name,
+        model=model,
+        agent_name=agent_name,
+        attempts=attempts,
+    )

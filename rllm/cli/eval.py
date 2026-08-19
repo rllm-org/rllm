@@ -121,7 +121,7 @@ def _run_eval(
     benchmark: str,
     agent_name: str,
     evaluator_name: str | None,
-    base_url: str,
+    base_url: str | None,
     model: str,
     split: str,
     concurrency: int,
@@ -137,6 +137,12 @@ def _run_eval(
     warm_queue_size: int = 0,
     sampling_config=None,
     attempts: int = 1,
+    provider: str | None = None,
+    api_key: str | None = None,
+    harbor_agent_kwargs: dict | None = None,
+    harbor_agent_env: dict[str, str] | None = None,
+    harbor_config: str | None = None,
+    agent_timeout: int | None = None,
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
@@ -149,6 +155,7 @@ def _run_eval(
     from rllm.tasks.loader import BenchmarkLoader
 
     _is_local = BenchmarkLoader.is_local_benchmark(benchmark)
+    _direct_harbor_eval = False
 
     # If `benchmark` is a bare name (not a path) and a materialised dir
     # exists under ~/.rllm/datasets/<name>/, transparently use that
@@ -273,6 +280,7 @@ def _run_eval(
 
         _is_harbor_agent = bool(agent_name) and agent_name.startswith("harbor:")
         _is_harbor_source = bool(catalog_entry) and catalog_entry.get("source", "").startswith("harbor:")
+        _direct_harbor_eval = _is_harbor_agent and _is_harbor_source
 
         # Require Docker only when execution lands on the local daemon; a remote
         # backend (modal/daytona) pulls the task's image in the cloud.
@@ -296,7 +304,11 @@ def _run_eval(
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             fail(f"Error loading agent '{agent_name}': {e}")
 
-        _apply_sandbox_overrides(agent, agent_metadata)
+        direct_agent_metadata = dict(agent_metadata or {})
+        if _direct_harbor_eval:
+            # The native Job adapter maps this to AgentConfig directly.
+            direct_agent_metadata.pop("agent_timeout", None)
+        _apply_sandbox_overrides(agent, direct_agent_metadata)
 
         # Resolve evaluator: explicit --evaluator > catalog auto-resolve >
         # catalog reward_fn > None. When ``evaluator`` is None ``SandboxTaskHooks``
@@ -304,14 +316,16 @@ def _run_eval(
         # Task has its verifier config — i.e. materialised dir or harbor
         # task.toml).
         evaluator = None
-        evaluator_display = "per-task (from dataset.toml)"
+        evaluator_display = "Harbor verifier (native)" if _direct_harbor_eval else "per-task (from dataset.toml)"
+        if evaluator_name is not None and _direct_harbor_eval:
+            fail("--evaluator cannot be used with a Harbor dataset + Harbor agent; Harbor runs the task verifier directly.")
         if evaluator_name is not None:
             try:
                 evaluator = load_evaluator(evaluator_name)
                 evaluator_display = f"{evaluator_name} (overrides per-task verifier)"
             except (KeyError, ImportError, AttributeError, TypeError) as e:
                 fail(f"Error loading evaluator '{evaluator_name}': {e}")
-        else:
+        elif not _direct_harbor_eval:
             # ``harbor_reward_fn`` reads ``episode.artifacts['harbor_reward']``,
             # which is only populated by HarborRuntime. When the user runs a
             # harbor-sourced dataset through an rllm-native harness (oracle,
@@ -410,7 +424,8 @@ def _run_eval(
     if not use_snapshot:
         rows.append(("Snapshots", "[dim]disabled (--no-snapshot, cold start)[/]"))
     if sampling_config is not None and not sampling_config.is_empty:
-        rows.append(("Sampling", f"[dim]{sampling_config.as_dict()} (gateway-enforced)[/]"))
+        owner = "Harbor agent kwargs" if _direct_harbor_eval else "gateway-enforced"
+        rows.append(("Sampling", f"[dim]{sampling_config.as_dict()} ({owner})[/]"))
     console.print()
     console.print(info_panel(rows, border="brand"))
     console.print()
@@ -497,33 +512,54 @@ def _run_eval(
             if _ui_callback is not None:
                 _ui_callback(_materialize_trajectory_deltas(episode))
 
-    # Single execution path: every Task goes through ``AgentFlowEngine``
-    # via ``SandboxTaskHooks``. The engine fronts every LLM call with the rLLM
-    # model gateway (so flows that ``return None`` get their Steps
-    # populated from gateway-captured traces, exactly as in training).
-    # ``evaluator`` (when set) overrides per-task verifier resolution;
-    # otherwise ``SandboxTaskHooks`` reads each Task's [verifier] config.
-    from rllm.eval.runner import run_dataset
+    if _direct_harbor_eval:
+        from rllm.integrations.harbor.eval_runner import run_harbor_eval
 
-    result, episodes = asyncio.run(
-        run_dataset(
-            tasks=list(dataset.data),
-            agent_flow=agent,
-            base_url=base_url,
-            model=model,
-            concurrency=concurrency,
-            sandbox_backend=(agent_metadata or {}).get("sandbox_backend"),
-            use_snapshot=use_snapshot,
-            warm_queue_size=warm_queue_size,
-            agent_name=agent_name,
-            dataset_name=getattr(dataset, "name", benchmark) or benchmark,
-            on_episode_complete=on_episode_complete,
-            evaluator=evaluator,
-            sampling_params=(sampling_config.as_dict() if sampling_config is not None else None),
-            attempts=attempts,
-            compact_episodes=save_episodes and compact_episodes,
+        effective_kwargs = dict(sampling_config.as_dict()) if sampling_config is not None else {}
+        effective_kwargs.update(harbor_agent_kwargs or {})
+        result, episodes = asyncio.run(
+            run_harbor_eval(
+                tasks=list(dataset.data),
+                agent_name=agent_name.removeprefix("harbor:"),
+                model=model,
+                provider=provider,
+                api_key=api_key,
+                base_url=base_url,
+                concurrency=(agent_metadata or {}).get("sandbox_concurrency") or concurrency,
+                attempts=attempts,
+                sandbox_backend=(agent_metadata or {}).get("sandbox_backend"),
+                dataset_name=getattr(dataset, "name", benchmark) or benchmark,
+                jobs_dir=os.path.join(run_dir, "harbor"),
+                agent_kwargs=effective_kwargs,
+                agent_env=harbor_agent_env,
+                agent_timeout=agent_timeout,
+                harbor_config=harbor_config,
+                on_episode_complete=on_episode_complete,
+            )
         )
-    )
+    else:
+        # rLLM-native flows still use AgentFlowEngine + gateway trace capture.
+        from rllm.eval.runner import run_dataset
+
+        result, episodes = asyncio.run(
+            run_dataset(
+                tasks=list(dataset.data),
+                agent_flow=agent,
+                base_url=base_url,
+                model=model,
+                concurrency=concurrency,
+                sandbox_backend=(agent_metadata or {}).get("sandbox_backend"),
+                use_snapshot=use_snapshot,
+                warm_queue_size=warm_queue_size,
+                agent_name=agent_name,
+                dataset_name=getattr(dataset, "name", benchmark) or benchmark,
+                on_episode_complete=on_episode_complete,
+                evaluator=evaluator,
+                sampling_params=(sampling_config.as_dict() if sampling_config is not None else None),
+                attempts=attempts,
+                compact_episodes=save_episodes and compact_episodes,
+            )
+        )
 
     # Flush remaining buffered episodes BEFORE posting eval result / finishing
     # session.  The flush enqueues episodes onto the UILogger background
@@ -592,8 +628,34 @@ def _run_eval(
 @click.command("eval")
 @click.argument("benchmark")
 @click.option("--agent", "agent_name", default=None, help="Agent scaffold: registry name or module:object path.")
+@click.option(
+    "--agent-kwarg",
+    "--ak",
+    "harbor_agent_kwargs",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="Harbor agent kwarg; repeatable. Values use Harbor's JSON-aware parser.",
+)
+@click.option(
+    "--agent-env",
+    "--ae",
+    "harbor_agent_env",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="Harbor agent environment variable; repeatable.",
+)
+@click.option(
+    "--harbor-config",
+    default=None,
+    metavar="PATH_OR_URL",
+    help="Base Harbor JobConfig JSON/YAML. All Harbor job/agent fields are supported; eval task/model fields override it.",
+)
 @click.option("--evaluator", "evaluator_name", default=None, help="Evaluator: registry name or module:class path.")
-@click.option("--base-url", default=None, help="OpenAI-compatible API endpoint URL. If omitted, a proxy is auto-started using 'rllm setup' config.")
+@click.option(
+    "--base-url",
+    default=None,
+    help="OpenAI-compatible API endpoint URL. Harbor agents call it directly; other agents auto-start a proxy when omitted.",
+)
 @click.option(
     "--proxy-port", "proxy_port", default=None, type=int, help="Pin the auto-started LiteLLM proxy to this port. Default: a free port is picked automatically (so concurrent eval jobs don't collide)."
 )
@@ -658,6 +720,9 @@ def _run_eval(
 def eval_cmd(
     benchmark: str,
     agent_name: str | None,
+    harbor_agent_kwargs: tuple[str, ...],
+    harbor_agent_env: tuple[str, ...],
+    harbor_config: str | None,
     evaluator_name: str | None,
     base_url: str | None,
     proxy_port: int | None,
@@ -692,6 +757,22 @@ def eval_cmd(
         fail(f"Invalid --sampling-params: {e}")
     if attempts < 1:
         fail("--attempts must be >= 1.")
+
+    try:
+        from harbor.cli.utils import parse_env_vars, parse_kwargs
+
+        parsed_harbor_kwargs = parse_kwargs(list(harbor_agent_kwargs))
+        parsed_harbor_env = parse_env_vars(list(harbor_agent_env))
+    except (ImportError, ValueError) as e:
+        fail(f"Invalid Harbor agent option: {e}")
+
+    # The explicit Harbor pairing is a separate runtime: provider calls go
+    # straight from Harbor's agent environment to the provider API.
+    catalog_entry = load_dataset_catalog().get("datasets", {}).get(benchmark)
+    harbor_dataset = benchmark.startswith("harbor:") or bool(catalog_entry and catalog_entry.get("source", "").startswith("harbor:"))
+    direct_harbor = harbor_dataset and (agent_name is None or agent_name.startswith("harbor:"))
+    if (parsed_harbor_kwargs or parsed_harbor_env or harbor_config) and not direct_harbor:
+        fail("--ak/--agent-kwarg, --ae/--agent-env, and --harbor-config require a Harbor dataset with a Harbor agent.")
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
     _ui_explicit = enable_ui is not None
     if enable_ui is None:
@@ -706,6 +787,8 @@ def eval_cmd(
         console.print("  [blue]Tip: Try rllm UI for live monitoring! Run [bold]rllm login[/bold] to get started.[/]")
 
     proxy_manager = None
+    provider = None
+    api_key = None
 
     if base_url is not None:
         if provider_override is not None:
@@ -755,6 +838,14 @@ def eval_cmd(
             if api_key:
                 _os.environ.setdefault("OPENAI_API_KEY", api_key)
             console.print(f"  [success]Using custom endpoint[/] at [dim]{base_url}[/]")
+        elif direct_harbor:
+            # Harbor's native runtime owns model routing and calls the provider
+            # directly. No LiteLLM proxy, rLLM gateway, or tunnel is started.
+            from rllm.eval.config import get_provider_info
+
+            provider_info = get_provider_info(provider)
+            base_url = provider_info.base_url or None if provider_info else None
+            console.print(f"  [success]Using Harbor direct runtime[/] for [dim]{provider}/{model}[/]")
         else:
             from rllm.eval.proxy import EvalProxyManager
 
@@ -819,6 +910,12 @@ def eval_cmd(
             warm_queue_size=warm_queue_size,
             sampling_config=sampling_config,
             attempts=attempts,
+            provider=provider,
+            api_key=api_key,
+            harbor_agent_kwargs=parsed_harbor_kwargs,
+            harbor_agent_env=parsed_harbor_env,
+            harbor_config=harbor_config,
+            agent_timeout=agent_timeout,
         )
     finally:
         if proxy_manager is not None:
