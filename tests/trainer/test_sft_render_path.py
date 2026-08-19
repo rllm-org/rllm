@@ -351,8 +351,8 @@ def test_f3_roundtrip_stamps_trainable_none(qwen_tokenizer, tmp_path):
     shares a parquet with a flagged (self-describing) row.
 
     The flag-less row's first message then *has* a ``trainable`` key (value
-    ``None``), so ``_ensure_trainable`` treats it as self-describing and passes
-    it straight to the CUSTOMIZED renderer.
+    ``None``), so the old key-presence check treated it as self-describing and
+    passed it straight to the CUSTOMIZED renderer.
 
     RED today: ``build_supervised_example`` does ``int(None)`` for the flag-less
     row -> ``TypeError: int() argument must be a string ... not 'NoneType'``.
