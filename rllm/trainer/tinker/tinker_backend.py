@@ -361,7 +361,15 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
                 beta2=self.beta2,
                 eps=self.eps,
             )
-            await optim_step_future.result_async()
+            optim_result = await optim_step_future.result_async()
+            optim_metrics = getattr(optim_result, "metrics", None) or {}
+            for key, value in optim_metrics.items():
+                if key.startswith("clock_cycle"):
+                    continue
+                bare_key = key.removesuffix(":last")
+                if key.endswith(":last") and bare_key in optim_metrics:
+                    continue
+                trainer_state.metrics[f"train/{bare_key.replace(':', '/')}"] = value
             trainer_state.extra_info["scheduled_learning_rate"] = scheduled_learning_rate
 
     # =========================================================================

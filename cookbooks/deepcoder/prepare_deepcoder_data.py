@@ -63,25 +63,40 @@ def _preprocess(example: dict, idx: int) -> dict:
     }
 
 
-def prepare_deepcoder_data(train_size: int | None = None, test_size: int | None = None):
-    train_ds = concatenate_datasets(
-        [
-            load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="primeintellect", split="train"),
-            load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="taco", split="train"),
-            load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="lcbv5", split="train"),
-        ]
-    )
-    test_ds = concatenate_datasets(
-        [
-            load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="codeforces", split="test"),
-            load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="lcbv5", split="test"),
-        ]
-    )
+def _load_subsets(names: list[str], split: str, limit: int | None):
+    subsets = []
+    remaining = limit
+    for name in names:
+        if remaining is not None and remaining <= 0:
+            break
+        subset = load_dataset(
+            "agentica-org/DeepCoder-Preview-Dataset",
+            name=name,
+            split=split,
+        )
+        if remaining is not None:
+            subset = subset.select(range(min(remaining, len(subset))))
+            remaining -= len(subset)
+        subsets.append(subset)
+    return concatenate_datasets(subsets)
 
-    if train_size:
-        train_ds = train_ds.select(range(min(train_size, len(train_ds))))
-    if test_size:
-        test_ds = test_ds.select(range(min(test_size, len(test_ds))))
+
+def prepare_deepcoder_data(
+    train_size: int | None = None,
+    test_size: int | None = None,
+    include_lcbv5: bool = True,
+):
+    train_names = ["primeintellect", "taco"]
+    test_names = ["codeforces"]
+    if include_lcbv5:
+        train_names.append("lcbv5")
+        test_names.append("lcbv5")
+    train_ds = _load_subsets(
+        train_names,
+        "train",
+        train_size,
+    )
+    test_ds = _load_subsets(test_names, "test", test_size)
 
     train_ds = train_ds.map(_preprocess, with_indices=True, writer_batch_size=10, num_proc=16)
     test_ds = test_ds.map(_preprocess, with_indices=True, writer_batch_size=10, num_proc=16)
@@ -95,9 +110,14 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--train-size", type=int, default=None, help="Cap train rows (default: full).")
     ap.add_argument("--test-size", type=int, default=None, help="Cap test rows (default: full).")
+    ap.add_argument("--exclude-lcbv5", action="store_true", help="Use only primeintellect+taco train and codeforces test.")
     args = ap.parse_args()
 
-    train, test = prepare_deepcoder_data(train_size=args.train_size, test_size=args.test_size)
+    train, test = prepare_deepcoder_data(
+        train_size=args.train_size,
+        test_size=args.test_size,
+        include_lcbv5=not args.exclude_lcbv5,
+    )
     print(f"Train: {len(train.get_data())} rows")
     print(f"Test:  {len(test.get_data())} rows")
     print("Sample train row:", train.get_data()[0])

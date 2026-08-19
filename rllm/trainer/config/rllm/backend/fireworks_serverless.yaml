@@ -22,6 +22,7 @@ training:
   beta1: 0.9
   beta2: 0.95
   eps: 1e-8
+  emit_grad_norm_metrics: basic
   max_length: 16384
   num_minibatches: 1
   default_local_dir: 'checkpoints/${rllm.trainer.project_name}/${rllm.trainer.experiment_name}'
