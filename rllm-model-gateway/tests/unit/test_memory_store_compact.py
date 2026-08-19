@@ -176,6 +176,7 @@ def test_trace_parity_dump_preserves_raw_inputs_and_eventual_graph(tmp_path):
 def test_raw_trace_record_is_dumped_before_graph_conversion(tmp_path, monkeypatch):
     store = MemoryTraceStore(compact=True, trace_parity_dump_dir=str(tmp_path))
     record = _trajectory(1)[0]
+    record["response_message"] = {"role": "assistant", "content": "", "reasoning": "raw reasoning"}
     original_add = TraceGraph.add
 
     def assert_raw_dump_exists_before_add(graph, raw_record):
@@ -186,3 +187,10 @@ def test_raw_trace_record_is_dumped_before_graph_conversion(tmp_path, monkeypatc
 
     monkeypatch.setattr(TraceGraph, "add", assert_raw_dump_exists_before_add)
     _run(store.store_trace("raw", "session", record))
+
+    dumped = TraceRecord.model_validate_json(next(tmp_path.glob("session-*/generation-0000/raw_trace_records.jsonl")).read_text())
+    graph_message = store._graphs["session"].deltas[0].response_message
+    assert dumped.response_message["reasoning"] == "raw reasoning"
+    assert "reasoning_content" not in dumped.response_message
+    assert graph_message["reasoning_content"] == "raw reasoning"
+    assert "reasoning" not in graph_message

@@ -4,7 +4,7 @@ import json
 
 import pytest
 from pydantic import ValidationError
-from rllm_model_gateway.models import TraceDelta, TraceGraph, TraceRecord
+from rllm_model_gateway.models import TraceDelta, TraceGraph, TraceRecord, canonicalize_message
 
 
 def _record(
@@ -125,15 +125,87 @@ def test_root_and_child_deltas_resolve_exactly():
     _assert_exact(graph.resolve(continuation.trace_id), continuation)
 
 
-def test_message_identity_preserves_key_order_for_byte_parity():
+def test_message_identity_canonicalizes_key_order_without_mutating_raw_input():
     parent = _record(0, [{"role": "user", "content": {"a": 1, "b": 2}}], [1])
-    same_message = {"content": {"b": 2, "a": 1}, "role": "user"}
-    child = _record(1, [same_message, {"role": "user", "content": "next"}], [1, 2])
+    child = _record(
+        1,
+        [
+            {"content": {"b": 2, "a": 1}, "role": "user"},
+            {"content": "a0", "role": "assistant"},
+            {"role": "user", "content": "next"},
+        ],
+        [1, *parent.completion_token_ids, 2],
+    )
+    raw_child = child.model_dump_json()
 
     graph = _graph([parent, child])
 
-    assert graph.deltas[1].parent_trace_id is None
-    _assert_exact(graph.resolve(child.trace_id), child)
+    assert graph.deltas[1].parent_trace_id == parent.trace_id
+    assert child.model_dump_json() == raw_child
+    assert graph.resolve(child.trace_id).messages == [canonicalize_message(message) for message in child.messages]
+
+
+def test_canonical_message_normalizes_litellm_reasoning_transport_aliases():
+    response = {
+        "role": "assistant",
+        "content": "",
+        "reasoning": "inspect the repository",
+        "tool_calls": [],
+    }
+    resent = {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "inspect the repository",
+        "tool_calls": [],
+        "provider_specific_fields": {
+            "refusal": None,
+            "reasoning": "inspect the repository",
+        },
+    }
+
+    assert canonicalize_message(response) == canonicalize_message(resent)
+    assert response["reasoning"] == "inspect the repository"
+    assert resent["provider_specific_fields"]["reasoning"] == "inspect the repository"
+
+
+def test_graph_stores_canonical_messages_without_mutating_raw_records():
+    parent = _record(0, [{"role": "user", "content": "question"}], [1, 2])
+    parent.response_message = {
+        "role": "assistant",
+        "content": "",
+        "reasoning": "inspect the repository",
+        "tool_calls": [],
+    }
+    resent_response = {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "inspect the repository",
+        "tool_calls": [],
+        "provider_specific_fields": {
+            "refusal": None,
+            "reasoning": "inspect the repository",
+        },
+    }
+    child = _record(
+        1,
+        [*parent.messages, resent_response, {"role": "tool", "tool_call_id": "call-0", "content": "result"}],
+        [*parent.prompt_token_ids, *parent.completion_token_ids, 3],
+    )
+    raw_parent = parent.model_dump_json()
+    raw_child = child.model_dump_json()
+
+    graph = _graph([parent, child])
+    delta = graph.deltas[1]
+
+    assert delta.parent_trace_id == parent.trace_id
+    assert delta.messages_suffix == [canonicalize_message(child.messages[-1])]
+    assert delta.response_message == canonicalize_message(child.response_message)
+    assert graph.resolve(child.trace_id).messages == [canonicalize_message(message) for message in child.messages]
+    assert parent.model_dump_json() == raw_parent
+    assert child.model_dump_json() == raw_child
+
+    restored = TraceGraph.model_validate_json(graph.model_dump_json())
+    assert restored.resolve(child.trace_id).messages == [canonicalize_message(message) for message in child.messages]
 
 
 @pytest.mark.parametrize("facet", ["messages", "tokens"])

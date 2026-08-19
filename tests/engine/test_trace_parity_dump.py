@@ -63,3 +63,44 @@ def test_verifier_accepts_raw_derived_parent_and_suffixes(tmp_path):
     passed, detail, *_ = verify_generation(generation_dir)
 
     assert passed, detail
+
+
+def test_verifier_accepts_canonical_graph_built_from_raw_reasoning_aliases(tmp_path):
+    root, child = _records()
+    root.response_message = {
+        "role": "assistant",
+        "content": "",
+        "reasoning": "inspect the repository",
+        "tool_calls": [],
+    }
+    child.messages = [
+        *root.messages,
+        {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [],
+            "reasoning_content": "inspect the repository",
+            "provider_specific_fields": {
+                "refusal": None,
+                "reasoning": "inspect the repository",
+            },
+        },
+        {"role": "user", "content": "three"},
+    ]
+    raw_root = root.model_dump_json()
+    raw_child = child.model_dump_json()
+    graph = TraceGraph(format="compact", version=1, deltas=[])
+    graph.add(root)
+    graph.add(child)
+
+    assert graph.deltas[1].parent_trace_id == root.trace_id
+    assert "reasoning" not in graph.deltas[0].response_message
+    assert graph.deltas[0].response_message["reasoning_content"] == "inspect the repository"
+    assert root.model_dump_json() == raw_root
+    assert child.model_dump_json() == raw_child
+
+    generation_dir = tmp_path / "session-test" / "generation-0000"
+    _write_dump(generation_dir, [root, child], graph)
+    passed, detail, *_ = verify_generation(generation_dir)
+
+    assert passed, detail

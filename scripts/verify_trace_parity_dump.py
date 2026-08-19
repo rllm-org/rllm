@@ -54,6 +54,52 @@ def _message_key(message: dict) -> str:
     return json.dumps(message, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
+def _expected_canonical_message(message: dict) -> dict:
+    """Independently model the raw-message-to-graph normalization contract.
+
+    Keep this separate from the production converter: sharing that helper would
+    make the parity check unable to detect a bug in the conversion itself.
+    """
+    normalized = json.loads(_message_key(message))
+    provider_fields = normalized.get("provider_specific_fields")
+    if provider_fields is None:
+        normalized.pop("provider_specific_fields", None)
+        provider_fields = None
+
+    reasoning_values = [value for value in (normalized.get("reasoning"), normalized.get("reasoning_content")) if value is not None]
+    if reasoning_values and all(value == reasoning_values[0] for value in reasoning_values[1:]):
+        normalized.pop("reasoning", None)
+        normalized.pop("reasoning_content", None)
+        normalized["reasoning_content"] = reasoning_values[0]
+        if isinstance(provider_fields, dict) and provider_fields.get("reasoning") == reasoning_values[0]:
+            provider_fields.pop("reasoning", None)
+    elif not reasoning_values:
+        if normalized.get("reasoning") is None:
+            normalized.pop("reasoning", None)
+        if normalized.get("reasoning_content") is None:
+            normalized.pop("reasoning_content", None)
+        if isinstance(provider_fields, dict) and provider_fields.get("reasoning") is None:
+            provider_fields.pop("reasoning", None)
+
+    if normalized.get("refusal") is None:
+        normalized.pop("refusal", None)
+    if isinstance(provider_fields, dict):
+        if provider_fields.get("refusal") is None:
+            provider_fields.pop("refusal", None)
+        if not provider_fields:
+            normalized.pop("provider_specific_fields", None)
+    return json.loads(json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False))
+
+
+def _expected_canonical_record(record: TraceRecord) -> TraceRecord:
+    return record.model_copy(
+        update={
+            "messages": [_expected_canonical_message(message) for message in record.messages],
+            "response_message": _expected_canonical_message(record.response_message),
+        }
+    )
+
+
 def _messages_start_with(values: list[dict], prefix: list[dict]) -> bool:
     return len(prefix) <= len(values) and all(_message_key(value) == _message_key(expected) for value, expected in zip(values[: len(prefix)], prefix, strict=True))
 
@@ -107,7 +153,8 @@ def _find_expected_parent(record: TraceRecord, states: OrderedDict[str, _Expecte
 def _expected_structure(records: list[TraceRecord]) -> list[_ExpectedTrace]:
     """Model add/leaf-replacement semantics from raw records, without a graph."""
     states: OrderedDict[str, _ExpectedTrace] = OrderedDict()
-    for record in records:
+    for raw_record in records:
+        record = _expected_canonical_record(raw_record)
         current = states.get(record.trace_id)
         if current is None:
             states[record.trace_id] = _ExpectedTrace(record=record, parent_trace_id=_find_expected_parent(record, states))
