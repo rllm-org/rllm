@@ -22,10 +22,13 @@
 #
 # Required before launch:
 #   export FIREWORKS_API_KEY=...
-#   export RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR=/local/nvme/z6xi3xkh-parity-001
 #   rllm tunnel setup  # once; register an ngrok wildcard such as *.example.com
 #   rllm dataset pull tb-v2-debug
 #   rllm dataset pull harbor:terminal-bench@2.0
+#
+# Raw records and graphs default to:
+#   /data/home/thw/trace-dumps/z6xi3xkh-parity-001
+# Set RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR only to override that path.
 #
 # With a registered wildcard, do not run `rllm tunnel up` and do not pass a
 # tunnel or port here. AgentTrainer creates both automatically. To deliberately
@@ -49,7 +52,7 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
 
-: "${RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR:?Set RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR to a unique local path with ample free space}"
+export RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR="${RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR:-/data/home/thw/trace-dumps/z6xi3xkh-parity-001}"
 
 if [[ "$RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR" != /* ]]; then
     echo "RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR must be an absolute path" >&2
