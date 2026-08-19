@@ -102,6 +102,46 @@ def _install_inference_header_patch() -> None:
 _install_inference_header_patch()
 
 
+def _install_httpx_response_cycle_patch() -> None:
+    """Release closed async responses without waiting for cyclic GC.
+
+    httpx 0.28's ``BoundAsyncStream`` owns its ``Response`` while the response
+    owns the stream.  ``aclose()`` closes the transport but leaves that
+    back-reference intact, so the response body remains reachable until cyclic
+    GC runs.  Fireworks routing-matrix responses are several MiB each, and the
+    standalone gateway deliberately makes older-generation GC infrequent; at
+    rollout concurrency this otherwise turns transient response bodies into
+    monotonically growing worker RSS.
+
+    Once ``aclose`` has finished, httpx has already recorded ``elapsed`` and
+    released the connection, so the back-reference has no remaining purpose.
+    ``BoundAsyncStream`` is internal to the pinned httpx version, so an
+    incompatible future httpx change should fail loudly instead of silently
+    restoring unbounded worker memory.
+    """
+    from httpx._client import BoundAsyncStream
+
+    orig = BoundAsyncStream.aclose
+    if getattr(orig, "_rllm_response_cycle_patch", False):
+        return
+
+    async def _aclose(self):  # noqa: ANN001 - matches httpx's private method
+        try:
+            return await orig(self)
+        finally:
+            # BoundAsyncStream.aclose has already consumed this reference to set
+            # Response.elapsed. Clearing it breaks Response <-> stream.
+            if getattr(self, "_response", None) is not None:
+                self._response = None
+
+    _aclose._rllm_response_cycle_patch = True  # type: ignore[attr-defined]
+    BoundAsyncStream.aclose = _aclose
+    logger.info("Installed httpx closed-response cycle patch")
+
+
+_install_httpx_response_cycle_patch()
+
+
 def _install_httpx_orjson_patch() -> None:
     """Serialize httpx ``json=`` request bodies with orjson instead of stdlib json.
 
