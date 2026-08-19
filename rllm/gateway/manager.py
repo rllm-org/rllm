@@ -40,7 +40,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from rllm_model_gateway.client import AsyncGatewayClient, GatewayClient
-from rllm_model_gateway.models import TraceRecord
+from rllm_model_gateway.models import TraceGraph, TraceRecord
 
 from rllm.env import env_float
 
@@ -196,12 +196,12 @@ class GatewayManager:
         self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
         configured_port = gw_cfg.get("port", None)
         self.port: int = int(configured_port) if configured_port is not None else (_find_free_port() if self.tunnel_backend else DEFAULT_GATEWAY_PORT)
-        self.store: str = gw_cfg.get("store", "memory")
+        self.store: str = os.environ.get("RLLM_GATEWAY_STORE", gw_cfg.get("store", "compact"))
         self.db_path: str | None = gw_cfg.get("db_path", None)
-        if self.store not in ("memory", "sqlite"):
-            raise ValueError(f"rllm.gateway.store must be 'memory' or 'sqlite', got {self.store!r}")
-        if self.store == "memory" and self.db_path:
-            raise ValueError("rllm.gateway.db_path is set but store='memory'; set store='sqlite' or clear db_path")
+        if self.store not in ("memory", "compact", "sqlite"):
+            raise ValueError(f"rllm.gateway.store must be 'memory', 'compact' or 'sqlite', got {self.store!r}")
+        if self.store in ("memory", "compact") and self.db_path:
+            raise ValueError(f"rllm.gateway.db_path is set but store={self.store!r} is in-memory; set store='sqlite' or clear db_path")
         _model_cfg = config.get("model", {})
         self.model: str | None = _model_cfg.get("tokenizer_model") or _model_cfg.get("name", None)
 
@@ -363,9 +363,13 @@ class GatewayManager:
             return f"{base}/sessions/{session_id}/v1"
         return self.client.get_session_url(session_id)
 
+    @property
+    def _trace_format(self) -> str | None:
+        return "compact" if self.store == "compact" else None
+
     def get_traces(self, session_id: str) -> list[TraceRecord]:
         self.client.flush()
-        return self.client.get_session_traces(session_id)
+        return self.client.get_session_traces(session_id, format=self._trace_format)
 
     # -- Async session / trace API -------------------------------------------
 
@@ -375,7 +379,11 @@ class GatewayManager:
 
     async def aget_traces(self, session_id: str) -> list[TraceRecord]:
         await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
-        return await self.async_client.get_session_traces(session_id)
+        return await self.async_client.get_session_traces(session_id, format=self._trace_format)
+
+    async def aget_trace_graph(self, session_id: str) -> TraceGraph:
+        await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
+        return await self.async_client.get_session_traces(session_id, format="compact", flatten=False)
 
     async def adelete_session(self, session_id: str) -> int:
         """Delete a session and all its accumulated traces. Returns count removed."""

@@ -84,12 +84,11 @@ def create_store(config: GatewayConfig) -> TraceStore:
         from rllm_model_gateway.store.sqlite_store import SqliteTraceStore
 
         return SqliteTraceStore(db_path=config.db_path)
-    elif worker == "memory":
+    if worker in ("memory", "compact"):
         from rllm_model_gateway.store.memory_store import MemoryTraceStore
 
-        return MemoryTraceStore()
-    else:
-        raise ValueError(f"Unknown store worker: {worker}")
+        return MemoryTraceStore(compact=worker == "compact")
+    raise ValueError(f"Unknown store worker: {worker}")
 
 
 # ------------------------------------------------------------------
@@ -273,7 +272,11 @@ def create_app(
         session_id: str,
         since: float | None = Query(None),
         limit: int | None = Query(None),
+        format: str = Query("default"),
     ):
+        # Only compact stores serve the graph; other stores retain the legacy list.
+        if format == "compact" and getattr(store, "_compact", False):
+            return await store.get_session_traces_compact(session_id, since=since, limit=limit)
         traces = await store.get_session_traces(session_id, since=since, limit=limit)
         return traces
 
@@ -522,7 +525,7 @@ def main() -> None:
         help="Worker URL (can be repeated)",
     )
     parser.add_argument("--db-path", type=str, default=None)
-    parser.add_argument("--store", type=str, default=None, choices=["sqlite", "memory"])
+    parser.add_argument("--store", type=str, default=None, choices=["sqlite", "memory", "compact"])
     parser.add_argument("--log-level", type=str, default=None)
     parser.add_argument(
         "--model",

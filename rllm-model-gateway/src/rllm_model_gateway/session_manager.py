@@ -52,12 +52,12 @@ class SessionManager:
 
     async def get_session_info(self, session_id: str) -> SessionInfo | None:
         """Return session info including trace count."""
-        traces = await self.store.get_session_traces(session_id)
-        if not traces and session_id not in self._created_at:
+        count = await self.store.count_session_traces(session_id) if hasattr(self.store, "count_session_traces") else len(await self.store.get_session_traces(session_id))
+        if not count and session_id not in self._created_at:
             return None
         return SessionInfo(
             session_id=session_id,
-            trace_count=len(traces),
+            trace_count=count,
             created_at=self._created_at.get(session_id),
             metadata=self._metadata.get(session_id, {}),
         )

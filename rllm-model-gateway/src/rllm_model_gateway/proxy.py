@@ -244,6 +244,8 @@ class ReverseProxy:
         # reads only token-id/logprob/message fields, and serializing the raw
         # dicts (≤120K-token prompt + full response) is the dominant per-request
         # CPU cost on the event loop at high concurrency. Enable for debugging.
+        if capture_raw_payloads and getattr(store, "_compact", False):
+            raise ValueError("capture_raw_payloads is incompatible with compact traces")
         self.capture_raw_payloads = capture_raw_payloads
         # Whitespace heartbeat for slow non-streaming completions: middleboxes
         # on the response path (Cloudflare quick tunnel: 120s; ngrok: ~300s;

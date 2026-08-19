@@ -137,8 +137,7 @@ def test_cumulative_local_streaming_emits_sse_and_ingests():
 
 
 def test_cumulative_local_replay_regenerates_in_place_without_advancing():
-    """A duplicate resend regenerates (fresh sample) and overwrites the turn in
-    place — handler is called again, turn_count does not advance, no reset."""
+    """A duplicate resend regenerates without advancing the accumulator."""
     record = []
     proxy = _make_proxy(_completion_handler(record))
 

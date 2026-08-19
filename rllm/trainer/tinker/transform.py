@@ -14,7 +14,7 @@ from tinker_cookbook.supervised.common import create_rightshifted_model_input_an
 from rllm.engine.rollout.tinker_engine import _flat_token_input_length, _flat_token_input_to_model_input
 from rllm.engine.rollout.types import TinkerTokenInput
 from rllm.trainer.algorithms import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
-from rllm.types import Trajectory, TrajectoryGroup
+from rllm.types import StepDelta, Trajectory, TrajectoryDelta, TrajectoryGroup, _index_step_deltas, _partition_steps_by_lineage, _resolve_step_delta_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ def _flatten_token_input(token_input: TinkerTokenInput) -> TinkerTokenInput:
     return flattened
 
 
-def _trajectory_oov_token(traj: Trajectory, vocab_size: int) -> int | None:
+def _trajectory_oov_token(traj: Trajectory | TrajectoryDelta, vocab_size: int) -> int | None:
     """Return the first out-of-vocab token id (>= ``vocab_size``) in the trajectory, or None.
 
     Sampled ids come back raw from the serving stack; a rare corrupt id past the
@@ -52,30 +52,14 @@ def _trajectory_oov_token(traj: Trajectory, vocab_size: int) -> int | None:
         for t in step.response_ids or []:
             if isinstance(t, int) and t >= vocab_size:
                 return t
-        for elem in _flatten_token_input(cast(TinkerTokenInput, step.prompt_ids or [])):
+        prompt = step.prompt_ids_suffix if isinstance(step, StepDelta) else step.prompt_ids
+        for elem in _flatten_token_input(cast(TinkerTokenInput, prompt or [])):
             if isinstance(elem, int) and elem >= vocab_size:
                 return elem
     return None
 
 
-def _partition_steps_by_lineage(steps: list) -> list[list]:
-    """Group steps by gateway ``lineage_id`` (``step.metadata``), first-appearance
-    order. Steps of one lineage stay together even when interleaved in time with
-    other lineages. Untagged steps (no ``lineage_id`` — cumulative mode off, or
-    eval) share the ``None`` key → a single partition, i.e. the original behavior.
-    """
-    groups: dict = {}
-    order: list = []
-    for step in steps:
-        lid = (step.metadata or {}).get("lineage_id")
-        if lid not in groups:
-            groups[lid] = []
-            order.append(lid)
-        groups[lid].append(step)
-    return [groups[lid] for lid in order]
-
-
-def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[tinker.Datum]:
+def trajectory_to_datums(traj: Trajectory | TrajectoryDelta, router_replay: bool = False) -> list[tinker.Datum]:
     """
     Return one or more Datum objects corresponding to the trajectory.
     If the sequence grows by appending, i.e., each successive observation contains
@@ -139,11 +123,14 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
         )
 
     data: list[tinker.Datum] = []
+    delta_index = _index_step_deltas(traj.steps)[0] if isinstance(traj, TrajectoryDelta) else {}
     for lineage_steps in _partition_steps_by_lineage(traj.steps):
         SequenceAccumulator.clear()  # each lineage merges independently
+        previous = None
         for step in lineage_steps:
-            token_input = cast(TinkerTokenInput, step.prompt_ids)
-            token_input_flat = _flatten_token_input(token_input)
+            direct_child = isinstance(step, StepDelta) and previous is not None and step.parent_step_id == previous.id
+            prompt = step.prompt_ids_suffix if direct_child else (_resolve_step_delta_prompt(step, delta_index) if isinstance(step, StepDelta) else step.prompt_ids)
+            token_input_flat = _flatten_token_input(cast(TinkerTokenInput, prompt))
 
             output_token_ids, output_logprobs = step.response_ids, step.logprobs
             assert len(output_logprobs) > 0, "output_logprobs is empty. Cannot build Tinker Datum for training."
@@ -156,7 +143,7 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
             else:  # float
                 advantages = [step.advantage] * len(output_token_ids)
 
-            if len(SequenceAccumulator.full_sequence) == 0:
+            if not SequenceAccumulator.full_sequence or direct_child:
                 delta_token_input_flat = token_input_flat
             elif _is_prefix(SequenceAccumulator.full_sequence, token_input_flat):
                 delta_token_input_flat = token_input_flat[len(SequenceAccumulator.full_sequence) :]
@@ -174,6 +161,7 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
             if router_replay:
                 step_rm = step.routing_matrices or []
                 SequenceAccumulator.routing_matrices.extend([""] * delta_token_input_length + (list(step_rm) if step_rm else [""] * len(output_token_ids)))
+            previous = step
 
         if SequenceAccumulator.full_sequence:
             data.append(make_datum_from_state())

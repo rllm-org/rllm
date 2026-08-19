@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from rllm.types import Episode
+from rllm.types import Episode, TrajectoryDelta
 
 
 class EpisodeLogger:
@@ -100,7 +100,8 @@ class EpisodeLogger:
             "trajectories": [],
         }
 
-        for traj in episode.trajectories:
+        for trajectory in episode.trajectories:
+            traj = trajectory.resolve() if isinstance(trajectory, TrajectoryDelta) else trajectory
             traj_data = {
                 "name": traj.name,
                 "uid": traj.uid,
