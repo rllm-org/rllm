@@ -473,7 +473,7 @@ def test_finish_episode_preserves_flat_evaluator_contract():
     assert result.trajectories[0].signals == {"custom": 0.25}
 
 
-def test_manager_keeps_legacy_fetch_flat_and_exposes_graph_fetch():
+def test_manager_keeps_legacy_fetch_flat_and_exposes_async_graph_fetch():
     from rllm_model_gateway.models import TraceGraph
 
     from rllm.gateway.manager import GatewayManager
@@ -502,7 +502,6 @@ def test_manager_keeps_legacy_fetch_flat_and_exposes_graph_fetch():
     manager.store = "compact"
     manager._client = SyncClient()
     assert manager.get_traces("s") == []
-    assert manager.get_trace_graph("s") is graph
     manager._async_client = AsyncClient()
 
     async def fetch():
@@ -510,7 +509,7 @@ def test_manager_keeps_legacy_fetch_flat_and_exposes_graph_fetch():
         assert await manager.aget_trace_graph("s") is graph
 
     asyncio.run(fetch())
-    assert manager.client.calls == [{"format": "compact"}, {"format": "compact", "flatten": False}]
+    assert manager.client.calls == [{"format": "compact"}]
     assert manager.async_client.calls == [{"format": "compact"}, {"format": "compact", "flatten": False}]
 
 

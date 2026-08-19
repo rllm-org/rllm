@@ -371,10 +371,6 @@ class GatewayManager:
         self.client.flush()
         return self.client.get_session_traces(session_id, format=self._trace_format)
 
-    def get_trace_graph(self, session_id: str) -> TraceGraph:
-        self.client.flush()
-        return self.client.get_session_traces(session_id, format="compact", flatten=False)
-
     # -- Async session / trace API -------------------------------------------
 
     async def acreate_session(self, session_id: str, is_validation: bool = False, sampling_params: dict[str, Any] | None = None) -> str:
