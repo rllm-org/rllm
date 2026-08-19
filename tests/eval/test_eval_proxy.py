@@ -187,3 +187,16 @@ class TestSamplingExtraPassthrough:
         pm = EvalProxyManager(provider="fireworks", model_name=self.FIREWORKS_MODEL, api_key="fw-key")
 
         assert "extra_body" not in pm.build_proxy_config()["model_list"][0]["litellm_params"]
+
+
+class TestOrcaRouter:
+    def test_build_proxy_config_orcarouter(self):
+        """OrcaRouter should route through the OpenAI adapter pinned to its api_base."""
+        pm = EvalProxyManager(provider="orcarouter", model_name="openai/gpt-5.5", api_key="ok-orca-key")
+        config = pm.build_proxy_config()
+
+        entry = config["model_list"][0]
+        assert entry["model_name"] == "openai/gpt-5.5"
+        assert entry["litellm_params"]["model"] == "openai/openai/gpt-5.5"
+        assert entry["litellm_params"]["api_key"] == "ok-orca-key"
+        assert entry["litellm_params"]["api_base"] == "https://api.orcarouter.ai/v1"

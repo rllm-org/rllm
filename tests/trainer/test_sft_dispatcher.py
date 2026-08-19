@@ -77,8 +77,9 @@ def test_output_dir_and_checkpoint_dir():
 
 
 def test_overrides_escape_hatch():
-    cfg = TinkerSFTBackend(_spec(overrides={"data": {"renderer_name": "qwen3"}})).build_config()
+    cfg = TinkerSFTBackend(_spec(overrides={"data": {"renderer_name": "qwen3", "chat_template_kwargs": {"enable_thinking": True}}})).build_config()
     assert cfg.data.renderer_name == "qwen3"
+    assert cfg.data.chat_template_kwargs.enable_thinking is True
 
 
 def test_validate_spec_accepts_messages():
@@ -162,6 +163,38 @@ def test_build_sft_data_rejects_structured_chat_template_fallback(monkeypatch):
     for train_data, val_data in ((structured, None), (_ds(), structured)):
         with pytest.raises(SFTConfigError, match="cannot represent reasoning"):
             build_sft_data(config, train_data, val_data)
+
+
+def test_build_sft_data_passes_chat_template_kwargs(monkeypatch):
+    config = OmegaConf.create(
+        {
+            "model": {"name": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"},
+            "data": {
+                "renderer_name": "nemotron3",
+                "chat_template_kwargs": {"truncate_history_thinking": False},
+                "rllm": {"tokenize_and_mask_method": "cumulative"},
+            },
+        }
+    )
+    captured = {}
+    renderer = object()
+
+    monkeypatch.setattr("tinker_cookbook.tokenizer_utils.get_tokenizer", lambda _: object())
+
+    def fake_resolve(*_args, **kwargs):
+        captured["chat_template_kwargs"] = kwargs.get("chat_template_kwargs")
+        return SimpleNamespace(renderer=renderer, name="nemotron-3", source="prime")
+
+    monkeypatch.setattr("rllm.renderers.resolve", fake_resolve)
+    monkeypatch.setattr(
+        "rllm.trainer.sft.tinker_dataset.create_tinker_sft_datasets",
+        lambda **kwargs: (kwargs["renderer"], None),
+    )
+
+    _, train_dataset, _ = build_sft_data(config, _ds(), None)
+
+    assert train_dataset is renderer
+    assert captured["chat_template_kwargs"] == {"truncate_history_thinking": False}
 
 
 def test_dispatch_tinker_runs_lifecycle(monkeypatch):

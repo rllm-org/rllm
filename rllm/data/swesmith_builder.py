@@ -65,7 +65,7 @@ def bug_in_test_file(task_dir: Path) -> bool:
     return any(t in f2p_files for t in targets)
 
 
-def list_task_ids() -> list[str]:
+def list_task_ids(revision: str | None = None) -> list[str]:
     """List every task-dir name in the HF repo from one tree listing.
 
     A repo-tree listing is a handful of paginated API calls — unlike the
@@ -74,7 +74,11 @@ def list_task_ids() -> list[str]:
     """
     from huggingface_hub import HfApi
 
-    files = HfApi().list_repo_files(REPO_ID, repo_type="dataset")
+    files = HfApi().list_repo_files(
+        REPO_ID,
+        repo_type="dataset",
+        revision=revision,
+    )
     return sorted({f.split("/", 1)[0] for f in files if "/" in f})
 
 
@@ -98,7 +102,10 @@ def spread_task_ids(ids: list[str], n: int) -> list[str]:
     return sorted(picked)
 
 
-def _snapshot_download_with_retry(patterns: list[str] | None) -> Path:
+def _snapshot_download_with_retry(
+    patterns: list[str] | None,
+    revision: str | None = None,
+) -> Path:
     """``snapshot_download`` that sleeps out HF 429 rate-limit windows.
 
     The free tier allows 5000 resolver requests per 5 minutes and every file
@@ -111,7 +118,14 @@ def _snapshot_download_with_retry(patterns: list[str] | None) -> Path:
 
     while True:
         try:
-            return Path(snapshot_download(REPO_ID, repo_type="dataset", allow_patterns=patterns))
+            return Path(
+                snapshot_download(
+                    REPO_ID,
+                    repo_type="dataset",
+                    revision=revision,
+                    allow_patterns=patterns,
+                )
+            )
         except HfHubHTTPError as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
             if status != 429:
@@ -164,6 +178,7 @@ def build_benchmark(
     out_dir: str | Path,
     catalog_entry: dict | None = None,
     task_ids: list[str] | None = None,
+    revision: str | None = None,
     limit: int | None = None,
     default_agent: str = "mini-swe-agent",
     clean: bool = False,
@@ -179,6 +194,8 @@ def build_benchmark(
             ``default_agent``/``limit`` are read from it when present.
         task_ids: Build only these instance ids (downloads just their files).
             Default: derived from ``limit`` when given, else the full repo.
+        revision: Hugging Face dataset revision used for task discovery and
+            snapshot download.
         limit: Keep only N solvable tasks. Without explicit ``task_ids`` the
             download itself is capped to ``limit`` (+screen margin) ids picked
             round-robin across repos — not first-N-alphabetical.
@@ -203,7 +220,10 @@ def build_benchmark(
     # With a limit but no explicit ids, select the download set up front from
     # one repo-tree listing so a capped build never fetches all ~33K files.
     if task_ids is None and limit is not None:
-        task_ids = spread_task_ids(list_task_ids(), int(limit * _SCREEN_MARGIN) + 10)
+        task_ids = spread_task_ids(
+            list_task_ids(revision=revision),
+            int(limit * _SCREEN_MARGIN) + 10,
+        )
         print(f"[swesmith] selected {len(task_ids)} candidate tasks across repos for limit={limit}", flush=True)
 
     patterns = [f"{t}/*" for t in task_ids] if task_ids else None
@@ -214,7 +234,10 @@ def build_benchmark(
             f"[swesmith] downloading the FULL {REPO_ID} repo (~4.8K tasks, ~33K files).\n[swesmith] HF free-tier rate limits make this take ~35-40 min; progress resumes from cache if interrupted.",
             flush=True,
         )
-    cache = _snapshot_download_with_retry(patterns)
+    cache = _snapshot_download_with_retry(
+        patterns,
+        revision=revision,
+    )
 
     candidates = sorted(d for d in cache.iterdir() if d.is_dir() and (d / "task.toml").exists())
     if task_ids:

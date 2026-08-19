@@ -15,6 +15,7 @@ from rllm.trainer.sft.backend import SFTConfigError  # noqa: E402
 from rllm.trainer.sft.tinker_dataset import (  # noqa: E402
     TinkerSFTDataset,
     count_loss_tokens,
+    create_tinker_sft_datasets,
 )
 
 
@@ -90,14 +91,37 @@ def test_hosted_configs_default_to_token_mean(backend):
     assert config.data.rllm.loss_reduction == "token_mean"
 
 
-def test_final_partial_batch_is_not_dropped():
+def test_final_partial_batch_is_dropped_by_default():
     dataset = TinkerSFTDataset(
         _dataset([2, 2, 2]),
         renderer=_TokenRenderer(),
         batch_size=2,
     )
+    assert len(dataset) == 1
+
+
+def test_drop_last_false_keeps_final_partial_batch():
+    dataset = TinkerSFTDataset(
+        _dataset([2, 2, 2]),
+        renderer=_TokenRenderer(),
+        batch_size=2,
+        drop_last=False,
+    )
     assert len(dataset) == 2
     assert len(dataset.get_batch(1)) == 1
+
+
+def test_validation_keeps_final_partial_batch():
+    _, val = create_tinker_sft_datasets(
+        train_data=_dataset([2, 2]),
+        val_data=_dataset([2, 2, 2]),
+        renderer=_TokenRenderer(),
+        batch_size=2,
+        val_batch_size=2,
+    )
+    assert val is not None
+    assert len(val) == 2
+    assert len(val.get_batch(1)) == 1
 
 
 def test_overlength_error_is_explicit_opt_in():
