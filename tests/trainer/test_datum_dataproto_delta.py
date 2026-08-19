@@ -185,56 +185,51 @@ def test_buffer_segment_count_flat_delta_parity():
 
 @pytest.fixture
 def verl_transform(monkeypatch):
-    """Load the real converter with tiny import stubs; no optional Verl skip."""
-    stubbed = False
-    try:
-        module = importlib.import_module("rllm.trainer.verl.transform")
-    except ModuleNotFoundError:
-        stubbed = True
-        verl = ModuleType("verl")
-        verl.__path__ = []
-        protocol = ModuleType("verl.protocol")
+    """Load the converter against deterministic verl stubs; the helpers below cannot normalize a real DataProto."""
+    verl = ModuleType("verl")
+    verl.__path__ = []
+    protocol = ModuleType("verl.protocol")
 
-        class DataProto:
-            @classmethod
-            def from_dict(cls, tensors, non_tensors, meta_info):
-                value = cls()
-                value.batch = tensors
-                value.non_tensor_batch = non_tensors
-                value.meta_info = meta_info
-                return value
+    class DataProto:
+        @classmethod
+        def from_dict(cls, tensors, non_tensors, meta_info):
+            value = cls()
+            value.batch = tensors
+            value.non_tensor_batch = non_tensors
+            value.meta_info = meta_info
+            return value
 
-        protocol.DataProto = DataProto
-        utils = ModuleType("verl.utils")
-        utils.__path__ = []
-        torch_functional = ModuleType("verl.utils.torch_functional")
+    protocol.DataProto = DataProto
+    utils = ModuleType("verl.utils")
+    utils.__path__ = []
+    torch_functional = ModuleType("verl.utils.torch_functional")
 
-        def pad_sequence_to_length(value, max_length, pad_value, left_pad=False):
-            if value.shape[1] >= max_length:
-                return value
-            padding = torch.full((value.shape[0], max_length - value.shape[1]), pad_value, dtype=value.dtype)
-            return torch.cat((padding, value), dim=1) if left_pad else torch.cat((value, padding), dim=1)
+    def pad_sequence_to_length(value, max_length, pad_value, left_pad=False):
+        if value.shape[1] >= max_length:
+            return value
+        padding = torch.full((value.shape[0], max_length - value.shape[1]), pad_value, dtype=value.dtype)
+        return torch.cat((padding, value), dim=1) if left_pad else torch.cat((value, padding), dim=1)
 
-        torch_functional.pad_sequence_to_length = pad_sequence_to_length
-        for name, stub in {
-            "verl": verl,
-            "verl.protocol": protocol,
-            "verl.utils": utils,
-            "verl.utils.torch_functional": torch_functional,
-        }.items():
-            monkeypatch.setitem(sys.modules, name, stub)
-        import rllm.engine.rollout as rollout
+    torch_functional.pad_sequence_to_length = pad_sequence_to_length
+    for name, stub in {
+        "verl": verl,
+        "verl.protocol": protocol,
+        "verl.utils": utils,
+        "verl.utils.torch_functional": torch_functional,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, stub)
+    import rllm.engine.rollout as rollout
 
-        monkeypatch.setattr(rollout, "VerlEngine", object, raising=False)
-        module = importlib.import_module("rllm.trainer.verl.transform")
+    monkeypatch.setattr(rollout, "VerlEngine", object, raising=False)
+    sys.modules.pop("rllm.trainer.verl.transform", None)
+    module = importlib.import_module("rllm.trainer.verl.transform")
     try:
         yield module
     finally:
-        if stubbed:
-            sys.modules.pop("rllm.trainer.verl.transform", None)
-            package = sys.modules.get("rllm.trainer.verl")
-            if getattr(package, "transform", None) is module:
-                delattr(package, "transform")
+        sys.modules.pop("rllm.trainer.verl.transform", None)
+        package = sys.modules.get("rllm.trainer.verl")
+        if getattr(package, "transform", None) is module:
+            delattr(package, "transform")
 
 
 def _routing(length, seed):
