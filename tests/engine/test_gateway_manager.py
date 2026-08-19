@@ -1,6 +1,7 @@
 """Unit tests for GatewayManager store-backend selection and validation."""
 
 import socket
+from pathlib import Path
 
 import pytest
 from omegaconf import OmegaConf
@@ -24,6 +25,10 @@ class TestGatewayStoreSelection:
         gw = GatewayManager(_make_config(), mode="thread")
         assert gw.store == "compact"
         assert gw.db_path is None
+
+    def test_training_config_defaults_to_compact(self):
+        config = OmegaConf.load(Path(__file__).parents[2] / "rllm/trainer/config/rllm/base.yaml")
+        assert config.gateway.store == "compact"
 
     def test_explicit_memory_store(self):
         gw = GatewayManager(_make_config(store="memory"), mode="thread")
