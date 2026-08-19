@@ -5,15 +5,19 @@ on:
     branches: [main]
     paths:
       - "rllm/engine/rollout/**"
+      - "rllm/gateway/tinker_adapter.py"
       - "rllm/trainer/tinker/**"
       - "tests/engine/test_tinker_engine.py"
+      - "tests/test_tinker_adapter_cumulative.py"
       - ".github/workflows/test-tinker.yml"
   pull_request:
     branches: [main]
     paths:
       - "rllm/engine/rollout/**"
+      - "rllm/gateway/tinker_adapter.py"
       - "rllm/trainer/tinker/**"
       - "tests/engine/test_tinker_engine.py"
+      - "tests/test_tinker_adapter_cumulative.py"
       - ".github/workflows/test-tinker.yml"
   workflow_dispatch:
 
@@ -35,4 +39,4 @@ jobs:
         run: uv sync --extra tinker --extra dev
 
       - name: Run Tinker engine tests
-        run: uv run pytest tests/engine/test_tinker_engine.py -v
+        run: uv run pytest tests/engine/test_tinker_engine.py tests/test_tinker_adapter_cumulative.py -v
