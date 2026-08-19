@@ -1,6 +1,6 @@
 """Training-side client for interacting with the model gateway."""
 
-from typing import Any
+from typing import Any, Literal, overload
 
 import httpx
 
@@ -239,13 +239,21 @@ class AsyncGatewayClient:
 
     # -- Trace retrieval ---------------------------------------------------
 
+    @overload
+    async def get_session_traces(self, session_id: str, since: float | None = None, limit: int | None = None, format: str | None = None, *, flatten: Literal[True] = True) -> list[TraceRecord]: ...
+
+    @overload
+    async def get_session_traces(self, session_id: str, since: float | None = None, limit: int | None = None, format: str | None = None, *, flatten: Literal[False]) -> TraceGraph: ...
+
     async def get_session_traces(
         self,
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
         format: str | None = None,
-    ) -> list[TraceRecord]:
+        *,
+        flatten: bool = True,
+    ) -> list[TraceRecord] | TraceGraph:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
@@ -255,7 +263,12 @@ class AsyncGatewayClient:
             params["format"] = format
         resp = await self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
-        return _parse_traces(resp.json())
+        data = resp.json()
+        if flatten:
+            return _parse_traces(data)
+        if not isinstance(data, dict):
+            raise ValueError("gateway did not return a compact trace graph")
+        return TraceGraph.model_validate(data)
 
     async def get_trace(self, trace_id: str) -> TraceRecord:
         resp = await self._http.get(f"{self.gateway_url}/traces/{trace_id}")

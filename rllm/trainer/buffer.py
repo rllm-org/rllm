@@ -28,7 +28,7 @@ from rllm.trainer.algorithms import (
 from rllm.trainer.algorithms.transform import transform_episodes_to_trajectory_groups
 from rllm.trainer.metrics_aggregator import MetricsAggregator
 from rllm.trainer.sync_coordinator import SyncCoordinator
-from rllm.types import INFRA_ERROR_REASONS, Episode, TerminationReason, TrajectoryGroup
+from rllm.types import INFRA_ERROR_REASONS, Episode, StepDelta, TerminationReason, TrajectoryDelta, TrajectoryGroup, _index_step_deltas, _resolve_step_delta_prompt, _trajectory_prompt_lengths
 from rllm.utils.group_summary import format_group_finished
 
 logger = logging.getLogger(__name__)
@@ -391,7 +391,7 @@ class TrajectoryGroupBuffer:
 
             # Episode-level totals across all trajectories
             total_turns = sum(len(traj.steps) for traj in ep.trajectories)
-            total_prompt_tokens = sum(len(s.prompt_ids) for traj in ep.trajectories for s in traj.steps)
+            total_prompt_tokens = sum(length for traj in ep.trajectories for length in _trajectory_prompt_lengths(traj))
             total_response_tokens = sum(len(s.response_ids) for traj in ep.trajectories for s in traj.steps)
             self._aggregator.record("episode/num_turns", total_turns)
             self._aggregator.record("episode/prompt_tokens", total_prompt_tokens)
@@ -459,13 +459,17 @@ class TrajectoryGroupBuffer:
         transform's datum split. =1 for a healthy cumulative trajectory (all
         turns merge into one row); >1 when the prefix chain breaks.
         """
+        by_id = _index_step_deltas(traj.steps)[0] if isinstance(traj, TrajectoryDelta) else {}
         full: list[int] | None = None
         segments = 0
+        previous = None
         for step in traj.steps:
-            ids = list(step.prompt_ids)
-            if full is None or ids[: len(full)] != full:
+            direct = isinstance(step, StepDelta) and previous is not None and step.parent_step_id == previous.id
+            prompt = list(step.prompt_ids_suffix) if direct else (_resolve_step_delta_prompt(step, by_id) if isinstance(step, StepDelta) else list(step.prompt_ids))
+            if full is None or (not direct and prompt[: len(full)] != full):
                 segments += 1
-            full = ids + list(step.response_ids)
+            full = [*(full or []), *prompt, *step.response_ids] if direct else [*prompt, *step.response_ids]
+            previous = step
         return max(segments, 1)
 
     def _log_prompt_group_finished(
