@@ -26,22 +26,6 @@ from rllm.trainer.sft.backend import SFTConfigError
 logger = logging.getLogger(__name__)
 
 
-def _ensure_trainable(conversation: list[Message], last_only: bool) -> list[Message]:
-    """Legacy trainable-flag derivation (superseded by :mod:`rllm.data.sft_schema`).
-
-    Retained as an importable helper for callers/tests that still reference it;
-    the render path below now normalizes via the schema instead. Self-describing
-    rows (e.g. from ``from-eval``'s automerge) already carry the flag and are
-    returned untouched. A row without flags gets a derived default: assistant
-    messages train (only the *last* when ``last_only``), reproducing the legacy
-    ``ALL_ASSISTANT_MESSAGES`` / ``LAST_ASSISTANT_MESSAGE`` behavior.
-    """
-    if conversation and isinstance(conversation[0], dict) and "trainable" in conversation[0]:
-        return conversation
-    last_asst = max((i for i, m in enumerate(conversation) if m.get("role") == "assistant"), default=-1)
-    return [{**m, "trainable": m.get("role") == "assistant" and (not last_only or i == last_asst)} for i, m in enumerate(conversation)]
-
-
 def _row_context(conversation, limit: int = 400) -> str:
     """A truncated repr of a failing conversation, for actionable errors."""
     text = repr(conversation)
