@@ -25,9 +25,9 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 if TYPE_CHECKING:
     from rllm.engine.rollout import ModelOutput
@@ -404,6 +404,46 @@ def resolve_step_deltas(deltas: list[StepDelta]) -> list[Step]:
     return list(by_id.values())
 
 
+def _index_step_deltas(deltas: list[StepDelta]) -> tuple[dict[str, StepDelta], dict[str, int]]:
+    by_id: dict[str, StepDelta] = {}
+    prompt_lengths: dict[str, int] = {}
+    for delta in deltas:
+        if delta.id in by_id:
+            raise ValueError(f"duplicate step id {delta.id!r}")
+        parent = None if delta.parent_step_id is None else by_id.get(delta.parent_step_id)
+        if delta.parent_step_id is not None and parent is None:
+            raise ValueError(f"step {delta.id!r}: parent {delta.parent_step_id!r} is not earlier")
+        prompt_lengths[delta.id] = len(delta.prompt_ids_suffix) + (0 if parent is None else prompt_lengths[parent.id] + len(parent.response_ids))
+        by_id[delta.id] = delta
+    return by_id, prompt_lengths
+
+
+def _resolve_step_delta_prompt(delta: StepDelta, by_id: dict[str, StepDelta]) -> list[int]:
+    chain = [delta]
+    while chain[-1].parent_step_id is not None:
+        chain.append(by_id[chain[-1].parent_step_id])
+    chain.reverse()
+    prompt = list(chain[0].prompt_ids_suffix)
+    for parent, child in zip(chain[:-1], chain[1:], strict=True):
+        prompt.extend(parent.response_ids)
+        prompt.extend(child.prompt_ids_suffix)
+    return prompt
+
+
+def _partition_steps_by_lineage(steps: list) -> list[list]:
+    """Group steps by lineage in first-appearance order."""
+    groups: dict = {}
+    for step in steps:
+        groups.setdefault((step.metadata or {}).get("lineage_id"), []).append(step)
+    return list(groups.values())
+
+
+def _sanitize_task(task: Any) -> Any:
+    if isinstance(task, dict):
+        return {key: value for key, value in task.items() if key not in ("image", "images")}
+    return task
+
+
 class Trajectory(BaseModel):
     """A sequence of Steps forming one agent trajectory."""
 
@@ -436,13 +476,6 @@ class Trajectory(BaseModel):
         self.metadata = value
 
     def to_dict(self):
-        # Remove large/non-serializable payloads (e.g., images) from task
-        def _sanitize_task(task_obj):
-            if isinstance(task_obj, dict):
-                cleaned = {k: v for k, v in task_obj.items() if k not in ("image", "images")}
-                return cleaned
-            return task_obj
-
         return {
             "uid": self.uid,
             "name": self.name,
@@ -497,6 +530,41 @@ class TrajectoryDelta(BaseModel):
         """Reconstruct the flat trajectory, following explicit parent ids."""
         return Trajectory(**(vars(self) | {"steps": resolve_step_deltas(self.steps)}))
 
+    def to_dict(self) -> dict:
+        return {
+            "uid": self.uid,
+            "name": self.name,
+            "task": _sanitize_task(self.task),
+            "steps": [step.model_dump(mode="python", exclude={"input", "output"}) | {"action": step.action.action if isinstance(step.action, Action) else step.action} for step in self.steps],
+            "reward": float(self.reward) if self.reward is not None else None,
+            "info": self.metadata or {},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> TrajectoryDelta:
+        return cls.model_validate({**data, "metadata": data.get("info", data.get("metadata"))})
+
+
+def _materialize_trajectory_deltas(container):
+    if not any(isinstance(trajectory, TrajectoryDelta) for trajectory in container.trajectories):
+        return container
+    return container.model_copy(update={"trajectories": [trajectory.resolve() if isinstance(trajectory, TrajectoryDelta) else trajectory for trajectory in container.trajectories]})
+
+
+def _trajectory_prompt_lengths(trajectory: Trajectory | TrajectoryDelta) -> list[int]:
+    if isinstance(trajectory, TrajectoryDelta):
+        return list(_index_step_deltas(trajectory.steps)[1].values())
+    return [len(step.prompt_ids) for step in trajectory.steps]
+
+
+def _select_delta_trajectory(value: Any) -> Any:
+    if isinstance(value, dict) and any({"parent_step_id", "prompt_ids_suffix", "chat_completions_suffix"} & step.keys() for step in value.get("steps", []) if isinstance(step, dict)):
+        return TrajectoryDelta.model_validate(value)
+    return value
+
+
+_TrajectoryLike = Annotated[Trajectory | TrajectoryDelta, BeforeValidator(_select_delta_trajectory)]
+
 
 class Episode(BaseModel):
     """A rollout episode containing one or more Trajectories."""
@@ -508,7 +576,7 @@ class Episode(BaseModel):
     termination_reason: TerminationReason | None = None
     is_correct: bool = False
     session_id: str | None = None
-    trajectories: list[Trajectory] = Field(default_factory=list)
+    trajectories: list[_TrajectoryLike] = Field(default_factory=list)
     artifacts: dict[str, Any] = Field(default_factory=dict)
     metrics: dict = Field(default_factory=dict)
     metadata: dict = Field(default_factory=dict)
@@ -531,13 +599,6 @@ class Episode(BaseModel):
         self.metadata = value
 
     def to_dict(self):
-        # Remove large/non-serializable payloads (e.g., images) from task
-        def _sanitize_task(task_obj):
-            if isinstance(task_obj, dict):
-                cleaned = {k: v for k, v in task_obj.items() if k not in ("image", "images")}
-                return cleaned
-            return task_obj
-
         return {
             "id": self.id,
             "task": _sanitize_task(self.task),
@@ -557,7 +618,10 @@ class Episode(BaseModel):
             task=data["task"],
             termination_reason=TerminationReason(data.get("termination_reason", TerminationReason.UNKNOWN)),
             is_correct=data["is_correct"],
-            trajectories=[Trajectory.from_dict(trajectory_data) for trajectory_data in data["trajectories"]],
+            trajectories=[
+                TrajectoryDelta.from_dict(trajectory_data) if any("prompt_ids_suffix" in step for step in trajectory_data.get("steps", [])) else Trajectory.from_dict(trajectory_data)
+                for trajectory_data in data["trajectories"]
+            ],
             metrics=data.get("metrics", {}),
             metadata=data.get("info", data.get("metadata", {})),
         )
@@ -577,7 +641,7 @@ class TrajectoryGroup(BaseModel):
         metadata: List of metadata for each trajectory in the group
     """
 
-    trajectories: list[Trajectory]
+    trajectories: list[_TrajectoryLike]
     group_id: str = ""
     metadata: list[dict] = Field(default_factory=list)
     weight_version: int = 0

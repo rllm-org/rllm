@@ -75,6 +75,36 @@ def test_run_single_passes_validation_flag_and_preserves_termination_reason():
     assert episode.termination_reason == TerminationReason.ERROR
 
 
+def test_compact_gateway_is_graph_native_only_for_training():
+    from rllm_model_gateway.models import TraceGraph
+
+    class _CompactGateway(_Gateway):
+        store = "compact"
+
+        def __init__(self):
+            super().__init__()
+            self.fetches = []
+
+        async def aget_traces(self, session_id):
+            self.fetches.append("flat")
+            return []
+
+        async def aget_trace_graph(self, session_id):
+            self.fetches.append("graph")
+            return TraceGraph(format="compact", version=1, deltas=[])
+
+    gateway = _CompactGateway()
+    engine = AgentFlowEngine(agent_flow=_Agent(), evaluator=_Evaluator(), gateway=gateway, model="test-model", n_parallel_tasks=1)
+    task = task_from_row({"question": "q"}, "task")
+    try:
+        asyncio.run(engine._run_single(task, "task:validation", is_validation=True))
+        asyncio.run(engine._run_single(task, "task:training", is_validation=False))
+    finally:
+        engine.shutdown()
+
+    assert gateway.fetches == ["flat", "graph"]
+
+
 def _empty_token_trace(session_id: str):
     from rllm_model_gateway.models import TraceRecord
 

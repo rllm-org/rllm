@@ -2,21 +2,45 @@ name: Test Tinker engine
 
 on:
   push:
-    branches: [main]
+    branches: [main, terminal-rl]
     paths:
       - "rllm/engine/rollout/**"
+      - "rllm/engine/agentflow_engine.py"
+      - "rllm/engine/remote_agent_flow_engine.py"
+      - "rllm/engine/trace_converter.py"
+      - "rllm/gateway/manager.py"
       - "rllm/gateway/tinker_adapter.py"
       - "rllm/trainer/tinker/**"
+      - "rllm/trainer/verl/transform.py"
+      - "rllm/trainer/buffer.py"
+      - "rllm/trainer/algorithms/visualization.py"
+      - "rllm/types.py"
+      - "rllm/utils/episode_logger.py"
+      - "rllm-model-gateway/src/rllm_model_gateway/client.py"
       - "tests/engine/test_tinker_engine.py"
+      - "tests/engine/test_agentflow_engine.py"
+      - "tests/trainer/test_datum_dataproto_delta.py"
       - "tests/test_tinker_adapter_cumulative.py"
       - ".github/workflows/test-tinker.yml"
   pull_request:
-    branches: [main]
+    branches: [main, terminal-rl, step-deepcopy-skip]
     paths:
       - "rllm/engine/rollout/**"
+      - "rllm/engine/agentflow_engine.py"
+      - "rllm/engine/remote_agent_flow_engine.py"
+      - "rllm/engine/trace_converter.py"
+      - "rllm/gateway/manager.py"
       - "rllm/gateway/tinker_adapter.py"
       - "rllm/trainer/tinker/**"
+      - "rllm/trainer/verl/transform.py"
+      - "rllm/trainer/buffer.py"
+      - "rllm/trainer/algorithms/visualization.py"
+      - "rllm/types.py"
+      - "rllm/utils/episode_logger.py"
+      - "rllm-model-gateway/src/rllm_model_gateway/client.py"
       - "tests/engine/test_tinker_engine.py"
+      - "tests/engine/test_agentflow_engine.py"
+      - "tests/trainer/test_datum_dataproto_delta.py"
       - "tests/test_tinker_adapter_cumulative.py"
       - ".github/workflows/test-tinker.yml"
   workflow_dispatch:
@@ -40,3 +64,6 @@ jobs:
 
       - name: Run Tinker engine tests
         run: uv run pytest tests/engine/test_tinker_engine.py tests/test_tinker_adapter_cumulative.py -v
+
+      - name: Run compact consumer parity tests
+        run: uv run pytest tests/trainer/test_datum_dataproto_delta.py tests/engine/test_agentflow_engine.py -v
