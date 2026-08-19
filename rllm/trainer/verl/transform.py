@@ -8,9 +8,10 @@ import torch
 from verl.protocol import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
+import rllm.types as rllm_types
 from rllm.engine.rollout import VerlEngine
 from rllm.trainer.verl.dataclass import AccumulatedData, ProcessedStepData
-from rllm.types import Episode, TerminationReason, Trajectory, TrajectoryGroup
+from rllm.types import Episode, StepDelta, TerminationReason, Trajectory, TrajectoryDelta, TrajectoryGroup, _index_step_deltas, _resolve_step_delta_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -244,24 +245,7 @@ def _decode_routing_matrices(encoded: list[str] | None) -> torch.Tensor | None:
     return torch.from_numpy(arr.copy())
 
 
-def _partition_steps_by_lineage(steps: list) -> list[list]:
-    """Group steps by gateway ``lineage_id`` (``step.metadata``), first-appearance
-    order. Steps of one lineage stay together even when interleaved in time with
-    other lineages. Untagged steps (no ``lineage_id`` — cumulative mode off, or
-    eval) share the ``None`` key → a single partition, i.e. the original behavior.
-    """
-    groups: dict = {}
-    order: list = []
-    for step in steps:
-        lid = (step.metadata or {}).get("lineage_id")
-        if lid not in groups:
-            groups[lid] = []
-            order.append(lid)
-        groups[lid].append(step)
-    return [groups[lid] for lid in order]
-
-
-def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: AccumulatedData) -> int:
+def _process_trajectory(trajectory: Trajectory | TrajectoryDelta, task_id: str, accumulated: AccumulatedData) -> int:
     """Processes a trajectory and returns an AccumulatedData.
 
     Multi-turn trajectories whose steps form a cumulative-prefix chain
@@ -313,7 +297,8 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
     # assumes every entry has prompt_ids and completion_ids.
     valid_steps = []
     for step_idx, step in enumerate(trajectory.steps):
-        if step.model_output is None or step.model_output.prompt_ids is None:
+        valid = isinstance(step, StepDelta) or step.model_output is not None and step.model_output.prompt_ids is not None
+        if not valid:
             logger.warning(f"Step {step_idx} in trajectory {trajectory_id} has no valid model_output, skipping")
             continue
         valid_steps.append(step)
@@ -336,22 +321,22 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
     # that segment. ``full_seq`` tracks prompt+all-action-and-obs tokens
     # so we can detect prefix-extension on the next step.
 
-    def _new_segment(step):
-        prompt = list(step.model_output.prompt_ids)
-        action = list(step.model_output.completion_ids)
-        action_lp = list(step.model_output.logprobs or [])
-        # If logprobs missing/short, pad to action length with zeros so
-        # accumulator lists stay aligned. add_step skips logprobs entirely
-        # when the list is empty, but we keep parity with action_tokens.
-        if action_lp and len(action_lp) != len(action):
-            action_lp = list(action_lp) + [0.0] * (len(action) - len(action_lp))
+    def _action_and_logprobs(step):
+        action = list(step.response_ids if isinstance(step, StepDelta) else step.model_output.completion_ids)
+        logprobs = list((step.logprobs if isinstance(step, StepDelta) else step.model_output.logprobs) or [])
+        if logprobs and len(logprobs) != len(action):
+            logprobs += [0.0] * (len(action) - len(logprobs))
+        return action, logprobs
+
+    def _new_segment(step, prompt):
+        action, action_lp = _action_and_logprobs(step)
         return {
             "prompt": prompt,
-            "response": list(action),
+            "response": action,
             "mask": [1] * len(action),
-            "logprobs": list(action_lp),
-            "full_seq": list(prompt) + list(action),
-            "multi_modal": step.model_output.multi_modal_inputs or {},
+            "logprobs": action_lp,
+            "full_seq": [*prompt, *action],
+            "multi_modal": {} if isinstance(step, StepDelta) else step.model_output.multi_modal_inputs or {},
             # Hold the latest step that produced routing in this segment. Each step's
             # routing covers (step.prompt + step.action), and the segment is cumulative
             # by construction, so the last step's routing covers seg["full_seq"]. We
@@ -393,17 +378,18 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
 
     def _merge_lineage(steps) -> int:
         """Linear-merge one lineage's steps into segments; return rows emitted."""
-        seg = _new_segment(steps[0])
+        first = steps[0]
+        first_prompt = _resolve_step_delta_prompt(first, delta_index) if isinstance(first, StepDelta) else list(first.model_output.prompt_ids)
+        seg = _new_segment(first, first_prompt)
         emitted = 0
+        previous = first
         for step in steps[1:]:
-            prompt_ids = list(step.model_output.prompt_ids)
-            if len(prompt_ids) >= len(seg["full_seq"]) and prompt_ids[: len(seg["full_seq"])] == seg["full_seq"]:
+            direct_child = isinstance(step, StepDelta) and step.parent_step_id == previous.id
+            prompt_ids = list(step.prompt_ids_suffix) if direct_child else (_resolve_step_delta_prompt(step, delta_index) if isinstance(step, StepDelta) else list(step.model_output.prompt_ids))
+            if direct_child or (len(prompt_ids) >= len(seg["full_seq"]) and prompt_ids[: len(seg["full_seq"])] == seg["full_seq"]):
                 # Cumulative — extend the current segment.
-                delta_obs = prompt_ids[len(seg["full_seq"]) :]
-                action = list(step.model_output.completion_ids)
-                action_lp = list(step.model_output.logprobs or [])
-                if action_lp and len(action_lp) != len(action):
-                    action_lp = list(action_lp) + [0.0] * (len(action) - len(action_lp))
+                delta_obs = prompt_ids if direct_child else prompt_ids[len(seg["full_seq"]) :]
+                action, action_lp = _action_and_logprobs(step)
 
                 seg["response"].extend(delta_obs)
                 seg["response"].extend(action)
@@ -420,15 +406,13 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
                 # Non-cumulative — close out current segment, start a new one.
                 _emit(seg)
                 emitted += 1
-                seg = _new_segment(step)
+                seg = _new_segment(step, prompt_ids)
+            previous = step
         _emit(seg)
-        emitted += 1
-        return emitted
+        return emitted + 1
 
-    segments_emitted = 0
-    for lineage_steps in _partition_steps_by_lineage(valid_steps):
-        segments_emitted += _merge_lineage(lineage_steps)
-    return segments_emitted
+    delta_index = _index_step_deltas(trajectory.steps)[0] if isinstance(trajectory, TrajectoryDelta) else {}
+    return sum(_merge_lineage(lineage_steps) for lineage_steps in rllm_types._partition_steps_by_lineage(valid_steps))
 
 
 def _process_episode(episode: Episode, task_id: str, accumulated: AccumulatedData) -> int:
@@ -571,6 +555,10 @@ def transform_episodes_to_dataproto(
     """
     tokenizer = rollout_engine.tokenizer
     processor = getattr(rollout_engine, "processor", None)
+    if processor is not None:
+        # StepDelta has no multimodal payload; preserve the existing processor
+        # path by materializing only these trajectories.
+        episodes = [rllm_types._materialize_trajectory_deltas(episode) for episode in episodes]
 
     accumulated = AccumulatedData()
     total_agent_steps = 0
@@ -602,6 +590,8 @@ def transform_trajectory_groups_to_dataproto(
     """
     tokenizer = rollout_engine.tokenizer
     processor = getattr(rollout_engine, "processor", None)
+    if processor is not None:
+        trajectory_groups = [rllm_types._materialize_trajectory_deltas(group) for group in trajectory_groups]
 
     accumulated = AccumulatedData()
     for trajectory_group in trajectory_groups:
