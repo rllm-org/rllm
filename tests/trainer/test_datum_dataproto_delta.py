@@ -10,7 +10,7 @@ from types import ModuleType
 import numpy as np
 import pytest
 import torch
-from rllm_model_gateway.models import _messages_start_with
+from rllm_model_gateway.models import _canonical_messages_start_with
 
 from rllm.engine.rollout import ModelOutput
 from rllm.types import Action, Episode, Step, StepDelta, Trajectory, TrajectoryDelta, TrajectoryGroup, _index_step_deltas
@@ -72,7 +72,7 @@ def _encode_step(step, parent):
     if not (
         parent is not None
         and (parent.metadata or {}).get("lineage_id") == (step.metadata or {}).get("lineage_id")
-        and _messages_start_with(step.chat_completions, chat_prefix)
+        and _canonical_messages_start_with(step.chat_completions, chat_prefix)
         and step.prompt_ids[: len(prompt_prefix)] == prompt_prefix
     ):
         parent, chat_prefix, prompt_prefix = None, [], []

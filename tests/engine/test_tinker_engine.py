@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import tinker
+from tinker._client import AsyncTinker
 from tinker_cookbook.renderers import get_renderer
 from tinker_cookbook.renderers.base import ToolCall as TinkerToolCall
 from tinker_cookbook.tokenizer_utils import get_tokenizer
@@ -24,33 +26,51 @@ from rllm.renderers.types import ParsedResponse
 from rllm.tools.tool_base import ToolCall as RllmToolCall
 
 
-def test_closed_httpx_response_does_not_wait_for_cyclic_gc():
-    """Importing TinkerEngine installs the lifecycle fix shared by Fireworks."""
+def test_tinker_sampling_response_does_not_wait_for_cyclic_gc():
+    """Exercise Tinker's real async sampling resource with cyclic GC disabled."""
 
     class PayloadStream(httpx.AsyncByteStream):
         async def __aiter__(self):
-            yield b"sampling-response-payload"
+            yield b'{"request_id":"request-1"}'
 
         async def aclose(self) -> None:
             pass
 
+    response_refs: list[weakref.ReferenceType[httpx.Response]] = []
+
     async def respond(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, stream=PayloadStream())
+        response = httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=PayloadStream(),
+            request=_request,
+        )
+        response_refs.append(weakref.ref(response))
+        return response
 
     async def exercise() -> None:
         gc.collect()
         gc_was_enabled = gc.isenabled()
         gc.disable()
         try:
-            async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-                response = await client.get("https://example.test/sample")
-                stream = response.stream
-                response_ref = weakref.ref(response)
-
-                assert response.is_closed
-                assert getattr(stream, "_response", None) is None
-                del response
-                assert response_ref() is None
+            http_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+            client = AsyncTinker(
+                api_key="tml-test",
+                base_url="https://example.test",
+                max_retries=0,
+                http_client=http_client,
+            )
+            try:
+                future = await client.sampling.asample(
+                    request=tinker.SampleRequest(
+                        prompt=tinker.ModelInput.from_ints([1]),
+                        sampling_params=tinker.SamplingParams(max_tokens=1),
+                    )
+                )
+                assert future.request_id == "request-1"
+                assert response_refs[0]() is None
+            finally:
+                await client.close()
         finally:
             if gc_was_enabled:
                 gc.enable()
