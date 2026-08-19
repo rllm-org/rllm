@@ -1,28 +1,48 @@
-"""Gateway-free eval execution through Harbor's native Job runtime."""
+"""Run Harbor evals directly and adapt their artifacts to rLLM output."""
 
 from __future__ import annotations
 
+import json
 import os
-import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
-from rllm.eval.runner import episodes_to_eval_result
+from rllm.eval.results import EvalItem, EvalResult
 from rllm.integrations.harbor.trial_helper import (
+    HarborTaskOutcome,
     ensure_dummy_api_keys,
-    harbor_result_to_outcome,
+    map_termination_reason,
     outcome_to_episode,
     silence_harbor,
+    trial_result_to_reward,
 )
 
 
-def _qualified_model(provider: str | None, model: str) -> str:
-    """Return Harbor/LiteLLM's ``provider/model`` spelling."""
-    if not provider or provider == "custom":
-        return model if "/" in model else f"openai/{model}"
+def _load_job_config(source: str | None, jobs_dir: str):
+    from harbor.models.job.config import JobConfig
 
+    if not source:
+        return JobConfig(jobs_dir=Path(jobs_dir), quiet=True)
+
+    path = Path(source).expanduser()
+    text = path.read_text()
+    if path.suffix.lower() in {".yaml", ".yml"}:
+        import yaml
+
+        data = yaml.safe_load(text)
+    else:
+        data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("Harbor config must contain a JSON/YAML object")
+    data.setdefault("jobs_dir", jobs_dir)
+    data.setdefault("quiet", True)
+    return JobConfig.model_validate(data)
+
+
+def _model_name(provider: str | None, model: str) -> str:
+    if not provider or provider == "custom":
+        return model
     from rllm.eval.config import get_provider_info
 
     info = get_provider_info(provider)
@@ -30,82 +50,39 @@ def _qualified_model(provider: str | None, model: str) -> str:
     return model if model.startswith(f"{prefix}/") else f"{prefix}/{model}"
 
 
-def _provider_base_url(provider: str | None) -> str | None:
-    """Use Harbor's provider registry for a public direct API endpoint."""
-    if not provider or provider == "custom":
-        return None
+def _runtime_env(provider: str | None, api_key: str | None, base_url: str | None) -> dict[str, str]:
+    env: dict[str, str] = {}
+    if api_key:
+        env["LLM_API_KEY"] = api_key
+        if provider:
+            from rllm.eval.config import get_provider_info
 
-    try:
-        from harbor.agents.model_connection import PROVIDERS
-        from rllm.eval.config import get_provider_info
-
-        aliases = {"gemini": "google", "together_ai": "together"}
-        info = get_provider_info(provider)
-        harbor_provider = info.litellm_prefix if info else provider
-        access = PROVIDERS.get(aliases.get(harbor_provider, harbor_provider))
-        return access.base_url if access else None
-    except (ImportError, AttributeError):
-        return None
-
-
-def _configured_api_env(provider: str | None, api_key: str | None) -> dict[str, str]:
-    """Build host-only credential env vars (never serialized in JobConfig)."""
-    if not api_key:
-        return {}
-
-    env = {"LLM_API_KEY": api_key}
-    if provider and provider != "custom":
-        from rllm.eval.config import get_provider_info
-
-        info = get_provider_info(provider)
-        if info and info.env_key:
-            env[info.env_key] = api_key
-
-        # Harbor occasionally uses a canonical alias different from rLLM's.
-        try:
-            from harbor.agents.model_connection import PROVIDERS
-
-            aliases = {"gemini": "google", "together_ai": "together"}
-            harbor_provider = info.litellm_prefix if info else provider
-            access = PROVIDERS.get(aliases.get(harbor_provider, harbor_provider))
-            if access and access.api_key_envs:
-                env[access.api_key_envs[0]] = api_key
-        except (ImportError, AttributeError):
-            pass
-    else:
-        env["OPENAI_API_KEY"] = api_key
+            info = get_provider_info(provider)
+            if info and info.env_key:
+                env[info.env_key] = api_key
+    base_url = base_url or {"openrouter": "https://openrouter.ai/api/v1"}.get(provider or "")
+    if base_url:
+        env["LLM_BASE_URL"] = base_url
     return env
 
 
-def _agent_endpoint_env(base_url: str | None) -> dict[str, str]:
-    if not base_url:
-        return {}
-    return {
-        "LLM_BASE_URL": base_url,
-        "OPENAI_API_BASE": base_url,
-        "OPENAI_BASE_URL": base_url,
-        "ANTHROPIC_BASE_URL": base_url,
-        "OPENROUTER_BASE_URL": base_url,
-    }
-
-
-def _load_job_config(source: str | None, *, job_name: str, jobs_dir: str):
-    from harbor.models.job.config import JobConfig
-
-    if source:
-        from harbor.cli.config_sources import load_config_source
-
-        data = load_config_source(source)
-        if not isinstance(data, dict):
-            raise ValueError("Harbor config must contain a JSON/YAML object")
-        return JobConfig.model_validate(data)
-    return JobConfig(job_name=job_name, jobs_dir=Path(jobs_dir), quiet=True)
-
-
-def _result_task_path(result) -> str | None:
-    path = getattr(getattr(result, "config", None), "task", None)
-    path = getattr(path, "path", None)
-    return str(Path(path).resolve()) if path else None
+def _to_outcome(result) -> HarborTaskOutcome:
+    reward, is_correct, error = trial_result_to_reward(result)
+    exception_type = result.exception_info.exception_type if result.exception_info else None
+    elapsed = 0.0
+    if result.started_at and result.finished_at:
+        elapsed = max(0.0, (result.finished_at - result.started_at).total_seconds())
+    return HarborTaskOutcome(
+        finished=reward is not None,
+        reward=reward,
+        is_correct=is_correct,
+        error=error,
+        termination_reason=map_termination_reason(reward is not None, exception_type),
+        elapsed=elapsed,
+        raw_result=result.model_dump(mode="json"),
+        trial_uri=getattr(result, "trial_uri", None),
+        _trial_result=result,
+    )
 
 
 async def run_harbor_eval(
@@ -123,50 +100,29 @@ async def run_harbor_eval(
     jobs_dir: str,
     agent_kwargs: dict[str, Any] | None = None,
     agent_env: dict[str, str] | None = None,
-    agent_timeout: int | None = None,
     harbor_config: str | None = None,
     on_episode_complete=None,
 ):
-    """Run one Harbor Job and adapt its artifacts into rLLM eval output.
-
-    There is deliberately no rLLM gateway, proxy, tunnel, AgentFlowEngine, or
-    sandbox hook in this path. Harbor owns provisioning, scheduling, agent
-    execution, verification, retries, and its native artifacts.
-    """
+    """Let one Harbor Job execute and verify all selected eval trials."""
     from harbor.job import Job
-    from harbor.models.trial.config import AgentConfig, EnvironmentConfig, TaskConfig
+    from harbor.models.environment_type import EnvironmentType
+    from harbor.models.trial.config import AgentConfig, TaskConfig
 
-    task_paths: list[str] = []
-    for task in tasks:
-        task_path = task.metadata.get("task_path")
-        if not task_path:
-            raise ValueError(f"Harbor task {getattr(task, 'id', '<unknown>')} is missing metadata.task_path")
-        task_paths.append(str(Path(task_path).resolve()))
+    task_paths = [Path(task.metadata["task_path"]).resolve() for task in tasks]
+    config = _load_job_config(harbor_config, jobs_dir)
+    agent_data = config.agents[0].model_dump() if config.agents else {}
+    agent_data.update(name=agent_name, import_path=None, model_name=_model_name(provider, model))
+    agent_data["kwargs"] = {**agent_data.get("kwargs", {}), **(agent_kwargs or {})}
+    agent_data["env"] = {**agent_data.get("env", {}), **(agent_env or {})}
 
-    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", dataset_name).strip("-") or "dataset"
-    job_config = _load_job_config(harbor_config, job_name=f"rllm-{slug}-{uuid4().hex[:8]}", jobs_dir=jobs_dir)
-
-    # A config file is an escape hatch for the complete Harbor JobConfig and
-    # AgentConfig schemas. rLLM overrides only the fields defining this eval.
-    base_agent = job_config.agents[0].model_dump() if harbor_config and job_config.agents else {}
-    base_agent.update(name=agent_name, import_path=None, model_name=_qualified_model(provider, model))
-    if agent_timeout is not None:
-        base_agent["override_timeout_sec"] = agent_timeout
-    base_agent["kwargs"] = {**base_agent.get("kwargs", {}), **(agent_kwargs or {})}
-    endpoint = base_url or _provider_base_url(provider)
-    base_agent["env"] = {**base_agent.get("env", {}), **_agent_endpoint_env(endpoint), **(agent_env or {})}
-
-    environment = job_config.environment
+    environment = config.environment
     if sandbox_backend:
-        from harbor.models.environment_type import EnvironmentType
-
-        environment = EnvironmentConfig(**{**environment.model_dump(), "type": EnvironmentType(sandbox_backend)})
-
-    job_config = job_config.model_copy(
+        environment = environment.model_copy(update={"type": EnvironmentType(sandbox_backend)})
+    config = config.model_copy(
         update={
-            "agents": [AgentConfig.model_validate(base_agent)],
+            "agents": [AgentConfig.model_validate(agent_data)],
             "datasets": [],
-            "tasks": [TaskConfig(path=Path(path)) for path in task_paths],
+            "tasks": [TaskConfig(path=path) for path in task_paths],
             "n_attempts": attempts,
             "n_concurrent_trials": concurrency,
             "environment": environment,
@@ -175,12 +131,11 @@ async def run_harbor_eval(
 
     ensure_dummy_api_keys()
     silence_harbor()
-    configured_env = _configured_api_env(provider, api_key)
-    previous_env = {key: os.environ.get(key) for key in configured_env}
-    os.environ.update(configured_env)
+    runtime_env = {**_runtime_env(provider, api_key, base_url), **agent_data["env"]}
+    previous_env = {key: os.environ.get(key) for key in runtime_env}
+    os.environ.update(runtime_env)
     try:
-        job = await Job.create(job_config)
-        job_result = await job.run()
+        result = await (await Job.create(config)).run()
     finally:
         for key, previous in previous_env.items():
             if previous is None:
@@ -188,38 +143,35 @@ async def run_harbor_eval(
             else:
                 os.environ[key] = previous
 
-    # Harbor returns trials in completion order. Fold them back to rLLM's
-    # task-major, attempt-minor convention so pass@k and episode filenames stay
-    # stable. A task name fallback helps custom Harbor task resolvers.
-    by_path: dict[str, list] = defaultdict(list)
-    by_name: dict[str, list] = defaultdict(list)
-    for result in job_result.trial_results:
-        result_path = _result_task_path(result)
-        if result_path:
-            by_path[result_path].append(result)
-        else:
-            by_name[result.task_name].append(result)
+    by_task: dict[Path, list] = defaultdict(list)
+    for trial in result.trial_results:
+        if trial.config.task.path:
+            by_task[Path(trial.config.task.path).resolve()].append(trial)
 
-    episodes: list = []
-    for task, task_path in zip(tasks, task_paths, strict=True):
-        candidates = by_path.get(task_path)
-        if not candidates:
-            candidates = by_name.get(Path(task_path).name, [])
+    episodes, items = [], []
+    for task_idx, (task, task_path) in enumerate(zip(tasks, task_paths, strict=True)):
         for attempt in range(attempts):
-            result = candidates.pop(0) if candidates else None
-            if result is None:
-                episodes.append(None)
+            trial = by_task[task_path].pop(0) if by_task[task_path] else None
+            if trial is None:
+                items.append(EvalItem(idx=task_idx, attempt=attempt, reward=0.0, is_correct=False, error="missing Harbor trial"))
                 continue
-            outcome = harbor_result_to_outcome(result)
-            episode = outcome_to_episode(outcome, f"{task.id}:{attempt}", task.metadata)
-            episodes.append(episode)
-            if on_episode_complete is not None:
-                on_episode_complete(len(episodes) - 1, episode)
 
-    return episodes_to_eval_result(
-        episodes,
-        dataset_name=dataset_name,
-        model=model,
-        agent_name=f"harbor:{agent_name}",
-        attempts=attempts,
-    )
+            outcome = _to_outcome(trial)
+            episode = outcome_to_episode(outcome, f"{task.id}:{attempt}", task.metadata)
+            episode.artifacts.update(harbor_trial_ran=True, harbor_reward=outcome.reward or 0.0, harbor_is_correct=outcome.is_correct)
+            if on_episode_complete:
+                on_episode_complete(len(items), episode)
+            items.append(
+                EvalItem(
+                    idx=task_idx,
+                    attempt=attempt,
+                    reward=outcome.reward or 0.0,
+                    is_correct=outcome.is_correct,
+                    error=None if outcome.finished else outcome.error,
+                    termination_reason=outcome.termination_reason.value,
+                )
+            )
+            if outcome.finished:
+                episodes.append(episode)
+
+    return EvalResult.from_items(dataset_name, model, f"harbor:{agent_name}", items, attempts=attempts), episodes

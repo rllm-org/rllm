@@ -142,7 +142,6 @@ def _run_eval(
     harbor_agent_kwargs: dict | None = None,
     harbor_agent_env: dict[str, str] | None = None,
     harbor_config: str | None = None,
-    agent_timeout: int | None = None,
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
@@ -296,19 +295,15 @@ def _run_eval(
                 console.print("  [dim]Or run on a remote backend, e.g. [bold]--sandbox-backend modal[/].[/]")
                 fail(f"Harbor tasks require Docker — {reason}.")
 
-        # Load the agent. Catalog covers built-in flows (react/bash/claude-code)
-        # plus user-registered + plugin agents; ``harbor:<scaffold>`` resolves
-        # to a HarborRuntime via the harbor: prefix branch in load_agent.
-        try:
-            agent = load_agent(agent_name)
-        except (KeyError, ImportError, AttributeError, TypeError) as e:
-            fail(f"Error loading agent '{agent_name}': {e}")
-
-        direct_agent_metadata = dict(agent_metadata or {})
-        if _direct_harbor_eval:
-            # The native Job adapter maps this to AgentConfig directly.
-            direct_agent_metadata.pop("agent_timeout", None)
-        _apply_sandbox_overrides(agent, direct_agent_metadata)
+        # Harbor loads its own agent inside Job.create(). Other agents keep the
+        # existing rLLM AgentFlow path.
+        agent = None
+        if not _direct_harbor_eval:
+            try:
+                agent = load_agent(agent_name)
+            except (KeyError, ImportError, AttributeError, TypeError) as e:
+                fail(f"Error loading agent '{agent_name}': {e}")
+            _apply_sandbox_overrides(agent, agent_metadata)
 
         # Resolve evaluator: explicit --evaluator > catalog auto-resolve >
         # catalog reward_fn > None. When ``evaluator`` is None ``SandboxTaskHooks``
@@ -423,9 +418,8 @@ def _run_eval(
     ]
     if not use_snapshot:
         rows.append(("Snapshots", "[dim]disabled (--no-snapshot, cold start)[/]"))
-    if sampling_config is not None and not sampling_config.is_empty:
-        owner = "Harbor agent kwargs" if _direct_harbor_eval else "gateway-enforced"
-        rows.append(("Sampling", f"[dim]{sampling_config.as_dict()} ({owner})[/]"))
+    if not _direct_harbor_eval and sampling_config is not None and not sampling_config.is_empty:
+        rows.append(("Sampling", f"[dim]{sampling_config.as_dict()} (gateway-enforced)[/]"))
     console.print()
     console.print(info_panel(rows, border="brand"))
     console.print()
@@ -515,8 +509,6 @@ def _run_eval(
     if _direct_harbor_eval:
         from rllm.integrations.harbor.eval_runner import run_harbor_eval
 
-        effective_kwargs = dict(sampling_config.as_dict()) if sampling_config is not None else {}
-        effective_kwargs.update(harbor_agent_kwargs or {})
         result, episodes = asyncio.run(
             run_harbor_eval(
                 tasks=list(dataset.data),
@@ -530,9 +522,8 @@ def _run_eval(
                 sandbox_backend=(agent_metadata or {}).get("sandbox_backend"),
                 dataset_name=getattr(dataset, "name", benchmark) or benchmark,
                 jobs_dir=os.path.join(run_dir, "harbor"),
-                agent_kwargs=effective_kwargs,
+                agent_kwargs=harbor_agent_kwargs,
                 agent_env=harbor_agent_env,
-                agent_timeout=agent_timeout,
                 harbor_config=harbor_config,
                 on_episode_complete=on_episode_complete,
             )
@@ -647,7 +638,7 @@ def _run_eval(
 @click.option(
     "--harbor-config",
     default=None,
-    metavar="PATH_OR_URL",
+    metavar="PATH",
     help="Base Harbor JobConfig JSON/YAML. All Harbor job/agent fields are supported; eval task/model fields override it.",
 )
 @click.option("--evaluator", "evaluator_name", default=None, help="Evaluator: registry name or module:class path.")
@@ -758,21 +749,20 @@ def eval_cmd(
     if attempts < 1:
         fail("--attempts must be >= 1.")
 
-    try:
-        from harbor.cli.utils import parse_env_vars, parse_kwargs
-
-        parsed_harbor_kwargs = parse_kwargs(list(harbor_agent_kwargs))
-        parsed_harbor_env = parse_env_vars(list(harbor_agent_env))
-    except (ImportError, ValueError) as e:
-        fail(f"Invalid Harbor agent option: {e}")
-
     # The explicit Harbor pairing is a separate runtime: provider calls go
     # straight from Harbor's agent environment to the provider API.
-    catalog_entry = load_dataset_catalog().get("datasets", {}).get(benchmark)
-    harbor_dataset = benchmark.startswith("harbor:") or bool(catalog_entry and catalog_entry.get("source", "").startswith("harbor:"))
-    direct_harbor = harbor_dataset and (agent_name is None or agent_name.startswith("harbor:"))
-    if (parsed_harbor_kwargs or parsed_harbor_env or harbor_config) and not direct_harbor:
+    direct_harbor = benchmark.startswith("harbor:") and (agent_name is None or agent_name.startswith("harbor:"))
+    if (harbor_agent_kwargs or harbor_agent_env or harbor_config) and not direct_harbor:
         fail("--ak/--agent-kwarg, --ae/--agent-env, and --harbor-config require a Harbor dataset with a Harbor agent.")
+    parsed_harbor_kwargs, parsed_harbor_env = {}, {}
+    if harbor_agent_kwargs or harbor_agent_env:
+        try:
+            from harbor.cli.utils import parse_env_vars, parse_kwargs
+
+            parsed_harbor_kwargs = parse_kwargs(list(harbor_agent_kwargs))
+            parsed_harbor_env = parse_env_vars(list(harbor_agent_env))
+        except (ImportError, ValueError) as e:
+            fail(f"Invalid Harbor agent option: {e}")
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
     _ui_explicit = enable_ui is not None
     if enable_ui is None:
@@ -915,7 +905,6 @@ def eval_cmd(
             harbor_agent_kwargs=parsed_harbor_kwargs,
             harbor_agent_env=parsed_harbor_env,
             harbor_config=harbor_config,
-            agent_timeout=agent_timeout,
         )
     finally:
         if proxy_manager is not None:

@@ -283,44 +283,6 @@ class HarborTaskOutcome:
     _trial_result: Any = None
 
 
-def harbor_result_to_outcome(result, *, elapsed: float | None = None) -> HarborTaskOutcome:
-    """Translate a Harbor ``TrialResult`` into rLLM's runtime-neutral outcome."""
-    if elapsed is None:
-        started_at = getattr(result, "started_at", None)
-        finished_at = getattr(result, "finished_at", None)
-        elapsed = max(0.0, (finished_at - started_at).total_seconds()) if started_at and finished_at else 0.0
-
-    raw = result.model_dump(mode="json")
-    reward, is_correct, error_msg = trial_result_to_reward(result)
-    exc_type = result.exception_info.exception_type if result.exception_info else None
-    trial_uri = getattr(result, "trial_uri", None)
-
-    if reward is not None:
-        return HarborTaskOutcome(
-            finished=True,
-            reward=reward,
-            is_correct=is_correct,
-            error=error_msg,
-            termination_reason=map_termination_reason(True, exc_type),
-            elapsed=elapsed,
-            raw_result=raw,
-            trial_uri=trial_uri,
-            _trial_result=result,
-        )
-
-    return HarborTaskOutcome(
-        finished=False,
-        reward=None,
-        is_correct=False,
-        error=error_msg or "harbor trial produced no verifier reward",
-        termination_reason=map_termination_reason(False, exc_type),
-        elapsed=elapsed,
-        raw_result=raw,
-        trial_uri=trial_uri,
-        _trial_result=result,
-    )
-
-
 async def run_harbor_task(
     *,
     task_path: str,
@@ -397,7 +359,36 @@ async def run_harbor_task(
         )
 
     elapsed = time.monotonic() - start
-    return harbor_result_to_outcome(result, elapsed=elapsed)
+    raw = result.model_dump(mode="json")
+    reward, is_correct, error_msg = trial_result_to_reward(result)
+    exc_type = result.exception_info.exception_type if result.exception_info else None
+    trial_uri = getattr(result, "trial_uri", None)
+
+    if reward is not None:
+        return HarborTaskOutcome(
+            finished=True,
+            reward=reward,
+            is_correct=is_correct,
+            error=error_msg,
+            termination_reason=map_termination_reason(True, exc_type),
+            elapsed=elapsed,
+            raw_result=raw,
+            trial_uri=trial_uri,
+            _trial_result=result,
+        )
+
+    # No reward signal → finished=False.
+    return HarborTaskOutcome(
+        finished=False,
+        reward=None,
+        is_correct=False,
+        error=error_msg or "harbor trial produced no verifier reward",
+        termination_reason=map_termination_reason(False, exc_type),
+        elapsed=elapsed,
+        raw_result=raw,
+        trial_uri=trial_uri,
+        _trial_result=result,
+    )
 
 
 def outcome_to_episode(outcome: HarborTaskOutcome, uid: str, task: dict):
@@ -451,11 +442,6 @@ def outcome_to_episode(outcome: HarborTaskOutcome, uid: str, task: dict):
         task=task,
         is_correct=is_correct,
         trajectories=trajectories,
-        artifacts={
-            "harbor_trial_ran": True,
-            "harbor_reward": reward if reward is not None else 0.0,
-            "harbor_is_correct": is_correct,
-        },
         metrics=metrics,
         metadata=metadata,
         termination_reason=outcome.termination_reason,
