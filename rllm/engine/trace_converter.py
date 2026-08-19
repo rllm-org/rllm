@@ -57,7 +57,7 @@ def trace_to_model_output(
     raw_tool_calls = response_message.get("tool_calls")
     return ModelOutput(
         content=response_message.get("content", "") or "",
-        reasoning=response_message.get("reasoning", "") or "",
+        reasoning=response_message.get("reasoning") or response_message.get("reasoning_content") or "",
         tool_calls=_parse_openai_tool_calls(raw_tool_calls) if raw_tool_calls else None,
         prompt_ids=prompt_ids,
         completion_ids=completion_ids,
@@ -109,7 +109,7 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
 def trace_delta_to_step_delta(trace: TraceDelta) -> StepDelta:
     """Map the compact gateway contract to the compact training contract."""
     content = trace.response_message.get("content", "") or ""
-    reasoning = trace.response_message.get("reasoning", "") or ""
+    reasoning = trace.response_message.get("reasoning") or trace.response_message.get("reasoning_content") or ""
     metadata = trace.metadata | ({"lineage_id": trace.lineage_id} if trace.lineage_id is not None else {})
     return StepDelta(
         id=trace.trace_id,

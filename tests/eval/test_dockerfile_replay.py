@@ -11,6 +11,7 @@ Covers two fixes:
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,8 @@ def test_multiline_run_joins_with_space_not_newline(tmp_path):
     assert cmds == ["apt-get update && apt-get install -y python3-pip && rm -rf /var/lib/apt/lists/*"]
     # The old bug joined with "\n", which bash rejects ("syntax error near '&&'").
     assert "\n" not in cmds[0]
+    result = subprocess.run(["bash", "-n", "-c", cmds[0]], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_copy_directives_are_skipped(tmp_path):
