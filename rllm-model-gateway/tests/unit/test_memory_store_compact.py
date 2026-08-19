@@ -4,7 +4,7 @@ import asyncio
 import json
 
 import pytest
-from rllm_model_gateway.models import TraceGraph
+from rllm_model_gateway.models import TraceGraph, TraceRecord
 from rllm_model_gateway.store.memory_store import MemoryTraceStore
 
 _run = asyncio.run
@@ -144,3 +144,45 @@ def test_raw_capture_is_rejected_for_compact_store():
 
     with pytest.raises(ValueError, match="capture_raw_payloads"):
         ReverseProxy(router=None, store=MemoryTraceStore(compact=True), capture_raw_payloads=True)
+
+
+def test_trace_parity_dump_preserves_raw_inputs_and_eventual_graph(tmp_path):
+    store = MemoryTraceStore(compact=True, trace_parity_dump_dir=str(tmp_path))
+    root, child = _trajectory(2)
+    child_retry = {**child, "completion_token_ids": [999]}
+
+    _run(store.store_trace("root", "session/one", root))
+    _run(store.store_trace("child", "session/one", child))
+    _run(store.store_trace("child", "session/one", child_retry))
+    _run(store.get_session_traces_compact("session/one"))
+
+    session_dir = next(tmp_path.glob("session-*"))
+    assert json.loads((session_dir / "session.json").read_text()) == {"session_id": "session/one"}
+    generation_zero = session_dir / "generation-0000"
+    raw = [TraceRecord.model_validate_json(line) for line in (generation_zero / "raw_trace_records.jsonl").read_text().splitlines()]
+    graph = TraceGraph.model_validate_json((generation_zero / "trace_graph.json").read_text())
+
+    assert [record.trace_id for record in raw] == ["root", "child", "child"]
+    assert graph.flatten() == [raw[0], raw[2]]
+
+    # Deleting and recreating a session id is how rollout retries are isolated.
+    _run(store.delete_session("session/one"))
+    _run(store.store_trace("new-root", "session/one", root))
+    _run(store.get_session_traces_compact("session/one"))
+    assert (session_dir / "generation-0001" / "raw_trace_records.jsonl").exists()
+    assert (session_dir / "generation-0001" / "trace_graph.json").exists()
+
+
+def test_raw_trace_record_is_dumped_before_graph_conversion(tmp_path, monkeypatch):
+    store = MemoryTraceStore(compact=True, trace_parity_dump_dir=str(tmp_path))
+    record = _trajectory(1)[0]
+    original_add = TraceGraph.add
+
+    def assert_raw_dump_exists_before_add(graph, raw_record):
+        raw_path = next(tmp_path.glob("session-*/generation-0000/raw_trace_records.jsonl"))
+        dumped = TraceRecord.model_validate_json(raw_path.read_text().strip())
+        assert dumped == raw_record
+        return original_add(graph, raw_record)
+
+    monkeypatch.setattr(TraceGraph, "add", assert_raw_dump_exists_before_add)
+    _run(store.store_trace("raw", "session", record))

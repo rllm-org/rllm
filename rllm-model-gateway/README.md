@@ -111,7 +111,30 @@ workers:
 
 ### Environment Variables
 
-`RLLM_GATEWAY_HOST`, `RLLM_GATEWAY_PORT`, `RLLM_GATEWAY_DB_PATH`, `RLLM_GATEWAY_LOG_LEVEL`, `RLLM_GATEWAY_STORE`
+`RLLM_GATEWAY_HOST`, `RLLM_GATEWAY_PORT`, `RLLM_GATEWAY_DB_PATH`, `RLLM_GATEWAY_LOG_LEVEL`, `RLLM_GATEWAY_STORE`, `RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR`
+
+### Debugging compact-trace parity
+
+To check the compact graph implementation against its actual inputs, set a unique dump directory while using the compact store:
+
+```bash
+python cookbooks/terminal-rl/train.py \
+  rllm.gateway.store=compact \
+  rllm.gateway.trace_parity_dump_dir=/local/fast-disk/trace-parity-debug
+```
+
+Each session generation (retry attempts are kept separate) contains:
+
+- `raw_trace_records.jsonl`: every full `TraceRecord` serialized directly inside `store_trace()`, before `TraceGraph.add()` / `replace_leaf()` runs. It is not reconstructed from the graph, an episode, or a trajectory.
+- `trace_graph.json`: the eventual compact `TraceGraph`, written on full retrieval or session deletion.
+
+Verify exact reconstruction, including the store's same-leaf replacement semantics for retried trace IDs, with:
+
+```bash
+python scripts/verify_trace_parity_dump.py /local/fast-disk/trace-parity-debug
+```
+
+This is a debug-only path. It performs synchronous serialization on gateway workers, duplicates large prompt/token data, and may contain sensitive prompts. Prefer a small parity run on local fast storage; leave it disabled for performance measurements and normal training.
 
 ## Embedded Usage
 

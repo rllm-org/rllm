@@ -198,10 +198,14 @@ class GatewayManager:
         self.port: int = int(configured_port) if configured_port is not None else (_find_free_port() if self.tunnel_backend else DEFAULT_GATEWAY_PORT)
         self.store: str = os.environ.get("RLLM_GATEWAY_STORE", gw_cfg.get("store", "compact"))
         self.db_path: str | None = gw_cfg.get("db_path", None)
+        _trace_parity_dump_dir = os.environ.get("RLLM_GATEWAY_TRACE_PARITY_DUMP_DIR", gw_cfg.get("trace_parity_dump_dir", None))
+        self.trace_parity_dump_dir: str | None = os.path.abspath(os.path.expanduser(str(_trace_parity_dump_dir))) if _trace_parity_dump_dir else None
         if self.store not in ("memory", "compact", "sqlite"):
             raise ValueError(f"rllm.gateway.store must be 'memory', 'compact' or 'sqlite', got {self.store!r}")
         if self.store in ("memory", "compact") and self.db_path:
             raise ValueError(f"rllm.gateway.db_path is set but store={self.store!r} is in-memory; set store='sqlite' or clear db_path")
+        if self.trace_parity_dump_dir is not None and self.store != "compact":
+            raise ValueError("rllm.gateway.trace_parity_dump_dir requires rllm.gateway.store=compact")
         _model_cfg = config.get("model", {})
         self.model: str | None = _model_cfg.get("tokenizer_model") or _model_cfg.get("name", None)
 
@@ -432,6 +436,8 @@ class GatewayManager:
             for u in worker_urls or []:
                 cmd += ["--worker", u]
             return cmd
+        if self.trace_parity_dump_dir:
+            cmd += ["--trace-parity-dump-dir", self.trace_parity_dump_dir]
         if self.model:
             cmd += ["--model", self.model]
         if self.cumulative_token_mode:
@@ -532,6 +538,7 @@ class GatewayManager:
             port=self.port,
             db_path=self.db_path,
             store_worker=self.store,
+            trace_parity_dump_dir=self.trace_parity_dump_dir,
             model=self.model,
             add_logprobs=self.add_logprobs,
             add_return_token_ids=self.add_return_token_ids,
