@@ -39,6 +39,32 @@ def test_record_reward_stats_values():
     assert m["reward/opencode/all/std"] > 0.0
 
 
+def test_reward_role_name_does_not_select_metric_reducer():
+    aggregator = MetricsAggregator()
+    for value in (0.75, 0.9375, 0.5, 0.0625):
+        aggregator.record("reward/mini-swe-agent/all/mean", value)
+        aggregator.record("reward/mini-swe-agent/all/max", value)
+        aggregator.record("reward/mini-swe-agent/all/min", value)
+    m = aggregator.flush()
+
+    assert m["reward/mini-swe-agent/all/mean"] == 0.5625
+    assert m["reward/mini-swe-agent/all/max"] == 0.9375
+    assert m["reward/mini-swe-agent/all/min"] == 0.0625
+
+
+def test_compound_metric_name_still_selects_reducer():
+    aggregator = MetricsAggregator()
+    for value in (4.0, 16.0, 8.0):
+        aggregator.record("groups/max_group_size", value)
+        aggregator.record("groups/min_group_size", value)
+        aggregator.record("groups/avg_group_size", value)
+    m = aggregator.flush()
+
+    assert m["groups/max_group_size"] == 16.0
+    assert m["groups/min_group_size"] == 4.0
+    assert m["groups/avg_group_size"] == 28.0 / 3.0
+
+
 def test_reward_by_role_reports_each_role_separately():
     # Multi-agent: solver + judge each get their own reward/<role>/all/*.
     buf = _buffer_with_aggregator()
