@@ -30,6 +30,7 @@ import httpx
 from fireworks.training.sdk import DeploymentSampler
 from typing_extensions import override
 
+from rllm.engine.rollout.httpx_utils import install_httpx_response_cycle_patch
 from rllm.engine.rollout.rollout_engine import ModelOutput
 from rllm.engine.rollout.tinker_engine import (
     TinkerEngine,
@@ -100,6 +101,8 @@ def _install_inference_header_patch() -> None:
 
 
 _install_inference_header_patch()
+
+install_httpx_response_cycle_patch()
 
 
 def _install_httpx_orjson_patch() -> None:
