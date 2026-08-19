@@ -175,7 +175,7 @@ gateway:
                       # explicitly to a backend to auto-spawn ("cloudflared", "ngrok", "ngrok:<domain>")
                       # or an http(s):// URL reachable from the sandbox (tailscale IP, bore/frp, etc.).
                       # `rllm tunnel setup` can reserve a wildcard for isolated per-run ngrok URLs.
-  store: memory       # "memory" (non-persistent) | "sqlite" (writes traces to disk)
+  store: compact      # "compact" (default) | "memory" (legacy) | "sqlite" (persistent)
   db_path: null       # Only used when store=sqlite; null → auto-resolved path (logged at startup)
   # Sampling params attached to a session overwrite those keys on every LLM call;
   # keys not set pass through untouched.
