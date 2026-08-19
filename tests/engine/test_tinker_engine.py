@@ -1,8 +1,12 @@
-"""Tests for tinker_engine OpenAI-to-renderer conversion helpers."""
+"""Tests for Tinker rollout conversion helpers and shared HTTP lifecycle."""
 
+import asyncio
+import gc
 import json
+import weakref
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from tinker_cookbook.renderers import get_renderer
 from tinker_cookbook.renderers.base import ToolCall as TinkerToolCall
@@ -18,6 +22,41 @@ from rllm.engine.rollout.tinker_engine import (
 )
 from rllm.renderers.types import ParsedResponse
 from rllm.tools.tool_base import ToolCall as RllmToolCall
+
+
+def test_closed_httpx_response_does_not_wait_for_cyclic_gc():
+    """Importing TinkerEngine installs the lifecycle fix shared by Fireworks."""
+
+    class PayloadStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"sampling-response-payload"
+
+        async def aclose(self) -> None:
+            pass
+
+    async def respond(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=PayloadStream())
+
+    async def exercise() -> None:
+        gc.collect()
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+                response = await client.get("https://example.test/sample")
+                stream = response.stream
+                response_ref = weakref.ref(response)
+
+                assert response.is_closed
+                assert getattr(stream, "_response", None) is None
+                del response
+                assert response_ref() is None
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+
+    asyncio.run(exercise())
+
 
 # ------------------------------------------------------------------
 # Fixtures
