@@ -17,6 +17,7 @@ This resolution is used by both the gateway (turns 1+ bridge) and FireworksEngin
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -94,7 +95,12 @@ def _infer_model_name(model: str | None, tokenizer: Any) -> str:
     return model or getattr(tokenizer, "name_or_path", "") or ""
 
 
-def _try_prime(tokenizer: Any, family: str) -> Any | None:
+def _try_prime(
+    tokenizer: Any,
+    family: str,
+    *,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
+) -> Any | None:
     """prime-rl native renderer, or None if it falls back to DefaultRenderer."""
     try:
         import renderers as prime_renderers  # type: ignore
@@ -102,7 +108,11 @@ def _try_prime(tokenizer: Any, family: str) -> Any | None:
         return None
 
     config = prime_renderers.config_from_name(family)
-    renderer = prime_renderers.create_renderer(tokenizer, config)
+    renderer = prime_renderers.create_renderer(
+        tokenizer,
+        config,
+        chat_template_kwargs=chat_template_kwargs,
+    )
     if type(renderer).__name__ == "DefaultRenderer":
         return None
     return renderer
@@ -144,6 +154,7 @@ def resolve(
     backend: Backend | str | None = None,
     family: str = "auto",
     renderer_name: str | None = None,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
 ) -> RendererResolution:
     name = _infer_model_name(model, tokenizer)
 
@@ -153,7 +164,7 @@ def resolve(
     if renderer_name:
         prime_family = _PRIME_FAMILY_ALIASES.get(renderer_name)
         if prime_family:
-            renderer = _try_prime(tokenizer, prime_family)
+            renderer = _try_prime(tokenizer, prime_family, chat_template_kwargs=chat_template_kwargs)
             if renderer is not None:
                 return RendererResolution(renderer, "prime", prime_family)
         return RendererResolution(
@@ -164,13 +175,13 @@ def resolve(
 
     # 1b. Explicit prime-rl family.
     if family and family != "auto":
-        renderer = _try_prime(tokenizer, family)
+        renderer = _try_prime(tokenizer, family, chat_template_kwargs=chat_template_kwargs)
         if renderer is not None:
             return RendererResolution(renderer, "prime", family)
         logger.warning("prime-rl family=%r did not resolve a native renderer; continuing auto-resolution.", family)
 
     # 2. prime-rl native by exact model match.
-    renderer = _try_prime(tokenizer, "auto")
+    renderer = _try_prime(tokenizer, "auto", chat_template_kwargs=chat_template_kwargs)
     if renderer is not None:
         return RendererResolution(renderer, "prime", type(renderer).__name__)
 

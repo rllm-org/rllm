@@ -251,3 +251,49 @@ class TestConstants:
         """MiniMax should have an entry in DEFAULT_MODELS."""
         assert "minimax" in DEFAULT_MODELS
         assert DEFAULT_MODELS["minimax"] == "MiniMax-M3"
+
+    def test_orcarouter_provider_info(self):
+        """OrcaRouter provider should have correct metadata."""
+        info = get_provider_info("orcarouter")
+        assert info is not None
+        assert info.label == "OrcaRouter"
+        assert info.litellm_prefix == "openai"
+        assert info.env_key == "ORCAROUTER_API_KEY"
+
+    def test_orcarouter_base_url(self):
+        """OrcaRouter routes through the OpenAI adapter pinned to its api_base."""
+        info = get_provider_info("orcarouter")
+        assert info is not None
+        assert info.base_url == "https://api.orcarouter.ai/v1"
+
+    def test_orcarouter_default_model(self):
+        """OrcaRouter default model should be the GPT-5.5 flagship."""
+        info = get_provider_info("orcarouter")
+        assert info is not None
+        assert info.default_model == "openai/gpt-5.5"
+
+    def test_orcarouter_models_are_namespaced(self):
+        """OrcaRouter model ids carry the router namespace (e.g. openai/...)."""
+        info = get_provider_info("orcarouter")
+        assert info is not None
+        assert len(info.models) >= 5
+        for mid in info.models:
+            assert "/" in mid, f"{mid} must be router-prefixed"
+        assert "openai/gpt-5.5" in info.models
+        assert "anthropic/claude-sonnet-4.6" in info.models
+        assert "deepseek/deepseek-v4-pro" in info.models
+
+    def test_orcarouter_config_validates(self):
+        """A complete OrcaRouter config should pass validation."""
+        config = RllmConfig(
+            provider="orcarouter",
+            api_keys={"orcarouter": "sk-orca-test"},
+            model="openai/gpt-5.5",
+        )
+        assert config.is_configured()
+        assert config.validate() == []
+
+    def test_orcarouter_in_default_models(self):
+        """OrcaRouter should have an entry in DEFAULT_MODELS."""
+        assert "orcarouter" in DEFAULT_MODELS
+        assert DEFAULT_MODELS["orcarouter"] == "openai/gpt-5.5"

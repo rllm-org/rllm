@@ -190,6 +190,7 @@ def test_renderer_rejects_rewritten_trainable_target(with_content_metadata):
             ],
             HistoryRewritingRenderer(),
             max_length=None,
+            validate_prefix_stability=True,
         )
 
 

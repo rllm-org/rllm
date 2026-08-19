@@ -60,6 +60,7 @@ from rllm.cli._ui import console, fail
     type=click.Path(exists=True),
     help="YAML escape hatch merged ON TOP of the backend config: file keys beat equivalent CLI flags (--renderer/--gpus still win). For backend knobs without a flag.",
 )
+@click.option("--preflight", is_flag=True, help="Render and validate the dataset, then exit without starting training.")
 def sft_cmd(
     dataset: str | None,
     train_file: str | None,
@@ -86,6 +87,7 @@ def sft_cmd(
     enable_ui: bool | None,
     output_dir: str | None,
     config_file: str | None,
+    preflight: bool,
 ):
     """Fine-tune a model with supervised learning (SFT).
 
@@ -248,6 +250,10 @@ def sft_cmd(
     console.print()
 
     try:
+        if preflight:
+            trainer.preflight()
+            console.print("[green]Preflight passed.[/green]")
+            return
         trainer.train()
     except SFTConfigError as e:
         fail(str(e))
