@@ -319,7 +319,7 @@ def test_resolve_legacy_name_through_pinned_typed_factory(monkeypatch, renderer_
         "renderers",
         SimpleNamespace(
             config_from_name=config_from_name,
-            create_renderer=lambda tokenizer, renderer_config: calls.append((tokenizer, renderer_config)) or NativeRenderer(),
+            create_renderer=lambda tokenizer, renderer_config, **_kwargs: calls.append((tokenizer, renderer_config)) or NativeRenderer(),
         ),
     )
     tokenizer = object()
@@ -329,6 +329,33 @@ def test_resolve_legacy_name_through_pinned_typed_factory(monkeypatch, renderer_
     assert result.source == "prime"
     assert lookups == [prime_name]
     assert calls == [(tokenizer, config)]
+
+
+def test_resolve_passes_chat_template_kwargs_to_prime_renderer(monkeypatch):
+    calls = []
+    config = object()
+
+    class NativeRenderer: ...
+
+    monkeypatch.setitem(
+        sys.modules,
+        "renderers",
+        SimpleNamespace(
+            config_from_name=lambda _name: config,
+            create_renderer=lambda tokenizer, renderer_config, *, chat_template_kwargs=None: calls.append((tokenizer, renderer_config, chat_template_kwargs)) or NativeRenderer(),
+        ),
+    )
+    tokenizer = object()
+
+    result = resolve(
+        "model",
+        tokenizer,
+        renderer_name="nemotron3",
+        chat_template_kwargs={"truncate_history_thinking": False},
+    )
+
+    assert result.source == "prime"
+    assert calls == [(tokenizer, config, {"truncate_history_thinking": False})]
 
 
 def test_resolve_prime_native_for_qwen(qwen_tokenizer):

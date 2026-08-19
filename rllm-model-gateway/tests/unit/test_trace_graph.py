@@ -84,36 +84,26 @@ def _direct_delta(
     )
 
 
-@pytest.mark.parametrize("missing", ["format", "version", "deltas"])
-def test_graph_contract_fields_are_required(missing: str):
-    payload = {"format": "compact", "version": 1, "deltas": []}
-    payload.pop(missing)
-    with pytest.raises(ValidationError):
-        TraceGraph.model_validate(payload)
+_REQUIRED_WIRE_FIELDS = ["format", "version", "deltas", "trace_id", "session_id", "parent_trace_id", "messages_suffix", "prompt_ids_suffix", "response_message", "completion_token_ids"]
 
 
-def test_graph_accepts_only_version_one():
-    with pytest.raises(ValidationError):
-        TraceGraph.model_validate({"format": "compact", "version": 2, "deltas": []})
+def _wire_without(field: str) -> dict:
+    payload = {"format": "compact", "version": 1, "deltas": [_direct_delta("t").model_dump()]}
+    (payload if field in payload else payload["deltas"][0]).pop(field)
+    return payload
 
 
 @pytest.mark.parametrize(
-    "missing",
+    "payload",
     [
-        "trace_id",
-        "session_id",
-        "parent_trace_id",
-        "messages_suffix",
-        "prompt_ids_suffix",
-        "response_message",
-        "completion_token_ids",
+        *(_wire_without(field) for field in _REQUIRED_WIRE_FIELDS),
+        {"format": "flat", "version": 1, "deltas": []},
+        {"format": "compact", "version": 2, "deltas": []},
     ],
 )
-def test_delta_core_fields_are_required(missing: str):
-    payload = _direct_delta("t").model_dump()
-    payload.pop(missing)
+def test_compact_wire_payload_is_strictly_validated(payload: dict):
     with pytest.raises(ValidationError):
-        TraceDelta.model_validate(payload)
+        TraceGraph.model_validate(payload)
 
 
 def test_root_and_child_deltas_resolve_exactly():

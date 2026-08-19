@@ -93,6 +93,10 @@ class SFTBackend(ABC):
     def fit(self) -> None:
         """Run the full SFT training loop."""
 
+    def preflight(self) -> None:
+        """Render and validate the dataset without starting a trainer."""
+        raise SFTConfigError(f"SFT preflight is not supported by the {self.name!r} backend.")
+
     @property
     @abstractmethod
     def checkpoint_dir(self) -> str:

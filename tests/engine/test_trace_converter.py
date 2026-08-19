@@ -174,6 +174,34 @@ class TestTraceRecordToStep:
         assert step.thought == "Let me think..."
         assert step.model_output.reasoning == "Let me think..."
 
+    def test_step_with_reasoning_content_and_tool_call(self):
+        """OpenAI-compatible GLM responses retain reasoning and tool calls."""
+        trace = self._make_trace(
+            response_message={
+                "role": "assistant",
+                "content": "I will inspect the repository.",
+                "reasoning_content": "Let me think through this...",
+                "tool_calls": [
+                    {
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": '{"command": "find . -maxdepth 2 -type d"}',
+                        },
+                    }
+                ],
+            },
+            finish_reason="tool_calls",
+        )
+        step = trace_record_to_step(trace)
+
+        assert step.thought == "Let me think through this..."
+        assert step.model_output.reasoning == "Let me think through this..."
+        assert step.model_output.tool_calls is not None
+        assert step.model_output.tool_calls[0].name == "bash"
+        assert step.model_output.tool_calls[0].arguments == {"command": "find . -maxdepth 2 -type d"}
+
     def test_chat_completions_includes_response(self):
         trace = self._make_trace()
         step = trace_record_to_step(trace)
@@ -198,6 +226,7 @@ class TestTraceRecordToStep:
             response_message={
                 "role": "assistant",
                 "content": "",
+                "reasoning_content": "Need the weather.",
                 "tool_calls": [{"type": "function", "function": {"name": "weather", "arguments": '{"city":"London"}'}}],
             },
             completion_token_ids=[12],

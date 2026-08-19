@@ -196,8 +196,7 @@ class GatewayManager:
         self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
         configured_port = gw_cfg.get("port", None)
         self.port: int = int(configured_port) if configured_port is not None else (_find_free_port() if self.tunnel_backend else DEFAULT_GATEWAY_PORT)
-        # Only the exact env value "compact" overrides the configured store.
-        self.store: str = "compact" if os.environ.get("RLLM_GATEWAY_STORE") == "compact" else gw_cfg.get("store", "memory")
+        self.store: str = os.environ.get("RLLM_GATEWAY_STORE", gw_cfg.get("store", "compact"))
         self.db_path: str | None = gw_cfg.get("db_path", None)
         if self.store not in ("memory", "compact", "sqlite"):
             raise ValueError(f"rllm.gateway.store must be 'memory', 'compact' or 'sqlite', got {self.store!r}")
