@@ -5,6 +5,8 @@
 # Source of truth:
 #   - W&B recorded program/config from commit d501e357967c45bb46807d5f6a3366cbcdfee32b
 #   - W&B run arguments are copied below field-for-field
+#   - W&B captured transformers==5.15.0; pin it because this branch's 5.5.3
+#     does not recognize model_type=deepseek_v4
 #
 # Intentional current-branch adaptations:
 #   - tb_v2_debug -> the current registry name tb-v2-debug
@@ -74,7 +76,7 @@ export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-3000}"
 export RLLM_EXPERIMENT_NAME="${RLLM_EXPERIMENT_NAME:-z6xi3xkh-dsv4-flash-lora128-trace-parity}"
 
 launch_cmd=(
-    uv run python -u cookbooks/terminal-rl/train_debug.py
+    uv run --with transformers==5.15.0 python -u cookbooks/terminal-rl/train_debug.py
     rllm/backend=fireworks
     model.name=accounts/fireworks/models/deepseek-v4-flash-0731
     model.tokenizer_model=deepseek-ai/DeepSeek-V4-Flash-0731
