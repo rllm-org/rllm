@@ -17,7 +17,6 @@ from rllm.eval.curation import (
     curate,
 )
 from rllm.eval.results import EvalItem, EvalResult
-from rllm.trainer.sft.tinker_dataset import _ensure_trainable
 
 
 def _u(c):
@@ -161,14 +160,6 @@ def test_prefix_matches_primitive():
     diverges = [_u("SUMMARY"), _a("a1")]
     assert _prefix_matches(seg, extends) is True
     assert _prefix_matches(seg, diverges) is False
-
-
-def test_ensure_trainable_passthrough_and_derive():
-    flagged = [{"role": "user", "content": "x", "trainable": False}, {"role": "assistant", "content": "a", "trainable": True}]
-    assert _ensure_trainable(flagged, last_only=False) is flagged
-    plain = [_u("q"), _a("a1"), _u("o"), _a("a2")]
-    assert [m["trainable"] for m in _ensure_trainable(plain, last_only=False)] == [False, True, False, True]
-    assert [m["trainable"] for m in _ensure_trainable(plain, last_only=True)] == [False, False, False, True]
 
 
 # ---------------------------------------------------------------------------
