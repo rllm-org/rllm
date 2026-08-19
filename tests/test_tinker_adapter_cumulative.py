@@ -12,6 +12,8 @@ Uses a fake engine so no Tinker service / model is required.
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from rllm.gateway.tinker_adapter import _to_openai_tool_calls, create_tinker_handler
 
 
@@ -48,6 +50,16 @@ class _FakeEngine:
         return _ModelOutput()
 
 
+class _RoutingEngine(_FakeEngine):
+    def __init__(self, routing_matrices):
+        super().__init__()
+        self.routing_matrices = routing_matrices
+
+    async def get_token_output_from_token_input(self, token_input, **kwargs):
+        self.token_input = token_input
+        return SimpleNamespace(routing_matrices=self.routing_matrices)
+
+
 def test_token_prompt_path_samples_from_tokens():
     engine = _FakeEngine()
     handler = create_tinker_handler(engine)
@@ -65,6 +77,12 @@ def test_token_prompt_path_samples_from_tokens():
     assert resp["choices"][0]["text"] == "ls -la"
     assert resp["choices"][0]["token_ids"] == [10, 11]
     assert resp["choices"][0]["logprobs"]["token_logprobs"] == [-0.1, -0.2]
+
+
+@pytest.mark.parametrize("routing_matrices", [["layer-blob-a", "layer-blob-b"], None])
+def test_token_prompt_path_carries_routing_matrices(routing_matrices):
+    resp = asyncio.run(create_tinker_handler(_RoutingEngine(routing_matrices))({"prompt": [1, 2, 3, 4], "model": "qwen"}))
+    assert resp["choices"][0]["routing_matrices"] == routing_matrices
 
 
 def test_chat_path_unchanged_by_token_branch():
