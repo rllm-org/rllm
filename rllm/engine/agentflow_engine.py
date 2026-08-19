@@ -837,7 +837,7 @@ class AgentFlowEngine:
 
         t = time.perf_counter()
         evaluation_episode = _materialize_trajectory_deltas(enriched)
-        if self.verify_only_on_env_done and enriched.termination_reason != TerminationReason.ENV_DONE:
+        if getattr(self, "verify_only_on_env_done", False) and enriched.termination_reason != TerminationReason.ENV_DONE:
             eval_output = EvalOutput(
                 reward=0.0,
                 is_correct=False,
