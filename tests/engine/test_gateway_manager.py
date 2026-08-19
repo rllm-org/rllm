@@ -20,9 +20,9 @@ def _unset_store_env(monkeypatch):
 
 
 class TestGatewayStoreSelection:
-    def test_default_store_is_memory(self):
+    def test_default_store_is_compact(self):
         gw = GatewayManager(_make_config(), mode="thread")
-        assert gw.store == "memory"
+        assert gw.store == "compact"
         assert gw.db_path is None
 
     def test_explicit_memory_store(self):
@@ -51,20 +51,20 @@ class TestGatewayStoreValidation:
             GatewayManager(_make_config(store="memory", db_path="/tmp/x.db"), mode="thread")
 
 
-class TestCompactStoreOptIn:
+class TestCompactStoreDefault:
     @pytest.mark.parametrize(
         ("config_store", "env_store", "expected"),
         [
-            (None, None, "memory"),
+            (None, None, "compact"),
             ("compact", None, "compact"),
             (None, "compact", "compact"),
             ("memory", "compact", "compact"),
-            # Only the exact value opts in; any other env value leaves config alone.
-            ("memory", "sqlite", "memory"),
-            ("compact", "memory", "compact"),
+            (None, "memory", "memory"),
+            ("memory", "sqlite", "sqlite"),
+            ("compact", "memory", "memory"),
         ],
     )
-    def test_only_the_compact_env_value_overrides_config(self, monkeypatch, config_store, env_store, expected):
+    def test_store_env_overrides_config(self, monkeypatch, config_store, env_store, expected):
         if env_store is not None:
             monkeypatch.setenv("RLLM_GATEWAY_STORE", env_store)
         overrides = {} if config_store is None else {"store": config_store}
