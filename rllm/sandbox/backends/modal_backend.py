@@ -322,10 +322,11 @@ class ModalSandbox:
 
         run = _build_exec_command(command, self._persistent_env, user)
         start = time.monotonic()
-        process = self._sandbox.exec("bash", "-c", run, **exec_kwargs)
+        # Decode raw terminal output lossily because it may not be valid UTF-8.
+        process = self._sandbox.exec("bash", "-c", run, text=False, **exec_kwargs)
 
-        stdout = process.stdout.read()
-        stderr = process.stderr.read()
+        stdout = process.stdout.read().decode("utf-8", errors="replace")
+        stderr = process.stderr.read().decode("utf-8", errors="replace")
 
         # Wait for the process to complete and get exit code
         process.wait()
