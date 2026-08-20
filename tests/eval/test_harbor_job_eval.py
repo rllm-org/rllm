@@ -1,5 +1,3 @@
-"""Native Harbor Job → rLLM eval adapter coverage."""
-
 import asyncio
 import json
 import os
@@ -36,7 +34,6 @@ def test_harbor_job_owns_execution_and_converts_results(monkeypatch, tmp_path):
         _TrialResult(paths[1], 0),
         _TrialResult(paths[0], 1),
         _TrialResult(paths[1], 1),
-        _TrialResult(paths[0], 0),
     ]
     harbor_config = tmp_path / "harbor.json"
     harbor_config.write_text(
@@ -97,6 +94,7 @@ def test_harbor_job_owns_execution_and_converts_results(monkeypatch, tmp_path):
         "LLM_BASE_URL": "https://openrouter.ai/api/v1",
     }
     assert os.environ.get("OPENROUTER_API_KEY") is None
-    assert [episode.id for episode in episodes] == ["a:0", "a:1", "b:0", "b:1"]
+    assert [episode.id for episode in episodes] == ["a:0", "b:0", "b:1"]
     assert [item.reward for item in result.items] == [1, 0, 0, 1]
+    assert result.items[1].error == "missing Harbor trial"
     assert result.pass_at[2] == 1.0

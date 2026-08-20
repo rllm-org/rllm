@@ -1,5 +1,3 @@
-"""Run Harbor evals directly and adapt their artifacts to rLLM output."""
-
 from __future__ import annotations
 
 import json
@@ -103,7 +101,6 @@ async def run_harbor_eval(
     harbor_config: str | None = None,
     on_episode_complete=None,
 ):
-    """Let one Harbor Job execute and verify all selected eval trials."""
     from harbor.job import Job
     from harbor.models.environment_type import EnvironmentType
     from harbor.models.trial.config import AgentConfig, TaskConfig

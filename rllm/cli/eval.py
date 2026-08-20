@@ -295,8 +295,7 @@ def _run_eval(
                 console.print("  [dim]Or run on a remote backend, e.g. [bold]--sandbox-backend modal[/].[/]")
                 fail(f"Harbor tasks require Docker — {reason}.")
 
-        # Harbor loads its own agent inside Job.create(). Other agents keep the
-        # existing rLLM AgentFlow path.
+        # Harbor Job creates its agent; only rLLM runtimes use load_agent().
         agent = None
         if not _direct_harbor_eval:
             try:
@@ -529,7 +528,6 @@ def _run_eval(
             )
         )
     else:
-        # rLLM-native flows still use AgentFlowEngine + gateway trace capture.
         from rllm.eval.runner import run_dataset
 
         result, episodes = asyncio.run(
