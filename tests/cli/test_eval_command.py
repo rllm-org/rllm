@@ -93,6 +93,28 @@ def test_eval_base_url_requires_model(runner, tmp_rllm_home):
     assert "--model is required" in result.output
 
 
+@pytest.mark.parametrize(("episode_args", "expected"), [([], True), (["--full-episodes"], False)])
+def test_eval_episode_format_is_forwarded(runner, tmp_rllm_home, episode_args, expected):
+    with patch("rllm.cli.eval._run_eval") as mock_run:
+        result = runner.invoke(
+            cli,
+            [
+                "eval",
+                "gsm8k",
+                "--agent",
+                "math",
+                "--base-url",
+                "http://localhost:8000/v1",
+                "--model",
+                "test-model",
+                *episode_args,
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert mock_run.call_args.kwargs["compact_episodes"] is expected
+
+
 def test_eval_with_proxy_mode(runner, tmp_rllm_home, mock_dataset):
     """Eval without --base-url should auto-start proxy from config."""
     config = RllmConfig(provider="openai", model="gpt-5-mini", api_keys={"openai": "sk-test"})

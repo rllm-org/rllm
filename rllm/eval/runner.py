@@ -42,6 +42,7 @@ async def run_dataset(
     gateway: GatewayManager | None = None,
     sampling_params: dict | None = None,
     attempts: int = 1,
+    compact_episodes: bool = False,
 ) -> tuple[EvalResult, list]:
     """Run a list of :class:`rllm.types.Task` objects through :class:`AgentFlowEngine`.
 
@@ -66,6 +67,8 @@ async def run_dataset(
             into ``attempts`` adjacent copies; the engine numbers sibling rollouts
             ``task_id:0..n-1`` (training's GRPO convention) and the EvalResult
             groups them back by task to compute ``pass_at``.
+        compact_episodes: Keep graph-backed trajectories in returned episodes and
+            completion callbacks instead of materializing cumulative steps.
 
     Returns ``(EvalResult, list[Episode])``.
     """
@@ -142,6 +145,7 @@ async def run_dataset(
         raise_on_error=False,  # capture per-task errors as error Episodes
         hooks=hooks,
         val_sampling_params=sampling_params or None,  # eval is always validation
+        compact_episodes=compact_episodes,
     )
 
     warm_queue = None

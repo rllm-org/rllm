@@ -168,6 +168,18 @@ def _build_episode_index(episodes_dir: Path) -> list[dict[str, Any]]:
     return index
 
 
+def _episode_payload_for_view(data: dict[str, Any]) -> dict[str, Any]:
+    """Materialize compact trajectory graphs only when the viewer opens them."""
+    is_compact = any(isinstance(step, dict) and "prompt_ids_suffix" in step for trajectory in data.get("trajectories", []) if isinstance(trajectory, dict) for step in trajectory.get("steps", []))
+    if not is_compact:
+        return data
+
+    from rllm.types import Episode, _materialize_trajectory_deltas
+
+    episode = _materialize_trajectory_deltas(Episode.model_validate(data))
+    return {**data, **episode.model_dump(mode="json")}
+
+
 def _preview(value: Any, limit: int = 140) -> str:
     if value is None:
         return ""
@@ -902,17 +914,17 @@ def _make_handler(root_path: Path, html_factory):
             self.end_headers()
             self.wfile.write(data)
 
-        def _send_file_bytes(self, path: Path) -> None:
+        def _send_episode(self, path: Path) -> None:
             try:
-                data = path.read_bytes()
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload = _episode_payload_for_view(payload)
             except OSError:
                 self.send_error(404, "Not Found")
                 return
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            except (AttributeError, json.JSONDecodeError, TypeError, ValueError):
+                self.send_error(500, "Invalid episode")
+                return
+            self._send_json(200, payload)
 
         def do_GET(self):  # noqa: N802
             path = self.path.split("?", 1)[0]
@@ -946,7 +958,7 @@ def _make_handler(root_path: Path, html_factory):
                     return self.send_error(400, "Bad path")
                 if not target.is_file():
                     return self.send_error(404, "Episode not found")
-                return self._send_file_bytes(target)
+                return self._send_episode(target)
 
             return self.send_error(404, "Not Found")
 
