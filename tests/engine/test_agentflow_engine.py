@@ -75,8 +75,10 @@ def test_run_single_passes_validation_flag_and_preserves_termination_reason():
     assert episode.termination_reason == TerminationReason.ERROR
 
 
-def test_compact_gateway_is_graph_native_only_for_training():
+def test_compact_gateway_validation_graph_is_opt_in():
     from rllm_model_gateway.models import TraceGraph
+
+    from rllm.types import TrajectoryDelta
 
     class _CompactGateway(_Gateway):
         store = "compact"
@@ -87,22 +89,45 @@ def test_compact_gateway_is_graph_native_only_for_training():
 
         async def aget_traces(self, session_id):
             self.fetches.append("flat")
-            return []
+            return [_valid_token_trace(session_id)]
 
         async def aget_trace_graph(self, session_id):
             self.fetches.append("graph")
-            return TraceGraph(format="compact", version=1, deltas=[])
+            graph = TraceGraph(format="compact", version=1, deltas=[])
+            graph.add(_valid_token_trace(session_id))
+            return graph
 
     gateway = _CompactGateway()
     engine = AgentFlowEngine(agent_flow=_Agent(), evaluator=_Evaluator(), gateway=gateway, model="test-model", n_parallel_tasks=1)
+    compact_engine = AgentFlowEngine(
+        agent_flow=_Agent(),
+        evaluator=_Evaluator(),
+        gateway=gateway,
+        model="test-model",
+        n_parallel_tasks=1,
+        compact_episodes=True,
+    )
     task = task_from_row({"question": "q"}, "task")
+    completed = []
     try:
-        asyncio.run(engine._run_single(task, "task:validation", is_validation=True))
+        validation_episode = asyncio.run(engine._run_single(task, "task:validation", is_validation=True))
+        compact_validation = asyncio.run(
+            compact_engine.execute_tasks(
+                [task],
+                task_ids=["compact"],
+                is_validation=True,
+                on_episode_complete=lambda _idx, episode: completed.append(episode),
+            )
+        )[0]
         asyncio.run(engine._run_single(task, "task:training", is_validation=False))
     finally:
         engine.shutdown()
+        compact_engine.shutdown()
 
-    assert gateway.fetches == ["flat", "graph"]
+    assert gateway.fetches == ["flat", "graph", "graph"]
+    assert isinstance(validation_episode.trajectories[0], Trajectory)
+    assert isinstance(compact_validation.trajectories[0], TrajectoryDelta)
+    assert isinstance(completed[0].trajectories[0], TrajectoryDelta)
 
 
 def _empty_token_trace(session_id: str):

@@ -410,6 +410,7 @@ class AgentFlowEngine:
         hooks: TaskHooks | None = None,
         train_sampling_params: dict | None = None,
         val_sampling_params: dict | None = None,
+        compact_episodes: bool = False,
     ) -> None:
         if evaluator is None and hooks is None:
             raise ValueError("AgentFlowEngine requires either an `evaluator` (single evaluator for every task) or `hooks` (per-task evaluator + setup/teardown). Both cannot be None.")
@@ -432,6 +433,7 @@ class AgentFlowEngine:
         self.hooks = hooks
         self.train_sampling_params = train_sampling_params
         self.val_sampling_params = val_sampling_params
+        self.compact_episodes = compact_episodes
 
         self.n_parallel_tasks = n_parallel_tasks
         self.executor = ThreadPoolExecutor(max_workers=n_parallel_tasks)
@@ -530,7 +532,8 @@ class AgentFlowEngine:
                 # end — keeps the UI live and avoids a giant end-of-run flush.
                 if on_episode_complete is not None and episode is not None:
                     try:
-                        on_episode_complete(result_idx, _materialize_trajectory_deltas(episode))
+                        callback_episode = episode if self.compact_episodes else _materialize_trajectory_deltas(episode)
+                        on_episode_complete(result_idx, callback_episode)
                     except Exception:
                         logger.debug("on_episode_complete callback error", exc_info=True)
                 # Canary: a rollout whose LLM completions are ALL empty means the
@@ -691,7 +694,7 @@ class AgentFlowEngine:
         )
         try:
             t = time.perf_counter()
-            compact_fetch = not is_validation and getattr(self.gateway, "store", None) == "compact" and hasattr(self.gateway, "aget_trace_graph")
+            compact_fetch = (self.compact_episodes or not is_validation) and getattr(self.gateway, "store", None) == "compact" and hasattr(self.gateway, "aget_trace_graph")
             traces = await (self.gateway.aget_trace_graph(uid) if compact_fetch else self.gateway.aget_traces(uid))
             timings["time/traces_s"] = time.perf_counter() - t
 

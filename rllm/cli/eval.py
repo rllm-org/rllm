@@ -20,7 +20,7 @@ from rllm.cli._pull import load_dataset_catalog, pull_dataset
 from rllm.cli._sampling import SAMPLING_PARAMS_HELP as _SAMPLING_PARAMS_HELP
 from rllm.cli._ui import console, fail, info_panel, not_found, parse_index_spec
 from rllm.eval.config import SUPPORTED_PROVIDERS
-from rllm.types import Task
+from rllm.types import Task, _materialize_trajectory_deltas
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +131,7 @@ def _run_eval(
     agent_metadata: dict | None = None,
     enable_ui: bool = False,
     save_episodes: bool = True,
+    compact_episodes: bool = False,
     episodes_dir: str | None = None,
     use_snapshot: bool = True,
     warm_queue_size: int = 0,
@@ -441,6 +442,7 @@ def _run_eval(
             "split": split,
             "timestamp": timestamp,
             "attempts": attempts,
+            "episode_format": "compact" if compact_episodes else "full",
         }
     )
     episode_store = run_store if save_episodes else None
@@ -493,7 +495,7 @@ def _run_eval(
                 except Exception:
                     logger.debug("episode_store.write failed", exc_info=True)
             if _ui_callback is not None:
-                _ui_callback(episode)
+                _ui_callback(_materialize_trajectory_deltas(episode))
 
     # Single execution path: every Task goes through ``AgentFlowEngine``
     # via ``SandboxTaskHooks``. The engine fronts every LLM call with the rLLM
@@ -519,6 +521,7 @@ def _run_eval(
             evaluator=evaluator,
             sampling_params=(sampling_config.as_dict() if sampling_config is not None else None),
             attempts=attempts,
+            compact_episodes=save_episodes and compact_episodes,
         )
     )
 
@@ -631,6 +634,7 @@ def _run_eval(
 )
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
 @click.option("--save-episodes/--no-save-episodes", "save_episodes", default=True, help="Save each Episode as its own JSON file for later visualization (default: enabled).")
+@click.option("--compact-episodes", is_flag=True, help="Save graph-backed Episode JSONs without repeated cumulative messages and token IDs.")
 @click.option("--episodes-dir", "episodes_dir", default=None, help="Directory to write the episode JSONs into. Default: ~/.rllm/eval_results/<bench>_<model>_<timestamp>/.")
 @click.option("--sampling-params", "sampling_params", default=None, help=_SAMPLING_PARAMS_HELP)
 @click.option("--temperature", default=None, type=float, help="Sampling temperature (shortcut for --sampling-params temperature=...).")
@@ -667,6 +671,7 @@ def eval_cmd(
     warm_queue_size: int,
     enable_ui: bool | None,
     save_episodes: bool,
+    compact_episodes: bool,
     episodes_dir: str | None,
     sampling_params: str | None,
     temperature: float | None,
@@ -804,6 +809,7 @@ def eval_cmd(
             agent_metadata=agent_metadata,
             enable_ui=enable_ui,
             save_episodes=save_episodes,
+            compact_episodes=compact_episodes,
             episodes_dir=episodes_dir,
             use_snapshot=use_snapshot,
             warm_queue_size=warm_queue_size,
