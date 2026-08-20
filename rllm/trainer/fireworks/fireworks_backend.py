@@ -42,7 +42,7 @@ from rllm.trainer.algorithms import AlgorithmConfig, simple_timer
 # def _patched_rc_optim_step(self, params, grad_accumulation_normalization=None):
 #     return self._client.optim_step(params).result(timeout=self._default_timeout)
 # _RC.optim_step = _patched_rc_optim_step
-from rllm.trainer.fireworks.fireworks_policy_trainer import FireworksPolicyTrainer, builtin_loss_args
+from rllm.trainer.fireworks.fireworks_policy_trainer import FireworksPolicyTrainer
 from rllm.trainer.tinker.tinker_backend import TinkerBackend
 from rllm.trainer.tinker.tinker_metrics_utils import (
     update_training_metrics,
@@ -97,7 +97,7 @@ class FireworksBackend(TinkerBackend):
         self.beta2 = config.training.get("beta2", 0.95)
         self.eps = config.training.get("eps", 1e-8)
         self.weight_decay = config.training.get("weight_decay", 0.01)
-        self.grad_clip_norm = config.training.get("grad_clip_norm", 1.0)
+        self.grad_clip_norm = config.training.get("grad_clip_norm", 0.0)  # 0.0 = disabled; opt in explicitly (1.0 is too aggressive for token-sum loss)
 
         # Fireworks-specific handles (populated in _init_fireworks_infra)
         self.weight_syncer: WeightSyncer | None = None
@@ -148,12 +148,9 @@ class FireworksBackend(TinkerBackend):
         """Provision the trainer job, deployment, and sampler via the
         cookbook's ``training.provision.init_fireworks_infra``."""
         cfg = self.full_config
-        # Fail fast on loss misconfiguration before provisioning any
-        # (expensive, slow-to-create) remote infrastructure.
-        from training.utils.rl.losses import validate_loss_path
-
         algorithm_config = kwargs.get("algorithm_config") or AlgorithmConfig.from_config(cfg.rllm.algorithm)
-        validate_loss_path(builtin_loss_args(algorithm_config))
+        # (fireworks-ai >=1.2.1 dropped validate_loss_path; builtin loss is resolved in
+        # FireworksPolicyTrainer.resolve_builtin_loss instead.)
 
         provision_cfg = self._build_provision_config(algorithm_config)
 
@@ -216,6 +213,10 @@ class FireworksBackend(TinkerBackend):
 
             cfg = self.full_config
             rollout_extra = dict(cfg.get("rollout_engine", {}))
+            # Render turn-0 prompts with the same renderer the gateway uses for
+            # the cumulative bridge (rllm.gateway.renderer_family), so engine and
+            # gateway agree across turns. renderer_name still flows via rollout_extra.
+            renderer_family = cfg.rllm.gateway.get("renderer_family", "auto") if cfg.rllm.get("gateway") else "auto"
             self.rollout_engine = FireworksEngine(
                 tokenizer=self.tokenizer,
                 sampler=self.sampling_client,
@@ -226,6 +227,7 @@ class FireworksBackend(TinkerBackend):
                 disable_thinking=rollout_extra.pop("disable_thinking", False),
                 accumulate_reasoning=rollout_extra.pop("accumulate_reasoning", False),
                 reasoning_effort=rollout_extra.pop("reasoning_effort", "medium"),
+                renderer_family=renderer_family,
                 router_replay=cfg.rllm.algorithm.get("router_replay", "disabled") == "R3",
                 **rollout_extra,
             )
@@ -265,9 +267,9 @@ class FireworksBackend(TinkerBackend):
                 loss_fn,
             )
 
-        valid_loss_agg_modes = {None, "token-mean", "seq-mean-token-sum", "seq-mean-token-mean"}
+        valid_loss_agg_modes = {None, "token-mean", "token-sum", "seq-mean-token-sum", "seq-mean-token-mean"}
         if loss_agg_mode not in valid_loss_agg_modes:
-            raise ValueError(f"rllm.algorithm.loss_agg_mode must be null, 'token-mean', 'seq-mean-token-sum', or 'seq-mean-token-mean' for the Fireworks backend, got {loss_agg_mode!r}")
+            raise ValueError(f"rllm.algorithm.loss_agg_mode must be null, 'token-mean', 'token-sum', 'seq-mean-token-sum', or 'seq-mean-token-mean' for the Fireworks backend, got {loss_agg_mode!r}")
         logger.info("Fireworks loss aggregation mode: %s", loss_agg_mode or "backend default")
 
         if router_replay == "R2":

@@ -62,25 +62,42 @@ _VERL_KNOWN_LOSSES: set[str] | None = None
 
 
 class CustomPPOLoss:
-    """Wraps Verl's ``ppo_loss`` to support per-call loss mode override.
+    """The verl actor loss. Dispatches to either a verl-native kernel or an rLLM loss.
 
-    When the data TensorDict contains ``policy_loss_mode_override``,
-    the loss mode is temporarily overridden for that call.  Instances
-    are serialised via cloudpickle and sent to remote workers through
-    Verl's ``set_loss_fn`` RPC.
+    The loss mode comes from ``config.policy_loss.loss_mode`` (mapped from
+    ``algorithm.loss_fn``), optionally overridden per-call via ``policy_loss_mode_override``
+    (per-role routing). If the mode names an rLLM loss (``rllm.trainer.algorithms.loss``),
+    that single function is run in-process over a :class:`LossContext`; otherwise verl's
+    own ``ppo_loss`` runs. There is no separate auxiliary-loss path — a loss that wants an
+    extra term (e.g. ECHO) adds it in its own body. Instances are cloudpickled to workers
+    via verl's ``set_loss_fn`` RPC.
     """
 
-    def __init__(self, config):
-        # Convert OmegaConf DictConfig → ActorConfig dataclass
+    def __init__(self, config, loss_params=None, pad_token_id: int | None = None, loss_plugins=None):
         from verl.utils.config import omega_conf_to_dataclass
 
         self.config = omega_conf_to_dataclass(config)
+        self.loss_params = dict(loss_params or {})
+        self.pad_token_id = pad_token_id
+        # Modules to import on the worker so a user's @register_loss fires there (entry-point
+        # losses self-discover via get_loss; this covers the explicit loss_plugins list).
+        self.loss_plugins = list(loss_plugins or [])
 
     def __call__(self, model_output, data, dp_group=None):
         from verl.utils import tensordict_utils as _tu
         from verl.workers.utils.losses import ppo_loss
 
+        from rllm.trainer.algorithms.loss import is_custom_loss, native_loss_names
+
         override = _tu.get(data, "policy_loss_mode_override", default=None)
+        loss_mode = override if override is not None else self.config.policy_loss.get("loss_mode", "vanilla")
+
+        # Native-first: if verl has a fused kernel for this name (e.g. dppo_tv/gspo/cispo on
+        # 0.8), use it. Only fall back to the in-process rLLM loss when verl can't run it.
+        if is_custom_loss(loss_mode) and loss_mode not in native_loss_names("verl"):
+            return self._rllm_loss(loss_mode, model_output, data)
+
+        # verl-native loss (vanilla / gspo / ...), with per-call mode override.
         if override is not None:
             original = self.config.policy_loss.get("loss_mode", "vanilla")
             self.config.policy_loss["loss_mode"] = override
@@ -90,15 +107,81 @@ class CustomPPOLoss:
                 self.config.policy_loss["loss_mode"] = original
         return ppo_loss(self.config, model_output, data, dp_group)
 
+    def _rllm_loss(self, name, model_output, data):
+        """Run a single rLLM loss in-process. Builds a LossContext from the verl batch and
+        supplies ``aggregate`` = verl's ``agg_loss`` with global-batch normalization, so the
+        loss body (which returns a scalar) normalizes exactly like a verl-native loss."""
+        import torch
+        from verl.trainer.ppo.core_algos import agg_loss
+        from verl.utils.metric import AggregationType, Metric
+        from verl.workers.utils.padding import no_padding_2_padding
+
+        from rllm.trainer.algorithms.loss import LossContext, get_loss, load_loss_plugins
+
+        # Ensure a user's loss module is imported on this (worker) process before lookup.
+        load_loss_plugins(self.loss_plugins)
+
+        # Current-policy log-probs, repadded to (bs, response_len).
+        log_prob = no_padding_2_padding(model_output["log_probs"], data)
+
+        # global-batch info for aggregation (mirrors verl.workers.utils.losses.ppo_loss).
+        gbi = self.config.global_batch_info
+        gbi["dp_size"] = data["dp_size"]
+        gbi["batch_num_tokens"] = data["batch_num_tokens"]
+        gbi["global_batch_size"] = data["global_batch_size"]
+        gbi["loss_scale_factor"] = self.config.loss_scale_factor
+        distributed = gbi["dp_size"] > 1 or gbi["batch_num_tokens"] is not None or gbi["global_batch_size"] is not None or self.config.loss_scale_factor is not None
+        agg_type = AggregationType.SUM if distributed else AggregationType.MEAN
+
+        # behavior log-probs / advantages — selected and padded exactly as ppo_loss does.
+        fields = ["response_mask", "old_log_probs", "advantages"]
+        if "ref_log_prob" in data:
+            fields.append("ref_log_prob")
+        if "rollout_log_probs" in data:
+            fields.append("rollout_log_probs")
+        padded = data.select(*fields).to_padded_tensor()
+        response_mask = padded["response_mask"].to(torch.bool)
+
+        # observation tokens = non-pad response tokens that are not action tokens.
+        if self.pad_token_id is not None:
+            non_pad = data["responses"] != self.pad_token_id
+        else:
+            non_pad = data["attention_mask"][:, -response_mask.shape[-1] :].to(torch.bool)
+
+        def aggregate(per_token, mask, mode=None):
+            return agg_loss(loss_mat=per_token, loss_mask=mask, loss_agg_mode=(mode or self.config.loss_agg_mode), **gbi)
+
+        ctx = LossContext(
+            logp_curr=log_prob,
+            logp_old=padded["old_log_probs"],
+            advantages=padded["advantages"],
+            action_mask=response_mask.to(log_prob.dtype),
+            obs_mask=(non_pad & (~response_mask)).to(log_prob.dtype),
+            aggregate=aggregate,
+            logp_ref=padded.get("ref_log_prob", None),
+            logp_rollout=padded.get("rollout_log_probs", None),
+            params={**self.loss_params, "clip_ratio_c": self.config.get("clip_ratio_c", 20.0)},
+            backend="verl",
+        )
+        loss, raw_metrics = get_loss(name)(ctx)
+        metrics = {"actor/pg_loss": Metric(value=loss, aggregation=agg_type)}
+        for k, v in raw_metrics.items():
+            metrics[f"actor/{k}"] = Metric(value=(v if torch.is_tensor(v) else torch.tensor(float(v))), aggregation=AggregationType.MEAN)
+        return loss, metrics
+
 
 def _get_verl_known_losses() -> set[str]:
-    """Lazily load the set of registered Verl policy loss function names."""
-    global _VERL_KNOWN_LOSSES
-    if _VERL_KNOWN_LOSSES is None:
-        from verl.trainer.ppo.core_algos import POLICY_LOSS_REGISTRY
+    """Lazily load the set of registered Verl policy loss function names.
 
-        _VERL_KNOWN_LOSSES = set(POLICY_LOSS_REGISTRY.keys())
-    return _VERL_KNOWN_LOSSES
+    Includes rLLM unified loss terms (``rllm.trainer.algorithms.loss``): they are
+    registered into verl's ``POLICY_LOSS_REGISTRY`` on workers via the setup hook, so
+    driver-side name validation must accept them too. Recomputed each call so terms
+    registered after first use (e.g. via ``loss_plugins``) are still recognized."""
+    from verl.trainer.ppo.core_algos import POLICY_LOSS_REGISTRY
+
+    from rllm.trainer.algorithms.loss import RLLM_LOSS_REGISTRY
+
+    return set(POLICY_LOSS_REGISTRY.keys()) | set(RLLM_LOSS_REGISTRY.keys())
 
 
 class VerlBackend(BackendProtocol[Iterable, DataProto]):
@@ -324,11 +407,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         assert self.async_rollout_manager is not None
 
-        if hasattr(self.actor_rollout_wg, "set_loss_fn"):
-            self.actor_rollout_wg.set_loss_fn(CustomPPOLoss(self.config.actor_rollout_ref.actor))
-        else:
-            logger.warning("RayWorkerGroup.set_loss_fn not available — skipping custom loss injection")
-
         # Both paths obtain the rollout client from the LLMServerManager; the separated
         # path uses the partial-rollout-aware client so preempted rollouts can resume.
         if self.is_separated:
@@ -347,6 +425,29 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         self.rollout_engine.server_addresses = self.llm_server_manager.get_addresses()
 
         self.algorithm_config = kwargs.get("algorithm_config")
+
+        # Install the custom actor loss. If algorithm.loss_fn names an rLLM loss it runs
+        # in-process over a LossContext; otherwise verl's native kernel runs. Params
+        # (clip/kl + algorithm.loss_params) reach the loss via ctx.params; pad_token_id lets
+        # it identify environment-observation tokens. Installed after algorithm_config is
+        # resolved so the loss_fn default (e.g. echo) is reflected.
+        if hasattr(self.actor_rollout_wg, "set_loss_fn"):
+            from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
+
+            # native-first: only an rLLM loss verl can't run natively takes the in-process path
+            resolved = resolve_loss(self.algorithm_config, native_losses=native_loss_names("verl")) if self.algorithm_config is not None else None
+            self.actor_rollout_wg.set_loss_fn(
+                CustomPPOLoss(
+                    self.config.actor_rollout_ref.actor,
+                    loss_params=(resolved.params if resolved is not None else {}),
+                    pad_token_id=getattr(self.tokenizer, "pad_token_id", None),
+                    loss_plugins=list(getattr(self.algorithm_config, "loss_plugins", None) or []),
+                )
+            )
+            if resolved is not None:
+                logger.info("rLLM custom loss enabled on verl actor: %s (params=%s)", resolved.name, resolved.params)
+        else:
+            logger.warning("RayWorkerGroup.set_loss_fn not available — skipping custom loss injection")
 
         return self.rollout_engine
 
@@ -450,7 +551,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         if trainer_state.episodes is not None:
             batch = transform_episodes_to_dataproto(trainer_state.episodes, self.rollout_engine, max_prompt_length, max_total_length)
             # Lift per-batch merge metrics (batch/steps_per_traj,
-            # batch/step_response_length) out of meta_info so they show up in
+            # batch/merged_steps_per_traj, batch/step_response_length) out of meta_info so they show up in
             # the standard trainer_state.metrics path. Same metric names the
             # tinker backend logs, so dashboards work across both.
             merge_metrics = batch.meta_info.pop("merge_metrics", None)

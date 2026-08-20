@@ -31,8 +31,10 @@ class _FakeSandbox:
     ``test -f``/``cat`` shell commands the evaluator runs.
     """
 
-    def __init__(self, files: dict[str, str] | None = None):
+    def __init__(self, files: dict[str, str] | None = None, blobs: dict[str, bytes] | None = None):
         self.files: dict[str, str] = dict(files or {})
+        # Binary payloads reachable via upload_file/download_file (artifacts).
+        self.blobs: dict[str, bytes] = dict(blobs or {})
         self.execs: list[tuple[str, str | None]] = []
         self.uploads: list[tuple[str, str]] = []
 
@@ -50,6 +52,15 @@ class _FakeSandbox:
 
     def upload_dir(self, src: str, dst: str) -> None:
         self.uploads.append((src, dst))
+
+    def upload_file(self, local_path: str, remote_path: str) -> None:
+        with open(local_path, "rb") as f:
+            self.blobs[remote_path] = f.read()
+
+    def download_file(self, remote_path: str) -> bytes:
+        if remote_path not in self.blobs:
+            raise FileNotFoundError(remote_path)
+        return self.blobs[remote_path]
 
 
 def _episode() -> Episode:
@@ -133,16 +144,18 @@ class TestShellScriptEvaluator:
         out = ev.evaluate(task, _episode())
         assert out.reward == 1.0
 
-    def test_no_reward_file_returns_zero(self, tmp_path):
+    def test_no_reward_file_is_infra_error_not_score_zero(self, tmp_path):
         bench = _bench(tmp_path)
         sb = _FakeSandbox(files={})  # nothing written
         ev = ShellScriptEvaluator(sandbox=sb)
         task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
+        # A missing reward file means the verifier produced no verdict — a verifier/infra
+        # failure, distinct from a legitimate score of 0 — so it surfaces as a typed
+        # grading error (was a bare RuntimeError before the error taxonomy).
         out = ev.evaluate(task, _episode())
-        assert out.reward == 0.0
+        assert out.error == "RewardFileNotFoundError"
         assert out.is_correct is False
-        assert "no reward file" in out.metadata.get("error", "")
 
     def test_missing_tests_dir_short_circuits(self, tmp_path):
         bench = tmp_path / "bench-no-tests"
@@ -154,6 +167,268 @@ class TestShellScriptEvaluator:
         out = ev.evaluate(task, _episode())
         assert out.reward == 0.0
         assert "no" in out.metadata.get("error", "")
+        assert out.error == "AddTestsDirError"
+
+
+class TestShellScriptEvaluatorErrorTagging:
+    """Grading-infra failures set EvalOutput.error (Harbor-aligned) so the engine
+    routes them to an infra TerminationReason instead of a spurious reward 0."""
+
+    def test_verifier_timeout_tagged(self, tmp_path):
+        from rllm.sandbox.protocol import SandboxCommandTimeout
+
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={})
+        base_exec = sb.exec
+
+        def exec_with_verifier_timeout(cmd, timeout=None, user=None):
+            if "/tests/test.sh" in cmd:
+                raise SandboxCommandTimeout("verifier timed out")
+            return base_exec(cmd, timeout=timeout, user=user)
+
+        sb.exec = exec_with_verifier_timeout
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.error == "VerifierTimeoutError"
+        assert out.reward == 0.0
+
+    def test_no_reward_file_tagged(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={})
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.error == "RewardFileNotFoundError"
+
+    def test_empty_reward_file_tagged(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": ""})  # present but empty
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.error == "RewardFileEmptyError"
+
+    def test_unparseable_reward_tagged(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.json": "not-json{{"})
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.error == "VerifierOutputParseError"
+
+    def test_upload_failure_tagged(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={})
+
+        def boom(src, dst):
+            raise RuntimeError("upload failed")
+
+        sb.upload_dir = boom
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.error == "AddTestsDirError"
+
+    def test_legit_zero_is_not_tagged(self, tmp_path):
+        """A real reward of 0 (verifier ran, wrote 0) is NOT an error."""
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "0.0"})
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.reward == 0.0
+        assert out.error is None
+
+    def test_crash_sentinel_tagged(self, tmp_path):
+        """A negative reward is a harness "no verdict" sentinel, not a score.
+
+        Harbor-style ``test.sh`` wrappers trap a crashed grader and write -1. Read
+        as a reward it would count as a task failure *and* drag mean reward below
+        the task's scale, so it is tagged and zeroed instead — with the raw value
+        kept for triage.
+        """
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "-1"})
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.error == "VerifierCrashError"
+        assert out.reward == 0.0
+        assert out.is_correct is False
+        assert out.metadata["reward_sentinel"] == -1.0
+        assert any(s.name == "verifier_crash" and s.value == 1.0 for s in out.signals)
+
+    def test_crash_sentinel_maps_to_grading_error(self):
+        from rllm.types import TerminationReason, termination_reason_from_error
+
+        assert termination_reason_from_error("VerifierCrashError") is TerminationReason.GRADING_ERROR
+
+
+class TestVerifierStdoutCapture:
+    """The verifier's output is the only record of *why* a suite failed, and the
+    sandbox is torn down right after grading — what isn't lifted here is gone."""
+
+    def test_stdout_kept_on_pass(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        real_exec = sb.exec
+
+        def exec_(cmd: str, timeout: float | None = None, user: str | None = None) -> str:
+            if "/tests/test.sh" in cmd:
+                return "===== raw suite output =====\n7 passed"
+            return real_exec(cmd, timeout, user)
+
+        sb.exec = exec_  # type: ignore[method-assign]
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert "7 passed" in out.metadata["verifier_stdout_tail"]
+
+    def test_stdout_kept_when_verifier_exits_nonzero(self, tmp_path):
+        """The failure path is the one worth debugging, and there the backend
+        hands the output back on the exception rather than as a return value."""
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "0.0"})
+        real_exec = sb.exec
+
+        def exec_(cmd: str, timeout: float | None = None, user: str | None = None) -> str:
+            if "/tests/test.sh" in cmd:
+                raise RuntimeError("exit 1: FAILED tests/test_sort.py::test_natural_order")
+            return real_exec(cmd, timeout, user)
+
+        sb.exec = exec_  # type: ignore[method-assign]
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.reward == 0.0
+        assert out.error is None  # a real 0, not a grading failure
+        assert "test_natural_order" in out.metadata["verifier_stdout_tail"]
+
+    def test_stdout_tail_is_bounded(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "0.0"})
+        real_exec = sb.exec
+
+        def exec_(cmd: str, timeout: float | None = None, user: str | None = None) -> str:
+            if "/tests/test.sh" in cmd:
+                return "x" * 50_000 + "TAIL_MARKER"
+            return real_exec(cmd, timeout, user)
+
+        sb.exec = exec_  # type: ignore[method-assign]
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        tail = out.metadata["verifier_stdout_tail"]
+        assert len(tail) == 8000
+        assert tail.endswith("TAIL_MARKER")  # tail, not head
+
+
+class TestGraderStateCapture:
+    """Whatever a grader reports beside its verdict becomes a signal, so the
+    fine-grained state survives on the episode instead of being collapsed into
+    one number. Field names are grader-specific, so nothing is keyed to them."""
+
+    def test_extra_scalars_become_signals(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.json": ('{"reward": 0, "f2p_total": 3, "f2p_passed": 1, "p2p_failed": 0, "partial": 0.33, "apply_failed": true, "runner": "mocha"}')})
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+
+        signals = {s.name: s.value for s in out.signals}
+        assert signals["f2p_total"] == 3.0
+        assert signals["f2p_passed"] == 1.0
+        assert signals["p2p_failed"] == 0.0
+        assert signals["partial"] == pytest.approx(0.33)
+        assert signals["apply_failed"] == 1.0  # bools count
+        assert "runner" not in signals  # non-numeric detail is not a signal
+        assert "reward" not in signals  # the verdict itself is not duplicated
+
+
+class TestPreAgentGitHeadRestore:
+    """In-sandbox graders restore the task's official tests from ``HEAD``, so the
+    verifier has to see the image's commit — not the agent's. See
+    ShellScriptEvaluator._restore_git_heads."""
+
+    def test_soft_resets_each_repo_before_grading(self, tmp_path):
+        bench = _bench(tmp_path)
+        sha = "a" * 40
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+
+        ShellScriptEvaluator(sandbox=sb, git_heads={"/app": sha}).evaluate(task, _episode())
+
+        resets = [cmd for cmd, _ in sb.execs if "reset --soft" in cmd]
+        assert len(resets) == 1
+        assert f"-C /app reset --soft {sha}" in resets[0]
+        # Soft only: the agent's working tree is what gets graded.
+        assert "--hard" not in resets[0]
+        # And it happens before the verifier script runs.
+        order = [i for i, (cmd, _) in enumerate(sb.execs) if "reset --soft" in cmd or "/tests/test.sh" in cmd]
+        assert "reset --soft" in sb.execs[order[0]][0]
+
+    def test_no_repos_captured_is_a_noop(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+
+        ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert not [cmd for cmd, _ in sb.execs if "reset" in cmd]
+
+    def test_restore_failure_does_not_break_grading(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        base_exec = sb.exec
+
+        def exec_git_broken(cmd, timeout=None, user=None):
+            if "reset --soft" in cmd:
+                raise RuntimeError("no git in this image")
+            return base_exec(cmd, timeout=timeout, user=user)
+
+        sb.exec = exec_git_broken
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb, git_heads={"/app": "b" * 40}).evaluate(task, _episode())
+        assert out.reward == 1.0
+        assert out.error is None
+
+    def test_capture_skips_when_disabled(self, monkeypatch, tmp_path):
+        from rllm.eval._resolution import _capture_git_heads
+
+        sb = _FakeSandbox()
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=tmp_path)
+        monkeypatch.setenv("RLLM_VERIFIER_RESTORE_GIT_HEAD", "0")
+        assert _capture_git_heads(task, sb) == {}
+        assert sb.execs == []
+
+    @staticmethod
+    def _sandbox_reporting(sha_a: str, sha_b: str) -> _FakeSandbox:
+        sb = _FakeSandbox()
+        sb.exec = lambda cmd, timeout=None, user=None: f"/app {sha_a}\n/testbed {sha_b}\nnot-a-repo\n"
+        return sb
+
+    def test_capture_parses_repo_roots(self, tmp_path):
+        from rllm.eval._resolution import _capture_git_heads
+
+        sha_a, sha_b = "a" * 40, "b" * 40
+        sb = self._sandbox_reporting(sha_a, sha_b)
+        task = Task(id="0", instruction="", metadata={"workdir": "/testbed", "verifier_mode": "separate"}, dataset_dir=tmp_path)
+
+        assert _capture_git_heads(task, sb) == {"/app": sha_a, "/testbed": sha_b}
+
+    def test_shared_mode_tasks_are_left_alone(self, tmp_path):
+        """Moving HEAD is only right where we grade a separate-mode task in the
+        agent's box anyway. A shared-mode task's agent may be *supposed* to move
+        HEAD — terminal-bench's git-object-builder is scored on refs/heads/main
+        and `git ls-tree HEAD` — so resetting it would destroy the deliverable."""
+        from rllm.eval._resolution import _capture_git_heads
+
+        sb = self._sandbox_reporting("a" * 40, "b" * 40)
+        task = Task(id="0", instruction="", metadata={"verifier_mode": "shared"}, dataset_dir=tmp_path)
+        assert _capture_git_heads(task, sb) == {}
+        assert sb.execs == []  # not even probed
+
+        # A task that declares nothing at all is shared by default.
+        assert _capture_git_heads(Task(id="0", instruction="", metadata={}, dataset_dir=tmp_path), sb) == {}
+
+    def test_env_var_forces_it_on_for_a_shared_task(self, tmp_path, monkeypatch):
+        """Escape hatch for a shared-mode verifier that does assume pristine HEAD."""
+        from rllm.eval._resolution import _capture_git_heads
+
+        monkeypatch.setenv("RLLM_VERIFIER_RESTORE_GIT_HEAD", "1")
+        sha_a, sha_b = "a" * 40, "b" * 40
+        sb = self._sandbox_reporting(sha_a, sha_b)
+        task = Task(id="0", instruction="", metadata={"verifier_mode": "shared"}, dataset_dir=tmp_path)
+        assert _capture_git_heads(task, sb) == {"/app": sha_a, "/testbed": sha_b}
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +521,8 @@ def evaluate(metadata, trajectory):
         assert out.reward == 0.0
         assert out.is_correct is False
         assert "boom" in out.metadata["error"]
+        # The exception class is carried so the engine can route it to GRADING_ERROR.
+        assert out.error == "RuntimeError"
 
 
 # ---------------------------------------------------------------------------
@@ -284,3 +561,94 @@ class TestCoerceEvalResult:
         out = _coerce_eval_result(object())
         assert out.reward == 0.0
         assert "Cannot coerce" in out.metadata["error"]
+
+
+class TestSeparateVerifierEnvironment:
+    """Harbor's `[verifier].environment_mode = "separate"`: the agent's work
+    reaches a fresh container as collected artifacts, so the verifier never sees
+    the box the agent mutated."""
+
+    @staticmethod
+    def _task(tmp_path: Path) -> Task:
+        return Task(
+            id="0",
+            instruction="",
+            metadata={"verifier_mode": "separate"},
+            dataset_dir=_bench(tmp_path),
+        )
+
+    def test_grades_in_the_fresh_box_and_tears_it_down(self, tmp_path):
+        agent = _FakeSandbox(files={"/logs/verifier/reward.txt": "0.0"})  # stale: agent's box
+        verifier = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        verifier.closed = False
+        verifier.close = lambda: setattr(verifier, "closed", True)
+
+        ev = ShellScriptEvaluator(sandbox=agent, verifier_sandbox_factory=lambda: verifier)
+        out = ev.evaluate(self._task(tmp_path), _episode())
+
+        assert out.reward == 1.0  # read from the verifier box, not the agent's
+        assert any(dst == "/tests" for _, dst in verifier.uploads)
+        assert verifier.closed, "the verifier box must not outlive the grade"
+
+    def test_collect_runs_in_the_agent_box_and_artifact_lands_in_the_verifier(self, tmp_path):
+        # Binary, and not valid UTF-8: `git diff --binary` output is why the
+        # transfer uses the backend's native primitive rather than exec stdout.
+        patch = b"diff --git a/x b/x\n\x00\xff\x01binary"
+        agent = _FakeSandbox(files={}, blobs={"/logs/artifacts/model.patch": patch})
+        verifier = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        verifier.close = lambda: None
+
+        ev = ShellScriptEvaluator(
+            sandbox=agent,
+            verifier_sandbox_factory=lambda: verifier,
+            collect_commands=[{"command": "git diff --binary base HEAD > /logs/artifacts/model.patch"}],
+            artifacts=["/logs/artifacts/model.patch"],
+        )
+        ev.evaluate(self._task(tmp_path), _episode())
+
+        assert any("git diff --binary" in c for c, _ in agent.execs), "collect must run in the agent's box"
+        assert verifier.blobs.get("/logs/artifacts/model.patch") == patch, "artifact must arrive byte-identical"
+
+    def test_a_missing_artifact_is_not_fatal(self, tmp_path):
+        """A collect step that produced nothing leaves the artifact absent; the
+        verifier reports that as an unsubmitted patch, not a grading crash."""
+        agent = _FakeSandbox(files={})  # no blobs -> download_file raises FileNotFoundError
+        verifier = _FakeSandbox(files={"/logs/verifier/reward.txt": "0.0"})
+        verifier.close = lambda: None
+
+        ev = ShellScriptEvaluator(
+            sandbox=agent,
+            verifier_sandbox_factory=lambda: verifier,
+            collect_commands=[{"command": "true"}],
+            artifacts=["/logs/artifacts/model.patch"],
+        )
+        out = ev.evaluate(self._task(tmp_path), _episode())
+        assert out.reward == 0.0
+        assert out.error is None  # a real 0, not an infra failure
+        assert "/logs/artifacts/model.patch" not in verifier.blobs
+
+    def test_head_is_not_touched_when_grading_elsewhere(self, tmp_path):
+        """A fresh box is already at the image's commit; the reset exists only to
+        undo an agent's commits in its own container."""
+        agent = _FakeSandbox(files={})
+        verifier = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
+        verifier.close = lambda: None
+
+        ev = ShellScriptEvaluator(
+            sandbox=agent,
+            verifier_sandbox_factory=lambda: verifier,
+            git_heads={"/app": "a" * 40},
+        )
+        ev.evaluate(self._task(tmp_path), _episode())
+
+        assert not any("reset --soft" in c for c, _ in agent.execs + verifier.execs)
+
+    def test_unbuildable_verifier_env_is_an_infra_error_not_a_zero(self, tmp_path):
+        def boom():
+            raise RuntimeError("no capacity")
+
+        ev = ShellScriptEvaluator(sandbox=_FakeSandbox(files={}), verifier_sandbox_factory=boom)
+        out = ev.evaluate(self._task(tmp_path), _episode())
+
+        assert out.error == "VerifierEnvironmentError"
+        assert out.reward == 0.0

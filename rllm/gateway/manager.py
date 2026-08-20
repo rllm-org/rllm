@@ -4,7 +4,7 @@ Two classes share most of the lifecycle (uvicorn-on-thread or subprocess,
 trace store, session API). They differ in how upstream workers are
 registered and what request-body injection the middleware applies.
 
-* :class:`GatewayManager` — training. Workers come from a verl/tinker
+* :class:`GatewayManager` — training. Workers come from a verl/tinker/fireworks
   rollout engine via :meth:`start(rollout_engine)`. Injects ``logprobs``
   and ``return_token_ids`` into request bodies (vLLM needs both for the
   loss math downstream).
@@ -28,7 +28,9 @@ For Tinker backends, an in-process handler is injected into the gateway
 
 from __future__ import annotations
 
+import errno
 import logging
+import os
 import re
 import socket
 import subprocess
@@ -38,7 +40,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from rllm_model_gateway.client import AsyncGatewayClient, GatewayClient
-from rllm_model_gateway.models import TraceRecord
+from rllm_model_gateway.models import TraceGraph, TraceRecord
 
 from rllm.env import env_float
 
@@ -52,6 +54,46 @@ logger = logging.getLogger(__name__)
 _HEALTH_POLL_INTERVAL = 0.5
 _HEALTH_POLL_TIMEOUT = env_float("RLLM_GATEWAY_HEALTH_TIMEOUT_S", 30.0)  # set env var: export RLLM_GATEWAY_HEALTH_TIMEOUT_S=xxx
 _TRACE_API_TIMEOUT = 600.0
+
+DEFAULT_GATEWAY_PORT = 9090
+
+
+class GatewayPortInUseError(RuntimeError):
+    """The gateway's TCP port is already bound by another process."""
+
+
+def preflight_gateway_port(port: int) -> None:
+    """Fail fast if the gateway won't be able to bind ``port``.
+
+    The gateway binds ``0.0.0.0:<port>`` from a background thread or
+    subprocess, so a bind failure otherwise surfaces as an opaque
+    health-poll timeout — and only after any expensive setup that precedes
+    ``start()`` (e.g. minutes of remote-infra provisioning in training).
+    The probe sets ``SO_REUSEADDR`` to match uvicorn, so sockets in
+    TIME_WAIT don't false-positive. Best-effort: the port can still be
+    claimed between this check and the real bind.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("0.0.0.0", port))
+        except OSError as e:
+            if e.errno != errno.EADDRINUSE:
+                raise
+            daemon_hint = ""
+            try:
+                from rllm.gateway.tunnel import live_tunnel
+
+                state = live_tunnel() or {}
+                if str(state.get("upstream", "")).endswith(f":{port}"):
+                    daemon_hint = (
+                        f" Port {port} is the `rllm tunnel up` daemon's upstream, so another rLLM run "
+                        "(train/eval) is likely already serving behind the tunnel; give this run its own "
+                        "gateway with rllm.gateway.port=<free port> and rllm.gateway.tunnel=ngrok|cloudflared."
+                    )
+            except Exception:
+                pass
+            raise GatewayPortInUseError(f"Gateway port {port} is already in use (another process is listening on 0.0.0.0:{port}).{daemon_hint} Find the holder with: ss -tlnp 'sport = :{port}'") from e
 
 
 def _find_free_port() -> int:
@@ -149,18 +191,19 @@ class GatewayManager:
         gw_cfg = config.rllm.get("gateway", {})
         configured_host = gw_cfg.get("host", None)
         self.host: str = configured_host if configured_host else _get_routable_ip()
-        self.port: int = gw_cfg.get("port", 9090)
-        self.store: str = gw_cfg.get("store", "memory")
-        self.db_path: str | None = gw_cfg.get("db_path", None)
-        if self.store not in ("memory", "sqlite"):
-            raise ValueError(f"rllm.gateway.store must be 'memory' or 'sqlite', got {self.store!r}")
-        if self.store == "memory" and self.db_path:
-            raise ValueError("rllm.gateway.db_path is set but store='memory'; set store='sqlite' or clear db_path")
         from rllm.gateway.tunnel import parse_tunnel
 
         self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
-        # The gateway always pins ``body.model`` to whatever the trainer is serving
-        self.model: str | None = config.get("model", {}).get("name", None)
+        configured_port = gw_cfg.get("port", None)
+        self.port: int = int(configured_port) if configured_port is not None else (_find_free_port() if self.tunnel_backend else DEFAULT_GATEWAY_PORT)
+        self.store: str = os.environ.get("RLLM_GATEWAY_STORE", gw_cfg.get("store", "compact"))
+        self.db_path: str | None = gw_cfg.get("db_path", None)
+        if self.store not in ("memory", "compact", "sqlite"):
+            raise ValueError(f"rllm.gateway.store must be 'memory', 'compact' or 'sqlite', got {self.store!r}")
+        if self.store in ("memory", "compact") and self.db_path:
+            raise ValueError(f"rllm.gateway.db_path is set but store={self.store!r} is in-memory; set store='sqlite' or clear db_path")
+        _model_cfg = config.get("model", {})
+        self.model: str | None = _model_cfg.get("tokenizer_model") or _model_cfg.get("name", None)
 
         # Cumulative token mode: drift-free multi-turn token forwarding. The
         # gateway loads the tokenizer from the served model path. renderers
@@ -169,9 +212,17 @@ class GatewayManager:
         self.cumulative_token_mode: bool = gw_cfg.get("cumulative_token_mode", False)
         self.renderer_family: str = gw_cfg.get("renderer_family", "auto")
 
+        # 0 = gateway runs in a trainer thread (default). >=1 = run it in its own
+        # process(es), so its event loop no longer shares the trainer's GIL. 1 =
+        # a single separate gateway process (no session-sharding); >1 needs the
+        # session-sticky front router (not yet implemented).
+        self.num_workers: int = int(gw_cfg.get("num_workers", 0))
+
         self.mode = mode
 
         self._process: subprocess.Popen | None = None
+        self._processes: list[subprocess.Popen] = []  # workers + front for num_workers>1
+        self._handler_config_path: str | None = None  # temp file for --handler-config (cleaned up in stop)
         self._thread: threading.Thread | None = None
         self._server: Any = None  # uvicorn.Server when using thread mode
         self._local_handler: Any = None  # in-process handler for tinker
@@ -207,16 +258,21 @@ class GatewayManager:
         """Start the gateway and register inference workers.
 
         For VerlEngine: registers the existing vLLM server addresses.
-        For TinkerEngine: creates an in-process handler (no sidecar needed).
+        For TinkerEngine / FireworksEngine: creates an in-process handler (no sidecar needed).
         """
         engine_cls = type(rollout_engine).__name__
 
-        if engine_cls == "TinkerEngine":
-            # In-process handler — no HTTP backend, no worker registration
-            from rllm.gateway.tinker_adapter import create_tinker_handler
+        if engine_cls in ("TinkerEngine", "FireworksEngine"):
+            if self.num_workers >= 1:
+                # Run the gateway (with its own rebuilt engine) in a separate
+                # process so its event loop no longer shares the trainer's GIL.
+                self._start_gateway_subprocess(rollout_engine)
+            else:
+                # In-process handler — no HTTP backend, no worker registration.
+                from rllm.gateway.tinker_adapter import create_tinker_handler
 
-            self._local_handler = create_tinker_handler(rollout_engine)
-            self._start_thread(local_handler=self._local_handler)
+                self._local_handler = create_tinker_handler(rollout_engine)
+                self._start_thread(local_handler=self._local_handler)
         elif engine_cls == "VerlEngine":
             if self.mode == "process":
                 self._start_process()
@@ -227,6 +283,7 @@ class GatewayManager:
             for url in worker_urls:
                 worker_id = self.client.add_worker(url=url)
                 logger.info("Registered worker %s -> %s", worker_id, url)
+
         else:
             logger.warning("Unknown engine type %s — no workers registered", engine_cls)
 
@@ -239,12 +296,9 @@ class GatewayManager:
 
     def _start_tunnel(self) -> None:
         """Spawn the named tunnel backend and pin its public URL onto ``self.public_url``."""
-        if self.tunnel_backend != "cloudflared":
-            raise ValueError(f"Unsupported gateway tunnel backend: {self.tunnel_backend!r}. Supported: 'cloudflared', or pass an http(s):// URL.")
+        from rllm.gateway.tunnel import create_tunnel
 
-        from rllm.gateway.tunnel import CloudflaredTunnel
-
-        tunnel = CloudflaredTunnel(self.gateway_url)
+        tunnel = create_tunnel(self.tunnel_backend, self.gateway_url)
         self.public_url = tunnel.start()
         self._tunnel = tunnel
 
@@ -261,13 +315,24 @@ class GatewayManager:
             self._client.close()
             self._client = None
 
-        if self._process is not None:
-            self._process.terminate()
+        # Terminate the single process (verl / num_workers=1) and any multi-worker
+        # processes (front is last in the list; terminate it first so it stops
+        # routing before the workers go away).
+        for proc in ([self._process] if self._process is not None else []) + list(reversed(self._processes)):
+            proc.terminate()
             try:
-                self._process.wait(timeout=5)
+                proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self._process.kill()
-            self._process = None
+                proc.kill()
+        self._process = None
+        self._processes = []
+
+        if self._handler_config_path is not None:
+            try:
+                os.unlink(self._handler_config_path)
+            except OSError:
+                pass
+            self._handler_config_path = None
 
         if self._server is not None:
             self._server.should_exit = True
@@ -298,9 +363,13 @@ class GatewayManager:
             return f"{base}/sessions/{session_id}/v1"
         return self.client.get_session_url(session_id)
 
+    @property
+    def _trace_format(self) -> str | None:
+        return "compact" if self.store == "compact" else None
+
     def get_traces(self, session_id: str) -> list[TraceRecord]:
         self.client.flush()
-        return self.client.get_session_traces(session_id)
+        return self.client.get_session_traces(session_id, format=self._trace_format)
 
     # -- Async session / trace API -------------------------------------------
 
@@ -310,7 +379,11 @@ class GatewayManager:
 
     async def aget_traces(self, session_id: str) -> list[TraceRecord]:
         await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
-        return await self.async_client.get_session_traces(session_id)
+        return await self.async_client.get_session_traces(session_id, format=self._trace_format)
+
+    async def aget_trace_graph(self, session_id: str) -> TraceGraph:
+        await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
+        return await self.async_client.get_session_traces(session_id, format="compact", flatten=False)
 
     async def adelete_session(self, session_id: str) -> int:
         """Delete a session and all its accumulated traces. Returns count removed."""
@@ -341,51 +414,115 @@ class GatewayManager:
 
     # -- Internal ------------------------------------------------------------
 
-    def _start_process(self) -> None:
-        """Launch gateway as a subprocess and poll until healthy."""
-        cmd = [
-            sys.executable,
-            "-m",
-            "rllm_model_gateway",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(self.port),
-        ]
-        cmd.extend(["--store", self.store])
+    def _gateway_cmd(
+        self,
+        port: int,
+        *,
+        handler_factory: str | None = None,
+        handler_config_path: str | None = None,
+        front: bool = False,
+        worker_urls: list[str] | None = None,
+    ) -> list[str]:
+        """Build a ``python -m rllm_model_gateway`` command for one process."""
+        cmd = [sys.executable, "-m", "rllm_model_gateway", "--host", "0.0.0.0", "--port", str(port), "--store", self.store]
         if self.db_path:
-            cmd.extend(["--db-path", self.db_path])
+            cmd += ["--db-path", self.db_path]
+        if front:
+            cmd.append("--front")
+            for u in worker_urls or []:
+                cmd += ["--worker", u]
+            return cmd
         if self.model:
-            cmd.extend(["--model", self.model])
+            cmd += ["--model", self.model]
         if self.cumulative_token_mode:
             cmd.append("--cumulative-token-mode")
             if self.renderer_family != "auto":
-                cmd.extend(["--renderer-family", self.renderer_family])
+                cmd += ["--renderer-family", self.renderer_family]
+        if handler_factory:
+            cmd += ["--handler-factory", handler_factory]
+            if handler_config_path:
+                cmd += ["--handler-config", handler_config_path]
+        return cmd
 
+    def _poll_health(self, port: int, proc: subprocess.Popen, timeout: float) -> None:
+        """Poll ``http://127.0.0.1:{port}/health`` until healthy, ``proc`` dies, or timeout."""
+        from rllm_model_gateway.client import GatewayClient
+
+        client = GatewayClient(f"http://127.0.0.1:{port}")
+        try:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    client.health()
+                    logger.info("Gateway healthy on port %d", port)
+                    return
+                except Exception as e:
+                    if proc.poll() is not None:
+                        raise RuntimeError(f"Gateway process on port {port} exited unexpectedly (rc={proc.returncode})") from e
+                    time.sleep(_HEALTH_POLL_INTERVAL)
+            proc.terminate()
+            raise TimeoutError(f"Gateway on port {port} did not become healthy within {timeout}s")
+        finally:
+            client.close()
+
+    def _start_gateway_subprocess(self, rollout_engine: RolloutEngine) -> None:
+        """Run the gateway in its own process(es) with a rebuilt in-process handler.
+
+        The live engine can't cross a process boundary, so each worker subprocess
+        rebuilds an equivalent one from ``engine.handler_factory_spec()`` (see
+        ``rllm.gateway.worker_handlers``). ``num_workers==1`` runs one gateway on
+        ``self.port``; ``>1`` runs N workers on ``port+1..port+N`` behind a thin
+        session-sharding front on ``self.port`` (the tunnel target).
+        """
+        import json
+        import tempfile
+
+        preflight_gateway_port(self.port)
+        spec = getattr(rollout_engine, "handler_factory_spec", None)
+        if spec is None:
+            raise RuntimeError(f"{type(rollout_engine).__name__} does not support a separate-process gateway (no handler_factory_spec); set rllm.gateway.num_workers=0.")
+        factory_path, cfg = spec()
+        fd, cfg_path = tempfile.mkstemp(prefix="rllm_gw_handler_", suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            json.dump(cfg, f)
+        self._handler_config_path = cfg_path
+        # Building the engine (tokenizer load + renderer resolve) takes longer than
+        # a proxy-only start, so allow more startup headroom per worker.
+        worker_timeout = max(_HEALTH_POLL_TIMEOUT, 180.0)
+
+        if self.num_workers == 1:
+            cmd = self._gateway_cmd(self.port, handler_factory=factory_path, handler_config_path=cfg_path)
+            logger.info("Starting gateway subprocess: %s", " ".join(cmd))
+            self._process = subprocess.Popen(cmd)
+            self._poll_health(self.port, self._process, worker_timeout)
+            return
+
+        # num_workers > 1: N workers on port+1..port+N behind a front on self.port.
+        worker_ports = [self.port + 1 + i for i in range(self.num_workers)]
+        for port in worker_ports:
+            cmd = self._gateway_cmd(port, handler_factory=factory_path, handler_config_path=cfg_path)
+            logger.info("Starting gateway worker subprocess: %s", " ".join(cmd))
+            proc = subprocess.Popen(cmd)
+            self._processes.append(proc)
+            self._poll_health(port, proc, worker_timeout)
+        worker_urls = [f"http://127.0.0.1:{p}" for p in worker_ports]
+        front_cmd = self._gateway_cmd(self.port, front=True, worker_urls=worker_urls)
+        logger.info("Starting gateway front subprocess: %s", " ".join(front_cmd))
+        front = subprocess.Popen(front_cmd)
+        self._processes.append(front)
+        self._poll_health(self.port, front, _HEALTH_POLL_TIMEOUT)
+        logger.info("Gateway running with %d workers behind front on port %d", self.num_workers, self.port)
+
+    def _start_process(self) -> None:
+        """Launch the gateway as a subprocess (verl HTTP-proxy path) and poll until healthy."""
+        cmd = self._gateway_cmd(self.port)
         logger.info("Starting gateway subprocess: %s", " ".join(cmd))
-        # Inherit parent's stdout/stderr so gateway logs are visible for debugging.
-        # subprocess.PIPE causes problems as without an active reader, the OS pipe
-        # buffer (~64KB on Linux) fills up under high-throughput logging, causing the
-        # gateway process to block on write and eventually hang.
         self._process = subprocess.Popen(cmd)
-
-        # Poll health endpoint
-        deadline = time.monotonic() + _HEALTH_POLL_TIMEOUT
-        while time.monotonic() < deadline:
-            try:
-                self.client.health()
-                logger.info("Gateway process healthy at %s", self.gateway_url)
-                return
-            except Exception as e:
-                if self._process.poll() is not None:
-                    raise RuntimeError(f"Gateway process exited unexpectedly (rc={self._process.returncode})") from e
-                time.sleep(_HEALTH_POLL_INTERVAL)
-
-        self._process.terminate()
-        raise TimeoutError(f"Gateway did not become healthy within {_HEALTH_POLL_TIMEOUT}s")
+        self._poll_health(self.port, self._process, _HEALTH_POLL_TIMEOUT)
 
     def _start_thread(self, local_handler: Any = None) -> None:
         """Start gateway in a background thread using create_app + uvicorn."""
+        preflight_gateway_port(self.port)
         import uvicorn
         from rllm_model_gateway.models import GatewayConfig
         from rllm_model_gateway.server import create_app

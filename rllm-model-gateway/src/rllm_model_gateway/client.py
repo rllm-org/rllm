@@ -1,10 +1,16 @@
 """Training-side client for interacting with the model gateway."""
 
-from typing import Any
+from typing import Any, Literal, overload
 
 import httpx
 
-from rllm_model_gateway.models import TraceRecord, WorkerInfo
+from rllm_model_gateway.models import TraceGraph, TraceRecord, WorkerInfo
+
+
+def _parse_traces(data: Any) -> list[TraceRecord]:
+    if isinstance(data, dict):
+        return TraceGraph.model_validate(data).flatten()
+    return [TraceRecord(**trace) for trace in data]
 
 
 class GatewayClient:
@@ -88,16 +94,18 @@ class GatewayClient:
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
+        format: str | None = None,
     ) -> list[TraceRecord]:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
         if limit is not None:
             params["limit"] = limit
+        if format is not None:
+            params["format"] = format
         resp = self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
-        data = resp.json()
-        return [TraceRecord(**t) for t in data]
+        return _parse_traces(resp.json())
 
     def get_trace(self, trace_id: str) -> TraceRecord:
         resp = self._http.get(f"{self.gateway_url}/traces/{trace_id}")
@@ -231,21 +239,36 @@ class AsyncGatewayClient:
 
     # -- Trace retrieval ---------------------------------------------------
 
+    @overload
+    async def get_session_traces(self, session_id: str, since: float | None = None, limit: int | None = None, format: str | None = None, *, flatten: Literal[True] = True) -> list[TraceRecord]: ...
+
+    @overload
+    async def get_session_traces(self, session_id: str, since: float | None = None, limit: int | None = None, format: str | None = None, *, flatten: Literal[False]) -> TraceGraph: ...
+
     async def get_session_traces(
         self,
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
-    ) -> list[TraceRecord]:
+        format: str | None = None,
+        *,
+        flatten: bool = True,
+    ) -> list[TraceRecord] | TraceGraph:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
         if limit is not None:
             params["limit"] = limit
+        if format is not None:
+            params["format"] = format
         resp = await self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
         data = resp.json()
-        return [TraceRecord(**t) for t in data]
+        if flatten:
+            return _parse_traces(data)
+        if not isinstance(data, dict):
+            raise ValueError("gateway did not return a compact trace graph")
+        return TraceGraph.model_validate(data)
 
     async def get_trace(self, trace_id: str) -> TraceRecord:
         resp = await self._http.get(f"{self.gateway_url}/traces/{trace_id}")

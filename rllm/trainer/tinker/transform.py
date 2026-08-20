@@ -14,7 +14,7 @@ from tinker_cookbook.supervised.common import create_rightshifted_model_input_an
 from rllm.engine.rollout.tinker_engine import _flat_token_input_length, _flat_token_input_to_model_input
 from rllm.engine.rollout.types import TinkerTokenInput
 from rllm.trainer.algorithms import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
-from rllm.types import Trajectory, TrajectoryGroup
+from rllm.types import StepDelta, Trajectory, TrajectoryDelta, TrajectoryGroup, _index_step_deltas, _partition_steps_by_lineage, _resolve_step_delta_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,27 @@ def _flatten_token_input(token_input: TinkerTokenInput) -> TinkerTokenInput:
     return flattened
 
 
-def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[tinker.Datum]:
+def _trajectory_oov_token(traj: Trajectory | TrajectoryDelta, vocab_size: int) -> int | None:
+    """Return the first out-of-vocab token id (>= ``vocab_size``) in the trajectory, or None.
+
+    Sampled ids come back raw from the serving stack; a rare corrupt id past the
+    trainer's vocab (e.g. a padded-lm-head slot drawn under full-distribution
+    sampling) fails the whole forward_backward with "Invalid token id", so such
+    trajectories are dropped up front. Prompt ids are scanned too — in cumulative
+    token mode past sampled turns are echoed back inside later prompts.
+    """
+    for step in traj.steps:
+        for t in step.response_ids or []:
+            if isinstance(t, int) and t >= vocab_size:
+                return t
+        prompt = step.prompt_ids_suffix if isinstance(step, StepDelta) else step.prompt_ids
+        for elem in _flatten_token_input(cast(TinkerTokenInput, prompt or [])):
+            if isinstance(elem, int) and elem >= vocab_size:
+                return elem
+    return None
+
+
+def trajectory_to_datums(traj: Trajectory | TrajectoryDelta, router_replay: bool = False) -> list[tinker.Datum]:
     """
     Return one or more Datum objects corresponding to the trajectory.
     If the sequence grows by appending, i.e., each successive observation contains
@@ -57,6 +77,13 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
 
     Then we will merge the first two observation-action pairs into a single Datum,
     and the last observation-action pair into a separate Datum.
+
+    Steps are first partitioned by gateway ``lineage_id`` (parent agent vs each
+    subagent — a subagent runs under the same session with its own system prompt,
+    so its turns are not prefix-extensions of the parent). Each lineage is merged
+    independently, so interleaved sub-conversations each become their own Datum
+    instead of fragmenting into one Datum per turn. Untagged steps (cumulative
+    mode off / eval) form a single partition — the original behavior.
     """
 
     class SequenceAccumulator:
@@ -96,42 +123,48 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
         )
 
     data: list[tinker.Datum] = []
-    for step in traj.steps:
-        token_input = cast(TinkerTokenInput, step.prompt_ids)
-        token_input_flat = _flatten_token_input(token_input)
+    delta_index = _index_step_deltas(traj.steps)[0] if isinstance(traj, TrajectoryDelta) else {}
+    for lineage_steps in _partition_steps_by_lineage(traj.steps):
+        SequenceAccumulator.clear()  # each lineage merges independently
+        previous = None
+        for step in lineage_steps:
+            direct_child = isinstance(step, StepDelta) and previous is not None and step.parent_step_id == previous.id
+            prompt = step.prompt_ids_suffix if direct_child else (_resolve_step_delta_prompt(step, delta_index) if isinstance(step, StepDelta) else step.prompt_ids)
+            token_input_flat = _flatten_token_input(cast(TinkerTokenInput, prompt))
 
-        output_token_ids, output_logprobs = step.response_ids, step.logprobs
-        assert len(output_logprobs) > 0, "output_logprobs is empty. Cannot build Tinker Datum for training."
-        assert step.advantage is not None, "step.advantage is None. This indicates that advantage computation has not been performed yet."
+            output_token_ids, output_logprobs = step.response_ids, step.logprobs
+            assert len(output_logprobs) > 0, "output_logprobs is empty. Cannot build Tinker Datum for training."
+            assert step.advantage is not None, "step.advantage is None. This indicates that advantage computation has not been performed yet."
 
-        # build advantage list -- match length of token_output.tokens
-        if isinstance(step.advantage, list):
-            assert len(step.advantage) == len(output_token_ids), "length mismatch between step.advantage and token_output.tokens"
-            advantages = step.advantage
-        else:  # float
-            advantages = [step.advantage] * len(output_token_ids)
+            # build advantage list -- match length of token_output.tokens
+            if isinstance(step.advantage, list):
+                assert len(step.advantage) == len(output_token_ids), "length mismatch between step.advantage and token_output.tokens"
+                advantages = step.advantage
+            else:  # float
+                advantages = [step.advantage] * len(output_token_ids)
 
-        if len(SequenceAccumulator.full_sequence) == 0:
-            delta_token_input_flat = token_input_flat
-        elif _is_prefix(SequenceAccumulator.full_sequence, token_input_flat):
-            delta_token_input_flat = token_input_flat[len(SequenceAccumulator.full_sequence) :]
-        else:
+            if not SequenceAccumulator.full_sequence or direct_child:
+                delta_token_input_flat = token_input_flat
+            elif _is_prefix(SequenceAccumulator.full_sequence, token_input_flat):
+                delta_token_input_flat = token_input_flat[len(SequenceAccumulator.full_sequence) :]
+            else:
+                data.append(make_datum_from_state())
+                SequenceAccumulator.clear()
+                delta_token_input_flat = token_input_flat
+
+            delta_token_input_length = _flat_token_input_length(delta_token_input_flat)
+            SequenceAccumulator.full_sequence.extend(delta_token_input_flat)
+            SequenceAccumulator.full_sequence.extend(output_token_ids)
+            SequenceAccumulator.sampled_logprobs.extend([0.0] * delta_token_input_length + output_logprobs)
+            SequenceAccumulator.advantages.extend([0] * delta_token_input_length + advantages)
+            SequenceAccumulator.mask.extend([0.0] * delta_token_input_length + [1.0] * len(output_token_ids))
+            if router_replay:
+                step_rm = step.routing_matrices or []
+                SequenceAccumulator.routing_matrices.extend([""] * delta_token_input_length + (list(step_rm) if step_rm else [""] * len(output_token_ids)))
+            previous = step
+
+        if SequenceAccumulator.full_sequence:
             data.append(make_datum_from_state())
-            SequenceAccumulator.clear()
-            delta_token_input_flat = token_input_flat
-
-        delta_token_input_length = _flat_token_input_length(delta_token_input_flat)
-        SequenceAccumulator.full_sequence.extend(delta_token_input_flat)
-        SequenceAccumulator.full_sequence.extend(output_token_ids)
-        SequenceAccumulator.sampled_logprobs.extend([0.0] * delta_token_input_length + output_logprobs)
-        SequenceAccumulator.advantages.extend([0] * delta_token_input_length + advantages)
-        SequenceAccumulator.mask.extend([0.0] * delta_token_input_length + [1.0] * len(output_token_ids))
-        if router_replay:
-            step_rm = step.routing_matrices or []
-            SequenceAccumulator.routing_matrices.extend([""] * delta_token_input_length + (list(step_rm) if step_rm else [""] * len(output_token_ids)))
-
-    if SequenceAccumulator.full_sequence:
-        data.append(make_datum_from_state())
 
     return data
 
@@ -139,6 +172,7 @@ def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[
 def transform_trajectory_groups_to_datums(
     trajectory_groups: list[TrajectoryGroup],
     algorithm_config: AlgorithmConfig,
+    vocab_size: int | None = None,
 ) -> tuple[list[tinker.Datum] | dict[str, list[tinker.Datum]], dict]:
     """
     Transform a list of TrajectoryGroup objects to a list of Tinker Datum objects. Two things are done here:
@@ -165,9 +199,11 @@ def transform_trajectory_groups_to_datums(
     # per-Datum action-token fraction so the caller can log the same
     # metrics across backends. Metric semantics shared with verl's
     # transform_episodes_to_dataproto:
-    #   - steps_per_traj: number of training rows/datums one trajectory
-    #     becomes after prefix-merging. =1 for healthy cumulative agents;
-    #     >1 indicates a prefix break (re-tokenization quirk, mid-
+    #   - steps_per_traj: unmerged agent steps (LLM turns) per trajectory,
+    #     before prefix-merging (len(trajectory.steps)).
+    #   - merged_steps_per_traj: number of training rows/datums one
+    #     trajectory becomes after prefix-merging. =1 for healthy cumulative
+    #     agents; >1 indicates a prefix break (re-tokenization quirk, mid-
     #     trajectory context reset).
     #   - step_response_length: length of the response region per row,
     #     i.e. everything from the first action token onward (action
@@ -180,13 +216,29 @@ def transform_trajectory_groups_to_datums(
     #     trainable (mask=1) per row. =1.0 for single-step rows (no
     #     observations); <1.0 for merged multi-turn (tool/observation
     #     tokens are mask=0 between actions).
-    steps_per_traj = []
+    unmerged_steps_per_traj = []
+    merged_steps_per_traj = []
     step_response_lengths = []
     action_token_ratios = []
     total_agent_steps = 0
+    total_trajectories = 0
     dropped_malformed_sequences = 0
+    dropped_oov_sequences = 0
     for group in trajectory_groups:
         for traj_idx, trajectory in enumerate(group.trajectories):
+            total_trajectories += 1
+            if vocab_size is not None:
+                bad_token = _trajectory_oov_token(trajectory, vocab_size)
+                if bad_token is not None:
+                    dropped_oov_sequences += 1
+                    logger.warning(
+                        "Dropping trajectory with out-of-vocab token id %d (vocab_size=%d) group_id=%s traj_idx=%d: corrupt sampled id from the serving stack",
+                        bad_token,
+                        vocab_size,
+                        group.group_id,
+                        traj_idx,
+                    )
+                    continue
             try:
                 traj_datums = trajectory_to_datums(trajectory, router_replay=(algorithm_config.router_replay == "R3"))
             except AssertionError as e:
@@ -199,7 +251,8 @@ def transform_trajectory_groups_to_datums(
                 )
                 continue
             total_agent_steps += len(trajectory.steps)
-            steps_per_traj.append(len(traj_datums))
+            unmerged_steps_per_traj.append(len(trajectory.steps))
+            merged_steps_per_traj.append(len(traj_datums))
             for d in traj_datums:
                 mask_data = d.loss_fn_inputs["mask"].data
                 # Response region = total Datum length - leading prompt
@@ -220,14 +273,19 @@ def transform_trajectory_groups_to_datums(
                 datums.extend(traj_datums)
 
     adv_metrics["batch/dropped_malformed_sequences"] = dropped_malformed_sequences
+    adv_metrics["batch/dropped_oov_sequences"] = dropped_oov_sequences
+    adv_metrics["batch/oov_drop_rate"] = dropped_oov_sequences / max(1, total_trajectories)
 
-    if steps_per_traj:
+    if merged_steps_per_traj:
         import numpy as _np
 
-        total_emitted_rows = sum(steps_per_traj)
-        adv_metrics["batch/steps_per_traj/mean"] = _np.mean(steps_per_traj)
-        adv_metrics["batch/steps_per_traj/min"] = _np.min(steps_per_traj)
-        adv_metrics["batch/steps_per_traj/max"] = _np.max(steps_per_traj)
+        total_emitted_rows = sum(merged_steps_per_traj)
+        adv_metrics["batch/steps_per_traj/mean"] = _np.mean(unmerged_steps_per_traj)
+        adv_metrics["batch/steps_per_traj/min"] = _np.min(unmerged_steps_per_traj)
+        adv_metrics["batch/steps_per_traj/max"] = _np.max(unmerged_steps_per_traj)
+        adv_metrics["batch/merged_steps_per_traj/mean"] = _np.mean(merged_steps_per_traj)
+        adv_metrics["batch/merged_steps_per_traj/min"] = _np.min(merged_steps_per_traj)
+        adv_metrics["batch/merged_steps_per_traj/max"] = _np.max(merged_steps_per_traj)
         adv_metrics["batch/step_response_length/mean"] = _np.mean(step_response_lengths)
         adv_metrics["batch/step_response_length/min"] = _np.min(step_response_lengths)
         adv_metrics["batch/step_response_length/max"] = _np.max(step_response_lengths)

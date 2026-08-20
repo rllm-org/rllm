@@ -50,6 +50,17 @@ class TestTokenAccumulator:
         assert acc.prev_prompt_ids == [1, 2, 3]
         assert acc.prev_completion_ids == [10, 11]
 
+    def test_ingest_replay_overwrites_turn_in_place(self):
+        from rllm_model_gateway.token_accumulator import TokenAccumulator
+
+        acc = TokenAccumulator(renderer=_MockRenderer())
+        acc.ingest_turn([1, 2, 3], [10, 11])
+        # Replay a duplicate: same prompt, fresh completion, no turn advance.
+        acc.ingest_turn([1, 2, 3], [99], advance=False)
+        assert acc.turn_count == 1  # unchanged — same logical step
+        assert acc.prev_completion_ids == [99]
+        assert acc.cumulative_ids == [1, 2, 3, 99]
+
     def test_should_rewrite_false_on_first_turn(self):
         from rllm_model_gateway.token_accumulator import TokenAccumulator
 
@@ -195,6 +206,146 @@ class TestCumulativeVerification:
         assert acc.cumulative_ids == [5, 6, 7, 20, 21]
 
 
+SYS_PARENT = {"role": "system", "content": "PARENT AGENT"}
+SYS_SUB = {"role": "system", "content": "SUBAGENT"}
+
+
+def _seed(slot, messages, prompt=(1, 2), completion=(3, 4)):
+    """Simulate the proxy ingesting a completed turn into *slot*."""
+    slot.ingest_turn(list(prompt), list(completion))
+    slot.update_prefix(messages)
+
+
+class TestContinues:
+    def test_fresh_slot_never_continues(self):
+        from rllm_model_gateway.token_accumulator import TokenAccumulator
+
+        acc = TokenAccumulator(renderer=_MockRenderer())
+        assert acc.continues([{"role": "user", "content": "hi"}]) is False
+
+    def test_established_slot_continues_on_extension_and_duplicate(self):
+        from rllm_model_gateway.token_accumulator import TokenAccumulator
+
+        acc = TokenAccumulator(renderer=_MockRenderer())
+        msgs = [SYS_PARENT, {"role": "user", "content": "X"}]
+        _seed(acc, msgs)
+        # exact resend (duplicate) still belongs to this lineage
+        assert acc.continues(msgs) is True
+        # strict extension
+        assert acc.continues(msgs + [{"role": "assistant", "content": "a"}, {"role": "user", "content": "Y"}]) is True
+        # divergent prefix (a different lineage) does not continue this slot
+        assert acc.continues([SYS_SUB, {"role": "user", "content": "sub"}]) is False
+
+
+class TestSessionSlots:
+    def test_single_lineage_reuses_one_slot(self):
+        from rllm_model_gateway.token_accumulator import SessionSlots
+
+        slots = SessionSlots(renderer=_MockRenderer(), session_id="s")
+        m0 = [SYS_PARENT, {"role": "user", "content": "X"}]
+        a = slots.select(m0)
+        assert a.turn_count == 0
+        _seed(a, m0)
+
+        m1 = m0 + [{"role": "assistant", "content": "a1"}, {"role": "user", "content": "Y"}]
+        a2 = slots.select(m1)
+        assert a2 is a  # same lineage → same slot
+        assert slots.slot_count == 1
+
+    def test_subagent_turn_opens_new_slot(self):
+        from rllm_model_gateway.token_accumulator import SessionSlots
+
+        slots = SessionSlots(renderer=_MockRenderer(), session_id="s")
+        m0 = [SYS_PARENT, {"role": "user", "content": "X"}]
+        parent = slots.select(m0)
+        _seed(parent, m0)
+
+        # subagent: different system prompt → not a continuation → new slot
+        sub_msgs = [SYS_SUB, {"role": "user", "content": "subtask"}]
+        sub = slots.select(sub_msgs)
+        assert sub is not parent
+        assert sub.turn_count == 0
+        assert slots.slot_count == 2
+
+    def test_parent_resumes_same_slot_after_subagent(self):
+        """The core fix: a subagent turn between parent turns must not divert the
+        parent onto a new (drifting) slot — the parent resume re-selects its own
+        established slot, so its cumulative bridge stays byte-exact."""
+        from rllm_model_gateway.token_accumulator import SessionSlots
+
+        slots = SessionSlots(renderer=_MockRenderer(), session_id="s")
+
+        # parent turn 0
+        p0 = [SYS_PARENT, {"role": "user", "content": "X"}]
+        parent = slots.select(p0)
+        _seed(parent, p0)
+        # parent turn 1
+        p1 = p0 + [{"role": "assistant", "content": "a1"}, {"role": "user", "content": "Y"}]
+        assert slots.select(p1) is parent
+        _seed(parent, p1)
+
+        # subagent runs (its own lineage)
+        sub_msgs = [SYS_SUB, {"role": "user", "content": "subtask"}]
+        sub = slots.select(sub_msgs)
+        assert sub is not parent
+        _seed(sub, sub_msgs)
+
+        # parent resumes: appends the subagent's tool result to ITS list
+        resume = p1 + [{"role": "assistant", "content": "a2"}, {"role": "tool", "content": "subagent result"}]
+        chosen = slots.select(resume)
+        assert chosen is parent  # re-selected the parent lineage, not the subagent
+        assert slots.slot_count == 2
+
+    def test_active_tracks_last_selected(self):
+        from rllm_model_gateway.token_accumulator import SessionSlots
+
+        slots = SessionSlots(renderer=_MockRenderer(), session_id="s")
+        p0 = [SYS_PARENT, {"role": "user", "content": "X"}]
+        parent = slots.select(p0)
+        _seed(parent, p0)
+        sub = slots.select([SYS_SUB, {"role": "user", "content": "s"}])
+        assert slots.active is sub  # the turn-0 ingest site reads this
+
+    def test_active_never_none(self):
+        from rllm_model_gateway.token_accumulator import SessionSlots
+
+        slots = SessionSlots(renderer=_MockRenderer(), session_id="s")
+        assert slots.active is not None
+
+    def test_eviction_caps_slots_and_keeps_active(self):
+        from rllm_model_gateway.token_accumulator import SessionSlots
+
+        slots = SessionSlots(renderer=_MockRenderer(), session_id="s", max_slots=2)
+        made = []
+        for i in range(3):
+            msgs = [{"role": "system", "content": f"LINEAGE_{i}"}, {"role": "user", "content": "go"}]
+            slot = slots.select(msgs)
+            _seed(slot, msgs)
+            made.append(slot)
+        assert slots.slot_count == 2  # capped
+        assert slots.active is made[-1]  # most recent lineage kept & active
+
+    def test_lineage_ids_are_distinct_and_stable(self):
+        """Each lineage gets a distinct stable id; a resumed lineage keeps its id
+        (so its traces are tagged consistently for trainer-side splitting)."""
+        from rllm_model_gateway.token_accumulator import SessionSlots
+
+        slots = SessionSlots(renderer=_MockRenderer(), session_id="sess")
+        p0 = [SYS_PARENT, {"role": "user", "content": "X"}]
+        parent = slots.select(p0)
+        _seed(parent, p0)
+        sub = slots.select([SYS_SUB, {"role": "user", "content": "s"}])
+        _seed(sub, [SYS_SUB, {"role": "user", "content": "s"}])
+
+        assert parent.lineage_id == "sess#0"
+        assert sub.lineage_id == "sess#1"
+        assert parent.lineage_id != sub.lineage_id
+
+        # parent resumes → same slot → same lineage id
+        resume = p0 + [{"role": "assistant", "content": "a"}, {"role": "tool", "content": "r"}]
+        assert slots.select(resume).lineage_id == "sess#0"
+
+
 class TestExtractNewMessages:
     def test_extract_new_user_message(self):
         from rllm_model_gateway.token_accumulator import extract_new_messages
@@ -243,3 +394,137 @@ class TestExtractNewMessages:
             {"role": "tool", "content": "result"},
             {"role": "user", "content": "thanks"},
         ]
+
+
+class TestPlanTurnClassification:
+    """plan_turn maps the incoming request to extend or a classified reset.
+
+    Mirrors the four mutually-exclusive ResetReasons (+ the healthy extend) the
+    gateway logs, so a reset's *why* is recoverable from one line.
+    """
+
+    def _seed(self, messages, *, prompt=(1, 2, 3), completion=(10, 11)):
+        from rllm_model_gateway.token_accumulator import TokenAccumulator
+
+        acc = TokenAccumulator(renderer=_MockRenderer(), session_id="s1")
+        acc.ingest_turn(list(prompt), list(completion))
+        acc.update_prefix(messages)
+        return acc
+
+    def test_extend_on_cumulative_growth(self):
+        acc = self._seed([{"role": "user", "content": "Hello"}])
+        plan = acc.plan_turn(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+                {"role": "user", "content": "More"},
+            ]
+        )
+        assert plan.action == "extend"
+        # The assistant turn is dropped; only the new user message is bridged.
+        assert plan.new_messages == [{"role": "user", "content": "More"}]
+
+    def test_duplicate_identical_resend(self):
+        from rllm_model_gateway.token_accumulator import ResetReason
+
+        msgs = [{"role": "user", "content": "Hello"}]
+        acc = self._seed(msgs)
+        plan = acc.plan_turn([{"role": "user", "content": "Hello"}])  # byte-identical
+        # A duplicate is replayed in place (regenerate + overwrite), NOT reset.
+        assert plan.action == "replay"
+        assert plan.reason is ResetReason.DUPLICATE
+        # age_s is populated from the snapshot time (>= 0).
+        assert plan.diagnostics.get("age_s") is not None
+
+    def test_prefix_changed_same_length_different_content(self):
+        from rllm_model_gateway.token_accumulator import ResetReason
+
+        acc = self._seed([{"role": "user", "content": "Hello"}])
+        plan = acc.plan_turn([{"role": "user", "content": "Fresh start"}])
+        assert plan.action == "reset"
+        assert plan.reason is ResetReason.PREFIX_CHANGED
+        assert plan.diagnostics["first_divergent_index"] == 0
+        assert plan.diagnostics["incoming_at_divergence"]["preview"] == "Fresh start"
+
+    def test_prefix_changed_counts_incoming_tokens(self):
+        """A compaction (prefix_changed) line carries the incoming token count."""
+        from rllm_model_gateway.token_accumulator import TokenAccumulator
+
+        class _CountingRenderer(_MockRenderer):
+            def render_ids(self, messages, *, tools=None, add_generation_prompt=False):
+                return [0] * (7 * len(messages))  # 7 fake tokens per message
+
+        acc = TokenAccumulator(renderer=_CountingRenderer(), session_id="s1")
+        acc.ingest_turn([1, 2, 3], [10, 11])
+        acc.update_prefix([{"role": "user", "content": "Hello"}])
+        plan = acc.plan_turn([{"role": "user", "content": "compacted handoff"}])
+        assert plan.diagnostics["incoming_tokens"] == 7  # 1 message * 7
+
+    def test_incoming_tokens_none_when_renderer_cannot_tokenize(self):
+        """_count_tokens never raises — falls back to None (logged as '?')."""
+        acc = self._seed([{"role": "user", "content": "Hello"}])  # _MockRenderer has no render_ids
+        plan = acc.plan_turn([{"role": "user", "content": "different"}])
+        assert plan.diagnostics["incoming_tokens"] is None
+
+    def test_prefix_changed_when_history_shrinks(self):
+        from rllm_model_gateway.token_accumulator import ResetReason
+
+        acc = self._seed(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ]
+        )
+        plan = acc.plan_turn([{"role": "user", "content": "Hello"}])  # shorter
+        assert plan.action == "reset"
+        assert plan.reason is ResetReason.PREFIX_CHANGED
+
+    def test_empty_delta_assistant_only_extension(self):
+        from rllm_model_gateway.token_accumulator import ResetReason
+
+        acc = self._seed([{"role": "user", "content": "Hello"}])
+        # The list grows and the prefix matches, but the only new message is an
+        # assistant turn -> nothing renderable -> EMPTY_DELTA (not DUPLICATE).
+        plan = acc.plan_turn(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "sampled"},
+            ]
+        )
+        assert plan.action == "reset"
+        assert plan.reason is ResetReason.EMPTY_DELTA
+        assert plan.diagnostics["new_roles"] == ["assistant"]
+
+
+class TestResetLogging:
+    def test_reset_logs_reason_and_session(self, caplog):
+        import logging
+
+        from rllm_model_gateway.token_accumulator import ResetReason, TokenAccumulator
+
+        acc = TokenAccumulator(renderer=_MockRenderer(), session_id="sess-xyz")
+        acc.ingest_turn([1, 2, 3], [10, 11])
+        acc.update_prefix([{"role": "user", "content": "Hello"}])
+
+        with caplog.at_level(logging.INFO):
+            acc.reset(ResetReason.DUPLICATE, diagnostics={"incoming_len": 1, "age_s": 0.5})
+
+        rec = caplog.records[-1]
+        assert rec.levelno == logging.INFO
+        msg = caplog.text
+        assert "reason=duplicate" in msg
+        assert "session=sess-xyz" in msg
+        assert "reset_count=1" in msg
+        # Snapshot token count (prompt+completion of the ingested turn) is logged.
+        assert "snapshot_tokens=5" in msg
+        # Plain-language explanation with the resend timing woven in.
+        assert "identical to the last processed turn" in msg
+        assert "0.5s" in msg
+
+    def test_reset_count_survives_reset(self):
+        from rllm_model_gateway.token_accumulator import ResetReason, TokenAccumulator
+
+        acc = TokenAccumulator(renderer=_MockRenderer(), session_id="s")
+        acc.reset(ResetReason.MANUAL)
+        acc.reset(ResetReason.MANUAL)
+        assert acc.reset_count == 2

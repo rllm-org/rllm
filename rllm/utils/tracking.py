@@ -32,6 +32,11 @@ from typing import Any
 from rllm.env import env_float
 
 _UI_HTTP_TIMEOUT_S = env_float("RLLM_UI_HTTP_TIMEOUT_S", 5.0)  # set env var: export RLLM_UI_HTTP_TIMEOUT_S=xxx
+# Max seconds to drain the episode-upload queue on finish(). Episodes are
+# enqueued in a burst at the end of an eval, so a short cap silently drops
+# uploads (the UI ends up empty while local files are fine). Raise for runs
+# with many/large episodes (e.g. terminus2). set: export RLLM_UI_DRAIN_TIMEOUT_S=xxx
+_UI_DRAIN_TIMEOUT_S = env_float("RLLM_UI_DRAIN_TIMEOUT_S", 600.0)
 
 
 def concat_dict_to_str(dict: dict, step):
@@ -638,9 +643,9 @@ class UILogger:
         # processes queued episodes.
         if hasattr(self, "_worker_thread"):
             self._queue.put(None)  # sentinel: worker exits after draining
-            self._worker_thread.join(timeout=30)
+            self._worker_thread.join(timeout=_UI_DRAIN_TIMEOUT_S)
             if self._worker_thread.is_alive():
-                self.logger.warning("UILogger worker thread did not finish within 30s")
+                self.logger.warning("UILogger worker thread did not finish within %.0fs", _UI_DRAIN_TIMEOUT_S)
                 self._worker_stop.set()  # force-stop only if join timed out
 
         # Stop heartbeat thread

@@ -13,6 +13,14 @@ class SnapshotNotFound(Exception):
     """
 
 
+class SandboxCommandTimeout(RuntimeError):
+    """Raised by a backend's ``exec`` when a command is killed for exceeding its
+    own ``timeout``. Distinct from a genuine non-zero exit so callers can treat
+    "the agent spent its whole time budget" as expected, not a failure.
+    Subclasses ``RuntimeError`` so existing handlers keep catching it.
+    """
+
+
 @runtime_checkable
 class Sandbox(Protocol):
     """Protocol for sandbox backends (Docker, Local, Modal, etc.)."""
@@ -35,6 +43,17 @@ class Sandbox(Protocol):
 
     def upload_dir(self, local_path: str, remote_path: str) -> None:
         """Upload a directory tree into the sandbox."""
+        ...
+
+    def download_file(self, remote_path: str) -> bytes:
+        """Read a file out of the sandbox.
+
+        The counterpart to :meth:`upload_file`, needed whenever something has to
+        leave a sandbox — collecting a separate-mode verifier's artifacts, for
+        one. Backends use their native transfer (Modal's filesystem API, Daytona's
+        ``fs``, ``docker cp``) rather than shelling out, so binary payloads survive
+        intact. Raises ``FileNotFoundError`` when the path isn't there.
+        """
         ...
 
     def close(self) -> None:

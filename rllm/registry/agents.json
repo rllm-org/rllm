@@ -26,6 +26,11 @@
       "function": "MiniSweAgentHarness",
       "description": "Run mini-swe-agent inside the sandbox."
     },
+    "openhands": {
+      "module": "rllm.harnesses.openhands",
+      "function": "OpenHandsHarness",
+      "description": "Run the OpenHands Software Agent SDK inside the sandbox."
+    },
     "terminus2": {
       "module": "rllm.harnesses.terminus2",
       "function": "Terminus2Harness",
@@ -55,6 +60,11 @@
       "module": "rllm.harnesses.oracle",
       "function": "OracleHarness",
       "description": "Run the task's reference solution (solution/solve.sh) without an LLM. Smoke-test for verifier + image."
+    },
+    "nop": {
+      "module": "rllm.harnesses.nop",
+      "function": "NopHarness",
+      "description": "Make no agent-side changes and grade the untouched sandbox."
     },
     "zeroclaw": {
       "module": "rllm.harnesses.zeroclaw",

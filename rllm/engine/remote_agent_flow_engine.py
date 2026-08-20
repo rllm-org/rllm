@@ -15,11 +15,10 @@ from rllm.engine.remote_runtime.protocol import (
     RemoteTaskResult,
     TaskSubmission,
 )
-from rllm.engine.trace_converter import compute_step_metrics, trace_record_to_step
+from rllm.engine.trace_converter import _prepare_trace_items, compute_step_metrics, trace_delta_to_step_delta, trace_record_to_step
 from rllm.gateway.manager import GatewayManager
-from rllm.types import Episode, Step, Trajectory
+from rllm.types import Episode, Step, StepDelta, TerminationReason, Trajectory, TrajectoryDelta
 from rllm.utils.episode_logger import EpisodeLogger
-from rllm.workflows.workflow import TerminationReason
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +123,8 @@ class RemoteAgentFlowEngine:
                 logger.warning("Remote task failed (session=%s, assigning reward=0): %s", result.session_id, result.error)
                 result.reward = 0.0
 
-            traces = await self.gateway.aget_traces(session_id)
+            compact_fetch = not is_validation and getattr(self.gateway, "store", None) == "compact" and hasattr(self.gateway, "aget_trace_graph")
+            traces = await (self.gateway.aget_trace_graph(session_id) if compact_fetch else self.gateway.aget_traces(session_id))
             episode = _build_episode(traces, result, uid, task)
             if result.metadata:
                 episode.metadata.update(result.metadata)
@@ -163,16 +163,16 @@ def _build_episode(
     Converts all traces to training Steps via trace_record_to_step(),
     creates a single Trajectory with the remote reward, and computes metrics.
     """
+    graph, trace_items, empty_response_traces_dropped = _prepare_trace_items(traces)
+
     # Convert traces to training steps
-    training_steps: list[Step] = []
-    if traces:
-        training_steps = [trace_record_to_step(t) for t in traces]
+    training_steps: list[Step] | list[StepDelta] = [trace_delta_to_step_delta(t) for t in trace_items] if graph is not None else [trace_record_to_step(t) for t in trace_items]
 
     # Create trajectory with all steps and remote reward
     trajectories = []
     if training_steps:
         trajectories.append(
-            Trajectory(
+            (TrajectoryDelta if graph is not None else Trajectory)(
                 name="default",
                 task=task,
                 steps=training_steps,
@@ -192,8 +192,9 @@ def _build_episode(
 
     # Compute metrics
     metrics = compute_step_metrics(trajectories)
-    metrics["empty"] = int(len(traces) == 0)
-    metrics["steps_collected"] = len(traces)
+    metrics["empty"] = int(len(training_steps) == 0)
+    metrics["steps_collected"] = len(training_steps)
+    metrics["empty_response_traces_dropped"] = empty_response_traces_dropped
 
     remote_metrics = (result.raw_result or {}).get("metrics") or {}
     scalar_remote = {k: int(v) if isinstance(v, bool) else v for k, v in remote_metrics.items() if isinstance(v, (bool | int | float))}

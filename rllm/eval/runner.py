@@ -17,8 +17,7 @@ from typing import TYPE_CHECKING
 
 from rllm.eval.results import EvalItem, EvalResult
 from rllm.hooks import FixedEvaluation, SandboxTaskHooks
-from rllm.types import AgentFlow, Evaluator
-from rllm.workflows.workflow import TerminationReason
+from rllm.types import INFRA_ERROR_REASONS, AgentFlow, Evaluator
 
 if TYPE_CHECKING:
     from rllm.gateway.manager import GatewayManager
@@ -43,6 +42,7 @@ async def run_dataset(
     gateway: GatewayManager | None = None,
     sampling_params: dict | None = None,
     attempts: int = 1,
+    compact_episodes: bool = False,
 ) -> tuple[EvalResult, list]:
     """Run a list of :class:`rllm.types.Task` objects through :class:`AgentFlowEngine`.
 
@@ -67,6 +67,8 @@ async def run_dataset(
             into ``attempts`` adjacent copies; the engine numbers sibling rollouts
             ``task_id:0..n-1`` (training's GRPO convention) and the EvalResult
             groups them back by task to compute ``pass_at``.
+        compact_episodes: Keep graph-backed trajectories in returned episodes and
+            completion callbacks instead of materializing cumulative steps.
 
     Returns ``(EvalResult, list[Episode])``.
     """
@@ -93,9 +95,39 @@ async def run_dataset(
     # and tear down one ourselves (single-shot).
     owned_gateway = gateway is None
     if owned_gateway:
-        # Auto-tunnel for off-host sandboxes (same predicate AgentTrainer uses).
-        gateway_tunnel = None if is_local_sandbox_backend(sandbox_backend) else "cloudflared"
-        gateway = EvalGatewayManager(upstream_url=base_url, model=model, tunnel=gateway_tunnel)
+        # Each remote eval owns its tunnel instead of reusing the singleton
+        # `rllm tunnel up` daemon and its fixed origin port.
+        gateway_tunnel: str | None = None
+        gateway_port: int | None = None
+        if not is_local_sandbox_backend(sandbox_backend):
+            from rllm.gateway.tunnel import resolve_auto_tunnel
+
+            gateway_tunnel, tunnel_warning = resolve_auto_tunnel()
+            if tunnel_warning:
+                logger.warning(tunnel_warning)
+            if gateway_tunnel.startswith(("http://", "https://")):
+                # A tunnel URL means an already-running forwarder; the gateway
+                # must bind wherever it forwards (a free-port pick would leave
+                # the tunnel pointing at nothing). The daemon's recorded
+                # ``upstream`` is authoritative; a URL supplied some other way
+                # (env var) falls back to the setup config's port.
+                from urllib.parse import urlparse
+
+                from rllm.gateway.tunnel import live_tunnel
+
+                state = live_tunnel() or {}
+                upstream = state.get("upstream") if state.get("url") == gateway_tunnel else None
+                gateway_port = urlparse(upstream).port if upstream else None
+                if gateway_port is None:
+                    from rllm.eval.config import load_tunnel_config
+
+                    gateway_port = int(load_tunnel_config().get("port") or 9090)
+                    logger.warning(
+                        "Tunnel URL %s has no matching daemon state; binding the gateway to port %d from the tunnel config — it must match the port that URL forwards to.",
+                        gateway_tunnel,
+                        gateway_port,
+                    )
+        gateway = EvalGatewayManager(upstream_url=base_url, model=model, tunnel=gateway_tunnel, port=gateway_port)
         gateway.start()
 
     hooks = SandboxTaskHooks(evaluation=FixedEvaluation(evaluator) if evaluator is not None else None, sandbox_backend=sandbox_backend, use_snapshot=use_snapshot)
@@ -106,10 +138,14 @@ async def run_dataset(
         gateway=gateway,
         model=model,
         n_parallel_tasks=effective_concurrency,
-        retry_limit=1,  # eval doesn't retry on flow errors
+        # One retry: rollout errors are usually transient infra (sandbox reaped,
+        # flaky create, install blip), not flow bugs. Without it they become
+        # permanent zeros that depress the score; only errored tasks re-run.
+        retry_limit=2,
         raise_on_error=False,  # capture per-task errors as error Episodes
         hooks=hooks,
         val_sampling_params=sampling_params or None,  # eval is always validation
+        compact_episodes=compact_episodes,
     )
 
     warm_queue = None
@@ -130,7 +166,7 @@ async def run_dataset(
         # downstream consumer wants it) is stable; the engine's session uid
         # becomes f"{task.id}:0" which matches training's convention.
         task_ids = [getattr(t, "id", None) or str(idx) for idx, t in enumerate(tasks)]
-        episodes = await engine.execute_tasks(tasks, task_ids=task_ids, is_validation=True)
+        episodes = await engine.execute_tasks(tasks, task_ids=task_ids, is_validation=True, on_episode_complete=on_episode_complete)
     finally:
         if warm_queue is not None:
             warm_queue.shutdown()
@@ -151,10 +187,18 @@ async def run_dataset(
             items.append(EvalItem(idx=task_idx, attempt=attempt, reward=0.0, is_correct=False, error="missing episode"))
             continue
 
+        # An infra/grading failure (sandbox/setup/verifier/grading) means the
+        # reward isn't a real task score — surface it as an error so it's counted
+        # separately from genuine task failures. An agent TIMEOUT is NOT an error
+        # here: it's graded on partial state, so its reward stands.
+        reason = episode.termination_reason
         error_msg = None
-        if episode.termination_reason == TerminationReason.ERROR:
+        if reason in INFRA_ERROR_REASONS:
             err = (episode.metadata or {}).get("error") or {}
-            error_msg = err.get("message") if isinstance(err, dict) else str(err)
+            if isinstance(err, dict):
+                error_msg = err.get("error_type") or err.get("message") or reason.value
+            else:
+                error_msg = str(err) or reason.value
 
         signals: dict[str, float] = {}
         if episode.trajectories:
@@ -164,11 +208,9 @@ async def run_dataset(
         if episode.trajectories and episode.trajectories[0].reward is not None:
             reward = float(episode.trajectories[0].reward)
 
-        if on_episode_complete is not None:
-            try:
-                on_episode_complete(idx, episode)
-            except Exception:
-                logger.debug("on_episode_complete callback error", exc_info=True)
+        # NOTE: on_episode_complete is now invoked *streaming* inside
+        # engine.execute_tasks (as each rollout finishes), not here — so UI
+        # uploads + local writes happen progressively instead of in a burst.
 
         items.append(
             EvalItem(
@@ -178,6 +220,7 @@ async def run_dataset(
                 is_correct=bool(episode.is_correct),
                 signals=signals,
                 error=error_msg,
+                termination_reason=reason.value if reason is not None else None,
             )
         )
         if error_msg is None:

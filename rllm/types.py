@@ -23,14 +23,107 @@ import inspect
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 if TYPE_CHECKING:
     from rllm.engine.rollout import ModelOutput
     from rllm.eval.types import EvalOutput
+
+
+class TerminationReason(Enum):
+    MAX_PROMPT_LENGTH_EXCEEDED = "max_prompt_length_exceeded"
+    MAX_RESPONSE_LENGTH_EXCEEDED = "max_response_length_exceeded"
+    ENV_DONE = "env_done"
+    MAX_TURNS_EXCEEDED = "max_turns_exceeded"
+    TIMEOUT = "timeout"  # agent execution wall-clock budget — reward is still graded on partial state
+    UNKNOWN = "unknown"
+    ERROR = "error"
+    # Infra/grading failures: the reward (if any) reflects an infrastructure or
+    # grading breakdown, not the policy's behavior. Distinguished so training can
+    # filter them and eval can count them as errors rather than task failures.
+    AGENT_SETUP_TIMEOUT = "agent_setup_timeout"
+    ENV_START_TIMEOUT = "env_start_timeout"
+    VERIFIER_TIMEOUT = "verifier_timeout"
+    GRADING_ERROR = "grading_error"
+    SANDBOX_ERROR = "sandbox_error"
+    MODEL_ERROR = "model_error"  # upstream/API/proxy failure — every model completion came back empty
+
+
+# Reasons whose reward is NOT a trustworthy training signal: an infra or grading
+# failure produced it (or no reward at all). Training filters these; eval counts
+# them as errors. TIMEOUT (agent wall-clock) is deliberately excluded — that
+# rollout is real and graded on partial state, so its reward is valid.
+INFRA_ERROR_REASONS = frozenset(
+    {
+        TerminationReason.ERROR,
+        TerminationReason.AGENT_SETUP_TIMEOUT,
+        TerminationReason.ENV_START_TIMEOUT,
+        TerminationReason.VERIFIER_TIMEOUT,
+        TerminationReason.GRADING_ERROR,
+        TerminationReason.SANDBOX_ERROR,
+        TerminationReason.MODEL_ERROR,
+    }
+)
+
+
+# Canonical map from an exception class name to a coarse TerminationReason.
+# Mirrors Harbor's granular failure taxonomy (harbor.trial.errors,
+# harbor.verifier.verifier, harbor.llms.base, harbor.environments.base) so the
+# in-sandbox CLI path and the harbor-runtime path classify identically. The exact
+# class name is preserved on the episode (metadata.error_type); this is only the
+# coarse rollup used for filtering and per-category metrics.
+_ERROR_TYPE_TO_REASON: dict[str, TerminationReason] = {
+    # Phase timeouts (harbor.trial.errors)
+    "AgentTimeoutError": TerminationReason.TIMEOUT,
+    "AgentSetupTimeoutError": TerminationReason.AGENT_SETUP_TIMEOUT,
+    "EnvironmentStartTimeoutError": TerminationReason.ENV_START_TIMEOUT,
+    "VerifierTimeoutError": TerminationReason.VERIFIER_TIMEOUT,
+    # Model/context (harbor.llms.base)
+    "ContextLengthExceededError": TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,
+    "OutputLengthExceededError": TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED,
+    # Agent process (harbor.agents.installed.base)
+    "NonZeroAgentExitCodeError": TerminationReason.ERROR,
+    # Verifier/grading (harbor.verifier.verifier)
+    "AddTestsDirError": TerminationReason.GRADING_ERROR,
+    "DownloadVerifierDirError": TerminationReason.GRADING_ERROR,
+    "RewardFileNotFoundError": TerminationReason.GRADING_ERROR,
+    "RewardFileEmptyError": TerminationReason.GRADING_ERROR,
+    "VerifierOutputParseError": TerminationReason.GRADING_ERROR,
+    "VerifierCrashError": TerminationReason.GRADING_ERROR,  # grader died before a verdict (negative-reward sentinel)
+    # Environment/sandbox (harbor.environments.base + rllm.sandbox.protocol + backends)
+    "HealthcheckError": TerminationReason.SANDBOX_ERROR,
+    "SandboxBuildFailedError": TerminationReason.SANDBOX_ERROR,
+    "MemoryLimitExceededError": TerminationReason.SANDBOX_ERROR,
+    "SnapshotNotFound": TerminationReason.SANDBOX_ERROR,
+    "DaytonaValidationError": TerminationReason.SANDBOX_ERROR,
+    "DaytonaError": TerminationReason.SANDBOX_ERROR,
+}
+
+
+def termination_reason_from_error(
+    error_type: str | None,
+    default: TerminationReason = TerminationReason.ERROR,
+) -> TerminationReason:
+    """Map an exception class name to a coarse :class:`TerminationReason`.
+
+    Unknown names fall back to ``default``: callers pass
+    :attr:`TerminationReason.GRADING_ERROR` when the failure came from the
+    verifier/grader, and the more general :attr:`TerminationReason.ERROR`
+    otherwise.
+    """
+    if not error_type:
+        return default
+    return _ERROR_TYPE_TO_REASON.get(error_type, default)
+
+
+class TerminationEvent(Exception):
+    def __init__(self, reason: TerminationReason = TerminationReason.UNKNOWN):
+        super().__init__(f"Terminated: {reason}")
+        self.reason = reason
 
 
 @dataclass
@@ -238,6 +331,119 @@ class Step(BaseModel):
         )
 
 
+class StepDelta(BaseModel):
+    """One gateway-produced training step stored against its completed parent.
+
+    For a child delta ``d`` and its named parent ``p``::
+
+        prompt_ids       = p.prompt_ids + p.response_ids + d.prompt_ids_suffix
+        chat_completions = p.chat_completions + d.chat_completions_suffix
+
+    A root stores both inputs in full. ``model_output`` is deliberately absent
+    because its prompt fields duplicate the growing token list. Its finish
+    reason is retained so the legacy view can be reconstructed.
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    parent_step_id: str | None
+    input: Any | None = None
+    output: Any | None = None
+    action: Any | None = None
+    reward: float = 0.0
+    done: bool = False
+    metadata: dict | None = None
+
+    prompt_ids_suffix: list[int]
+    chat_completions_suffix: list[dict[str, Any]]
+    response_ids: list[int] = Field(default_factory=list)
+    logprobs: list[float] = Field(default_factory=list)
+    routing_matrices: list[str] | None = None
+    observation: Any = None
+    thought: str = ""
+    model_response: str = ""
+    finish_reason: str | None = None
+
+    mc_return: float = 0.0
+    advantage: list[float] | float | None = None
+    weight_version: int | None = None
+
+
+def resolve_step_deltas(deltas: list[StepDelta]) -> list[Step]:
+    """Resolve a topologically ordered StepDelta forest into flat Steps.
+
+    Newly added values are copied from compact storage once. Descendants share
+    their parents' message objects, so chat messages in the returned batch must
+    be treated as read-only.
+    """
+    from rllm.engine.trace_converter import trace_to_model_output
+
+    by_id: dict[str, Step] = {}
+    for delta in deltas:
+        if delta.id in by_id:
+            raise ValueError(f"duplicate step id {delta.id!r}")
+        parent = None if delta.parent_step_id is None else by_id.get(delta.parent_step_id)
+        if delta.parent_step_id is not None and parent is None:
+            raise ValueError(f"step {delta.id!r}: parent {delta.parent_step_id!r} is not earlier")
+        prompt_ids = list(delta.prompt_ids_suffix)
+        chat = deepcopy(delta.chat_completions_suffix)
+        if parent is not None:
+            prompt_ids = [*parent.prompt_ids, *parent.response_ids, *prompt_ids]
+            chat = [*parent.chat_completions, *chat]
+        step_values = deepcopy({name: value for name, value in vars(delta).items() if name in Step.model_fields})
+
+        model_output = trace_to_model_output(delta, chat[-1] if chat else {}, prompt_ids, step_values["response_ids"], step_values["logprobs"], step_values["routing_matrices"])
+
+        step = Step.model_construct(
+            **step_values,
+            prompt_ids=prompt_ids,
+            chat_completions=[],
+            model_output=model_output,
+        )
+        step.chat_completions = chat
+        by_id[delta.id] = step
+    return list(by_id.values())
+
+
+def _index_step_deltas(deltas: list[StepDelta]) -> tuple[dict[str, StepDelta], dict[str, int]]:
+    by_id: dict[str, StepDelta] = {}
+    prompt_lengths: dict[str, int] = {}
+    for delta in deltas:
+        if delta.id in by_id:
+            raise ValueError(f"duplicate step id {delta.id!r}")
+        parent = None if delta.parent_step_id is None else by_id.get(delta.parent_step_id)
+        if delta.parent_step_id is not None and parent is None:
+            raise ValueError(f"step {delta.id!r}: parent {delta.parent_step_id!r} is not earlier")
+        prompt_lengths[delta.id] = len(delta.prompt_ids_suffix) + (0 if parent is None else prompt_lengths[parent.id] + len(parent.response_ids))
+        by_id[delta.id] = delta
+    return by_id, prompt_lengths
+
+
+def _resolve_step_delta_prompt(delta: StepDelta, by_id: dict[str, StepDelta]) -> list[int]:
+    chain = [delta]
+    while chain[-1].parent_step_id is not None:
+        chain.append(by_id[chain[-1].parent_step_id])
+    chain.reverse()
+    prompt = list(chain[0].prompt_ids_suffix)
+    for parent, child in zip(chain[:-1], chain[1:], strict=True):
+        prompt.extend(parent.response_ids)
+        prompt.extend(child.prompt_ids_suffix)
+    return prompt
+
+
+def _partition_steps_by_lineage(steps: list) -> list[list]:
+    """Group steps by lineage in first-appearance order."""
+    groups: dict = {}
+    for step in steps:
+        groups.setdefault((step.metadata or {}).get("lineage_id"), []).append(step)
+    return list(groups.values())
+
+
+def _sanitize_task(task: Any) -> Any:
+    if isinstance(task, dict):
+        return {key: value for key, value in task.items() if key not in ("image", "images")}
+    return task
+
+
 class Trajectory(BaseModel):
     """A sequence of Steps forming one agent trajectory."""
 
@@ -270,13 +476,6 @@ class Trajectory(BaseModel):
         self.metadata = value
 
     def to_dict(self):
-        # Remove large/non-serializable payloads (e.g., images) from task
-        def _sanitize_task(task_obj):
-            if isinstance(task_obj, dict):
-                cleaned = {k: v for k, v in task_obj.items() if k not in ("image", "images")}
-                return cleaned
-            return task_obj
-
         return {
             "uid": self.uid,
             "name": self.name,
@@ -314,6 +513,59 @@ class Trajectory(BaseModel):
         return True
 
 
+class TrajectoryDelta(BaseModel):
+    """A gateway-produced trajectory whose growing steps use delta storage."""
+
+    uid: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = _DEFAULT_TRAJ_NAME
+    task: Any = None
+    steps: list[StepDelta] = Field(default_factory=list)
+    reward: float | None = None
+    input: dict | None = None
+    output: Any = None
+    signals: dict[str, float] = Field(default_factory=dict)
+    metadata: dict | None = None
+
+    def resolve(self) -> Trajectory:
+        """Reconstruct the flat trajectory, following explicit parent ids."""
+        return Trajectory(**(vars(self) | {"steps": resolve_step_deltas(self.steps)}))
+
+    def to_dict(self) -> dict:
+        return {
+            "uid": self.uid,
+            "name": self.name,
+            "task": _sanitize_task(self.task),
+            "steps": [step.model_dump(mode="python", exclude={"input", "output"}) | {"action": step.action.action if isinstance(step.action, Action) else step.action} for step in self.steps],
+            "reward": float(self.reward) if self.reward is not None else None,
+            "info": self.metadata or {},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> TrajectoryDelta:
+        return cls.model_validate({**data, "metadata": data.get("info", data.get("metadata"))})
+
+
+def _materialize_trajectory_deltas(container):
+    if not any(isinstance(trajectory, TrajectoryDelta) for trajectory in container.trajectories):
+        return container
+    return container.model_copy(update={"trajectories": [trajectory.resolve() if isinstance(trajectory, TrajectoryDelta) else trajectory for trajectory in container.trajectories]})
+
+
+def _trajectory_prompt_lengths(trajectory: Trajectory | TrajectoryDelta) -> list[int]:
+    if isinstance(trajectory, TrajectoryDelta):
+        return list(_index_step_deltas(trajectory.steps)[1].values())
+    return [len(step.prompt_ids) for step in trajectory.steps]
+
+
+def _select_delta_trajectory(value: Any) -> Any:
+    if isinstance(value, dict) and any({"parent_step_id", "prompt_ids_suffix", "chat_completions_suffix"} & step.keys() for step in value.get("steps", []) if isinstance(step, dict)):
+        return TrajectoryDelta.model_validate(value)
+    return value
+
+
+_TrajectoryLike = Annotated[Trajectory | TrajectoryDelta, BeforeValidator(_select_delta_trajectory)]
+
+
 class Episode(BaseModel):
     """A rollout episode containing one or more Trajectories."""
 
@@ -321,10 +573,10 @@ class Episode(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     task: Any = None
-    termination_reason: Any | None = None
+    termination_reason: TerminationReason | None = None
     is_correct: bool = False
     session_id: str | None = None
-    trajectories: list[Trajectory] = Field(default_factory=list)
+    trajectories: list[_TrajectoryLike] = Field(default_factory=list)
     artifacts: dict[str, Any] = Field(default_factory=dict)
     metrics: dict = Field(default_factory=dict)
     metadata: dict = Field(default_factory=dict)
@@ -347,13 +599,6 @@ class Episode(BaseModel):
         self.metadata = value
 
     def to_dict(self):
-        # Remove large/non-serializable payloads (e.g., images) from task
-        def _sanitize_task(task_obj):
-            if isinstance(task_obj, dict):
-                cleaned = {k: v for k, v in task_obj.items() if k not in ("image", "images")}
-                return cleaned
-            return task_obj
-
         return {
             "id": self.id,
             "task": _sanitize_task(self.task),
@@ -368,14 +613,15 @@ class Episode(BaseModel):
     @classmethod
     def from_dict(cls, data: dict) -> Episode:
         """Create Episode from dictionary, properly deserializing Trajectory objects."""
-        from rllm.workflows.workflow import TerminationReason
-
         return cls(
             id=data["id"],
             task=data["task"],
             termination_reason=TerminationReason(data.get("termination_reason", TerminationReason.UNKNOWN)),
             is_correct=data["is_correct"],
-            trajectories=[Trajectory.from_dict(trajectory_data) for trajectory_data in data["trajectories"]],
+            trajectories=[
+                TrajectoryDelta.from_dict(trajectory_data) if any("prompt_ids_suffix" in step for step in trajectory_data.get("steps", [])) else Trajectory.from_dict(trajectory_data)
+                for trajectory_data in data["trajectories"]
+            ],
             metrics=data.get("metrics", {}),
             metadata=data.get("info", data.get("metadata", {})),
         )
@@ -395,7 +641,7 @@ class TrajectoryGroup(BaseModel):
         metadata: List of metadata for each trajectory in the group
     """
 
-    trajectories: list[Trajectory]
+    trajectories: list[_TrajectoryLike]
     group_id: str = ""
     metadata: list[dict] = Field(default_factory=list)
     weight_version: int = 0

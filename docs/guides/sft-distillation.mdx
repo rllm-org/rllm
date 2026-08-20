@@ -1,0 +1,270 @@
+---
+title: SFT distillation
+description: Distill reasoning teacher traces into a student model with rllm eval → rllm dataset from-eval / import → rllm sft
+---
+
+Supervised fine-tuning (SFT) distillation teaches a small **student** model to imitate the traces of a stronger **teacher** — including its chain-of-thought. rLLM ships an end-to-end path for it: generate or collect teacher traces, curate them into a canonical SFT dataset, and fine-tune the student. No custom data-munging scripts required.
+
+```text The flow
+teacher model ──► rllm eval ──► eval run dir (episodes/*.json)
+                                   │
+                                   ├─► rllm dataset from-eval   (curate your OWN eval traces)
+                                   │
+external traces ──────────────────┼─► rllm dataset import      (messages | think-tags)
+                                   │
+                                   ▼
+                      registered SFT dataset  ({"messages": [...]} rows)
+                                   │
+                                   ▼
+                      rllm sft  ──►  student model (LoRA or full FT)
+```
+
+There are two entry points into the dataset stage. Use `rllm dataset from-eval` when the traces came from an `rllm eval` run (see [Running evaluations](/datasets/running-evaluations)). Use `rllm dataset import` when you have external trace files (an OpenAI `messages` export, or `<think>`-tagged rows). Both produce the same registered dataset, and both feed `rllm sft` unchanged.
+
+## The SFT row schema (the contract)
+
+Every dataset the pipeline produces is a list of `{"messages": [...]}` rows. Each message carries a per-message `trainable` flag, and its `content` is a list of **structured parts** rather than a flat string:
+
+```json Structured SFT row
+{
+  "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "What is 12 * 13?"}], "trainable": false},
+    {"role": "assistant", "content": [
+      {"type": "thinking", "thinking": "12*13 = 12*10 + 12*3 = 120 + 36 = 156."},
+      {"type": "text", "text": "156"}
+    ], "trainable": true}
+  ],
+  "task_id": "math-42",
+  "reward": 1.0
+}
+```
+
+The two recognized part types are `text` (visible output) and `thinking` (the model's reasoning). Tool calls ride on the message as a canonical OpenAI-shaped list:
+
+```json
+{"type": "function", "id": "call_1", "function": {"name": "search", "arguments": "{\"q\": \"...\"}"}}
+```
+
+The schema and its normalization live in `rllm/data/sft_schema.py` (`SFTMessage`, `TextPart`, `ThinkingPart`, `SFTToolCall`).
+
+The import bridges also accept common provider wire variants. Assistant
+`reasoning_content` or `reasoning` becomes one leading `thinking` part;
+`tool_calls` may be a list or a JSON-stringified list; and
+`function.arguments` may be a JSON string or a parsed object/array. Stored
+canonical rows always use structured `thinking`, a tool-call list, and
+JSON-string arguments. Ambiguous dual reasoning representations are rejected.
+
+### Multi-message rows and loss targets
+
+A **row** is one training example containing an ordered `messages` sequence. A
+message with `trainable: true` is a **target message**; `trainable: false` makes
+it **context-only**. Context-only messages stay in the rendered sequence—the
+flag controls loss eligibility, not visibility.
+
+The flag applies to the whole rendered message. Its thinking, visible text, and
+tool-call output cannot be masked independently. The canonical schema does not
+restrict explicit targets by role, although derived masks and think-tag
+explosion select assistant messages.
+
+For rows that remain intact (`messages`, direct normalization, or compact
+`think-tags`), mask resolution is all-or-nothing:
+
+- If every source message has a boolean `trainable`, rLLM preserves the mask
+  exactly and ignores the derivation policy.
+- If any value is missing, null, or non-boolean, the mask is partial. rLLM
+  derives the entire mask again, overwriting any explicit values in that row.
+  `messages` uses its `all` or `last` policy; compact `think-tags` selects every
+  assistant message.
+
+For `think-tags`, exploded mode emits one prefix row per selected assistant
+target. The selected target is the final and only trainable message in that
+row; future messages are omitted, and thinking is removed from historical
+assistant messages. A complete source mask uses `trainable: true` assistant
+messages as selectors, then rewrites each emitted row to one target and
+all-false history. A non-assistant selector is rejected. A partial mask ignores
+its explicit values and selects every assistant message.
+
+A renderer may still omit content according to its history policy. If a
+renderer is configured to omit historical reasoning, explosion keeps each
+selected reasoning target final so that history stripping cannot remove it.
+
+### Why structured `thinking` parts, not baked `<think>` strings
+
+Different model families wrap reasoning in different wire formats — DeepSeek uses `<think>...</think>`, Qwen and Harmony use their own. If the dataset hard-coded one format, it would only train that family. Instead, reasoning is stored **model-agnostically** as a `thinking` part, and the student's *renderer* decides the on-the-wire format at training time. One curated dataset trains any student.
+
+### Flag-less and partially flagged rows still work
+
+You can hand `rllm sft` a plain `{"role", "content": "..."}` dataset with no `trainable` flags at all (e.g. an external `--train-file`). The loader derives the mask: assistant messages are trainable, everything else is not. With `--tokenize-method stepwise`, only the **last** assistant message is trained instead of all of them. A complete boolean mask is used verbatim; a partial mask is fully re-derived as described above.
+
+## Getting data in
+
+### `rllm dataset from-eval` — curate your own eval runs
+
+`from-eval` reads one or more `rllm eval` run directories, filters tasks by an aggregate metric, selects which trajectories to keep, and emits SFT rows.
+
+```bash
+rllm dataset from-eval math500_run --name math500-rft --filter "0 < avg < 1"
+rllm dataset from-eval run_a run_b --name pooled --select best --max-per-task 1
+rllm dataset from-eval run --name d --filter "pass@4 >= 0.5" --dry-run
+```
+
+Key flags: `--metric` (what `avg`/`best`/`worst` aggregate — `is_correct`, `reward`, or a signal name), `--filter` (task-level DSL over aggregates), `--select` (`correct` | `best` | `best-n` | `shortest` | `all`), `--max-per-task`, `--min-reward`, `--dedup/--no-dedup`, `--trajectory` (named trajectory for multi-agent flows), and `--val-fraction` to hold out tasks as a validation split.
+
+<Note>
+  `--max-per-task` caps the number of **attempts** kept per task, not the number of rows. A single attempt can expand into several rows when the automerge walk splits it (below).
+</Note>
+
+#### The automerge walk
+
+Each kept attempt (episode) is turned into one or more rows by a deterministic walk over its steps (`rllm/eval/curation.py`, the message-extraction section). The data alone decides the shape — no flag toggles it:
+
+- **Non-thinking / interleaved histories** — when each step's conversation is a clean prefix of the next (the harness feeds full history back verbatim, reasoning included), the steps **merge** into one multi-turn row with every assistant turn trained.
+- **Reasoning stripped from history** — when the harness drops a turn's reasoning before feeding it back (non-interleaved runs), the prefix breaks and each turn becomes its own **split** row, so every row matches exactly what the model saw at inference.
+
+Watch these `CurationStats` fields in the summary (all defined in `CurationStats`, `rllm/eval/curation.py`):
+
+| Stat | Meaning |
+|------|---------|
+| `segments_merged` | steps merged into an already-open row |
+| `segments_split` | new rows started because the prefix broke |
+| `steps_skipped_no_assistant` | steps with no assistant turn to train |
+| `targets_skipped_empty` | steps whose final assistant turn had no text and no tool calls |
+| `rows_invalid` | rows dropped for failing SFT schema validation |
+
+If an attempt produces many trained steps but zero merges, curation logs a **degenerate-splitting warning** — usually a per-step-varying history element (a timestamp, a counter) is breaking the prefix. Heavy splitting is worth noticing: it duplicates history across rows, so a `T`-turn attempt costs on the order of `O(T²)` tokens.
+
+### `rllm dataset import` — external trace files
+
+`import` bridges a local file of `{"messages": [...]}` rows into the canonical schema and registers it. Choose the source shape with `--format` (`rllm/cli/dataset.py`, bridges in `rllm/data/sft_bridges.py`):
+
+```bash
+rllm dataset import data.jsonl --name my-sft                             # --format messages (default)
+rllm dataset import data.jsonl --name my-sft --train-on last             # only train the final assistant turn
+rllm dataset import traces.jsonl --name distill-traces --format think-tags  # split <think>...</think> into a thinking part
+```
+
+- **`messages`** — plain OpenAI rows, including provider reasoning fields and OpenAI-shaped tool calls. Complete boolean masks are preserved; otherwise the loss mask is derived from `--train-on` (`all` assistant messages, default, or only the `last`).
+- **`think-tags`** — rows whose assistant messages start with a `<think>...</think>` block (a common convention for distilled reasoning traces). The bridge splits that block into a `thinking` part and carries every non-`messages` top-level key through verbatim as row metadata. In compact mode, complete boolean masks are preserved. In exploded mode, true assistant flags select targets, non-assistant selectors are rejected, and a partial mask selects every assistant message.
+
+#### `--explode` (think-tags only, default ON)
+
+This is the most important knob for `think-tags`, so spell out the tradeoff before choosing:
+
+- **Exploded (default)** — the conversation is split into one row per selected assistant target. A complete source mask selects the targets; with a partial mask, every assistant message is selected. History messages keep only visible text (thinking stripped), and the row's single final assistant message is the trained target with its thinking kept. This matches inference when the renderer omits historical reasoning. The cost is duplicated history tokens.
+- **`--no-explode`** — one compact row per full conversation. A complete source mask is preserved; a partial mask makes every assistant message trainable. If the renderer omits historical thinking, only the final message's thinking is emitted and trained. You save history-token duplication but may train fewer reasoning blocks.
+
+Rule of thumb: keep the default `--explode` when every selected reasoning block
+must be a final target. Use `--no-explode` for compact conversations when your
+renderer retains the reasoning you intend to train.
+
+## Training with `rllm sft`
+
+```bash
+rllm sft my-sft --model Qwen/Qwen3.5-4B --backend tinker --epochs 3
+rllm sft --train-file data.parquet --lr 1e-5 --backend fireworks
+```
+
+Masking is always tinker's `CUSTOMIZED` mode, driven by each message's `trainable` flag — the data decides the loss mask (`rllm/trainer/sft/tinker_backend.py`, `build_sft_data`).
+
+### Logging training progress
+
+Per-step training metrics (loss, learning rate, progress) route through rLLM's unified tracking layer (`rllm.utils.tracking.Tracking`). `console` logging is always on; add more backends with `--logger`:
+
+```bash
+rllm sft my-sft --logger wandb                    # needs WANDB_API_KEY or `wandb login`
+rllm sft my-sft --logger wandb --logger tensorboard   # repeatable
+rllm sft my-sft --ui                              # live rLLM UI (see `rllm login`)
+```
+
+`--logger` accepts `console | wandb | mlflow | swanlab | tensorboard | file | ui`. `--project`/`--experiment` name the run in whichever backend you pick (default `rllm-sft` / the dataset name). `--ui` is auto-enabled when you're logged in; pass `--no-ui` to opt out.
+
+<Note>
+  Live rLLM UI logging (`--ui`) is supported on the **tinker** and **fireworks** backends only; on `--backend verl` it is dropped with a warning.
+</Note>
+
+### Renderer auto-detection and `--renderer`
+
+The tinker/fireworks path renders rows through a tinker-cookbook renderer. rLLM auto-detects it from the model in this order (`_resolve_renderer_name`, `rllm/trainer/sft/tinker_backend.py`):
+
+1. An explicit `--renderer` wins (an advisory warning fires if it looks mismatched — never fatal).
+2. Otherwise tinker-cookbook's recommendation map (`get_recommended_renderer_name`).
+3. Otherwise a family heuristic on the model basename (`qwen3.5 → qwen3_5`, `qwen3 → qwen3`, `deepseek → deepseekv3`, `llama-3 → llama3`).
+4. Otherwise fall back to `role_colon` with a warning.
+
+Pass `--renderer` when auto-detection can't place your model (e.g. a small or renamed checkpoint tinker's map doesn't cover). Valid names:
+
+```text
+qwen3 | qwen3_5 | deepseekv3 | llama3 | role_colon
+```
+
+<Warning>
+  `role_colon` and `llama3` are **text-only** renderers — they cannot represent reasoning (`thinking` parts) or tool calls. If your data contains either, the tinker backend **fails fast** with an `SFTConfigError` rather than silently dropping the reasoning. Pin a capable renderer (`qwen3` / `qwen3_5` / `deepseekv3`) or use a chat model whose default renderer supports structured content.
+</Warning>
+
+## Backend support matrix
+
+| Backend | Structured rows (thinking / tool calls) | Plain-text rows |
+|---------|:---:|:---:|
+| **tinker** | ✓ | ✓ |
+| **fireworks** | ✓ (same data path) | ✓ |
+| **verl** | ✗ (rejected today) | ✓ |
+
+Fireworks subclasses the tinker backend and reuses the same rendering pipeline, so structured rows behave identically. The verl backend rejects structured rows — parts-list content or per-message `trainable` flags — with an actionable `SFTConfigError` (`_reject_structured_rows`, `rllm/trainer/sft/verl_backend.py`); plain `{role, content: str}` rows still train fine on verl. Structured SFT support on verl is planned.
+
+## Worked example: importing think-tagged teacher traces
+
+Starting from an external file of `<think>`-tagged teacher traces, distill them into `Qwen/Qwen3.5-4B` on tinker.
+
+```bash
+# 1. Import the think-tagged traces (exploded by default: one row per reasoning turn)
+rllm dataset import teacher_traces.jsonl \
+  --name distill-sft \
+  --format think-tags \
+  --description "Teacher reasoning traces"
+
+# 2. Inspect what got registered
+rllm dataset inspect distill-sft --split train
+
+# 3. Fine-tune the student
+rllm sft distill-sft \
+  --model Qwen/Qwen3.5-4B \
+  --backend tinker \
+  --epochs 3 \
+  --lr 1e-5 \
+  --lora-rank 32
+```
+
+`import` prints how many source rows expanded into how many SFT rows (explosion inflates the count), then the exact `inspect` and `sft` commands to run next.
+
+## Troubleshooting
+
+Common `SFTConfigError` messages and what to do:
+
+| Message (abbreviated) | Cause / fix |
+|-----------------------|-------------|
+| `train dataset is empty` | The dataset/split resolved to zero rows. Check the name and `--split`; run `rllm dataset list --local`. |
+| `train dataset is missing a 'messages' column` | The file isn't in SFT shape. Import it first with `rllm dataset import` (or point at the right file). |
+| `... row 0 does not match the SFT schema` | A malformed message (bad part type, missing `role`/`content`). The error names the failing field. |
+| `The 'role_colon' renderer cannot represent reasoning (<think>) or tool-calls` | A text-only renderer met structured data. Pass `--renderer qwen3` (or `qwen3_5` / `deepseekv3`). |
+| `... has structured SFT rows ... not supported on the verl backend yet` | Structured rows on verl. Use `--backend tinker` (or `fireworks`). |
+| `Unsupported lr_schedule ... for verl` | verl ships `constant` / `cosine` only; `linear` maps to `cosine` with a warning. |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Running evaluations" icon="flask" href="/datasets/running-evaluations">
+    Generate the teacher traces that feed `from-eval`
+  </Card>
+
+  <Card title="Tinker backend" icon="server" href="/backends/tinker">
+    Configuration and LoRA options for the tinker trainer
+  </Card>
+
+  <Card title="Fireworks backend" icon="fire" href="/backends/fireworks">
+    Hosted training on Fireworks (same data path)
+  </Card>
+
+  <Card title="Bring your own dataset" icon="database" href="/datasets/byo-dataset">
+    Register custom datasets for eval and training
+  </Card>
+</CardGroup>
