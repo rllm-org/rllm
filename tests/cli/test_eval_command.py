@@ -93,7 +93,8 @@ def test_eval_base_url_requires_model(runner, tmp_rllm_home):
     assert "--model is required" in result.output
 
 
-def test_eval_compact_episodes_option_is_forwarded(runner, tmp_rllm_home):
+@pytest.mark.parametrize(("episode_args", "expected"), [([], True), (["--full-episodes"], False)])
+def test_eval_episode_format_is_forwarded(runner, tmp_rllm_home, episode_args, expected):
     with patch("rllm.cli.eval._run_eval") as mock_run:
         result = runner.invoke(
             cli,
@@ -106,12 +107,12 @@ def test_eval_compact_episodes_option_is_forwarded(runner, tmp_rllm_home):
                 "http://localhost:8000/v1",
                 "--model",
                 "test-model",
-                "--compact-episodes",
+                *episode_args,
             ],
         )
 
     assert result.exit_code == 0, result.output
-    assert mock_run.call_args.kwargs["compact_episodes"] is True
+    assert mock_run.call_args.kwargs["compact_episodes"] is expected
 
 
 def test_eval_with_proxy_mode(runner, tmp_rllm_home, mock_dataset):

@@ -131,7 +131,7 @@ def _run_eval(
     agent_metadata: dict | None = None,
     enable_ui: bool = False,
     save_episodes: bool = True,
-    compact_episodes: bool = False,
+    compact_episodes: bool = True,
     episodes_dir: str | None = None,
     use_snapshot: bool = True,
     warm_queue_size: int = 0,
@@ -634,7 +634,11 @@ def _run_eval(
 )
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
 @click.option("--save-episodes/--no-save-episodes", "save_episodes", default=True, help="Save each Episode as its own JSON file for later visualization (default: enabled).")
-@click.option("--compact-episodes", is_flag=True, help="Save graph-backed Episode JSONs without repeated cumulative messages and token IDs.")
+@click.option(
+    "--compact-episodes/--full-episodes",
+    default=True,
+    help="Save graph-backed Episode JSONs without repeated cumulative messages and token IDs (default: compact).",
+)
 @click.option("--episodes-dir", "episodes_dir", default=None, help="Directory to write the episode JSONs into. Default: ~/.rllm/eval_results/<bench>_<model>_<timestamp>/.")
 @click.option("--sampling-params", "sampling_params", default=None, help=_SAMPLING_PARAMS_HELP)
 @click.option("--temperature", default=None, type=float, help="Sampling temperature (shortcut for --sampling-params temperature=...).")
