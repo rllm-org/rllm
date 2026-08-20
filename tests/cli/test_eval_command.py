@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
+from rllm.cli.eval import _apply_agent_task_filter, _load_agent_config, _redact_config, _sanitize_endpoint
 from rllm.cli.main import cli
 from rllm.eval.config import RllmConfig, load_config, save_config
 from rllm.eval.types import EvalOutput, Signal
@@ -91,6 +92,36 @@ def test_eval_base_url_requires_model(runner, tmp_rllm_home):
     result = runner.invoke(cli, ["eval", "gsm8k", "--base-url", "http://localhost:8000/v1"])
     assert result.exit_code != 0
     assert "--model is required" in result.output
+
+
+def test_agent_config_loading_redaction_and_endpoint_sanitization(tmp_path):
+    config_path = tmp_path / "agent.json"
+    config_path.write_text('{"preflight":"strict","nested":{"api_key":"secret"}}')
+
+    config = _load_agent_config(f"@{config_path}")
+
+    assert config["preflight"] == "strict"
+    assert _redact_config(config)["nested"]["api_key"] == "<redacted>"
+    assert _sanitize_endpoint("https://user:pass@example.test/v1?token=secret") == "https://example.test/v1"
+
+
+def test_optional_agent_task_filter_preserves_dataset_identity():
+    from rllm.data.dataset import Dataset
+
+    class FilterAgent:
+        def filter_eval_tasks(self, tasks):
+            return tasks[1:]
+
+        def eval_task_filter_metadata(self):
+            return {"name": "test", "selected_task_count": 2}
+
+    source = Dataset(data=[1, 2, 3], name="bench", split="public")
+    filtered, metadata = _apply_agent_task_filter(source, FilterAgent())
+
+    assert filtered.data == [2, 3]
+    assert filtered.name == "bench"
+    assert filtered.split == "public"
+    assert metadata == {"name": "test", "selected_task_count": 2}
 
 
 def test_eval_with_proxy_mode(runner, tmp_rllm_home, mock_dataset):
