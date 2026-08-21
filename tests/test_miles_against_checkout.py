@@ -55,6 +55,25 @@ def _miles_arguments_importable() -> bool:
 needs_miles_arguments = pytest.mark.skipif(not _miles_arguments_importable(), reason="miles.utils.arguments not importable (needs sglang)")
 
 
+def _shipped_cfg():
+    """The shipped miles.yaml with the interpolations base.yaml would supply."""
+    from omegaconf import OmegaConf
+
+    import rllm.trainer.config as cfg_pkg
+
+    cfg = OmegaConf.load(Path(cfg_pkg.__file__).parent / "rllm" / "backend" / "miles.yaml")
+    for path, value in [
+        ("training.group_size", 8),
+        ("rllm.data.train_batch_size", 16),
+        ("rllm.data.max_prompt_length", 4096),
+        ("rllm.trainer.save_freq", 20),
+        ("rllm.trainer.project_name", "rllm-miles-test"),
+        ("rllm.trainer.experiment_name", "t"),
+    ]:
+        OmegaConf.update(cfg, path, value)
+    return cfg
+
+
 def _rendered_argv_block():
     from omegaconf import OmegaConf
 
@@ -194,22 +213,9 @@ class TestConfigBridgeThroughMilesParser:
     """
 
     def _args(self):
-        from omegaconf import OmegaConf
-
-        import rllm.trainer.config as cfg_pkg
         from rllm.trainer.miles.miles_config import build_miles_args
 
-        cfg = OmegaConf.load(Path(cfg_pkg.__file__).parent / "rllm" / "backend" / "miles.yaml")
-        for path, value in [
-            ("training.group_size", 8),
-            ("rllm.data.train_batch_size", 16),
-            ("rllm.data.max_prompt_length", 4096),
-            ("rllm.trainer.save_freq", 20),
-            ("rllm.trainer.project_name", "rllm-miles-test"),
-            ("rllm.trainer.experiment_name", "t"),
-        ]:
-            OmegaConf.update(cfg, path, value)
-        return build_miles_args(cfg, total_steps=50)
+        return build_miles_args(_shipped_cfg(), total_steps=50)
 
     def test_arity_introspection_finds_the_full_flag_surface(self):
         from rllm.trainer.miles.miles_config import miles_arity
@@ -252,3 +258,23 @@ class TestConfigBridgeThroughMilesParser:
         args = self._args()
         assert args.use_critic is False
         assert args.loss_type == "policy_loss"  # stock kernel reads batch["advantages"]
+
+
+@needs_miles_arguments
+class TestPlacementLayout:
+    """The shipped config must describe a placement Miles can actually satisfy."""
+
+    def test_shipped_config_is_a_valid_disaggregated_layout(self):
+        from miles.ray.placement_group import _get_placement_group_layout
+
+        from rllm.trainer.miles.miles_config import build_miles_args
+
+        args = build_miles_args(_shipped_cfg(), total_steps=50)
+        total, rollout_offset = _get_placement_group_layout(args)
+
+        actor_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
+        # Disaggregated: trainer and engines own separate GPUs, so the total is the sum
+        # and the rollout bundles start after the actor's.
+        assert args.colocate is False
+        assert total == actor_gpus + args.rollout_num_gpus + args.eval_num_gpus
+        assert rollout_offset == actor_gpus

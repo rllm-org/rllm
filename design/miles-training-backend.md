@@ -23,7 +23,12 @@ Branch `feat/miles-backend`. Landed and tested off-GPU:
 | `rllm/trainer/miles/transform.py` (episodes → Samples) | done, 19 tests |
 | `rllm/trainer/miles/_flag_audit.py` (offline flag-drift guard) | done |
 | `rllm/trainer/config/rllm/backend/miles.yaml` | done |
-| `miles_engine.py`, `miles_backend.py`, `miles_launcher.py`, `custom_loss.py`, `patch.py` | **not started** — all import miles, so they need the image |
+| `miles_engine.py` (SGLang /generate, TITO) | done |
+| `miles_backend.py` (BackendProtocol) | done, 12 tests |
+| `miles_launcher.py` (Ray init + bring-up) | done |
+| `patch.py` (advantages CP-slice) | done, contract asserted against installed miles |
+| `custom_loss.py` | **not needed until Phase 3** — stock `policy_loss_function` reads `batch["advantages"]` |
+| End-to-end bring-up (`create_training_models`, a train step) | **blocked on GPUs**: cu130 torch vs this box's CUDA 12.8 driver |
 
 Zero regressions: the failing-test set is byte-identical before and after
 (91 pre-existing failures in a venv without ray/verl/vllm, including two float32
