@@ -359,3 +359,59 @@ Roughly 3–4 weeks to Phase 4 for one engineer.
 `backend=miles` does **not** also support Miles' own rollout path (rLLM as trainer only). It
 would double the config surface for no gain — rLLM's agent/workflow layer is the reason to use
 rLLM at all.
+
+## 7. Remaining work
+
+Ordered by what would bite a real run first. Everything in §0 is verified; nothing below is
+known-broken, but nothing below has been executed either.
+
+### Would bite the first serious run
+
+1. **Checkpointing has never executed.** Every run so far used `save_freq=1000`, so
+   `actor_model.save_model()`, `rollout_manager.save()` and resume via `start_rollout_id`
+   are all unexercised. The first run that actually tries to checkpoint is the test.
+2. **Miles' training metrics don't reach rLLM.** `loss`, `grad_norm`, `entropy`, `ppo_kl`,
+   `pg_clipfrac` are computed by Miles and logged to its own tracking, but nothing lands in
+   `trainer_state.metrics` — so from rLLM's side you cannot see whether the optimizer is
+   healthy. `RayTrainGroup.train` returns a `train_step_outcome`; wire it through.
+3. **The sglang fork is unpinned.** Installed from `sglang-miles` branch HEAD (`cb05a44`).
+   A fork commit can change weight-update or generation behavior with no signal. Pin it,
+   next to the Miles commit pin.
+
+### Untested paths, not known-broken
+
+4. **CP > 1.** At CP=1 `slice_log_prob_with_cp` is the identity, so the advantages patch has
+   never done real work. This is the highest-value correctness test left.
+5. **Multi-turn merged samples.** The transform's merge walk is unit-tested but has only run
+   live on single-turn countdown.
+6. **Megatron backend.** Needs the offline HF→`torch_dist` conversion for `ref_load`. Also
+   the only path with TP/PP/EP, and the one all of Miles' recipes are tuned for.
+7. **R3 routing replay.** `routing_matrices` is plumbed through `MilesEngine` end to end but
+   never exercised; needs an MoE model plus `use_rollout_routing_replay`.
+
+### Efficiency and quality
+
+8. **`adv_zero` ≈ 0.7.** Two thirds of every batch is uniform-reward groups contributing no
+   gradient. `rllm.rejection_sample.filter_uniform_groups` is the intended fix, untried.
+9. **The curve flattens after ~step 40.** Unexplored: lr schedule, larger batch, more steps.
+
+### Hygiene
+
+10. `MilesEngine.close()` is never called — the httpx client leaks at shutdown.
+    `MilesBackend.shutdown()` should await it.
+11. `_num_rollout_per_epoch` is assigned and never read.
+12. `on_policy_updated` is an empty stub (correct until async lands).
+13. **Upstream the three patches** so `patch.py` can be deleted: the CP-slice key tuple, the
+    `_package_shards` allowlist, and gating the FSDP actor's `compute_advantages_and_returns`
+    the way the Megatron actor already does.
+14. `rllm[train]` is named in five error messages and by the `all` extra but does not exist
+    in `pyproject.toml`. Pre-existing, but making tinker optional turned it into a path users
+    can actually reach.
+15. The environment recipe in §0.1/§0.2 is prose. It wants to be a script.
+16. **Fault tolerance is unavailable**, not just untested: `nvidia-resiliency-ext` cannot
+    install on glibc < 2.39, so `--use-fault-tolerance` has no chance of working on this box.
+
+### Deliberately out of scope
+
+Async (Phase 5), a critic / PPO, multimodal rollouts and `--colocate` are all rejected in
+`validate_config` or the transform, with an explanatory error rather than a silent failure.
