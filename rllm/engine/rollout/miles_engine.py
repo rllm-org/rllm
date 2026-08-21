@@ -53,12 +53,22 @@ class MilesEngine(RolloutEngine):
         self._return_routed_experts = bool(getattr(miles_args, "use_rollout_routing_replay", False))
         self._return_indexer_topk = bool(getattr(miles_args, "use_rollout_indexer_replay", False))
 
-        sampling = rllm_cfg.get("sampling", {}) or {}
-        val_sampling = rllm_cfg.get("val_sampling", {}) or sampling
-        self.train_sampling_params = {"temperature": sampling.get("temperature", 1.0), "top_p": sampling.get("top_p", 1.0)}
-        self.val_sampling_params = {"temperature": val_sampling.get("temperature", 1.0), "top_p": val_sampling.get("top_p", 1.0)}
+        # rllm.rollout.train / .val are the canonical sampling blocks (see
+        # rllm/trainer/config/rllm/base.yaml); max_tokens is applied per request in
+        # get_token_output_from_token_input, not here.
+        rollout_cfg = rllm_cfg.get("rollout", {}) or {}
+        self.train_sampling_params = self._sampling_from(rollout_cfg.get("train", {}))
+        self.val_sampling_params = self._sampling_from(rollout_cfg.get("val", {})) or self.train_sampling_params.copy()
 
         self._client = httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_S)
+
+    @staticmethod
+    def _sampling_from(block) -> dict:
+        """Pass through what SGLang accepts, dropping keys it does not."""
+        if not block:
+            return {}
+        allowed = ("temperature", "top_p", "top_k", "min_p", "repetition_penalty", "frequency_penalty", "presence_penalty", "stop", "stop_token_ids")
+        return {k: v for k in allowed if (v := block.get(k)) is not None}
 
     @property
     def supports_token_in_token_out(self) -> bool:

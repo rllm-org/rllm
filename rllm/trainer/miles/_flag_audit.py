@@ -14,6 +14,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from rllm.trainer.miles.miles_config import BOOL_OPTIONAL
+
 # Miles registers flags two ways: plain add_argument, and reset_arg(parser, "--flag", ...)
 # which overrides a Megatron default and falls back to add_argument when the flag
 # does not exist yet (as on the FSDP path, where Megatron never ran).
@@ -38,10 +40,36 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
+def _fsdp_dataclass_flags(root: Path) -> dict[str, int | str]:
+    """Flags Miles' FSDP parser derives from the ``FSDPArgs`` dataclass.
+
+    ``build_fsdp_parser`` walks ``dataclasses.fields(FSDPArgs)`` and registers one
+    flag per field -- bools via ``BooleanOptionalAction`` -- so none of them appear
+    as an ``add_argument`` call and a source scan misses them entirely.
+    """
+    path = root / "miles" / "backends" / "fsdp_utils" / "arguments.py"
+    if not path.exists():
+        return {}
+
+    out: dict[str, int | str] = {}
+    for node in ast.walk(ast.parse(path.read_text())):
+        if not (isinstance(node, ast.ClassDef) and node.name == "FSDPArgs"):
+            continue
+        for stmt in node.body:
+            if not isinstance(stmt, ast.AnnAssign) or not isinstance(stmt.target, ast.Name):
+                continue
+            name = stmt.target.id
+            if name == "config":
+                continue  # build_fsdp_parser skips it
+            is_bool = isinstance(stmt.annotation, ast.Name) and stmt.annotation.id == "bool"
+            out[name] = BOOL_OPTIONAL if is_bool else 1
+    return out
+
+
 def flag_arity_from_source(miles_root: str | Path) -> dict[str, int | str]:
     """Map flag name (snake_case, no leading --) to value count: 0, 1, or "+"."""
     root = Path(miles_root)
-    arity: dict[str, int | str] = {}
+    arity: dict[str, int | str] = _fsdp_dataclass_flags(root)
 
     for relpath in SOURCE_RELPATHS:
         path = root / relpath

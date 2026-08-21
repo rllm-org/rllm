@@ -7,6 +7,15 @@
 # miles repo): it pins a forked SGLang and Megatron-LM plus transformers==5.12.1,
 # which cannot be assembled from PyPI.
 
+# Mirrored from rllm.data.* by rllm/trainer/miles/utils.py:sync_config. Nothing on
+# the miles path reads these, but shared code (and the verl-flavoured transforms)
+# expect the top-level namespace to exist.
+data:
+  train_batch_size: ${rllm.data.train_batch_size}
+  val_batch_size: ${rllm.data.val_batch_size}
+  max_prompt_length: ${rllm.data.max_prompt_length}
+  max_response_length: ${rllm.data.max_response_length}
+
 model:
   name: "Qwen/Qwen3-4B"
 
@@ -50,10 +59,19 @@ miles:
   save: 'checkpoints/${rllm.trainer.project_name}/${rllm.trainer.experiment_name}'
 
   # --- optimization -------------------------------------------------------
+  lr: 1e-6
+  # Megatron-only knobs (weight_decay, lr_decay_style, ...) are not in Miles'
+  # own parser and do not exist on the FSDP path; pass them via extra_args.
+  clip_grad: 1.0
   global_batch_size: 32
   advantage_estimator: grpo   # still selects Miles' loss kernel (GRPO/GSPO clip),
                               # even though the advantages themselves come from rLLM
   max_tokens_per_gpu: 16384
+
+  # --- fsdp-only (ignored when train_backend=megatron) --------------------
+  # Miles defaults this to flash_attention_2, which ships in its container image's
+  # wheels release. `sdpa` is built into torch and needs nothing extra.
+  attn_implementation: sdpa
 
   # --- megatron-only (ignored when train_backend=fsdp) --------------------
   ref_load: null              # torch_dist checkpoint dir, required for megatron

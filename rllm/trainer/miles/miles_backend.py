@@ -64,6 +64,9 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
         self.algorithm_config: AlgorithmConfig | None = None
         # Miles indexes everything by rollout_id; rLLM's global_step is the same clock.
         self._num_rollout_per_epoch = None
+        # Advantages are computed during transform (stage 4), but the trainer's
+        # compute_advantages hook runs at stage 6; carry the metrics across.
+        self._pending_adv_metrics: dict | None = None
 
     # =====================================================================
     # setup
@@ -113,7 +116,13 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
         total_steps = kwargs.get("total_training_steps")
 
         self.miles_args = build_miles_args(self.full_config, total_steps=total_steps)
-        logger.info("Miles args built: train_backend=%s num_rollout=%s", self.miles_args.train_backend, self.miles_args.num_rollout)
+        logger.info(
+            "Miles args: train_backend=%s num_rollout=%s compute_advantages=%s global_dataset=%s",
+            self.miles_args.train_backend,
+            self.miles_args.num_rollout,
+            self.miles_args.compute_advantages_and_returns,
+            self.miles_args.rollout_global_dataset,
+        )
 
         pgs = create_placement_groups(self.miles_args)
         object_store.init_instance(self.miles_args, contribute_segment=False)
@@ -187,6 +196,15 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
         groups = trainer_state.trajectory_groups
         assert groups is not None, "trajectory_groups must be set before transform_to_backend_batch"
 
+        # The trainer calls this at stage 4 but compute_advantages only at stage 6, so
+        # the per-token advantages the transform needs do not exist yet. Compute them
+        # here when absent -- the same thing the tinker transform does -- and hand the
+        # metrics to compute_advantages rather than computing twice.
+        needs_advantages = any(step.advantage is None for group in groups for traj in group.trajectories for step in traj.steps)
+        if needs_advantages:
+            assert self.algorithm_config is not None, "algorithm_config was not provided to init_rollout_engine"
+            self._pending_adv_metrics = collect_reward_and_advantage_from_trajectory_groups(groups, self.algorithm_config)
+
         grouped = trajectory_groups_to_payloads(groups)
         samples, advantages = payloads_to_samples(grouped)
         if not samples:
@@ -237,11 +255,19 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
             trainer_state.metrics.update(batch.metrics)
 
     async def compute_advantages(self, trainer_state: TrainerState, algorithm_config: AlgorithmConfig, **kwargs) -> None:
-        """rLLM-native, per token. Miles' own estimator is off via
-        ``--disable-compute-advantages-and-returns``."""
+        """Publish the advantage metrics. Miles' own estimator is off via
+        ``--disable-compute-advantages-and-returns``.
+
+        The advantages themselves were computed in transform_to_backend_batch, which
+        the trainer runs earlier; this only reports. Recomputing here would be
+        wasteful and would double-count the reward metrics.
+        """
         assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
-        adv_metrics = collect_reward_and_advantage_from_trajectory_groups(trainer_state.trajectory_groups, algorithm_config)
-        trainer_state.metrics.update(adv_metrics)
+        metrics = self._pending_adv_metrics
+        self._pending_adv_metrics = None
+        if metrics is None:
+            metrics = collect_reward_and_advantage_from_trajectory_groups(trainer_state.trajectory_groups, algorithm_config)
+        trainer_state.metrics.update(metrics)
 
     async def update_policy(self, trainer_state: TrainerState, **kwargs) -> None:
         batch: MilesBatch = trainer_state.backend_batch  # type: ignore[assignment]

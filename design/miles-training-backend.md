@@ -27,8 +27,8 @@ Branch `feat/miles-backend`. Landed and tested off-GPU:
 | `miles_backend.py` (BackendProtocol) | done, 12 tests |
 | `miles_launcher.py` (Ray init + bring-up) | done |
 | `patch.py` (advantages CP-slice) | done, contract asserted against installed miles |
-| `custom_loss.py` | **not needed until Phase 3** — stock `policy_loss_function` reads `batch["advantages"]` |
-| End-to-end bring-up (`create_training_models`, a train step) | **blocked on GPUs**: cu130 torch vs this box's CUDA 12.8 driver |
+| `custom_loss.py` | **not needed** — stock `policy_loss_function` reads `batch["advantages"]`, verified live |
+| End-to-end training run | **done** — 8 GRPO steps on countdown, Qwen3-1.7B, 8xH100, val pass@1 0.444 |
 
 Zero regressions: the failing-test set is byte-identical before and after
 (91 pre-existing failures in a venv without ray/verl/vllm, including two float32
@@ -69,6 +69,26 @@ Two caveats:
   `torch.cuda.is_available()` is False — true of the pre-existing rLLM venv too.
   Phase 1 onward needs cu12 wheels, or Miles' `cu12-x86` image variant
   (`ENABLE_CUDA_13=0`).
+
+### 0.2 End-to-end run (validated 2026-08-21)
+
+`examples/countdown/unified_trainer/train_countdown_unified_miles.sh` — countdown,
+Qwen3-1.7B, 4 train GPUs (FSDP) + 4 rollout GPUs, thinking disabled, 8 GRPO steps.
+Completes in a few minutes; final `val/countdown/pass@1` 0.444 with 8 `actor_train`
+passes. Reward is noisy across 8 steps (0.22-0.53) and does not visibly climb -- this
+validates the **mechanism**, not learning.
+
+Environment fixes this needed on a CUDA-12.8 box, in order:
+
+| Symptom | Fix |
+|---|---|
+| `torch.cuda.is_available()` false | `torch==2.11.0+cu128` (+ matching torchvision/torchaudio) from the pytorch cu128 index; sglang pins the torch *version*, not its CUDA build |
+| `libnvrtc.so.13` / `libcudart.so.13` missing | `sglang-kernel` from `docs.sglang.ai/whl/cu129/`; uninstall `sgl-deep-gemm` (cu13-only, and DeepGEMM needs SM100+ anyway) |
+| `FileNotFoundError: 'ninja'` | `pip install ninja`; put the venv bin and `/usr/local/cuda/bin` on PATH so Ray workers inherit them |
+| `__triton_launcher...so: cannot open shared object file` | `TRITON_CACHE_DIR=$(mktemp -d /dev/shm/triton.XXXXXX)` -- and `TRITON_` had to be added to rLLM's forwarded env prefixes or workers never see it |
+| `FlashAttention2 ... doesn't seem to be installed` | `miles.attn_implementation=sdpa` (FA2 ships in Miles' image wheels) |
+| `404 /begin_weight_update` | stock PyPI sglang serves generation fine but has no weight-update endpoint; install the fork: `git clone -b sglang-miles`, `pip install --no-deps --no-build-isolation -e python` |
+| `ModuleNotFoundError: megatron` inside `compute_log_probs` | `pip install megatron-core`. The FSDP path *does* need it -- Miles' shared log-prob kernel uses Megatron's fused cross-entropy (there is a `TODO` there for a fallback) |
 
 ## 1. Target architecture
 
@@ -177,6 +197,20 @@ Consequence worth noting: with advantages arriving CP-correct, **stock Miles
 all; `custom_loss.py` is only for rLLM-specific losses (DPPO etc.).
 
 Test CP=1 first (`C_i == R_i`, slicing is identity), then CP>1.
+
+**Two further sites, found only by running end to end.** With either one unpatched the
+run completes and looks healthy while the loss quietly uses Miles' own advantages:
+
+1. `_package_shards` (`train_data_conversion.py:357`) copies a **hardcoded allowlist**
+   of keys into each DP shard, so any extra key the driver attaches is dropped.
+2. The Megatron actor gates `compute_advantages_and_returns` on the flag; the **FSDP
+   actor calls it unconditionally** (`fsdp_utils/actor.py:496`), recomputing from the
+   scalar rewards and overwriting what rLLM shipped. Patching this needs the *actor
+   module's* binding repointed, not just the source module's -- both actors import the
+   function by value.
+
+Verified live: the worker receives 16 advantage rows per DP rank (64 total) and the
+short-circuit keeps rLLM's GRPO z-scores (-1.732 = -sqrt(3), 0.5773 = 1/sqrt(3)).
 
 Upstream as a small PR (`for key in (..., "advantages")` plus a `ROLLOUT_DATA_VALUE_SPEC`
 entry) so the patch can be dropped.

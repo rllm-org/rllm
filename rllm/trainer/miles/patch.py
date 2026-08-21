@@ -9,11 +9,14 @@ upstream change would be so they can be dropped as it lands.
 
 from __future__ import annotations
 
+import importlib
 import logging
 
 logger = logging.getLogger(__name__)
 
 _ADVANTAGES_CP_SLICE_PATCHED = False
+_PACKAGE_SHARDS_PATCHED = False
+_RESPECT_DISABLE_ADV_PATCHED = False
 
 # The key tuple in miles/backends/training_utils/data.py:get_rollout_data that gets
 # CP-sliced per sample. Asserted so a Miles upgrade that renames or reorders these
@@ -74,6 +77,81 @@ def patch_advantages_cp_slice() -> None:
     logger.info("Patched miles get_rollout_data to CP-slice rLLM's per-token advantages")
 
 
+def patch_package_shards_forwards_advantages() -> None:
+    """Stop the DP split from dropping rLLM's per-token advantages.
+
+    ``_package_shards`` copies a **hardcoded allowlist** of keys into each DP rank's
+    shard (``miles/ray/rollout/train_data_conversion.py``), so any extra key the
+    driver attaches -- ours included -- is silently discarded on the way to the train
+    workers. Silently: the loss then falls back to whatever Miles computed itself, and
+    the run looks healthy while ignoring rLLM's advantages entirely.
+
+    Upstream equivalent: add ``"advantages"`` to that per-sample list.
+    """
+    global _PACKAGE_SHARDS_PATCHED
+    if _PACKAGE_SHARDS_PATCHED:
+        return
+
+    from miles.ray.rollout import train_data_conversion as tdc
+
+    original = tdc._package_shards
+
+    def _package_shards(args, data, partitions):
+        shards = original(args, data, partitions)
+        advantages = data.get("advantages")
+        if advantages is not None:
+            for shard, partition in zip(shards, partitions, strict=True):
+                shard["advantages"] = [advantages[j] for j in partition]
+        return shards
+
+    tdc._package_shards = _package_shards
+    # split_train_data_by_dp_raw closed over the module-level name at def time only
+    # if it had been imported by value; it calls it through the module, so this is enough.
+    _PACKAGE_SHARDS_PATCHED = True
+    logger.info("Patched miles _package_shards to forward rLLM's advantages to the DP shards")
+
+
+def patch_respect_disable_compute_advantages() -> None:
+    """Make ``--disable-compute-advantages-and-returns`` actually hold on the FSDP path.
+
+    The Megatron actor gates its ``compute_advantages_and_returns`` call on that flag;
+    the FSDP actor (``miles/backends/fsdp_utils/actor.py``) calls it unconditionally, so
+    Miles recomputes advantages from the scalar rewards and overwrites the per-token
+    values rLLM shipped. This wraps the function to no-op when the flag is off and
+    advantages are already present, leaving ``returns`` aliased to them (GRPO's
+    identity, and the only estimator this backend supports today).
+
+    Upstream equivalent: wrap the FSDP call site in the same ``if`` the Megatron one uses.
+    """
+    global _RESPECT_DISABLE_ADV_PATCHED
+    if _RESPECT_DISABLE_ADV_PATCHED:
+        return
+
+    from miles.backends.training_utils import loss as miles_loss
+
+    original = miles_loss.compute_advantages_and_returns
+
+    def compute_advantages_and_returns(args, rollout_data):
+        if not getattr(args, "compute_advantages_and_returns", True) and rollout_data.get("advantages") is not None:
+            rollout_data.setdefault("returns", rollout_data["advantages"])
+            return
+        return original(args, rollout_data)
+
+    miles_loss.compute_advantages_and_returns = compute_advantages_and_returns
+    # Both actors do `from ...loss import compute_advantages_and_returns`, binding the
+    # function by value, so rebinding the source module is not enough.
+    for module_path in ("miles.backends.fsdp_utils.actor", "miles.backends.megatron_utils.actor"):
+        try:
+            module = importlib.import_module(module_path)
+        except Exception:  # megatron actor needs megatron installed
+            continue
+        if hasattr(module, "compute_advantages_and_returns"):
+            module.compute_advantages_and_returns = compute_advantages_and_returns
+
+    _RESPECT_DISABLE_ADV_PATCHED = True
+    logger.info("Patched miles compute_advantages_and_returns to respect --disable-compute-advantages-and-returns")
+
+
 def assert_cp_slice_contract() -> None:
     """Fail loudly if Miles moved the ground this patch stands on."""
     import inspect
@@ -94,3 +172,5 @@ def apply_all_miles_patches() -> None:
     """Entry point for both the driver and the train workers."""
     assert_cp_slice_contract()
     patch_advantages_cp_slice()
+    patch_package_shards_forwards_advantages()
+    patch_respect_disable_compute_advantages()

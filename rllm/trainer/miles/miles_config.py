@@ -23,6 +23,10 @@ from omegaconf import DictConfig, OmegaConf
 
 logger = logging.getLogger(__name__)
 
+# Arity sentinel for argparse.BooleanOptionalAction flags (--flag / --no-flag),
+# as distinct from store_true/store_false (0), a scalar (1), or nargs ("+").
+BOOL_OPTIONAL = "bool"
+
 # Flags rLLM owns. The user cannot set these; validate_pinned() rejects attempts.
 PINNED_FLAGS: dict[str, Any] = {
     # rLLM drives generation. The RolloutManager stays up only to own the SGLang
@@ -94,13 +98,16 @@ def miles_arity(argv: list[str] | None = None) -> dict[str, int | str]:
 
     arity: dict[str, int | str] = {}
     for action in parser._actions:
-        n = 0 if action.nargs == 0 or isinstance(action.const, bool) else (action.nargs or 1)
-        if action.nargs in ("+", "*"):
-            n = "+"
-        elif not isinstance(action.nargs, int) and action.nargs is not None:
-            n = 1
+        if isinstance(action, argparse.BooleanOptionalAction):
+            n: int | str = BOOL_OPTIONAL
+        else:
+            n = 0 if action.nargs == 0 or isinstance(action.const, bool) else (action.nargs or 1)
+            if action.nargs in ("+", "*"):
+                n = "+"
+            elif not isinstance(action.nargs, int) and action.nargs is not None:
+                n = 1
         for opt in action.option_strings:
-            if opt.startswith("--"):
+            if opt.startswith("--") and not opt.startswith("--no-"):
                 arity[opt[2:].replace("-", "_")] = n
     return arity
 
@@ -127,6 +134,13 @@ def render_argv(block: dict[str, Any], arity: dict[str, int | str] | None = None
         if value is None:
             continue
         n = arity.get(key, _infer_arity(value))
+        if n == BOOL_OPTIONAL:
+            # argparse.BooleanOptionalAction: omitting the flag keeps the declared
+            # default, so a False override has to be spelled --no-<flag>. Miles' FSDP
+            # args are all dataclass-derived and use this, and three of them default
+            # to True -- omitting would silently ignore the user.
+            argv.append(_flag(key) if value else _flag(key).replace("--", "--no-", 1))
+            continue
         if n == 0:
             if value:
                 argv.append(_flag(key))

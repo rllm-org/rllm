@@ -23,6 +23,9 @@ FORWARD_PREFIXES = [
     "DATASETS_",
     "TORCH_",
     "PYTORCH_",
+    # Triton's compile cache must be a fresh tmpfs dir per run or concurrent
+    # ranks race on it; TRITON_CACHE_DIR only helps if workers actually see it.
+    "TRITON_",
     "DEEPSPEED_",
     "MEGATRON_",
     "NCCL_",
