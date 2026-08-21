@@ -32,6 +32,9 @@ _REWARD_FN_TO_SCORE_FN: dict[str, str] = {
     "ifeval_reward_fn": "rllm.eval.reward_fns.ifeval",
     "llm_equality_reward_fn": "rllm.eval.reward_fns.llm_equality",
     "llm_judge_reward_fn": "rllm.eval.reward_fns.llm_judge",
+    # Exports no SYSTEM_PROMPT on purpose: GDPval's solver prompt is AA's,
+    # byte-exact, so there is no hint to inject.
+    "gdpval_rubric_reward_fn": "rllm.eval.reward_fns.gdpval_rubric",
     "translation_reward_fn": "rllm.eval.reward_fns.translation",
     "widesearch_reward_fn": "rllm.eval.reward_fns.widesearch",
 }

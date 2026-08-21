@@ -36,6 +36,11 @@
       "function": "Terminus2Harness",
       "description": "Run Harbor's Terminus-2 terminal agent inside the sandbox (harbor used only for the agent code)."
     },
+    "stirrup": {
+      "module": "rllm.harnesses.stirrup",
+      "function": "StirrupHarness",
+      "description": "Run Stirrup inside an rLLM-managed sandbox. Benchmark-agnostic; subclass to supply a system prompt."
+    },
     "codex": {
       "module": "rllm.harnesses.codex",
       "function": "CodexHarness",
@@ -70,6 +75,11 @@
       "module": "rllm.harnesses.zeroclaw",
       "function": "ZeroClawHarness",
       "description": "Run the ZeroClaw autonomous-assistant CLI inside the sandbox."
+    },
+    "gdpval-stirrup": {
+      "module": "rllm.harnesses.gdpval_stirrup",
+      "function": "GdpvalStirrupHarness",
+      "description": "Stirrup under Artificial Analysis' GDPval-AA v2 contract."
     }
   }
 }
