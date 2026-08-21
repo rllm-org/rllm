@@ -40,8 +40,6 @@ dependencies = [
     "aiosqlite",
     "hydra-core",
     "codetiming",
-    "tinker>=0.22.2 ; python_version >= '3.11'",
-    "tinker-cookbook>=0.4.1 ; python_version >= '3.11'",
 ]
 
 [project.scripts]
@@ -87,12 +85,23 @@ verl = [
     "qwen-vl-utils",
 ]
 
+miles = [
+    # miles itself, plus megatron-core / sglang / transformers, come from the
+    # Miles container image (docker/Dockerfile in the miles repo). Installing
+    # them from PyPI is not supported: miles pins a forked SGLang and Megatron-LM.
+    "ray",
+    "numpy",
+]
+
 tinker = [
     "tinker>=0.22.2 ; python_version >= '3.11'",
     "tinker-cookbook>=0.4.1 ; python_version >= '3.11'",
 ]
 
 fireworks = [
+    # fireworks_policy_trainer imports tinker directly (shared forward_backward_custom)
+    "tinker>=0.22.2 ; python_version >= '3.11'",
+    "tinker-cookbook>=0.4.1 ; python_version >= '3.11'",
     "fireworks-ai[training]==1.2.1 ; python_version >= '3.11'",
     "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git@6b1232504fdacd1149895acf63b388ae792cb062#subdirectory=training ; python_version >= '3.11'",
 ]

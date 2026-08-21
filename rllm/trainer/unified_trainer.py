@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import logging
 import time
 import uuid
@@ -1054,6 +1055,27 @@ class TrainerLauncher(ABC):
         raise NotImplementedError("Train method of the trainer launcher is not implemented")
 
 
+# backend -> (launcher module, launcher class, pip extra that provides it).
+# Every launcher takes the same constructor signature, so dispatch is a table lookup.
+_BACKEND_LAUNCHERS: dict[str, tuple[str, str, str]] = {
+    "verl": ("rllm.trainer.verl.verl_launcher", "VerlTrainerLauncher", "verl"),
+    "tinker": ("rllm.trainer.tinker.tinker_launcher", "TinkerTrainerLauncher", "tinker"),
+    "fireworks": ("rllm.trainer.fireworks.fireworks_launcher", "FireworksTrainerLauncher", "fireworks"),
+    "miles": ("rllm.trainer.miles.miles_launcher", "MilesTrainerLauncher", "miles"),
+}
+
+
+def _resolve_launcher_cls(backend: str) -> type:
+    """Import a backend's launcher, turning a missing backend dep into an install hint."""
+    if backend not in _BACKEND_LAUNCHERS:
+        raise ValueError(f"Unsupported backend: {backend!r}; expected one of {', '.join(_BACKEND_LAUNCHERS)}")
+    module_path, cls_name, extra = _BACKEND_LAUNCHERS[backend]
+    try:
+        return getattr(importlib.import_module(module_path), cls_name)
+    except ImportError as e:
+        raise ImportError(f"Backend {backend!r} is missing dependencies ({e}).\n  Install with: pip install 'rllm[{extra}]'") from e
+
+
 class AgentTrainer:
     """
     A unified agent trainer launcher that directly interfaces with the user script to launch training jobs.
@@ -1084,7 +1106,7 @@ class AgentTrainer:
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
-        backend: Literal["verl", "tinker", "fireworks"] = "verl",
+        backend: Literal["verl", "tinker", "fireworks", "miles"] = "verl",
         agent_flow: Any = None,
         evaluator: Any = None,
         hooks: Any = None,
@@ -1146,44 +1168,16 @@ class AgentTrainer:
             kwargs["hooks"] = hooks
         kwargs["backend_name"] = backend
 
-        if backend == "verl":
-            from rllm.trainer.verl.verl_launcher import VerlTrainerLauncher
-
-            self.launcher = VerlTrainerLauncher(
-                config=config,
-                workflow_class=workflow_class,
-                train_dataset=train_dataset,
-                val_dataset=val_dataset,
-                workflow_args=workflow_args,
-                store=store,
-                **kwargs,
-            )
-        elif backend == "tinker":
-            from rllm.trainer.tinker.tinker_launcher import TinkerTrainerLauncher
-
-            self.launcher = TinkerTrainerLauncher(
-                config=config,
-                workflow_class=workflow_class,
-                train_dataset=train_dataset,
-                val_dataset=val_dataset,
-                workflow_args=workflow_args,
-                store=store,
-                **kwargs,
-            )
-        elif backend == "fireworks":
-            from rllm.trainer.fireworks.fireworks_launcher import FireworksTrainerLauncher
-
-            self.launcher = FireworksTrainerLauncher(
-                config=config,
-                workflow_class=workflow_class,
-                train_dataset=train_dataset,
-                val_dataset=val_dataset,
-                workflow_args=workflow_args,
-                store=store,
-                **kwargs,
-            )
-        else:
-            raise ValueError(f"Unsupported backend: {backend}")
+        launcher_cls = _resolve_launcher_cls(backend)
+        self.launcher = launcher_cls(
+            config=config,
+            workflow_class=workflow_class,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            workflow_args=workflow_args,
+            store=store,
+            **kwargs,
+        )
 
     def train(self):
         self.launcher.train()
