@@ -53,4 +53,5 @@ trap 'rm -rf "$TRITON_CACHE_DIR"' EXIT
     rllm.trainer.total_epochs=1 \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=1000 \
-    rllm.trainer.save_freq=1000
+    rllm.trainer.save_freq=1000 \
+    "$@"

@@ -152,25 +152,46 @@ def patch_respect_disable_compute_advantages() -> None:
     logger.info("Patched miles compute_advantages_and_returns to respect --disable-compute-advantages-and-returns")
 
 
-def assert_cp_slice_contract() -> None:
-    """Fail loudly if Miles moved the ground this patch stands on."""
+def assert_patch_contracts() -> None:
+    """Fail loudly if Miles moved the ground any of these patches stands on.
+
+    Every one of them is load-bearing for rLLM's advantages reaching the loss, and
+    every one fails *silently* if it stops applying -- the run completes and the loss
+    quietly uses Miles' own advantages. So the structural assumptions are asserted
+    rather than assumed, and an upstream fix is reported so the patch can be dropped.
+    """
     import inspect
 
+    from miles.backends.fsdp_utils import actor as fsdp_actor
     from miles.backends.training_utils import data as miles_data
+    from miles.ray.rollout import train_data_conversion as tdc
 
-    source = inspect.getsource(miles_data)
+    # 1. the CP-slice key tuple get_rollout_data walks
     expected = 'for key in ("rollout_log_probs", "teacher_log_probs", "opd_reverse_kl"):'
-    if expected not in source:
+    if expected not in inspect.getsource(miles_data):
         raise RuntimeError(
             "miles get_rollout_data no longer CP-slices the expected key tuple "
             f"{_EXPECTED_CP_SLICED_KEYS}. rllm/trainer/miles/patch.py assumes that shape "
             "for per-token advantages; re-check it against the installed miles version."
         )
 
+    # 2. the DP-shard allowlist we append to
+    if not hasattr(tdc, "_package_shards"):
+        raise RuntimeError("miles train_data_conversion._package_shards is gone; the DP-shard advantages patch cannot apply.")
+    if '"advantages"' in inspect.getsource(tdc._package_shards):
+        logger.info("miles _package_shards now forwards advantages itself; the rLLM patch is redundant.")
+
+    # 3. the ungated FSDP call site the wrapper compensates for
+    fsdp_source = inspect.getsource(fsdp_actor)
+    if "compute_advantages_and_returns(" not in fsdp_source:
+        raise RuntimeError("the miles FSDP actor no longer calls compute_advantages_and_returns; re-check whether rLLM's advantages still survive to the loss.")
+    if "if self.args.compute_advantages_and_returns" in fsdp_source:
+        logger.info("miles' FSDP actor now honours --disable-compute-advantages-and-returns; the rLLM wrapper is redundant.")
+
 
 def apply_all_miles_patches() -> None:
     """Entry point for both the driver and the train workers."""
-    assert_cp_slice_contract()
+    assert_patch_contracts()
     patch_advantages_cp_slice()
     patch_package_shards_forwards_advantages()
     patch_respect_disable_compute_advantages()

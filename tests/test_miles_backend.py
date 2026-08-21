@@ -109,10 +109,10 @@ class TestPatchContract:
     """The advantages CP-slice patch is the load-bearing mechanism; guard its shape."""
 
     @needs_miles_data
-    def test_contract_holds_against_installed_miles(self):
-        from rllm.trainer.miles.patch import assert_cp_slice_contract
+    def test_all_patch_contracts_hold_against_installed_miles(self):
+        from rllm.trainer.miles.patch import assert_patch_contracts
 
-        assert_cp_slice_contract()
+        assert_patch_contracts()
 
     @needs_miles_data
     def test_patch_is_idempotent(self):
@@ -238,3 +238,14 @@ class TestAdvantagesReachTheTrainWorkers:
 
         patch_respect_disable_compute_advantages()
         assert fsdp_actor.compute_advantages_and_returns.__module__ == "rllm.trainer.miles.patch"
+
+    @needs_miles_data
+    def test_contract_check_fails_when_a_patch_site_disappears(self, monkeypatch):
+        # The guard is only worth having if it actually trips.
+        from miles.ray.rollout import train_data_conversion as tdc
+
+        from rllm.trainer.miles.patch import assert_patch_contracts
+
+        monkeypatch.delattr(tdc, "_package_shards")
+        with pytest.raises(RuntimeError, match="_package_shards is gone"):
+            assert_patch_contracts()
