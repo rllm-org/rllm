@@ -37,6 +37,15 @@ PINNED_FLAGS: dict[str, Any] = {
     "disable_rollout_global_dataset": True,
     # Advantages arrive per-token from rLLM inside the batch.
     "disable_compute_advantages_and_returns": True,
+    # rLLM's loop assumes exactly one optimizer step per update_policy call, but Miles
+    # takes `num_samples // global_batch_size` of them -- so a static global_batch_size
+    # both desyncs the step accounting and breaks whenever filtering makes the surviving
+    # sample count vary. The dynamic size is computed per batch in the transform.
+    "use_dynamic_global_batch_size": True,
+    # Miles asserts these two together: static micro-batching cannot keep
+    # dp_size * mb_group alignment when the physical sample count is data-dependent.
+    # Pairs with miles.max_tokens_per_gpu, which sizes the micro-batches.
+    "use_dynamic_batch_size": True,
 }
 
 # Flags that configure *Miles'* generation path, which rLLM bypasses entirely.
@@ -64,6 +73,11 @@ REJECTED_GENERATION_FLAGS: dict[str, str] = {
 SHARED_KEYS: list[tuple[str, str]] = [
     ("hf_checkpoint", "model.name"),
     ("rollout_batch_size", "rllm.data.train_batch_size"),
+    # Feeds Miles' train_iters (and its legacy reward-grouping fallback):
+    #   train_iters = num_rollout * rollout_batch_size * n_samples_per_prompt // global_batch_size
+    # Left at Miles' default of 1 this silently understates the schedule length; harmless
+    # only while lr_decay_style is "constant".
+    ("n_samples_per_prompt", "rllm.rollout.n"),
     ("rollout_max_prompt_len", "rllm.data.max_prompt_length"),
     ("save_interval", "rllm.trainer.save_freq"),
 ]
@@ -192,6 +206,15 @@ def build_block(config: DictConfig, total_steps: int | None = None) -> tuple[dic
         value = OmegaConf.select(config, rllm_path)
         if value is not None:
             block[miles_flag] = value
+
+    # Async training pins rllm.data.train_batch_size to 1 (the trainer streams one task
+    # batch at a time), so the prompts-per-optimizer-step Miles needs is the async
+    # mini_batch_size instead. Getting this wrong makes train_iters 0 and the FSDP LR
+    # scheduler asserts on `lr_decay_steps > 0`.
+    async_cfg = OmegaConf.select(config, "rllm.async_training") or {}
+    if async_cfg.get("enable", False):
+        mini_batch = async_cfg.get("mini_batch_size", 1)
+        block["rollout_batch_size"] = mini_batch
 
     # rLLM owns the schedule. num_rollout is required because --num-epoch asserts
     # Miles' global dataset, which we disable.

@@ -37,6 +37,7 @@ def _cfg(**rllm_over):
         "model": {"name": "Qwen/Qwen3-4B"},
         "rllm": {
             "async_training": {"enable": False},
+            "workflow": {"raise_on_error": False},
             "data": {"train_batch_size": 8, "max_prompt_length": 1024, "max_response_length": 512},
             "trainer": {"save_freq": 10, "project_name": "p", "experiment_name": "e"},
             **rllm_over,
@@ -69,14 +70,6 @@ class TestBackendContract:
 
 
 class TestValidateConfig:
-    def test_async_training_is_rejected(self):
-        backend = MilesBackend(config=_cfg(async_training={"enable": True}))
-        with pytest.raises((ValueError, ImportError)) as e:
-            backend.validate_config()
-        # ImportError only when miles is absent; either way async must not slip through.
-        if isinstance(e.value, ValueError):
-            assert "Phase 5" in str(e.value)
-
     def test_pinned_flag_override_is_rejected(self):
         cfg = _cfg()
         cfg.miles = {"rollout_function_path": "my.rollout"}
@@ -249,3 +242,171 @@ class TestAdvantagesReachTheTrainWorkers:
         monkeypatch.delattr(tdc, "_package_shards")
         with pytest.raises(RuntimeError, match="_package_shards is gone"):
             assert_patch_contracts()
+
+
+@needs_miles_data
+class TestAsyncTraining:
+    """Async moves weight sync to on_policy_updated and constrains the pass structure."""
+
+    def _backend(self, **async_over):
+        async_cfg = {"enable": True, "mini_batch_size": 4, **async_over}
+        return MilesBackend(config=_cfg(async_training=async_cfg))
+
+    def test_async_is_accepted(self):
+        self._backend().validate_config()
+
+    def test_is_async_flag_tracks_the_config(self):
+        assert self._backend().is_async is True
+        assert MilesBackend(config=_cfg()).is_async is False
+
+    def test_mismatched_fwd_bwd_group_size_is_rejected(self):
+        # Miles takes its optimizer step inside RayTrainGroup.train(), so it cannot
+        # accumulate gradient across several forward-backward passes.
+        with pytest.raises(ValueError, match="cannot accumulate gradient"):
+            self._backend(fwd_bwd_group_size=2).validate_config()
+
+    def test_matching_fwd_bwd_group_size_is_fine(self):
+        self._backend(fwd_bwd_group_size=4).validate_config()
+
+    def test_abort_pause_mode_is_rejected_under_async(self):
+        cfg = _cfg(async_training={"enable": True, "mini_batch_size": 1})
+        cfg.miles = {"pause_generation_mode": "abort"}
+        with pytest.raises(ValueError, match="requeues"):
+            MilesBackend(config=cfg).validate_config()
+
+    def test_retract_pause_mode_is_fine(self):
+        cfg = _cfg(async_training={"enable": True, "mini_batch_size": 1})
+        cfg.miles = {"pause_generation_mode": "retract"}
+        MilesBackend(config=cfg).validate_config()
+
+    def test_abort_pause_mode_is_fine_in_sync_mode(self):
+        # Sync mode drains generation before syncing, so abort costs nothing there.
+        cfg = _cfg()
+        cfg.miles = {"pause_generation_mode": "abort"}
+        MilesBackend(config=cfg).validate_config()
+
+
+class TestWeightSyncPlacement:
+    """Exactly one of on_batch_end / on_policy_updated may publish weights per step."""
+
+    class _Recorder:
+        def __init__(self):
+            self.calls = []
+
+        async def update_weights(self, rollout_id=None):
+            self.calls.append(rollout_id)
+
+        async def save_model(self, rollout_id):
+            pass
+
+    def _state(self):
+        from rllm.trainer.unified_trainer import TrainerState
+
+        return TrainerState(global_step=7)
+
+    def _backend(self, is_async):
+        b = MilesBackend(config=_cfg())
+        b.is_async = is_async
+        b.actor_model = self._Recorder()
+        b.miles_args = type("A", (), {"save_interval": 0})()
+        b.rollout_manager = None
+        return b
+
+    @pytest.mark.asyncio
+    async def test_sync_mode_publishes_in_on_batch_end(self):
+        b = self._backend(is_async=False)
+        state = self._state()
+        await b.on_batch_end(state)
+        await b.on_policy_updated(state)
+        assert b.actor_model.calls == [7], "sync mode should publish exactly once, from on_batch_end"
+
+    @pytest.mark.asyncio
+    async def test_async_mode_publishes_in_on_policy_updated(self):
+        b = self._backend(is_async=True)
+        state = self._state()
+        await b.on_batch_end(state)
+        await b.on_policy_updated(state)
+        assert b.actor_model.calls == [7], "async mode should publish exactly once, from on_policy_updated"
+
+
+class TestAsyncPrerequisites:
+    def test_raise_on_error_true_is_rejected_early(self):
+        # The trainer asserts this only after full GPU bring-up; catching it in
+        # validate_config turns minutes of setup into an immediate error.
+        cfg = _cfg(async_training={"enable": True, "mini_batch_size": 1})
+        cfg.rllm.workflow = {"raise_on_error": True}
+        with pytest.raises(ValueError, match="raise_on_error=false"):
+            MilesBackend(config=cfg).validate_config()
+
+    def test_raise_on_error_false_passes(self):
+        cfg = _cfg(async_training={"enable": True, "mini_batch_size": 1})
+        cfg.rllm.workflow = {"raise_on_error": False}
+        MilesBackend(config=cfg).validate_config()
+
+    def test_sync_mode_does_not_care(self):
+        cfg = _cfg()
+        cfg.rllm.workflow = {"raise_on_error": True}
+        MilesBackend(config=cfg).validate_config()
+
+
+class TestMilesBatchIsSized:
+    """The async loop does `len(backend_batch)` to count trainable sequences."""
+
+    def test_len_is_the_sample_count(self):
+        assert len(MilesBatch(data_ref="r", num_samples=32)) == 32
+
+    def test_empty_batch_has_len_zero(self):
+        b = MilesBatch(data_ref=None, num_samples=0)
+        assert len(b) == 0 and b.is_empty
+
+    @pytest.mark.asyncio
+    async def test_update_policy_skips_an_empty_batch(self):
+        from rllm.trainer.unified_trainer import TrainerState
+
+        b = MilesBackend(config=_cfg())
+        b.actor_model = None  # would explode if update_policy did not return early
+        state = TrainerState(global_step=1)
+        state.backend_batch = MilesBatch(data_ref=None, num_samples=0)
+        await b.update_policy(state)  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_update_policy_skips_when_there_is_no_batch(self):
+        from rllm.trainer.unified_trainer import TrainerState
+
+        b = MilesBackend(config=_cfg())
+        b.actor_model = None
+        await b.update_policy(TrainerState(global_step=1))
+
+
+@needs_miles_data
+class TestPatchesSurviveImportOrder:
+    """Miles' actors import these functions by value, so patching the source module
+    only reaches an actor that has not been imported yet. Importing an actor first
+    (assert_patch_contracts does) silently defeated the get_rollout_data patch and the
+    advantages arrived at the loss as plain lists."""
+
+    def test_get_rollout_data_is_repointed_in_the_fsdp_actor(self):
+        import miles.backends.fsdp_utils.actor as fsdp_actor
+
+        from rllm.trainer.miles.patch import patch_advantages_cp_slice
+
+        patch_advantages_cp_slice()
+        assert fsdp_actor.get_rollout_data.__module__ == "rllm.trainer.miles.patch"
+
+    def test_compute_advantages_is_repointed_in_the_fsdp_actor(self):
+        import miles.backends.fsdp_utils.actor as fsdp_actor
+
+        from rllm.trainer.miles.patch import patch_respect_disable_compute_advantages
+
+        patch_respect_disable_compute_advantages()
+        assert fsdp_actor.compute_advantages_and_returns.__module__ == "rllm.trainer.miles.patch"
+
+    def test_applying_everything_leaves_both_repointed(self):
+        # The realistic ordering: contracts assert (importing the actor) then patches.
+        import miles.backends.fsdp_utils.actor as fsdp_actor
+
+        from rllm.trainer.miles.patch import apply_all_miles_patches
+
+        apply_all_miles_patches()
+        assert fsdp_actor.get_rollout_data.__module__ == "rllm.trainer.miles.patch"
+        assert fsdp_actor.compute_advantages_and_returns.__module__ == "rllm.trainer.miles.patch"

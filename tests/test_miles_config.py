@@ -217,3 +217,49 @@ class TestRejectedGenerationFlags:
         with pytest.raises(ValueError) as e:
             validate_pinned({"fully_async": True})
         assert "sleep_rollout" in str(e.value)
+
+
+class TestMilesTrainIters:
+    """Miles derives its LR-schedule length from these three flags:
+
+        train_iters = num_rollout * rollout_batch_size * n_samples_per_prompt // global_batch_size
+
+    Zero makes the FSDP scheduler assert; too small silently shortens the schedule.
+    """
+
+    def _cfg(self, *, async_enable=False, mini_batch=4, train_batch=16, n=8):
+        return OmegaConf.create(
+            {
+                "model": {"name": "m"},
+                "rllm": {
+                    "data": {"train_batch_size": 1 if async_enable else train_batch},
+                    "rollout": {"n": n},
+                    "trainer": {"save_freq": 20},
+                    "async_training": {"enable": async_enable, "mini_batch_size": mini_batch},
+                },
+                "miles": {"global_batch_size": mini_batch * n if async_enable else train_batch * n},
+            }
+        )
+
+    def _train_iters(self, block, num_rollout):
+        return num_rollout * block["rollout_batch_size"] * block["n_samples_per_prompt"] // block["global_batch_size"]
+
+    def test_group_size_is_mirrored(self):
+        block, _ = build_block(self._cfg())
+        assert block["n_samples_per_prompt"] == 8
+
+    def test_sync_train_iters_equals_the_step_count(self):
+        block, _ = build_block(self._cfg(), total_steps=60)
+        assert self._train_iters(block, 60) == 60
+
+    def test_async_uses_mini_batch_size_not_the_pinned_train_batch_size(self):
+        # The trainer forces rllm.data.train_batch_size to 1 under async.
+        block, _ = build_block(self._cfg(async_enable=True), total_steps=20)
+        assert block["rollout_batch_size"] == 4
+        assert self._train_iters(block, 20) == 20
+
+    def test_async_train_iters_is_never_zero(self):
+        # The regression that broke the first async run: rollout_batch_size=1 and
+        # n_samples_per_prompt=1 gave 20 * 1 * 1 // 32 == 0.
+        block, _ = build_block(self._cfg(async_enable=True), total_steps=20)
+        assert self._train_iters(block, 20) > 0

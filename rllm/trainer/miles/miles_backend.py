@@ -47,6 +47,18 @@ class MilesBatch:
     num_samples: int = 0
     metrics: dict = field(default_factory=dict)
 
+    def __len__(self) -> int:
+        """Trainable sequences in this batch.
+
+        The async training loop sums ``len(backend_batch)`` across forward-backward
+        passes and skips the optimizer step when the total is zero.
+        """
+        return self.num_samples
+
+    @property
+    def is_empty(self) -> bool:
+        return self.num_samples == 0
+
 
 class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
     """Backend that trains through Miles' Ray actors."""
@@ -62,6 +74,9 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
         self.rollout_engine = None
         self.tokenizer = None
         self.algorithm_config: AlgorithmConfig | None = None
+        # Async training moves weight sync from on_batch_end to on_policy_updated,
+        # which the trainer calls inside its own pause/drain window.
+        self.is_async = bool((config.rllm.get("async_training", {}) or {}).get("enable", False))
         # Miles indexes everything by rollout_id; rLLM's global_step is the same clock.
         self._num_rollout_per_epoch = None
         # Advantages are computed during transform (stage 4), but the trainer's
@@ -88,11 +103,36 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
 
         node = self.full_config.get("miles", None)
         raw = OmegaConf.to_container(node, resolve=True) if node is not None else {}
-        validate_pinned(raw if isinstance(raw, dict) else {})
+        raw = raw if isinstance(raw, dict) else {}
+        validate_pinned(raw)
 
         async_cfg = self.full_config.rllm.get("async_training", {}) or {}
         if async_cfg.get("enable", False):
-            raise ValueError("Async training is not wired up for the miles backend yet (Phase 5). Set rllm.async_training.enable=false.")
+            # The trainer's async loop accumulates gradient across `num_fwd_bwd_passes`
+            # calls to process_backend_batch, then takes one optimizer step in
+            # update_policy. Miles' RayTrainGroup.train() is monolithic -- log-probs, loss
+            # and the optimizer steps happen in one call -- so it cannot accumulate across
+            # passes. Constrain the loop to one pass per step, the same restriction verl's
+            # separated mode carries.
+            mini_batch = async_cfg.get("mini_batch_size", 1)
+            fwd_bwd = async_cfg.get("fwd_bwd_group_size") or mini_batch
+            if fwd_bwd != mini_batch:
+                raise ValueError(
+                    f"The miles backend needs rllm.async_training.fwd_bwd_group_size ({fwd_bwd}) "
+                    f"== mini_batch_size ({mini_batch}): Miles takes its optimizer step inside "
+                    "RayTrainGroup.train(), so it cannot accumulate gradient across passes."
+                )
+            # The trainer asserts this too, but only once _fit_fully_async starts --
+            # after Ray, the SGLang engines and the model are all up, which is minutes of
+            # setup to reach a config error. validate_config runs before any of that.
+            if self.full_config.rllm.get("workflow", {}).get("raise_on_error", True):
+                raise ValueError("Async training needs rllm.workflow.raise_on_error=false so a failed task still yields an (error) episode instead of killing the generation loop.")
+            if raw.get("pause_generation_mode") == "abort":
+                raise ValueError(
+                    "miles.pause_generation_mode=abort kills in-flight generation on every "
+                    "weight update, which async training does continuously. Use 'retract' "
+                    "(Miles' default): it requeues those requests and resumes them after."
+                )
 
     def init_rollout_engine(self, **kwargs) -> RolloutEngine:
         """Build Miles' args, bring up its Ray actors, and return the rollout engine.
@@ -159,6 +199,14 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
         return MilesEngine(config=self.full_config, router_url=router_url, tokenizer=self.tokenizer, miles_args=self.miles_args)
 
     def shutdown(self) -> None:
+        engine = self.rollout_engine
+        if engine is not None and hasattr(engine, "close"):
+            try:
+                from miles.utils.async_utils import run as miles_run
+
+                miles_run(engine.close())
+            except Exception:
+                logger.exception("MilesEngine HTTP client did not close cleanly")
         try:
             if self.rollout_manager is not None:
                 import ray
@@ -208,12 +256,18 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
         grouped = trajectory_groups_to_payloads(groups)
         samples, advantages = payloads_to_samples(grouped)
         if not samples:
-            raise ValueError("No trainable samples in this batch; every trajectory group was empty.")
+            # Every group was dropped (e.g. all responses empty). The async loop treats a
+            # zero-length batch as "this pass contributes no gradient" and carries on, so
+            # returning empty is more useful than raising -- update_policy skips it.
+            logger.warning("No trainable samples in this batch; %d trajectory groups produced nothing.", len(groups))
+            return MilesBatch(data_ref=None, num_samples=0, metrics={"batch/miles_samples": 0, "batch/miles_groups": 0})
+
+        samples, advantages, dynamic_gbs = self._fit_to_dp(samples, advantages)
 
         train_data = convert_samples_to_train_data(
             self.miles_args,
             samples,
-            metadata={},
+            metadata={"dynamic_global_batch_size": dynamic_gbs},
             custom_convert_samples_to_train_data_func=None,
             custom_reward_post_process_func=None,
         )
@@ -233,6 +287,39 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
             num_samples=len(samples),
             metrics={"batch/miles_samples": len(samples), "batch/miles_groups": len(grouped)},
         )
+
+    def _fit_to_dp(self, samples: list, advantages: list[list[float]]) -> tuple[list, list[list[float]], int]:
+        """Trim the batch to a multiple of the DP size and return that as the batch size.
+
+        Miles computes ``num_steps_per_rollout = num_local_samples // num_local_gbs`` with
+        integer division, so a static ``--global-batch-size`` would either drop the
+        remainder silently or take several optimizer steps inside one rLLM step. Reusing
+        Miles' own ``_compute_dynamic_global_batch_size`` (rounded down to ``dp_size``)
+        pins it to exactly one step over exactly the samples we keep, whatever survived
+        rejection sampling and compact filtering.
+        """
+        from miles.ray.rollout.rollout_data_conversion import _compute_dynamic_global_batch_size
+
+        parallel_config = self._train_parallel_config()
+        dynamic_gbs = _compute_dynamic_global_batch_size(self.miles_args, parallel_config, len(samples))
+
+        if dynamic_gbs > len(samples):
+            # Fewer samples than dp_size: Miles pads the batch size up and would index
+            # past the end. Nothing trainable here.
+            raise ValueError(
+                f"Only {len(samples)} trainable samples for dp_size={parallel_config['dp_size']}; "
+                "raise rllm.async_training.mini_batch_size (or rllm.data.train_batch_size) "
+                "or rllm.rollout.n so every DP rank gets at least one sample."
+            )
+        if dynamic_gbs < len(samples):
+            logger.info(
+                "Trimming batch from %d to %d samples (a multiple of dp_size=%d) so Miles takes exactly one optimizer step.",
+                len(samples),
+                dynamic_gbs,
+                parallel_config["dp_size"],
+            )
+            samples, advantages = samples[:dynamic_gbs], advantages[:dynamic_gbs]
+        return samples, advantages, dynamic_gbs
 
     def _train_parallel_config(self):
         """Read the DP layout the train actor pushed into the RolloutManager.
@@ -271,6 +358,9 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
 
     async def update_policy(self, trainer_state: TrainerState, **kwargs) -> None:
         batch: MilesBatch = trainer_state.backend_batch  # type: ignore[assignment]
+        if batch is None or batch.is_empty:
+            logger.warning("Skipping the optimizer step: no trainable sequences in this batch.")
+            return
         rollout_id = trainer_state.global_step
         with simple_timer("update_actor", trainer_state.timing_dict):
             await self.actor_model.train(rollout_id, {"data_ref": batch.data_ref, "sample_indices": batch.sample_indices})
@@ -291,12 +381,27 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
                 await self.actor_model.save_model(rollout_id)
                 await self.rollout_manager.save.remote(rollout_id)
 
-        # Colocated runs would need offload here; phase 1 is disaggregated only.
-        with simple_timer("update_weights", trainer_state.timing_dict):
-            await self.actor_model.update_weights(rollout_id=rollout_id)
+        # Sync mode publishes weights at the end of the step; async mode syncs in
+        # on_policy_updated instead, inside the trainer's pause/drain window. Doing both
+        # would push the same weights twice per step.
+        if not self.is_async:
+            with simple_timer("update_weights", trainer_state.timing_dict):
+                await self.actor_model.update_weights(rollout_id=rollout_id)
 
     async def on_policy_updated(self, trainer_state: TrainerState) -> None:
-        """Async path syncs here instead of on_batch_end. Not wired up yet (Phase 5)."""
+        """Publish new weights to the SGLang engines (async path).
+
+        Called from the trainer's ``_perform_weight_sync``. With ``partial_rollout=True``
+        the trainer does *not* drain generation first, which is safe because Miles' own
+        update pauses every engine, flushes, loads and resumes
+        (``update_weight_utils.update_weights``). Under the default
+        ``--pause-generation-mode retract`` in-flight requests are requeued rather than
+        killed, so a rollout crossing a sync boundary survives it.
+        """
+        if not self.is_async:
+            return
+        with simple_timer("weight_sync", trainer_state.timing_dict):
+            await self.actor_model.update_weights(rollout_id=trainer_state.global_step)
 
     async def on_validation_start(self, trainer_state: TrainerState) -> bool:
         trainer_state.is_training = False

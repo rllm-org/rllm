@@ -24,6 +24,23 @@ _RESPECT_DISABLE_ADV_PATCHED = False
 _EXPECTED_CP_SLICED_KEYS = ("rollout_log_probs", "teacher_log_probs", "opd_reverse_kl")
 
 
+# Both actors do `from ...module import name`, which binds the function *by value* at
+# import time. Rebinding the source module therefore only reaches an actor that has not
+# been imported yet -- and anything that imports an actor early (assert_patch_contracts
+# did) silently defeats the patch. Always repoint the holders too.
+_FUNCTION_HOLDERS = ("miles.backends.fsdp_utils.actor", "miles.backends.megatron_utils.actor")
+
+
+def _rebind_everywhere(name: str, replacement) -> None:
+    for module_path in _FUNCTION_HOLDERS:
+        try:
+            module = importlib.import_module(module_path)
+        except Exception:  # the megatron actor needs megatron installed
+            continue
+        if hasattr(module, name):
+            setattr(module, name, replacement)
+
+
 def patch_advantages_cp_slice() -> None:
     """Let driver-supplied per-token advantages ride the ``rollout_log_probs`` path.
 
@@ -73,6 +90,7 @@ def patch_advantages_cp_slice() -> None:
         return rollout_data, store_get_result
 
     miles_data.get_rollout_data = get_rollout_data
+    _rebind_everywhere("get_rollout_data", get_rollout_data)
     _ADVANTAGES_CP_SLICE_PATCHED = True
     logger.info("Patched miles get_rollout_data to CP-slice rLLM's per-token advantages")
 
@@ -138,15 +156,7 @@ def patch_respect_disable_compute_advantages() -> None:
         return original(args, rollout_data)
 
     miles_loss.compute_advantages_and_returns = compute_advantages_and_returns
-    # Both actors do `from ...loss import compute_advantages_and_returns`, binding the
-    # function by value, so rebinding the source module is not enough.
-    for module_path in ("miles.backends.fsdp_utils.actor", "miles.backends.megatron_utils.actor"):
-        try:
-            module = importlib.import_module(module_path)
-        except Exception:  # megatron actor needs megatron installed
-            continue
-        if hasattr(module, "compute_advantages_and_returns"):
-            module.compute_advantages_and_returns = compute_advantages_and_returns
+    _rebind_everywhere("compute_advantages_and_returns", compute_advantages_and_returns)
 
     _RESPECT_DISABLE_ADV_PATCHED = True
     logger.info("Patched miles compute_advantages_and_returns to respect --disable-compute-advantages-and-returns")
