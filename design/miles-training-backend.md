@@ -28,7 +28,7 @@ Branch `feat/miles-backend`. Landed and tested off-GPU:
 | `miles_launcher.py` (Ray init + bring-up) | done |
 | `patch.py` (advantages CP-slice) | done, contract asserted against installed miles |
 | `custom_loss.py` | **not needed** — stock `policy_loss_function` reads `batch["advantages"]`, verified live |
-| End-to-end training run | **done** — 8 GRPO steps on countdown, Qwen3-1.7B, 8xH100, val pass@1 0.444 |
+| End-to-end training run | **done** — 60 GRPO steps, val pass@1 0.537→0.630 (~6σ) |
 
 Zero regressions: the failing-test set is byte-identical before and after
 (91 pre-existing failures in a venv without ray/verl/vllm, including two float32
@@ -73,10 +73,27 @@ Two caveats:
 ### 0.2 End-to-end run (validated 2026-08-21)
 
 `examples/countdown/unified_trainer/train_countdown_unified_miles.sh` — countdown,
-Qwen3-1.7B, 4 train GPUs (FSDP) + 4 rollout GPUs, thinking disabled, 8 GRPO steps.
-Completes in a few minutes; final `val/countdown/pass@1` 0.444 with 8 `actor_train`
-passes. Reward is noisy across 8 steps (0.22-0.53) and does not visibly climb -- this
-validates the **mechanism**, not learning.
+Qwen3-1.7B, 4 train GPUs (FSDP) + 4 rollout GPUs, thinking disabled. ~18s/step at 128
+samples/step, so a 60-step run is ~20 minutes.
+
+**Reward climbs, on held-out data.** 60 steps, 16 prompts x 8 rollouts, lr 2e-6:
+
+| | train reward | truncation | adv_zero |
+|---|---|---|---|
+| steps 1–15 | 0.432 | 0.148 | 0.633 |
+| steps 16–30 | 0.579 | 0.258 | 0.704 |
+| steps 31–45 | 0.602 | 0.358 | 0.679 |
+| steps 46–60 | 0.612 | 0.351 | 0.721 |
+
+`val/countdown/pass@1` on 1024 held-out tasks: **0.537 → 0.620 → 0.630** at steps
+20/40/60 (SE ≈ 0.015, so +0.093 is ~6σ), against 0.444 for the earlier 8-step run.
+
+Two things to read from that. Truncation *rises* as reward rises — the policy first
+learns the `<answer>` format and stops rambling, then spends the recovered budget on
+reasoning. And the curve flattens after ~step 40 while `adv_zero` stays near 0.7: two
+thirds of every batch is uniform-reward groups contributing no gradient, which is what
+`rllm.rejection_sample.filter_uniform_groups` exists to fix. An 8-step run cannot see
+any of this — it sits entirely inside the noise band.
 
 Environment fixes this needed on a CUDA-12.8 box, in order:
 
