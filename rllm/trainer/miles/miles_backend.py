@@ -76,6 +76,7 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
         self.algorithm_config: AlgorithmConfig | None = None
         # Async training moves weight sync from on_batch_end to on_policy_updated,
         # which the trainer calls inside its own pause/drain window.
+        self._engine_closed = False
         self.is_async = bool((config.rllm.get("async_training", {}) or {}).get("enable", False))
         # Miles indexes everything by rollout_id; rLLM's global_step is the same clock.
         self._num_rollout_per_epoch = None
@@ -198,15 +199,32 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
         logger.info("Miles SGLang router at %s", router_url)
         return MilesEngine(config=self.full_config, router_url=router_url, tokenizer=self.tokenizer, miles_args=self.miles_args)
 
-    def shutdown(self) -> None:
-        engine = self.rollout_engine
-        if engine is not None and hasattr(engine, "close"):
-            try:
-                from miles.utils.async_utils import run as miles_run
+    async def on_train_end(self, trainer_state: TrainerState) -> None:
+        """Close the engine's HTTP client on the loop that opened it.
 
-                miles_run(engine.close())
-            except Exception:
-                logger.exception("MilesEngine HTTP client did not close cleanly")
+        httpx binds its connections to the running loop, so closing them anywhere else
+        (Miles' background loop, or after ``fit()``'s loop has been torn down) raises
+        "Event loop is closed". This hook is awaited on the trainer's own loop, which is
+        the only safe place.
+        """
+        await self._close_engine()
+
+    async def _close_engine(self) -> None:
+        engine = self.rollout_engine
+        if engine is None or self._engine_closed or not hasattr(engine, "close"):
+            return
+        self._engine_closed = True
+        try:
+            await engine.close()
+        except Exception:
+            logger.warning("MilesEngine HTTP client did not close cleanly", exc_info=True)
+
+    def shutdown(self) -> None:
+        # on_train_end already closed the engine on the right loop. Reaching here with it
+        # still open means fit() never ran (a bring-up failure), and there is no live loop
+        # to close it on -- the process is exiting anyway, so leave it.
+        if self.rollout_engine is not None and not self._engine_closed:
+            logger.debug("MilesEngine HTTP client left open; no event loop available at shutdown.")
         try:
             if self.rollout_manager is not None:
                 import ray

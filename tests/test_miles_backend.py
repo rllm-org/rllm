@@ -410,3 +410,42 @@ class TestPatchesSurviveImportOrder:
         apply_all_miles_patches()
         assert fsdp_actor.get_rollout_data.__module__ == "rllm.trainer.miles.patch"
         assert fsdp_actor.compute_advantages_and_returns.__module__ == "rllm.trainer.miles.patch"
+
+
+class TestEngineCleanup:
+    """httpx binds connections to the loop that opened them, so the client has to be
+    closed on the trainer's loop -- not Miles' background loop, and not after fit()
+    tore its loop down ("Event loop is closed")."""
+
+    class _Engine:
+        def __init__(self):
+            self.closed = 0
+
+        async def close(self):
+            self.closed += 1
+
+    @pytest.mark.asyncio
+    async def test_on_train_end_closes_the_client(self):
+        from rllm.trainer.unified_trainer import TrainerState
+
+        b = MilesBackend(config=_cfg())
+        b.rollout_engine = self._Engine()
+        await b.on_train_end(TrainerState())
+        assert b.rollout_engine.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_closing_twice_is_a_no_op(self):
+        from rllm.trainer.unified_trainer import TrainerState
+
+        b = MilesBackend(config=_cfg())
+        b.rollout_engine = self._Engine()
+        await b.on_train_end(TrainerState())
+        await b.on_train_end(TrainerState())
+        assert b.rollout_engine.closed == 1
+
+    def test_shutdown_does_not_touch_the_loop(self):
+        # shutdown() is sync; awaiting a close here is what raised "Event loop is closed".
+        b = MilesBackend(config=_cfg())
+        b.rollout_engine = self._Engine()
+        b.shutdown()
+        assert b.rollout_engine.closed == 0
