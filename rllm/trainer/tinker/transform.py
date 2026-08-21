@@ -14,16 +14,11 @@ from tinker_cookbook.supervised.common import create_rightshifted_model_input_an
 from rllm.engine.rollout.tinker_engine import _flat_token_input_length, _flat_token_input_to_model_input
 from rllm.engine.rollout.types import TinkerTokenInput
 from rllm.trainer.algorithms import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
+from rllm.trainer.algorithms.step_merge import is_prefix as _is_prefix
+from rllm.trainer.algorithms.step_merge import partition_steps_by_lineage as _partition_steps_by_lineage
 from rllm.types import Trajectory, TrajectoryGroup
 
 logger = logging.getLogger(__name__)
-
-
-def _is_prefix(seq1: TinkerTokenInput, seq2: TinkerTokenInput) -> bool:
-    """
-    Check if seq1 is a prefix of seq2.
-    """
-    return len(seq1) <= len(seq2) and seq2[: len(seq1)] == seq1
 
 
 def _flatten_token_input(token_input: TinkerTokenInput) -> TinkerTokenInput:
@@ -56,23 +51,6 @@ def _trajectory_oov_token(traj: Trajectory, vocab_size: int) -> int | None:
             if isinstance(elem, int) and elem >= vocab_size:
                 return elem
     return None
-
-
-def _partition_steps_by_lineage(steps: list) -> list[list]:
-    """Group steps by gateway ``lineage_id`` (``step.metadata``), first-appearance
-    order. Steps of one lineage stay together even when interleaved in time with
-    other lineages. Untagged steps (no ``lineage_id`` — cumulative mode off, or
-    eval) share the ``None`` key → a single partition, i.e. the original behavior.
-    """
-    groups: dict = {}
-    order: list = []
-    for step in steps:
-        lid = (step.metadata or {}).get("lineage_id")
-        if lid not in groups:
-            groups[lid] = []
-            order.append(lid)
-        groups[lid].append(step)
-    return [groups[lid] for lid in order]
 
 
 def trajectory_to_datums(traj: Trajectory, router_replay: bool = False) -> list[tinker.Datum]:
