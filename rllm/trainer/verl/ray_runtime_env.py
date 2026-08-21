@@ -3,6 +3,8 @@ import os
 
 from ray._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
 
+from rllm.trainer.ray_init_utils import FORWARD_PREFIXES, get_forwarded_env_vars  # noqa: F401  (re-exported)
+
 PPO_RAY_RUNTIME_ENV = {
     "env_vars": {
         "TOKENIZERS_PARALLELISM": "true",
@@ -21,63 +23,6 @@ PPO_RAY_RUNTIME_ENV = {
     },
 }
 
-FORWARD_PREFIXES = [
-    "VLLM_",
-    "SGL_",
-    "SGLANG_",
-    "HF_",
-    "TOKENIZERS_",
-    "DATASETS_",
-    "TORCH_",
-    "PYTORCH_",
-    "DEEPSPEED_",
-    "MEGATRON_",
-    "NCCL_",
-    "CUDA_",
-    "CUBLAS_",
-    "CUDNN_",
-    "NV_",
-    "NVIDIA_",
-    "RLLM_",
-]
-
-
-def _get_forwarded_env_vars():
-    """
-    Get the forwarded environment variables. The `RLLM_EXCLUDE` environment variable can be used to
-    exclude specific environment variables or all variables with a specific prefix.
-
-    Example:
-    ```
-    RLLM_EXCLUDE=VLLM*,CUDA*,NCCL_IB_DISABLE
-    ```
-    will exclude all variables with prefix `VLLM_`, `CUDA_`, and `NCCL_IB_DISABLE`.
-
-    By default, all environment variables with prefix in `FORWARD_PREFIXES` are forwarded.
-    """
-    if os.environ.get("RLLM_EXCLUDE", None) is not None:
-        rllm_exclude = str(os.environ.get("RLLM_EXCLUDE")).split(",")
-    else:
-        rllm_exclude = []
-
-    forward_prefix = FORWARD_PREFIXES.copy()
-
-    # RLLM_EXCLUDE is a control var read on the launching node; it matches the
-    # RLLM_ prefix but must never be forwarded into workers.
-    exclude_vars = {"RLLM_EXCLUDE"}
-    for name in rllm_exclude:
-        if "*" in name:  # denote a prefix match, e.g. "VLLM*"
-            prefix = name.replace("*", "_")
-            try:
-                forward_prefix.remove(prefix)
-            except ValueError:
-                pass
-        else:
-            exclude_vars.add(name)
-
-    forwarded = {k: v for k, v in os.environ.items() if any(k.startswith(p) for p in forward_prefix) and k not in exclude_vars}
-    return forwarded
-
 
 def get_ppo_ray_runtime_env():
     """Build the runtime_env to pass to ray.init().
@@ -93,7 +38,7 @@ def get_ppo_ray_runtime_env():
     the job config's value wins.
     """
     env = PPO_RAY_RUNTIME_ENV.get("env_vars", {}).copy()
-    env.update(_get_forwarded_env_vars())
+    env.update(get_forwarded_env_vars())
 
     # Parse the job-submission runtime_env (if launched via `ray job submit`)
     try:

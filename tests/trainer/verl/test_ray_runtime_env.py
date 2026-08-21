@@ -4,7 +4,8 @@ from unittest.mock import patch
 
 from ray._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
 
-from rllm.trainer.verl.ray_runtime_env import _get_forwarded_env_vars, get_ppo_ray_runtime_env
+from rllm.trainer.ray_init_utils import get_forwarded_env_vars as _get_forwarded_env_vars
+from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
 
 
 def test_forward_basic_env_vars():
