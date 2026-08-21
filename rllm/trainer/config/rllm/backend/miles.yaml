@@ -1,0 +1,72 @@
+# @package _global_
+
+# Miles backend: rLLM's UnifiedTrainer drives the loop, Miles (SGLang rollout +
+# Megatron-LM / FSDP2 training) owns the GPUs. See design/miles-training-backend.md.
+#
+# This backend only runs inside the Miles container image (docker/Dockerfile in the
+# miles repo): it pins a forked SGLang and Megatron-LM plus transformers==5.12.1,
+# which cannot be assembled from PyPI.
+
+model:
+  name: "Qwen/Qwen3-4B"
+
+training:
+  group_size: ???      # rollouts per prompt (GRPO group size)
+  learning_rate: 1e-6
+
+validation:
+  group_size: 1
+
+workflow:
+  n_parallel_tasks: 64
+
+# Everything under `miles:` is passed through to Miles' CLI verbatim. Keys are
+# *flag names* in snake_case, not argparse dests -- so a negated flag is written
+# the way Miles spells it (e.g. `disable_rollout_global_dataset`, not
+# `rollout_global_dataset`). null means "leave Miles' own default alone".
+#
+# Flags rLLM owns (rollout_function_path, eval_function_path,
+# disable_rollout_global_dataset, disable_compute_advantages_and_returns,
+# num_rollout) are set by the backend and rejected here -- see
+# rllm/trainer/miles/miles_config.py:PINNED_FLAGS.
+miles:
+  # --- training backend ---------------------------------------------------
+  # `fsdp` trains the HF implementation as-is (no checkpoint conversion, the fast
+  # path for bring-up). `megatron` needs an offline HF -> torch_dist conversion
+  # into `ref_load`, and is the only backend with TP/PP/CP/EP.
+  train_backend: fsdp
+
+  # --- GPU layout ---------------------------------------------------------
+  # Disaggregated only: rLLM generates while Miles trains, so the two must not
+  # share GPUs. `colocate` is rejected by the config bridge.
+  actor_num_nodes: 1
+  actor_num_gpus_per_node: 4
+  rollout_num_gpus: 4
+  rollout_num_gpus_per_engine: 1
+
+  # --- checkpointing ------------------------------------------------------
+  # Miles owns the weights, so Miles writes the checkpoints. miles_validate_args
+  # requires --save whenever --save-interval is set.
+  save: 'checkpoints/${rllm.trainer.project_name}/${rllm.trainer.experiment_name}'
+
+  # --- optimization -------------------------------------------------------
+  global_batch_size: 32
+  advantage_estimator: grpo   # still selects Miles' loss kernel (GRPO/GSPO clip),
+                              # even though the advantages themselves come from rLLM
+  max_tokens_per_gpu: 16384
+
+  # --- megatron-only (ignored when train_backend=fsdp) --------------------
+  ref_load: null              # torch_dist checkpoint dir, required for megatron
+  tensor_model_parallel_size: null
+  pipeline_model_parallel_size: null
+
+  # --- escape hatch -------------------------------------------------------
+  # Appended to argv verbatim. Use for any Miles or Megatron flag not mirrored
+  # above, so an unmodelled flag never blocks a run.
+  extra_args: []
+
+rllm:
+  backend: miles
+  rollout:
+    n: ${oc.select:training.group_size, 8}
+    n_val: ${oc.select:validation.group_size, 1}
