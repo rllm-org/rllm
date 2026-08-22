@@ -400,30 +400,43 @@ rLLM at all.
 
 Ordered by what would bite a real run first. Everything in §0 is verified.
 
-### The one blocking async
+### Resolved: the train/inference divergence was `attn_implementation`
 
-**Train/inference logprob divergence.** `tis_abs` ~0.83 -- the same weights on the same
-tokens give very different logprobs between Miles' trainer and the SGLang engines. Ruled
-out: our extraction (SGLang rescores its own generation to within 0.0155 nats) and weight
-sync (`--check-weight-update-equal` passes, 14 calls, zero failures). What is left is the
-forward pass: the trainer runs `attn_implementation=sdpa` because flash-attn is not
-installed, while SGLang runs flashinfer.
+Miles' FSDP path calls the model with `attention_mask=None` and packed `position_ids`
+that reset at each document start, deriving `cu_seqlens` from them
+(`fsdp_utils/adaptations/packing/boundaries.py`). `qkv_format` defaults to `thd`, so
+several samples share one row. **SDPA cannot consume `cu_seqlens`**, so it applies one
+causal mask across the whole packed row and samples attend across each other — the wrong
+computation, not merely lower precision. Miles defaults to `flash_attention_2` for
+exactly this reason and does not validate the combination, so overriding it failed
+silently.
 
-This is why async underperforms and why TIS makes it *worse* -- a correction computed
-from a badly mismatched ratio is worse than none:
-
-| val pass@1 | @8 | @16 | @24 |
+| training attn | inference attn | `tis` | `tis_abs` |
 |---|---|---|---|
-| async, no correction | 0.380 | 0.400 | 0.438 |
-| async + TIS | 0.423 | 0.459 | 0.475 |
-| *sync* | *0.444* | — | *0.537 @20* |
+| sdpa | flashinfer | 0.303 | 0.830 |
+| sdpa | torch_native (sdpa) | 0.403 | 0.712 |
+| **flash_attention_2 (varlen)** | flashinfer | **1.000** | **0.012** |
 
-Sync is unaffected because it never reads `rollout_log_probs`.
+It corrupted the forward pass in *every* run. Sync still learned, because the gradient
+stayed correlated with the right direction — which is why it hid for so long. Async was
+hit far harder: TIS computes its correction from precisely the logprobs that were wrong,
+so the correction was noise and made the slope *worse* than no correction.
 
-*Next:* confirm by scoring one fixed token sequence on the **base** checkpoint (no
-training, so no weight drift) through a bare SGLang server and through HF with `sdpa`,
-then install flash-attn (prebuilt cu128 wheel from Miles' wheels release) so training
-and inference share an attention path.
+With it fixed, async matches sync's learning rate:
+
+| val pass@1 | @8 | @16 | @24 | slope |
+|---|---|---|---|---|
+| async + TIS, sdpa | 0.423 | 0.459 | 0.475 | +0.0032/step |
+| **async + TIS, FA2** | **0.455** | **0.504** | **0.552** | **+0.0061/step** |
+| sync, sdpa (@8→@20) | 0.444 | — | 0.537 @20 | +0.0078/step |
+
+Async on FA2 at step 24 (0.552) already exceeds the old sync baseline at step 20 (0.537),
+and that baseline was itself measured with the broken attention path — so **the sync
+numbers in §0.2 understate what the backend does and need re-measuring on FA2.**
+
+`validate_attention` now rejects any non-varlen attention implementation under
+`qkv_format=thd`, and `scripts/setup_miles_env.sh` installs flash-attn. Do not "optimise"
+that install away.
 
 ### Would bite the first serious run
 
