@@ -107,6 +107,42 @@ Environment fixes this needed on a CUDA-12.8 box, in order:
 | `404 /begin_weight_update` | stock PyPI sglang serves generation fine but has no weight-update endpoint; install the fork: `git clone -b sglang-miles`, `pip install --no-deps --no-build-isolation -e python` |
 | `ModuleNotFoundError: megatron` inside `compute_log_probs` | `pip install megatron-core`. The FSDP path *does* need it -- Miles' shared log-prob kernel uses Megatron's fused cross-entropy (there is a `TODO` there for a fallback) |
 
+### 0.3 Async training (validated 2026-08-22)
+
+Async needs `fwd_bwd_group_size == mini_batch_size` (Miles takes its optimizer step
+inside `RayTrainGroup.train()`, so it cannot accumulate across passes) and
+`rllm.workflow.raise_on_error=false`. Weight sync moves to `on_policy_updated`; Miles'
+own update pauses, flushes, loads and resumes every engine, and the default
+`--pause-generation-mode retract` requeues in-flight requests instead of killing them,
+so `partial_rollout=true` is safe.
+
+**Off-policy correction is not optional.** `rllm.algorithm.rollout_correction.*` was
+initially unmapped, so `tis_mode` / `tis_cap` / `bypass_mode` were accepted by Hydra and
+discarded. A/B on countdown, Qwen3-1.7B, `mini_batch_size=32`, `staleness_threshold=0.5`,
+identical apart from correction:
+
+| `val/countdown/pass@1` | step 8 | step 16 | step 24 |
+|---|---|---|---|
+| no correction | 0.380 | 0.400 | 0.438 |
+| **+ TIS** (`tis_mode=token`, `tis_cap=2.0`) | **0.445** | **0.471** | **0.475** |
+| *sync reference* | *0.444* | — | *0.537 @20* |
+
+Train reward by 5-step window, control vs TIS: 0.380/0.388, 0.381/0.443, 0.359/0.445,
+0.397/0.454, 0.436/0.468 — TIS ahead everywhere past the first window, where staleness
+is still 0–1. Miles reports `ois'` (uncorrected) = 1.0 against `tis'` ≈ 0.21–0.31, so
+stale samples were being overweighted 3–5x. Uncorrected reward *falls* over steps 11–15,
+which is what a biased gradient looks like once the policy has drifted from the
+behaviour policy.
+
+Corrected async matches sync at step 8 (0.445 vs 0.444) but stays behind by step 20–24
+(0.475 vs 0.537): the residual cost of off-policy learning, plus the ~40% of groups
+still lost to uniform-reward filtering. `filter_uniform_groups` is the next lever and
+now has a baseline to beat.
+
+Sizing matters as much as correction: every working async config in the repo uses
+`mini_batch_size` 32–64. The first attempt used 4, giving ~21 samples/step after
+filtering, and learned nothing.
+
 ## 1. Target architecture
 
 One Ray cluster, one driver process (rLLM), inside Miles' docker image.
@@ -413,5 +449,6 @@ known-broken, but nothing below has been executed either.
 
 ### Deliberately out of scope
 
-Async (Phase 5), a critic / PPO, multimodal rollouts and `--colocate` are all rejected in
-`validate_config` or the transform, with an explanatory error rather than a silent failure.
+A critic / PPO, multimodal rollouts and `--colocate` are rejected in `validate_config` or
+the transform, with an explanatory error rather than a silent failure. Async is supported
+(§0.3).
