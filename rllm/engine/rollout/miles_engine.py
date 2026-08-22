@@ -58,17 +58,30 @@ class MilesEngine(RolloutEngine):
         # get_token_output_from_token_input, not here.
         rollout_cfg = rllm_cfg.get("rollout", {}) or {}
         self.train_sampling_params = self._sampling_from(rollout_cfg.get("train", {}))
-        self.val_sampling_params = self._sampling_from(rollout_cfg.get("val", {})) or self.train_sampling_params.copy()
+        self.val_sampling_params = self._sampling_from(rollout_cfg.get("val", None) or rollout_cfg.get("train", {}))
 
         self._client = httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_S)
 
-    @staticmethod
-    def _sampling_from(block) -> dict:
-        """Pass through what SGLang accepts, dropping keys it does not."""
-        if not block:
-            return {}
+    # Sent on every request so no server-side default can leak in. SGLang otherwise
+    # falls back to the model's generation_config -- for Qwen3 that is top_k=20, which
+    # samples from a truncated distribution and returns logprobs renormalised over those
+    # 20 tokens. Those logprobs are systematically too high, so
+    # exp(train_log_probs - rollout_log_probs) lands far below 1 and any importance
+    # correction built on them (TIS) scales the gradient by a bogus factor. Invisible
+    # without TIS, because then rollout_log_probs are never read by the loss.
+    # Miles' own rollout does the same thing (rollout_top_k defaults to -1).
+    _SAMPLING_DEFAULTS = {"temperature": 1.0, "top_p": 1.0, "top_k": -1}
+
+    @classmethod
+    def _sampling_from(cls, block) -> dict:
+        """Pass through what SGLang accepts, over explicit defaults."""
         allowed = ("temperature", "top_p", "top_k", "min_p", "repetition_penalty", "frequency_penalty", "presence_penalty", "stop", "stop_token_ids")
-        return {k: v for k in allowed if (v := block.get(k)) is not None}
+        params = dict(cls._SAMPLING_DEFAULTS)
+        for key in allowed:
+            value = (block or {}).get(key)
+            if value is not None:
+                params[key] = value
+        return params
 
     @property
     def supports_token_in_token_out(self) -> bool:

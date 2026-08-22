@@ -180,6 +180,25 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
         # generation starts on-policy. Mirrors miles' train.py.
         miles_run(self.actor_model.update_weights())
 
+        # Diagnostic, mirroring miles' train.py: assert the engines actually hold the
+        # trainer's weights. A silent divergence here shows up much later as a large
+        # train/inference logprob gap, which wrecks any importance correction (TIS)
+        # without ever failing a run. create_rollout_manager already took the snapshot
+        # and reset the engine tensors when this flag is set.
+        if getattr(self.miles_args, "check_weight_update_equal", False):
+            import ray
+
+            logger.info("Comparing engine weights against the trainer (--check-weight-update-equal)")
+            result = ray.get(
+                self.rollout_manager.check_weights.remote(
+                    action="compare",
+                    allow_quant_error=self.miles_args.check_weight_update_allow_quant_error,
+                    selector=self.miles_args.check_weight_update_selector,
+                    skip_list=self.miles_args.check_weight_update_skip_list,
+                )
+            )
+            logger.info("Weight comparison result: %s", result)
+
         self.tokenizer = self._load_tokenizer()
         self.rollout_engine = self._build_engine()
         return self.rollout_engine
