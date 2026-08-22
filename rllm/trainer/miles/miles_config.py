@@ -189,6 +189,32 @@ def validate_pinned(block: dict[str, Any]) -> None:
         raise ValueError("Set epochs on the rLLM side (rllm.trainer.total_epochs); miles.num_epoch needs Miles' own dataset.")
 
 
+# Attention implementations that consume `cu_seqlens`, i.e. that honour packed-sequence
+# boundaries. Miles' FSDP path passes `attention_mask=None` with packed `position_ids`
+# (see fsdp_utils/adaptations/packing/boundaries.py), so with `qkv_format=thd` -- the
+# default -- anything else silently attends across document boundaries: samples in the
+# same microbatch see each other. No error, just wrong logprobs, which shows up as a huge
+# train/inference gap and wrecks any importance correction.
+_VARLEN_ATTENTION = {"flash_attention_2", "flash_attention_3", "fa3", "triton"}
+
+
+def validate_attention(block: dict[str, Any]) -> None:
+    """Reject an attention implementation that cannot honour packed-sequence boundaries."""
+    attn = block.get("attn_implementation")
+    if attn is None or attn in _VARLEN_ATTENTION:
+        return
+    # bshd pads one sequence per row, so there is nothing to cross-contaminate.
+    if block.get("qkv_format", "thd") == "bshd":
+        return
+    raise ValueError(
+        f"miles.attn_implementation={attn!r} cannot honour packed-sequence boundaries: Miles' FSDP "
+        "path passes attention_mask=None with packed position_ids, so with qkv_format=thd (the "
+        "default) samples in a microbatch attend to each other. Use flash_attention_2 (Miles' own "
+        f"default; install flash-attn), one of {sorted(_VARLEN_ATTENTION)}, or set "
+        "miles.qkv_format=bshd to pad instead of pack."
+    )
+
+
 def _apply_rollout_correction(config: DictConfig, block: dict[str, Any]) -> None:
     """Map rllm.algorithm.rollout_correction onto Miles' TIS flags.
 
@@ -236,6 +262,7 @@ def build_block(config: DictConfig, total_steps: int | None = None) -> tuple[dic
         raise TypeError(f"`miles:` must be a mapping of flag names to values, got {type(raw).__name__}")
     extra_args = raw.pop("extra_args", None) or []
     validate_pinned(raw)
+    validate_attention(raw)
 
     block: dict[str, Any] = dict(raw)
     for miles_flag, rllm_path in SHARED_KEYS:

@@ -180,6 +180,8 @@ class TestShippedBackendYaml:
         # null entries (ref_load, tensor_model_parallel_size) stay out of argv
         assert "--ref-load" not in argv
         assert "--tensor-model-parallel-size" not in argv
+        # attn_implementation is deliberately unset so Miles' flash_attention_2 default holds
+        assert "--attn-implementation" not in argv
         # empty extra_args must not become a flag
         assert "--extra-args" not in argv
 
@@ -326,3 +328,43 @@ class TestRolloutCorrection:
     def test_on_policy_async_does_not_warn(self, caplog):
         build_block(self._cfg({}, staleness=0.0))
         assert "biased by the policy lag" not in caplog.text
+
+
+class TestAttentionMustHonourPacking:
+    """Miles' FSDP path packs samples into one row and passes attention_mask=None,
+    deriving cu_seqlens from position_ids. An attention impl that ignores cu_seqlens
+    attends across document boundaries -- silently, and it destroys the logprobs."""
+
+    def test_sdpa_with_default_packing_is_rejected(self):
+        from rllm.trainer.miles.miles_config import validate_attention
+
+        with pytest.raises(ValueError, match="packed-sequence boundaries"):
+            validate_attention({"attn_implementation": "sdpa"})
+
+    def test_eager_is_rejected_too(self):
+        from rllm.trainer.miles.miles_config import validate_attention
+
+        with pytest.raises(ValueError, match="packed-sequence boundaries"):
+            validate_attention({"attn_implementation": "eager"})
+
+    def test_flash_attention_2_is_accepted(self):
+        from rllm.trainer.miles.miles_config import validate_attention
+
+        validate_attention({"attn_implementation": "flash_attention_2"})
+
+    def test_unset_defers_to_miles_default(self):
+        from rllm.trainer.miles.miles_config import validate_attention
+
+        validate_attention({})
+
+    def test_sdpa_is_fine_with_bshd_padding(self):
+        from rllm.trainer.miles.miles_config import validate_attention
+
+        validate_attention({"attn_implementation": "sdpa", "qkv_format": "bshd"})
+
+    def test_error_names_the_fix(self):
+        from rllm.trainer.miles.miles_config import validate_attention
+
+        with pytest.raises(ValueError) as e:
+            validate_attention({"attn_implementation": "sdpa"})
+        assert "flash_attention_2" in str(e.value) and "qkv_format=bshd" in str(e.value)

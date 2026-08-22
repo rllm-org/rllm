@@ -69,9 +69,13 @@ miles:
   max_tokens_per_gpu: 16384
 
   # --- fsdp-only (ignored when train_backend=megatron) --------------------
-  # Miles defaults this to flash_attention_2, which ships in its container image's
-  # wheels release. `sdpa` is built into torch and needs nothing extra.
-  attn_implementation: sdpa
+  # Left unset on purpose: Miles defaults to flash_attention_2, and that default is
+  # load-bearing. The FSDP path packs several samples into one row and passes
+  # attention_mask=None, deriving cu_seqlens from packed position_ids -- so an attention
+  # implementation that ignores cu_seqlens (sdpa, eager) attends across document
+  # boundaries. Silently: no error, just corrupted logprobs. Install flash-attn
+  # (scripts/setup_miles_env.sh does) rather than overriding this.
+  attn_implementation: null
 
   # --- megatron-only (ignored when train_backend=fsdp) --------------------
   ref_load: null              # torch_dist checkpoint dir, required for megatron

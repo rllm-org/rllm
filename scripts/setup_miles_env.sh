@@ -59,6 +59,16 @@ uv pip uninstall --python "$PY" -q sgl-deep-gemm 2>/dev/null || true
 echo "==> megatron-core (the FSDP path uses Megatron's fused cross-entropy) + ninja"
 uv pip install --python "$PY" -q megatron-core ninja
 
+echo "==> flash-attn (required, not optional: see below) -- source build, ~20-40 min"
+# Miles' FSDP path packs samples into one row with attention_mask=None and derives
+# cu_seqlens from packed position_ids. Only a varlen-capable attention kernel honours
+# those boundaries; sdpa/eager silently let samples attend across each other, which
+# corrupts the logprobs and shows up as a huge train/inference gap. Miles' image ships a
+# prebuilt wheel; from source this compiles.
+if ! "$PY" -c "import flash_attn" 2>/dev/null; then
+    MAX_JOBS="${MAX_JOBS:-16}" uv pip install --python "$PY" --no-build-isolation flash-attn
+fi
+
 echo "==> rLLM (editable)"
 uv pip install --python "$PY" -q -e "$RLLM"
 
