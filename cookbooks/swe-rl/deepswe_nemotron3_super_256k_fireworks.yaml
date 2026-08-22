@@ -1,0 +1,26 @@
+# Fireworks Training API overrides for Nemotron 3 Super 120B-A12B at 256K.
+# The model, tokenizer, and LoRA training shape must move together.
+
+model:
+  tokenizer_model: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+
+fireworks_config:
+  policy_trainer_shape_id: accounts/fireworks/trainingShapes/nemotron-3-super-120b-a12b-bf16-262k-lora
+  policy_trainer_replica_count: 1
+
+data:
+  rllm:
+    overlength_policy: error
+    loss_reduction: token_mean
+
+optim:
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  warmup_steps_ratio: 0.1
+  warmup_steps: -1
+  min_lr: 0.0
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+
+trainer:
+  max_steps: null

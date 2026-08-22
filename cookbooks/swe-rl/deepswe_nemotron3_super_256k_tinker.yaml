@@ -1,0 +1,28 @@
+# Tinker LoRA SFT overrides for the same 256K DeepSWE data contract.
+# Tinker chooses a model SKU rather than a Fireworks-style training shape.
+
+model:
+  name: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16:peft:262144
+  lora_rank: 32
+
+data:
+  renderer_name: nemotron3
+  rllm:
+    tokenize_and_mask_method: cumulative
+    overlength_policy: error
+    # The dataset adapter scales each logical batch's supervised-token weights
+    # to total 1.0. Tinker's cross_entropy is a weighted sum, so this is one
+    # (and only one) token-mean reduction across the batch.
+    loss_reduction: token_mean
+
+optim:
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  warmup_steps_ratio: 0.1
+  warmup_steps: -1
+  min_lr: 0.0
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+
+trainer:
+  max_steps: null
