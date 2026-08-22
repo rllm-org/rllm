@@ -76,17 +76,16 @@ Two caveats:
 Qwen3-1.7B, 4 train GPUs (FSDP) + 4 rollout GPUs, thinking disabled. ~18s/step at 128
 samples/step, so a 60-step run is ~20 minutes.
 
-**Reward climbs, on held-out data.** 60 steps, 16 prompts x 8 rollouts, lr 2e-6:
+**Reward climbs, on held-out data.** 60 steps, 16 prompts x 8 rollouts, lr 2e-6, with
+`flash_attention_2` (see §0.4 -- the earlier sdpa numbers were measured with a corrupted
+forward pass and are kept here only for contrast):
 
-| | train reward | truncation | adv_zero |
+| `val/countdown/pass@1` | @20 | @40 | @60 |
 |---|---|---|---|
-| steps 1–15 | 0.432 | 0.148 | 0.633 |
-| steps 16–30 | 0.579 | 0.258 | 0.704 |
-| steps 31–45 | 0.602 | 0.358 | 0.679 |
-| steps 46–60 | 0.612 | 0.351 | 0.721 |
+| **sync, flash_attention_2** | **0.554** | **0.661** | **0.676** |
+| sync, sdpa (corrupted) | 0.537 | 0.620 | 0.630 |
 
-`val/countdown/pass@1` on 1024 held-out tasks: **0.537 → 0.620 → 0.630** at steps
-20/40/60 (SE ≈ 0.015, so +0.093 is ~6σ), against 0.444 for the earlier 8-step run.
+Train reward by third, FA2 vs sdpa: 0.445/0.593/0.612 against 0.432/0.579/0.602.
 
 Two things to read from that. Truncation *rises* as reward rises — the policy first
 learns the `<answer>` format and stops rambling, then spends the recovered budget on
@@ -400,7 +399,7 @@ rLLM at all.
 
 Ordered by what would bite a real run first. Everything in §0 is verified.
 
-### Resolved: the train/inference divergence was `attn_implementation`
+### 0.4 Resolved: the train/inference divergence was `attn_implementation`
 
 Miles' FSDP path calls the model with `attention_mask=None` and packed `position_ids`
 that reset at each document start, deriving `cu_seqlens` from them
@@ -422,17 +421,26 @@ stayed correlated with the right direction — which is why it hid for so long. 
 hit far harder: TIS computes its correction from precisely the logprobs that were wrong,
 so the correction was noise and made the slope *worse* than no correction.
 
-With it fixed, async matches sync's learning rate:
+With it fixed, both modes improve, and async becomes competitive with sync:
 
-| val pass@1 | @8 | @16 | @24 | slope |
-|---|---|---|---|---|
-| async + TIS, sdpa | 0.423 | 0.459 | 0.475 | +0.0032/step |
-| **async + TIS, FA2** | **0.455** | **0.504** | **0.552** | **+0.0061/step** |
-| sync, sdpa (@8→@20) | 0.444 | — | 0.537 @20 | +0.0078/step |
+| `val/countdown/pass@1` | @8 | @16 | @20 | @24 | @40 | @60 |
+|---|---|---|---|---|---|---|
+| sync, FA2 | — | — | 0.554 | — | 0.661 | 0.676 |
+| sync, sdpa | 0.444 | — | 0.537 | — | 0.620 | 0.630 |
+| async + TIS, FA2 | 0.455 | 0.504 | — | 0.552 | — | — |
+| async + TIS, sdpa | 0.423 | 0.459 | — | 0.475 | — | — |
 
-Async on FA2 at step 24 (0.552) already exceeds the old sync baseline at step 20 (0.537),
-and that baseline was itself measured with the broken attention path — so **the sync
-numbers in §0.2 understate what the backend does and need re-measuring on FA2.**
+The blast radius differed sharply by code path, which is why it hid for so long:
+
+- **async** lost ~0.08 pass@1, because TIS computes its correction *from* the corrupted
+  logprobs, so the correction was noise and made the slope worse than no correction.
+- **sync** lost ~0.05, and only visibly with training: +0.017 at step 20 growing to
+  +0.046 by step 60. It never reads `rollout_log_probs`, so it only suffered a partially
+  wrong gradient — still correlated with the right direction, which is exactly what made
+  a 60-step run look healthy.
+
+`tis_abs` is the diagnostic: it should be ~0.01. At 0.83 nothing downstream is
+trustworthy.
 
 `validate_attention` now rejects any non-varlen attention implementation under
 `qkv_format=thd`, and `scripts/setup_miles_env.sh` installs flash-attn. Do not "optimise"

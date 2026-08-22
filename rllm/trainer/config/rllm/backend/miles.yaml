@@ -66,7 +66,12 @@ miles:
   global_batch_size: 32
   advantage_estimator: grpo   # still selects Miles' loss kernel (GRPO/GSPO clip),
                               # even though the advantages themselves come from rLLM
-  max_tokens_per_gpu: 16384
+  # Sizes the micro-batches, and therefore peak training memory: the backend pins
+  # use_dynamic_batch_size (a static global_batch_size cannot work once filtering makes
+  # the surviving sample count vary), so this replaces micro_batch_size as the memory
+  # knob. 16384 OOMs a 1.7B model on an 80GB card that is sharing the GPU with another
+  # tenant; raise it when you have the card to yourself.
+  max_tokens_per_gpu: 8192
 
   # --- fsdp-only (ignored when train_backend=megatron) --------------------
   # Left unset on purpose: Miles defaults to flash_attention_2, and that default is
