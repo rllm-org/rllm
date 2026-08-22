@@ -35,3 +35,64 @@ def test_save_load_round_trips_pass_at(tmp_path):
     loaded = EvalResult.load(result.save(str(tmp_path / "r.json")))
     assert loaded.attempts == 2 and loaded.pass_at == result.pass_at
     assert [(i.idx, i.attempt) for i in loaded.items] == [(0, 0), (0, 1)]
+
+
+def test_solver_usage_reports_tokens_only_and_excludes_judge_usage():
+    items = [
+        EvalItem(
+            idx=0,
+            reward=1.0,
+            is_correct=True,
+            metrics={
+                "turns": 2,
+                "input_tokens": 100,
+                "answer_tokens": 20,
+                "reasoning_tokens": 5,
+                "output_tokens": 25,
+            },
+        ),
+        EvalItem(
+            idx=1,
+            reward=0.0,
+            is_correct=False,
+            metrics={
+                "turns": 4,
+                "input_tokens": 200,
+                "answer_tokens": 40,
+                "reasoning_tokens": 10,
+                "output_tokens": 50,
+                "judge_tokens": 999,
+            },
+        ),
+    ]
+
+    usage = EvalResult.from_items("d", "m", "a", items).usage
+
+    assert usage == {
+        "tasks": 2,
+        "average_turns_per_task": 3.0,
+        "average_answer_tokens_per_task": 30.0,
+        "average_reasoning_tokens_per_task": 7.5,
+        "average_output_tokens_per_task": 37.5,
+        "average_input_tokens_per_task": 150.0,
+        "total_input_tokens": 300,
+        "total_answer_tokens": 60,
+        "total_reasoning_tokens": 15,
+        "total_output_tokens": 75,
+    }
+
+
+def test_save_load_round_trips_solver_metrics_and_usage(tmp_path):
+    item = EvalItem(
+        idx=0,
+        reward=1.0,
+        is_correct=True,
+        metrics={"turns": 3, "answer_tokens": 12, "reasoning_tokens": 4, "output_tokens": 16},
+    )
+    result = EvalResult.from_items("d", "m", "a", [item])
+
+    loaded = EvalResult.load(result.save(str(tmp_path / "usage.json")))
+
+    assert loaded.items[0].metrics == item.metrics
+    assert loaded.usage == result.usage
+    assert not any("cost" in key for key in loaded.usage)

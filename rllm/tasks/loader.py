@@ -183,7 +183,11 @@ def _parse_dockerfile_image_workdir(dockerfile: Path) -> tuple[str | None, str |
                 continue
             upper = line.upper()
             if upper.startswith("FROM "):
-                base_image = line[5:].strip().split()[0]  # drop "AS <alias>" / flags
+                # Drop "AS <alias>" and any leading flags (``--platform=…``),
+                # which would otherwise be read as the image reference.
+                tokens = [token for token in line[5:].strip().split() if not token.startswith("--")]
+                if tokens:
+                    base_image = tokens[0]
             elif upper.startswith("WORKDIR "):
                 workdir = line[8:].strip()
     except OSError:
