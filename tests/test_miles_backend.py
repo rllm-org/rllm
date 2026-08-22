@@ -449,3 +449,37 @@ class TestEngineCleanup:
         b.rollout_engine = self._Engine()
         b.shutdown()
         assert b.rollout_engine.closed == 0
+
+
+@needs_miles_data
+class TestNoSilentAdvantageFallback:
+    """If rLLM's advantages go missing while Miles' own computation is disabled, the
+    only safe outcome is a loud failure -- recomputing from scalar rewards would train
+    on the wrong signal while the run looks healthy."""
+
+    def test_missing_advantages_raises_instead_of_recomputing(self):
+        from miles.backends.training_utils import loss as miles_loss
+
+        from rllm.trainer.miles.patch import patch_respect_disable_compute_advantages
+
+        patch_respect_disable_compute_advantages()
+
+        class Args:
+            compute_advantages_and_returns = False
+
+        with pytest.raises(RuntimeError, match="did not reach the train worker"):
+            miles_loss.compute_advantages_and_returns(Args(), {"rewards": [1.0], "tokens": [[1]]})
+
+    def test_the_error_names_the_keys_that_did_arrive(self):
+        from miles.backends.training_utils import loss as miles_loss
+
+        from rllm.trainer.miles.patch import patch_respect_disable_compute_advantages
+
+        patch_respect_disable_compute_advantages()
+
+        class Args:
+            compute_advantages_and_returns = False
+
+        with pytest.raises(RuntimeError) as e:
+            miles_loss.compute_advantages_and_returns(Args(), {"rewards": [1.0]})
+        assert "'rewards'" in str(e.value)

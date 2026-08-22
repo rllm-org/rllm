@@ -150,8 +150,24 @@ def patch_respect_disable_compute_advantages() -> None:
     original = miles_loss.compute_advantages_and_returns
 
     def compute_advantages_and_returns(args, rollout_data):
-        if not getattr(args, "compute_advantages_and_returns", True) and rollout_data.get("advantages") is not None:
-            rollout_data.setdefault("returns", rollout_data["advantages"])
+        disabled = not getattr(args, "compute_advantages_and_returns", True)
+        advantages = rollout_data.get("advantages")
+
+        if disabled and advantages is None:
+            # Falling through here would have Miles recompute advantages from the scalar
+            # rewards and train on those instead of rLLM's -- the run would look healthy
+            # while quietly ignoring the estimator, which is the exact failure this
+            # backend has hit twice. Refuse rather than train on the wrong signal.
+            raise RuntimeError(
+                "rLLM's per-token advantages did not reach the train worker "
+                f"(keys present: {sorted(rollout_data)}). Miles' own advantage computation is "
+                "disabled, so there is nothing correct to train on. This means one of the "
+                "patches in rllm/trainer/miles/patch.py stopped applying -- check "
+                "assert_patch_contracts and that _package_shards still forwards 'advantages'."
+            )
+
+        if disabled:
+            rollout_data.setdefault("returns", advantages)
             return
         return original(args, rollout_data)
 

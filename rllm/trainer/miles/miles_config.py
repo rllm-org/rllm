@@ -189,6 +189,44 @@ def validate_pinned(block: dict[str, Any]) -> None:
         raise ValueError("Set epochs on the rLLM side (rllm.trainer.total_epochs); miles.num_epoch needs Miles' own dataset.")
 
 
+def _apply_rollout_correction(config: DictConfig, block: dict[str, Any]) -> None:
+    """Map rllm.algorithm.rollout_correction onto Miles' TIS flags.
+
+    Async training consumes trajectories generated one or more weight versions ago.
+    Without truncated importance sampling the ratio is taken against a freshly computed
+    pi_old, which ignores that the data came from an older behaviour policy -- the update
+    is biased and the policy can degrade. Every reference async config sets tis_mode.
+
+    rLLM -> Miles:
+      tis_mode "token"  -> --use-tis (Miles' TIS is token-level)
+      tis_cap           -> --tis-clip
+      bypass_mode true  -> --use-rollout-logprobs   (pi_old = pi_rollout)
+    """
+    correction = OmegaConf.select(config, "rllm.algorithm.rollout_correction") or {}
+    tis_mode = correction.get("tis_mode")
+    bypass = correction.get("bypass_mode")
+
+    if tis_mode == "sequence":
+        raise ValueError("rllm.algorithm.rollout_correction.tis_mode=sequence has no equivalent on the miles backend: Miles' --use-tis is token-level. Use tis_mode=token.")
+    if tis_mode == "token":
+        block.setdefault("use_tis", True)
+        cap = correction.get("tis_cap")
+        if cap is not None:
+            block.setdefault("tis_clip", cap)
+    if bypass is True:
+        block.setdefault("use_rollout_logprobs", True)
+
+    staleness = OmegaConf.select(config, "rllm.async_training.staleness_threshold") or 0
+    async_on = bool(OmegaConf.select(config, "rllm.async_training.enable"))
+    if async_on and staleness > 0 and not tis_mode:
+        logger.warning(
+            "Async training with staleness_threshold=%s but no rollout correction: set "
+            "rllm.algorithm.rollout_correction.tis_mode=token (and tis_cap) or the update is "
+            "biased by the policy lag and the run can get worse, not better.",
+            staleness,
+        )
+
+
 def build_block(config: DictConfig, total_steps: int | None = None) -> tuple[dict[str, Any], list[Any]]:
     """Assemble the flag mapping: user's ``miles:`` block + shared keys + pinned."""
     node = config.get("miles", None)
@@ -215,6 +253,8 @@ def build_block(config: DictConfig, total_steps: int | None = None) -> tuple[dic
     if async_cfg.get("enable", False):
         mini_batch = async_cfg.get("mini_batch_size", 1)
         block["rollout_batch_size"] = mini_batch
+
+    _apply_rollout_correction(config, block)
 
     # rLLM owns the schedule. num_rollout is required because --num-epoch asserts
     # Miles' global dataset, which we disable.

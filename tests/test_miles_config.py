@@ -263,3 +263,66 @@ class TestMilesTrainIters:
         # n_samples_per_prompt=1 gave 20 * 1 * 1 // 32 == 0.
         block, _ = build_block(self._cfg(async_enable=True), total_steps=20)
         assert self._train_iters(block, 20) > 0
+
+
+class TestRolloutCorrection:
+    """Async trains on data from older weight versions; without TIS the ratio is taken
+    against a fresh pi_old, the update is biased, and the policy can degrade. This was
+    unmapped, so rllm.algorithm.rollout_correction.* was silently ignored."""
+
+    def _cfg(self, correction=None, async_on=True, staleness=0.5):
+        return OmegaConf.create(
+            {
+                "model": {"name": "m"},
+                "rllm": {
+                    "data": {"train_batch_size": 1},
+                    "rollout": {"n": 8},
+                    "trainer": {"save_freq": 20},
+                    "async_training": {"enable": async_on, "mini_batch_size": 32, "staleness_threshold": staleness},
+                    "algorithm": {"rollout_correction": correction or {}},
+                },
+                "miles": {},
+            }
+        )
+
+    def test_token_tis_enables_miles_tis(self):
+        block, _ = build_block(self._cfg({"tis_mode": "token", "tis_cap": 2.0}))
+        assert block["use_tis"] is True
+        assert block["tis_clip"] == 2.0
+
+    def test_tis_cap_is_forwarded(self):
+        block, _ = build_block(self._cfg({"tis_mode": "token", "tis_cap": 1.5}))
+        assert block["tis_clip"] == 1.5
+
+    def test_no_tis_mode_leaves_the_flags_alone(self):
+        block, _ = build_block(self._cfg({"tis_mode": None}))
+        assert "use_tis" not in block
+
+    def test_bypass_mode_uses_rollout_logprobs(self):
+        block, _ = build_block(self._cfg({"bypass_mode": True}))
+        assert block["use_rollout_logprobs"] is True
+
+    def test_bypass_false_leaves_miles_recomputing_pi_old(self):
+        block, _ = build_block(self._cfg({"bypass_mode": False}))
+        assert "use_rollout_logprobs" not in block
+
+    def test_sequence_tis_is_rejected_not_silently_downgraded(self):
+        with pytest.raises(ValueError, match="token-level"):
+            build_block(self._cfg({"tis_mode": "sequence"}))
+
+    def test_explicit_miles_flag_wins(self):
+        cfg = self._cfg({"tis_mode": "token", "tis_cap": 2.0})
+        cfg.miles = {"tis_clip": 3.0}
+        block, _ = build_block(cfg)
+        assert block["tis_clip"] == 3.0
+
+    def test_stale_async_without_correction_warns(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            build_block(self._cfg({}, staleness=1.0))
+        assert "biased by the policy lag" in caplog.text
+
+    def test_on_policy_async_does_not_warn(self, caplog):
+        build_block(self._cfg({}, staleness=0.0))
+        assert "biased by the policy lag" not in caplog.text
