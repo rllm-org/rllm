@@ -226,3 +226,6 @@ gcp-key.json
 
 # IDE
 .vscode/
+
+# Miles backend venv (see scripts/setup_miles_env.sh)
+miles-venv/

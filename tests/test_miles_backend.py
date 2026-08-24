@@ -483,3 +483,41 @@ class TestNoSilentAdvantageFallback:
         with pytest.raises(RuntimeError) as e:
             miles_loss.compute_advantages_and_returns(Args(), {"rewards": [1.0]})
         assert "'rewards'" in str(e.value)
+
+
+class TestOptimizerMetricsReachRLLM:
+    """Miles logs train/loss, train/grad_norm, train/tis inside the worker and returns
+    None from the FSDP actor, so from rLLM's side the optimizer was invisible. The patch
+    stashes log_train_step's dict and rides it back on the existing per-rank return list.
+    """
+
+    def test_rank0_metrics_are_extracted(self):
+        results = [
+            {"miles_train_metrics": [{"train/loss": 0.5, "train/grad_norm": 1.2, "train/step": 7}]},
+            {"miles_train_metrics": []},
+            {"miles_train_metrics": []},
+            {"miles_train_metrics": []},
+        ]
+        m = MilesBackend._optimizer_metrics(results)
+        assert m == {"train/loss": 0.5, "train/grad_norm": 1.2}, "train/step is a counter, not a measurement"
+
+    def test_several_optimizer_steps_are_averaged(self):
+        results = [{"miles_train_metrics": [{"train/loss": 1.0}, {"train/loss": 2.0}]}]
+        assert MilesBackend._optimizer_metrics(results) == {"train/loss": 1.5}
+
+    def test_non_numeric_values_are_skipped(self):
+        results = [{"miles_train_metrics": [{"train/loss": 0.5, "train/outcome": "NORMAL", "train/ok": True}]}]
+        assert MilesBackend._optimizer_metrics(results) == {"train/loss": 0.5}
+
+    def test_megatron_shape_keeps_its_own_keys_out_of_the_way(self):
+        # The megatron actor returns a dict; the patch adds a key rather than replacing it.
+        results = [{"train_step_outcome": "NORMAL", "miles_train_metrics": [{"train/loss": 0.25}]}]
+        assert MilesBackend._optimizer_metrics(results) == {"train/loss": 0.25}
+
+    def test_unpatched_return_yields_nothing(self):
+        # A Miles version whose actors return None must not raise.
+        assert MilesBackend._optimizer_metrics([None, None]) == {}
+        assert MilesBackend._optimizer_metrics(None) == {}
+
+    def test_scalar_return_is_tolerated(self):
+        assert MilesBackend._optimizer_metrics("unexpected") == {}

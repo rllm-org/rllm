@@ -325,6 +325,37 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
             metrics={"batch/miles_samples": len(samples), "batch/miles_groups": len(grouped)},
         )
 
+    @staticmethod
+    def _optimizer_metrics(results: Any) -> dict:
+        """Pull Miles' per-step optimizer metrics out of the train return value.
+
+        ``RayTrainGroup.train`` gathers one entry per train worker; only rank 0 logs, so
+        exactly one entry normally carries metrics (see
+        ``rllm/trainer/miles/patch.py:patch_capture_train_metrics``). A rollout can contain
+        several optimizer steps, so numeric values are averaged across them; ``train/step``
+        is dropped as it is a counter, not a measurement.
+
+        Returns an empty dict when the patch is not applied, so this stays safe against a
+        Miles version whose actors return something else.
+        """
+        if not isinstance(results, list):
+            results = [results]
+
+        steps: list[dict] = []
+        for entry in results:
+            if isinstance(entry, dict):
+                steps.extend(d for d in entry.get("miles_train_metrics", []) or [] if isinstance(d, dict))
+        if not steps:
+            return {}
+
+        totals: dict[str, list[float]] = {}
+        for step in steps:
+            for key, value in step.items():
+                if key == "train/step" or not isinstance(value, (int, float)) or isinstance(value, bool):
+                    continue
+                totals.setdefault(key, []).append(float(value))
+        return {key: sum(vals) / len(vals) for key, vals in totals.items()}
+
     def _fit_to_dp(self, samples: list, advantages: list[list[float]]) -> tuple[list, list[list[float]], int]:
         """Trim the batch to a multiple of the DP size and return that as the batch size.
 
@@ -400,7 +431,9 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
             return
         rollout_id = trainer_state.global_step
         with simple_timer("update_actor", trainer_state.timing_dict):
-            await self.actor_model.train(rollout_id, {"data_ref": batch.data_ref, "sample_indices": batch.sample_indices})
+            results = await self.actor_model.train(rollout_id, {"data_ref": batch.data_ref, "sample_indices": batch.sample_indices})
+
+        trainer_state.metrics.update(self._optimizer_metrics(results))
 
         from miles.utils.data import remove_rollout_data_refs
 

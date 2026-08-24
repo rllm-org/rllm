@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 _ADVANTAGES_CP_SLICE_PATCHED = False
 _PACKAGE_SHARDS_PATCHED = False
 _RESPECT_DISABLE_ADV_PATCHED = False
+_TRAIN_METRICS_PATCHED = False
+
+# Filled in the *worker* by the patched log_train_step, drained by the patched
+# actor train() so the values ride the return channel back to the driver.
+_TRAIN_METRICS: list[dict] = []
 
 # The key tuple in miles/backends/training_utils/data.py:get_rollout_data that gets
 # CP-sliced per sample. Asserted so a Miles upgrade that renames or reorders these
@@ -178,6 +183,69 @@ def patch_respect_disable_compute_advantages() -> None:
     logger.info("Patched miles compute_advantages_and_returns to respect --disable-compute-advantages-and-returns")
 
 
+def patch_capture_train_metrics() -> None:
+    """Return Miles' optimizer metrics to the driver instead of only logging them.
+
+    ``log_train_step`` builds ``train/loss``, ``train/grad_norm``, ``train/tis``, the
+    learning rates and so on, returns the dict, and ``tracking.log``s it on rank 0 only.
+    Nothing hands it back, so from rLLM's side the optimizer is invisible -- diagnosing
+    the attention bug meant grepping Miles' raw worker log for ``tis_abs``.
+
+    ``RayTrainGroup.train`` already gathers a per-rank return list; on the FSDP path every
+    entry is ``None``. So: stash what ``log_train_step`` produced in the worker, and have
+    the actor's ``train`` drain it into its return value.
+
+    Upstream equivalent: have the actors return the accumulated log dict.
+    """
+    global _TRAIN_METRICS_PATCHED
+    if _TRAIN_METRICS_PATCHED:
+        return
+
+    from miles.backends.training_utils import log_utils
+
+    original_log = log_utils.log_train_step
+
+    def log_train_step(*args, **kwargs):
+        out = original_log(*args, **kwargs)
+        if isinstance(out, dict):
+            _TRAIN_METRICS.append(dict(out))
+        return out
+
+    log_utils.log_train_step = log_train_step
+    _rebind_everywhere("log_train_step", log_train_step)
+
+    for module_path, cls_name in (
+        ("miles.backends.fsdp_utils.actor", "FSDPTrainRayActor"),
+        ("miles.backends.megatron_utils.actor", "MegatronTrainRayActor"),
+    ):
+        try:
+            cls = getattr(importlib.import_module(module_path), cls_name)
+        except Exception:  # the megatron actor needs megatron installed
+            continue
+        if getattr(cls.train, "_rllm_wrapped", False):
+            continue
+        original_train = cls.train
+
+        def train(self, *args, _original=original_train, **kwargs):
+            del _TRAIN_METRICS[:]
+            result = _original(self, *args, **kwargs)
+            captured = [dict(d) for d in _TRAIN_METRICS]
+            del _TRAIN_METRICS[:]
+            # Only widen shapes we understand: None (FSDP) or a dict (megatron, which
+            # carries train_step_outcome and possibly critic values).
+            if result is None:
+                return {"miles_train_metrics": captured}
+            if isinstance(result, dict):
+                return {**result, "miles_train_metrics": captured}
+            return result
+
+        train._rllm_wrapped = True
+        cls.train = train
+
+    _TRAIN_METRICS_PATCHED = True
+    logger.info("Patched miles log_train_step + actor.train to return optimizer metrics")
+
+
 def assert_patch_contracts() -> None:
     """Fail loudly if Miles moved the ground any of these patches stands on.
 
@@ -221,3 +289,4 @@ def apply_all_miles_patches() -> None:
     patch_advantages_cp_slice()
     patch_package_shards_forwards_advantages()
     patch_respect_disable_compute_advantages()
+    patch_capture_train_metrics()
