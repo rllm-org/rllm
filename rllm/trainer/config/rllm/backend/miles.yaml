@@ -73,6 +73,16 @@ miles:
   # tenant; raise it when you have the card to yourself.
   max_tokens_per_gpu: 8192
 
+  # --- rollout-server logging ---------------------------------------------
+  # SGLang is very chatty at its own defaults and drowns rLLM's metrics: one
+  # "Decode batch, ..." line every `decode_log_interval` steps (default 40) per engine,
+  # plus a uvicorn access line per request -- and the AgentFlow path issues one request
+  # per agent turn, so that scales with n_parallel_tasks. Quiet by default; raise either
+  # when actually debugging the rollout servers (e.g. miles.sglang_log_level_http=info).
+  # Note these keep the `sglang_` prefix as attributes on Miles' namespace.
+  sglang_log_level_http: warning
+  sglang_decode_log_interval: 1000
+
   # --- fsdp-only (ignored when train_backend=megatron) --------------------
   # Left unset on purpose: Miles defaults to flash_attention_2, and that default is
   # load-bearing. The FSDP path packs several samples into one row and passes

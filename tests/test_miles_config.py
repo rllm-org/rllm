@@ -368,3 +368,49 @@ class TestAttentionMustHonourPacking:
         with pytest.raises(ValueError) as e:
             validate_attention({"attn_implementation": "sdpa"})
         assert "flash_attention_2" in str(e.value) and "qkv_format=bshd" in str(e.value)
+
+
+class TestRolloutServerLoggingDefaults:
+    """SGLang's own defaults drown rLLM's metrics: a "Decode batch" line every 40 steps
+    per engine plus a uvicorn access line per request -- and on the AgentFlow path that
+    is one request per agent turn. Quiet by default in backend/miles.yaml rather than
+    per-script, but still overridable (hence a yaml default, not a PINNED_FLAG).
+    """
+
+    def _compose(self, extra=()):
+        """Compose the way a run does, so a default that only exists in a hand-built
+        config -- or gets clobbered during composition -- shows up as a failure."""
+        from pathlib import Path
+
+        from hydra import compose, initialize_config_dir
+
+        import rllm.trainer.config as cfg_pkg
+
+        with initialize_config_dir(config_dir=str(Path(cfg_pkg.__file__).parent), version_base=None):
+            return compose(
+                config_name="unified",
+                overrides=[
+                    "rllm/backend=miles",
+                    "model.name=Qwen/Qwen3-1.7B",
+                    "training.group_size=8",
+                    "rllm.data.train_batch_size=16",
+                    "rllm.data.max_prompt_length=512",
+                    "rllm.data.max_response_length=2048",
+                    *extra,
+                ],
+            )
+
+    def test_quiet_by_default(self):
+        cfg = self._compose()
+        assert cfg.miles.sglang_log_level_http == "warning"
+        assert cfg.miles.sglang_decode_log_interval == 1000
+
+    def test_still_overridable(self):
+        cfg = self._compose(["miles.sglang_log_level_http=info", "miles.sglang_decode_log_interval=40"])
+        assert cfg.miles.sglang_log_level_http == "info"
+        assert cfg.miles.sglang_decode_log_interval == 40
+
+    def test_general_sglang_log_level_left_alone(self):
+        """Only the per-request/per-decode floods are silenced; startup diagnostics
+        (model load, memory, cuda graph capture) stay visible."""
+        assert self._compose().miles.get("sglang_log_level") is None
