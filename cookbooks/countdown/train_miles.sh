@@ -65,6 +65,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
     miles.rollout_num_gpus_per_engine=1 \
     miles.global_batch_size=128 \
     miles.max_tokens_per_gpu=8192 \
+    miles.sglang_log_level_http=warning \
+    miles.sglang_decode_log_interval=1000 \
     miles.lr=2e-6 \
     rllm.data.train_batch_size=16 \
     rllm.data.max_prompt_length=512 \

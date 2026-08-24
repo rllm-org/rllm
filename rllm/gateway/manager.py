@@ -435,6 +435,10 @@ class GatewayManager:
             return cmd
         if self.model:
             cmd += ["--model", self.model]
+        # Must cross the process boundary: the subprocess gateway defaults to "vllm",
+        # so omitting this made an SGLang run inject vLLM's return_token_ids, capture no
+        # token IDs at all, and fail only later in Step validation.
+        cmd += ["--worker-flavor", self.worker_flavor]
         if self.cumulative_token_mode:
             cmd.append("--cumulative-token-mode")
             if self.renderer_family != "auto":

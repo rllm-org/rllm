@@ -114,7 +114,10 @@ class TestFlavourInjection:
         SessionRoutingMiddleware(app=None, worker_flavor="sglang")._mutate(p)
         assert p["return_meta_info"] is True
         assert p["return_prompt_token_ids"] is True
-        assert p["skip_special_tokens"] is False
+        # no_stop_trim, matching miles.rollout.session.core; skip_special_tokens was wrong
+        # and would have left special tokens in the agent-visible text.
+        assert p["no_stop_trim"] is False
+        assert "skip_special_tokens" not in p
         assert "return_token_ids" not in p, "SGLang has no such field"
 
     def test_vllm_keeps_return_token_ids(self):

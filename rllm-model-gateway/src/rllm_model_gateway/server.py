@@ -493,6 +493,8 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         data["store_worker"] = args.store
     if getattr(args, "model", None) is not None:
         data["model"] = args.model
+    if getattr(args, "worker_flavor", None) is not None:
+        data["worker_flavor"] = args.worker_flavor
     if getattr(args, "cumulative_token_mode", False):
         data["cumulative_token_mode"] = True
     if getattr(args, "renderer_family", None) is not None:
@@ -530,6 +532,15 @@ def main() -> None:
         type=str,
         default=None,
         help="If set, the gateway rewrites every request body's 'model' field to this value before forwarding.",
+    )
+    parser.add_argument(
+        "--worker-flavor",
+        type=str,
+        default=None,
+        choices=["vllm", "sglang"],
+        help="Inference server family behind this gateway. Decides which per-request fields the "
+        "middleware injects to capture training tokens: vLLM exposes return_token_ids, SGLang "
+        "instead needs return_meta_info. Getting this wrong loses token IDs silently.",
     )
     parser.add_argument(
         "--cumulative-token-mode",

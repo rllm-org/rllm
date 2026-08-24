@@ -144,11 +144,12 @@ class SessionRoutingMiddleware:
                 # SGLang has no return_token_ids. Completion ids ride in
                 # meta_info.output_token_logprobs ([logprob, token_id] pairs), which
                 # return_meta_info attaches to the choice; prompt ids come from
-                # return_prompt_token_ids. skip_special_tokens must stay False so stop
-                # tokens are trimmed from the text while their ids survive.
+                # return_prompt_token_ids. no_stop_trim=False keeps the stop token out of
+                # the assistant text while its id survives in meta_info -- this mirrors
+                # miles.rollout.session.core, which is the reference for these flags.
                 payload["return_meta_info"] = True
                 payload["return_prompt_token_ids"] = True
-                payload["skip_special_tokens"] = False
+                payload["no_stop_trim"] = False
             elif not payload.get("return_token_ids"):
                 payload["return_token_ids"] = True
         # Pin the model the gateway forwards to (overrides whatever the client sets)
