@@ -397,6 +397,16 @@ rLLM at all.
 
 ## 7. Remaining work
 
+**Streaming agents are not yet supported on the gateway path.** SGLang rejects
+`return_meta_info` together with `stream=true` (`serving_chat.py`), and trace capture
+needs `return_meta_info` to get completion token IDs at all. A streaming agent therefore
+fails outright rather than silently losing tokens. The fix is fake streaming in the
+gateway -- strip `stream` before forwarding, synthesize the SSE frames back to the
+client -- which is exactly what `miles.rollout.session.core` does and would also let
+`extract_delta_*` be deleted. Non-streaming agents (including `cookbooks/countdown`) are
+unaffected.
+
+
 Ordered by what would bite a real run first. Everything in §0 is verified.
 
 ### 0.4 Resolved: the train/inference divergence was `attn_implementation`
