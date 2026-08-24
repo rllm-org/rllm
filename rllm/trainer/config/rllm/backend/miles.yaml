@@ -73,6 +73,15 @@ miles:
   # tenant; raise it when you have the card to yourself.
   max_tokens_per_gpu: 8192
 
+  # --- router --------------------------------------------------------------
+  # Must stay true. The Rust sglang_router re-serializes chat requests through its own
+  # struct, dropping the sglang-miles-only return_meta_info / return_prompt_token_ids --
+  # which is where rLLM reads completion token IDs from on the AgentFlow path. logprobs
+  # survives the round-trip, so the loss is silent until Step validation reports
+  # "length mismatch between response_ids and logprobs, got 0, N". Miles' own router
+  # proxies raw bytes, so nothing is dropped; miles_config.py:validate_router enforces it.
+  use_miles_router: true
+
   # --- rollout-server logging ---------------------------------------------
   # SGLang is very chatty at its own defaults and drowns rLLM's metrics: one
   # "Decode batch, ..." line every `decode_log_interval` steps (default 40) per engine,

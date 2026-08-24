@@ -215,6 +215,29 @@ def validate_attention(block: dict[str, Any]) -> None:
     )
 
 
+def validate_router(block: dict[str, Any]) -> None:
+    """Reject the Rust router: it silently drops the fork-only trace-capture fields.
+
+    ``sglang_router`` (0.3.2 measured) deserializes a chat request into its own struct and
+    re-serializes it, so fields it does not know are dropped -- including
+    ``return_meta_info`` and ``return_prompt_token_ids``, the sglang-miles additions that
+    make completion token IDs available. ``logprobs`` survives, because it is a field the
+    router knows. The result is a response with logprobs and no token IDs, which surfaces
+    far downstream as "length mismatch between response_ids and logprobs, got 0, N".
+
+    Miles' own session server never hits this: it proxies raw bytes straight to an engine.
+    ``use_miles_router`` selects that same transparent Python router, so rLLM requires it.
+    """
+    if block.get("use_miles_router") is False:
+        raise ValueError(
+            "miles.use_miles_router=false drops trace-capture fields. rLLM reads completion "
+            "token IDs out of SGLang's meta_info, which needs return_meta_info on the request; "
+            "the Rust sglang_router re-serializes the body through its own struct and drops "
+            "that field, leaving logprobs with no matching token IDs. Leave use_miles_router "
+            "at rLLM's default (true), which selects Miles' transparent proxy."
+        )
+
+
 def _apply_rollout_correction(config: DictConfig, block: dict[str, Any]) -> None:
     """Map rllm.algorithm.rollout_correction onto Miles' TIS flags.
 
@@ -263,6 +286,7 @@ def build_block(config: DictConfig, total_steps: int | None = None) -> tuple[dic
     extra_args = raw.pop("extra_args", None) or []
     validate_pinned(raw)
     validate_attention(raw)
+    validate_router(raw)
 
     block: dict[str, Any] = dict(raw)
     for miles_flag, rllm_path in SHARED_KEYS:

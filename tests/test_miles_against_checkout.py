@@ -117,8 +117,32 @@ class TestFlagSurfaceMatchesMiles:
         assert len(flags) > 200, f"only found {len(flags)} flags; the audit probably failed to parse"
 
         block, _ = _rendered_argv_block()
-        unknown = sorted(k for k, v in block.items() if v is not None and k not in flags)
+        # --sglang-* flags are generated from sglang's ServerArgs dataclass when Miles
+        # builds its parser, so a source scan of Miles cannot see them. They get their
+        # own check below, against ServerArgs itself.
+        unknown = sorted(k for k, v in block.items() if v is not None and k not in flags and not k.startswith("sglang_"))
         assert not unknown, f"flags the bridge emits that Miles does not define: {unknown}"
+
+    def test_emitted_sglang_flags_exist_in_server_args(self):
+        """The --sglang-* passthrough is only as stable as sglang's ServerArgs field names.
+
+        Miles derives these flags by walking that dataclass (backends/sglang_utils/
+        arguments.py), so a renamed field silently becomes an unknown flag.
+        """
+        import dataclasses
+
+        pytest.importorskip("sglang")
+        from sglang.srt.server_args import ServerArgs
+
+        from miles.backends.sglang_utils.arguments import _SKIPPED_SERVER_ARGS
+
+        available = {f.name for f in dataclasses.fields(ServerArgs)} - set(_SKIPPED_SERVER_ARGS)
+        block, _ = _rendered_argv_block()
+        emitted = {k[len("sglang_"):] for k, v in block.items() if v is not None and k.startswith("sglang_")}
+        # Router flags are Miles' own, not ServerArgs-derived.
+        emitted = {k for k in emitted if not k.startswith("router_")}
+        missing = sorted(emitted - available)
+        assert not missing, f"--sglang-* flags the bridge emits that sglang's ServerArgs does not define: {missing}"
 
     def test_assumed_arity_matches_miles(self):
         from rllm.trainer.miles._flag_audit import flag_arity_from_source

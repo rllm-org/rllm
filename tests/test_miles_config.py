@@ -414,3 +414,32 @@ class TestRolloutServerLoggingDefaults:
         """Only the per-request/per-decode floods are silenced; startup diagnostics
         (model load, memory, cuda graph capture) stay visible."""
         assert self._compose().miles.get("sglang_log_level") is None
+
+
+class TestRouterMustBeTransparent:
+    """The Rust sglang_router (0.3.2, measured) re-serializes a chat request through its
+    own struct and drops fields it does not know -- including the sglang-miles-only
+    return_meta_info / return_prompt_token_ids that carry completion token IDs. logprobs
+    survives, so the failure is silent until "length mismatch between response_ids and
+    logprobs, got 0, N". Miles' own router proxies raw bytes.
+    """
+
+    def test_default_is_the_transparent_router(self):
+        from pathlib import Path
+
+        import rllm.trainer.config as cfg_pkg
+
+        cfg = OmegaConf.load(Path(cfg_pkg.__file__).parent / "rllm" / "backend" / "miles.yaml")
+        assert cfg.miles.use_miles_router is True
+
+    def test_disabling_it_is_rejected(self):
+        from rllm.trainer.miles.miles_config import validate_router
+
+        with pytest.raises(ValueError, match="drops trace-capture fields"):
+            validate_router({"use_miles_router": False})
+
+    def test_absent_or_true_is_fine(self):
+        from rllm.trainer.miles.miles_config import validate_router
+
+        validate_router({})
+        validate_router({"use_miles_router": True})

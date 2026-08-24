@@ -79,8 +79,22 @@ class TestValidateConfig:
         if isinstance(e.value, ValueError):
             assert "cannot be overridden" in str(e.value)
 
-    @pytest.mark.skipif(has_miles, reason="miles is importable")
-    def test_missing_miles_explains_how_to_install(self):
+    def test_missing_miles_explains_how_to_install(self, monkeypatch):
+        """Force the absence rather than skipping when miles happens to be importable.
+
+        The old skipif read a module-level `has_miles` computed at import time, but
+        test_miles_against_checkout inserts MILES_ROOT into sys.path while *it* is
+        collected -- so by the time this ran, miles was importable, no ImportError was
+        raised, and the test failed depending only on which files were collected with it.
+        Setting sys.modules["miles"] = None makes `import miles...` raise ImportError,
+        so the test asserts the message in every environment.
+        """
+        import sys
+
+        for name in [n for n in sys.modules if n == "miles" or n.startswith("miles.")]:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        monkeypatch.setitem(sys.modules, "miles", None)
+
         with pytest.raises(ImportError, match="pip install -r requirements.txt"):
             MilesBackend(config=_cfg()).validate_config()
 

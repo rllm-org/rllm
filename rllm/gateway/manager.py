@@ -174,6 +174,22 @@ def _get_routable_ip() -> str:
     return "127.0.0.1"
 
 
+def _quiet_httpx() -> None:
+    """Drop httpx's per-request INFO line in the trainer process.
+
+    httpx logs one line per request. On the AgentFlow path that is one per agent turn
+    across n_parallel_tasks, which buries rLLM's own progress and metrics. The gateway
+    already does this inside its own process; the trainer never did. Set
+    RLLM_LOG_HTTPX=1 to keep them when debugging gateway traffic.
+    """
+    if os.environ.get("RLLM_LOG_HTTPX") == "1":
+        return
+    for name in ("httpx", "httpcore"):
+        logger_ = logging.getLogger(name)
+        if logger_.level in (logging.NOTSET, logging.INFO, logging.DEBUG):
+            logger_.setLevel(logging.WARNING)
+
+
 class GatewayManager:
     """Manages model gateway lifecycle for training.
 
@@ -263,6 +279,7 @@ class GatewayManager:
         For TinkerEngine / FireworksEngine: creates an in-process handler (no sidecar needed).
         """
         engine_cls = type(rollout_engine).__name__
+        _quiet_httpx()
 
         if engine_cls in ("TinkerEngine", "FireworksEngine"):
             if self.num_workers >= 1:
