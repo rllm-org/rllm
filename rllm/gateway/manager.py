@@ -47,7 +47,7 @@ from rllm.env import env_float
 if TYPE_CHECKING:
     from omegaconf import DictConfig
 
-    from rllm.engine.rollout import RolloutEngine, VerlEngine
+    from rllm.engine.rollout import RolloutEngine
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +257,7 @@ class GatewayManager:
     def start(self, rollout_engine: RolloutEngine) -> None:
         """Start the gateway and register inference workers.
 
-        For VerlEngine: registers the existing vLLM server addresses.
+        For VerlEngine / MilesEngine: registers the existing HTTP server addresses.
         For TinkerEngine / FireworksEngine: creates an in-process handler (no sidecar needed).
         """
         engine_cls = type(rollout_engine).__name__
@@ -273,13 +273,13 @@ class GatewayManager:
 
                 self._local_handler = create_tinker_handler(rollout_engine)
                 self._start_thread(local_handler=self._local_handler)
-        elif engine_cls == "VerlEngine":
+        elif engine_cls in ("VerlEngine", "MilesEngine"):
             if self.mode == "process":
                 self._start_process()
             else:
                 self._start_thread()
 
-            worker_urls = self._ensure_verl_engine_workers(rollout_engine)
+            worker_urls = self._http_worker_urls(rollout_engine)
             for url in worker_urls:
                 worker_id = self.client.add_worker(url=url)
                 logger.info("Registered worker %s -> %s", worker_id, url)
@@ -399,8 +399,12 @@ class GatewayManager:
 
     # -- Worker setup --------------------------------------------------------
 
-    def _ensure_verl_engine_workers(self, rollout_engine: VerlEngine) -> list[str]:
-        """Get or create worker URLs for the VerlEngine."""
+    def _http_worker_urls(self, rollout_engine) -> list[str]:
+        """Worker URLs for an engine that fronts its own OpenAI-compatible HTTP servers.
+
+        VerlEngine exposes one address per vLLM worker; MilesEngine exposes its SGLang
+        router, which already load-balances across the engines behind it.
+        """
         addresses = rollout_engine.server_addresses
         return [f"http://{addr}" if not addr.startswith("http") else addr for addr in addresses]
 

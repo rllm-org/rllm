@@ -60,6 +60,11 @@ class MilesEngine(RolloutEngine):
         self.train_sampling_params = self._sampling_from(rollout_cfg.get("train", {}))
         self.val_sampling_params = self._sampling_from(rollout_cfg.get("val", None) or rollout_cfg.get("train", {}))
 
+        # The gateway registers these as inference workers for the AgentFlow path.
+        # SGLang's router is OpenAI-compatible and already load-balances across the
+        # engines behind it, so one address is enough (verl registers one per worker).
+        self.server_addresses = [self.router_url]
+
         self._client = httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_S)
 
     # Sent on every request so no server-side default can leak in. SGLang otherwise
