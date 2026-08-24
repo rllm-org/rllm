@@ -43,6 +43,17 @@ trap 'rm -rf "$TRITON_CACHE_DIR"' EXIT
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
+# NOTE on thinking mode: rllm.disable_thinking is deliberately NOT set here. It only
+# affects rLLM's own ChatTemplateParser, i.e. the SimpleWorkflow / direct-engine path.
+# On the AgentFlow path the *server* applies the chat template, so Qwen3 defaults to
+# thinking ON and responses are long -- hence max_response_length=2048 rather than the
+# 1024 the SimpleWorkflow script uses. Passing disable_thinking here would look like it
+# worked and change nothing.
+#
+# To actually disable it, the agent has to ask the server:
+#   client.chat.completions.create(..., extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+# which is per-agent and not portable across backends, so it is left to the caller.
+
 
 "$PY" -u train.py \
     rllm/backend=miles \
@@ -57,12 +68,11 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
     miles.lr=2e-6 \
     rllm.data.train_batch_size=16 \
     rllm.data.max_prompt_length=512 \
-    rllm.data.max_response_length=1024 \
+    rllm.data.max_response_length=2048 \
     rllm.rollout.n=8 \
     rllm.rollout.n_val=1 \
     rllm.rollout.train.temperature=1.0 \
     rllm.rollout.train.top_p=1.0 \
-    rllm.disable_thinking=true \
     rllm.algorithm.adv_estimator=grpo \
     rllm.workflow.n_parallel_tasks=64 \
     rllm.trainer.logger=['console'] \
