@@ -7,6 +7,30 @@ import httpx
 from rllm_model_gateway.models import TraceRecord, WorkerInfo
 
 
+# Connection tuning shared by both clients.
+#
+# Keepalive stays disabled (max_keepalive_connections=0) so every request opens a fresh
+# TCP connection. That avoids the race where the client and uvicorn both expire an idle
+# connection at ~5s and the next request lands on a half-closed socket (httpx.ReadError).
+#
+# What is bounded here is *connect*. The trace API is called with timeout=600s, and a
+# scalar httpx timeout applies to connect and pool acquisition too -- so a connect that
+# stalls used to hang the rollout for ten minutes with the gateway completely idle, which
+# reads as "the run is stuck on its last few trajectories". A connect to the gateway is
+# local or one hop away, so cap it and let the caller's retry handle a real failure.
+_CONNECT_TIMEOUT_S = 10.0
+_POOL_TIMEOUT_S = 60.0
+
+
+def _limits() -> "httpx.Limits":
+    return httpx.Limits(max_keepalive_connections=0)
+
+
+def _timeout(timeout: float) -> "httpx.Timeout":
+    """Caller's value governs read/write; connect and pool are bounded separately."""
+    return httpx.Timeout(timeout, connect=_CONNECT_TIMEOUT_S, pool=_POOL_TIMEOUT_S)
+
+
 class GatewayClient:
     """Synchronous client for the rllm-model-gateway REST API.
 
@@ -20,13 +44,7 @@ class GatewayClient:
         timeout: float = 30.0,
     ) -> None:
         self.gateway_url = gateway_url.rstrip("/")
-        # max_keepalive_connections=0 disables idle connection reuse so every
-        # request opens a fresh TCP connection. Avoids the keepalive race where
-        # client and uvicorn both expire idle connections at ~5s and the next
-        # request hits a half-closed socket → httpx.ReadError. Per-request
-        # handshake cost is negligible for the control-plane JSON calls this
-        # client makes.
-        self._http = httpx.Client(timeout=timeout, limits=httpx.Limits(max_keepalive_connections=0))
+        self._http = httpx.Client(timeout=_timeout(timeout), limits=_limits())
 
     def close(self) -> None:
         self._http.close()
@@ -164,8 +182,7 @@ class AsyncGatewayClient:
         timeout: float = 30.0,
     ) -> None:
         self.gateway_url = gateway_url.rstrip("/")
-        # See GatewayClient.__init__ for why keepalive is disabled.
-        self._http = httpx.AsyncClient(timeout=timeout, limits=httpx.Limits(max_keepalive_connections=0))
+        self._http = httpx.AsyncClient(timeout=_timeout(timeout), limits=_limits())
 
     async def close(self) -> None:
         await self._http.aclose()
