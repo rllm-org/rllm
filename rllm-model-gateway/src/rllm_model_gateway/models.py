@@ -121,6 +121,12 @@ class GatewayConfig(BaseModel):
     store_worker: str = "memory"
     add_logprobs: bool = True
     add_return_token_ids: bool = True
+    # Which inference server the workers are: decides how trace capture is requested.
+    # "vllm" uses return_token_ids; "sglang" uses return_meta_info +
+    # return_prompt_token_ids, because SGLang has no return_token_ids and carries
+    # completion ids in meta_info.output_token_logprobs instead. Set explicitly --
+    # guessing wrong yields empty response_ids, which looks like a healthy run.
+    worker_flavor: str = "vllm"
     strip_vllm_fields: bool = True
     routing_policy: str | None = None
     health_check_interval: float = 10.0

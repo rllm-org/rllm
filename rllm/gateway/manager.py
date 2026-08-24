@@ -186,6 +186,8 @@ class GatewayManager:
     # off when the upstream isn't vLLM (e.g. OpenAI/Anthropic via LiteLLM).
     add_logprobs: bool = True
     add_return_token_ids: bool = True
+    # Set from the rollout engine in start(); see GatewayConfig.worker_flavor.
+    worker_flavor: str = "vllm"
 
     def __init__(self, config: DictConfig, mode: str = "thread") -> None:
         gw_cfg = config.rllm.get("gateway", {})
@@ -274,6 +276,9 @@ class GatewayManager:
                 self._local_handler = create_tinker_handler(rollout_engine)
                 self._start_thread(local_handler=self._local_handler)
         elif engine_cls in ("VerlEngine", "MilesEngine"):
+            # Must be set before the gateway starts: the middleware reads it when
+            # injecting trace-capture flags on every request.
+            self.worker_flavor = "sglang" if engine_cls == "MilesEngine" else "vllm"
             if self.mode == "process":
                 self._start_process()
             else:
@@ -531,6 +536,7 @@ class GatewayManager:
             model=self.model,
             add_logprobs=self.add_logprobs,
             add_return_token_ids=self.add_return_token_ids,
+            worker_flavor=self.worker_flavor,
             cumulative_token_mode=self.cumulative_token_mode,
             renderer_family=self.renderer_family,
         )

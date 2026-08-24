@@ -20,6 +20,21 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 
 
+def _sglang_output_token_logprobs(response: dict[str, Any]) -> list:
+    """SGLang's ``meta_info.output_token_logprobs``: ``[logprob, token_id, ...]`` per position.
+
+    Attached to the choice when the request set ``return_meta_info`` (which is why the
+    middleware hardcodes it for sglang workers). SGLang has no vLLM-style
+    ``choices[0].token_ids``, so this is the only place completion ids appear.
+    """
+    choices = response.get("choices")
+    if not choices:
+        return []
+    meta = choices[0].get("meta_info") or response.get("meta_info") or {}
+    pairs = meta.get("output_token_logprobs")
+    return pairs if isinstance(pairs, list) else []
+
+
 def extract_prompt_token_ids(response: dict[str, Any]) -> list[int]:
     """Extract ``prompt_token_ids`` from a vLLM response.
 
@@ -40,9 +55,10 @@ def extract_completion_token_ids(response: dict[str, Any]) -> list[int]:
     if not choices:
         return []
     ids = choices[0].get("token_ids")
-    if ids is None:
-        return []
-    return list(ids)
+    if ids is not None:
+        return list(ids)
+    # SGLang: ids live at index 1 of each meta_info.output_token_logprobs entry.
+    return [p[1] for p in _sglang_output_token_logprobs(response) if isinstance(p, (list, tuple)) and len(p) > 1]
 
 
 def extract_logprobs(response: dict[str, Any]) -> list[float]:
@@ -55,6 +71,14 @@ def extract_logprobs(response: dict[str, Any]) -> list[float]:
     choices = response.get("choices")
     if not choices:
         return []
+
+    # Prefer SGLang's meta_info when present: completion ids come from there too, so
+    # taking both from one source keeps them index-aligned. logprobs.content is a
+    # post-processed view (special tokens trimmed) and can differ in length, which would
+    # misalign ids against logprobs without any error.
+    pairs = _sglang_output_token_logprobs(response)
+    if pairs:
+        return [float(p[0]) for p in pairs if isinstance(p, (list, tuple)) and p and p[0] is not None]
 
     lp_obj = choices[0].get("logprobs")
     if lp_obj is None:

@@ -43,12 +43,14 @@ class SessionRoutingMiddleware:
         add_return_token_ids: bool = True,
         sessions: Any | None = None,
         model: str | None = None,
+        worker_flavor: str = "vllm",
     ) -> None:
         self.app = app
         self.add_logprobs = add_logprobs
         self.add_return_token_ids = add_return_token_ids
         self.sessions = sessions  # SessionManager — for per-session sampling params
         self.model = model
+        self.worker_flavor = worker_flavor
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -137,8 +139,18 @@ class SessionRoutingMiddleware:
         # is left alone.
         if self.add_logprobs and not payload.get("logprobs"):
             payload["logprobs"] = True
-        if self.add_return_token_ids and not payload.get("return_token_ids"):
-            payload["return_token_ids"] = True
+        if self.add_return_token_ids:
+            if self.worker_flavor == "sglang":
+                # SGLang has no return_token_ids. Completion ids ride in
+                # meta_info.output_token_logprobs ([logprob, token_id] pairs), which
+                # return_meta_info attaches to the choice; prompt ids come from
+                # return_prompt_token_ids. skip_special_tokens must stay False so stop
+                # tokens are trimmed from the text while their ids survive.
+                payload["return_meta_info"] = True
+                payload["return_prompt_token_ids"] = True
+                payload["skip_special_tokens"] = False
+            elif not payload.get("return_token_ids"):
+                payload["return_token_ids"] = True
         # Pin the model the gateway forwards to (overrides whatever the client sets)
         if self.model:
             payload["model"] = self.model

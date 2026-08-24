@@ -223,6 +223,7 @@ def create_app(
         add_return_token_ids=config.add_return_token_ids,
         sessions=sessions,
         model=config.model,
+        worker_flavor=config.worker_flavor,
     )
 
     # -- Health endpoints --------------------------------------------------
