@@ -23,16 +23,28 @@ needs_checkout = pytest.mark.skipif(
 
 
 def _miles_importable() -> bool:
-    if importlib.util.find_spec("miles") is not None:
-        return True
-    if not (MILES_ROOT / "miles" / "__init__.py").exists():
-        return False
+    """Whether the module these tests actually use can be imported.
+
+    Deliberately not `find_spec("miles") is not None`: any directory named `miles`
+    without an `__init__.py` (a stray venv, a build artifact) satisfies that as a
+    namespace package, so the gate passed and the tests then failed on
+    `No module named 'miles.ray'`. Import the specific module or skip.
+    """
     import sys
 
+    target = "miles.ray.rollout.train_data_conversion"
+    try:
+        importlib.import_module(target)
+        return True
+    except ImportError:
+        pass
+
+    if not (MILES_ROOT / "miles" / "__init__.py").exists():
+        return False
     if str(MILES_ROOT) not in sys.path:
         sys.path.insert(0, str(MILES_ROOT))
     try:
-        importlib.import_module("miles.ray.rollout.train_data_conversion")
+        importlib.import_module(target)
         return True
     except Exception:
         return False
