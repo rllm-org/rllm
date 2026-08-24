@@ -129,9 +129,15 @@ class SessionRoutingMiddleware:
         Keys in the session config overwrite whatever the client sent; keys absent
         from it pass through untouched.
         """
-        if self.add_logprobs and "logprobs" not in payload:
+        # Overwrite a falsy value, do not merely fill an absent key: an agent that sends
+        # `logprobs: false` would otherwise silently destroy its own training data --
+        # trace capture needs per-token logprobs, and the client's original intent is
+        # already recorded in `originally_requested_logprobs` so the proxy can strip them
+        # from the response. A client asking for *more* (completions-style `logprobs: 5`)
+        # is left alone.
+        if self.add_logprobs and not payload.get("logprobs"):
             payload["logprobs"] = True
-        if self.add_return_token_ids and "return_token_ids" not in payload:
+        if self.add_return_token_ids and not payload.get("return_token_ids"):
             payload["return_token_ids"] = True
         # Pin the model the gateway forwards to (overrides whatever the client sets)
         if self.model:
