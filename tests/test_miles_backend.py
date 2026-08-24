@@ -329,6 +329,7 @@ class TestWeightSyncPlacement:
         assert b.actor_model.calls == [7], "async mode should publish exactly once, from on_policy_updated"
 
 
+@needs_miles_data
 class TestAsyncPrerequisites:
     def test_raise_on_error_true_is_rejected_early(self):
         # The trainer asserts this only after full GPU bring-up; catching it in
@@ -486,38 +487,66 @@ class TestNoSilentAdvantageFallback:
 
 
 class TestOptimizerMetricsReachRLLM:
-    """Miles logs train/loss, train/grad_norm, train/tis inside the worker and returns
-    None from the FSDP actor, so from rLLM's side the optimizer was invisible. The patch
-    stashes log_train_step's dict and rides it back on the existing per-rank return list.
-    """
+    """Miles logs train/loss, train/grad_norm, train/tis inside the worker and the FSDP
+    actor returns None, so from rLLM's side the optimizer was invisible. The driver now
+    drains each worker's buffer with __ray_call__."""
 
-    def test_rank0_metrics_are_extracted(self):
-        results = [
-            {"miles_train_metrics": [{"train/loss": 0.5, "train/grad_norm": 1.2, "train/step": 7}]},
-            {"miles_train_metrics": []},
-            {"miles_train_metrics": []},
-            {"miles_train_metrics": []},
-        ]
-        m = MilesBackend._optimizer_metrics(results)
-        assert m == {"train/loss": 0.5, "train/grad_norm": 1.2}, "train/step is a counter, not a measurement"
+    def _backend(self, per_worker, boom=False):
+        b = MilesBackend(config=_cfg())
 
-    def test_several_optimizer_steps_are_averaged(self):
-        results = [{"miles_train_metrics": [{"train/loss": 1.0}, {"train/loss": 2.0}]}]
-        assert MilesBackend._optimizer_metrics(results) == {"train/loss": 1.5}
+        class Handle:
+            def __init__(self, payload):
+                self.payload = payload
 
-    def test_non_numeric_values_are_skipped(self):
-        results = [{"miles_train_metrics": [{"train/loss": 0.5, "train/outcome": "NORMAL", "train/ok": True}]}]
-        assert MilesBackend._optimizer_metrics(results) == {"train/loss": 0.5}
+            class _Call:
+                def __init__(self, payload):
+                    self.payload = payload
 
-    def test_megatron_shape_keeps_its_own_keys_out_of_the_way(self):
-        # The megatron actor returns a dict; the patch adds a key rather than replacing it.
-        results = [{"train_step_outcome": "NORMAL", "miles_train_metrics": [{"train/loss": 0.25}]}]
-        assert MilesBackend._optimizer_metrics(results) == {"train/loss": 0.25}
+                def remote(self, fn):
+                    if isinstance(self.payload, Exception):
+                        raise self.payload
+                    return self.payload
 
-    def test_unpatched_return_yields_nothing(self):
-        # A Miles version whose actors return None must not raise.
-        assert MilesBackend._optimizer_metrics([None, None]) == {}
-        assert MilesBackend._optimizer_metrics(None) == {}
+            @property
+            def __ray_call__(self):
+                return self._Call(self.payload)
 
-    def test_scalar_return_is_tolerated(self):
-        assert MilesBackend._optimizer_metrics("unexpected") == {}
+        b.actor_model = type("G", (), {"_actor_handles": [Handle(p) for p in per_worker]})()
+        return b
+
+    def _patch_ray_get(self, monkeypatch, results):
+        import ray
+
+        monkeypatch.setattr(ray, "get", lambda refs: results)
+
+    def test_rank0_metrics_are_extracted(self, monkeypatch):
+        b = self._backend([None, None])
+        self._patch_ray_get(monkeypatch, [[{"train/loss": 0.5, "train/grad_norm": 1.2, "train/step": 7}], []])
+        assert b._optimizer_metrics() == {"train/loss": 0.5, "train/grad_norm": 1.2}
+
+    def test_several_optimizer_steps_are_averaged(self, monkeypatch):
+        b = self._backend([None])
+        self._patch_ray_get(monkeypatch, [[{"train/loss": 1.0}, {"train/loss": 2.0}]])
+        assert b._optimizer_metrics() == {"train/loss": 1.5}
+
+    def test_non_numeric_values_are_skipped(self, monkeypatch):
+        b = self._backend([None])
+        self._patch_ray_get(monkeypatch, [[{"train/loss": 0.5, "train/outcome": "NORMAL", "train/ok": True}]])
+        assert b._optimizer_metrics() == {"train/loss": 0.5}
+
+    def test_nothing_captured_yields_nothing(self, monkeypatch):
+        b = self._backend([None])
+        self._patch_ray_get(monkeypatch, [[]])
+        assert b._optimizer_metrics() == {}
+
+    def test_no_actor_handles_is_safe(self):
+        b = MilesBackend(config=_cfg())
+        b.actor_model = object()
+        assert b._optimizer_metrics() == {}
+
+    def test_a_failing_drain_never_breaks_the_step(self, monkeypatch):
+        import ray
+
+        b = self._backend([None])
+        monkeypatch.setattr(ray, "get", lambda refs: (_ for _ in ()).throw(RuntimeError("actor died")))
+        assert b._optimizer_metrics() == {}

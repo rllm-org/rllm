@@ -325,33 +325,40 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
             metrics={"batch/miles_samples": len(samples), "batch/miles_groups": len(grouped)},
         )
 
-    @staticmethod
-    def _optimizer_metrics(results: Any) -> dict:
-        """Pull Miles' per-step optimizer metrics out of the train return value.
+    def _optimizer_metrics(self) -> dict:
+        """Pull Miles' per-step optimizer metrics off the train workers.
 
-        ``RayTrainGroup.train`` gathers one entry per train worker; only rank 0 logs, so
-        exactly one entry normally carries metrics (see
-        ``rllm/trainer/miles/patch.py:patch_capture_train_metrics``). A rollout can contain
-        several optimizer steps, so numeric values are averaged across them; ``train/step``
-        is dropped as it is a counter, not a measurement.
+        The actors return ``None`` on the FSDP path, so there is nothing to read from
+        ``train()``. Instead each worker buffers what ``log_train_step`` produced (see
+        ``rllm/trainer/miles/patch.py``) and the driver drains it with ``__ray_call__`` --
+        no dependence on the actor class having been patched in the worker.
 
-        Returns an empty dict when the patch is not applied, so this stays safe against a
-        Miles version whose actors return something else.
+        Only rank 0 logs, so normally one worker has entries. A rollout can contain
+        several optimizer steps, so numeric values are averaged; ``train/step`` is dropped
+        as a counter rather than a measurement. Returns ``{}`` on any failure -- missing
+        metrics must never take down a training step.
         """
-        if not isinstance(results, list):
-            results = [results]
+        import ray
 
-        steps: list[dict] = []
-        for entry in results:
-            if isinstance(entry, dict):
-                steps.extend(d for d in entry.get("miles_train_metrics", []) or [] if isinstance(d, dict))
+        from rllm.trainer.miles.patch import drain_train_metrics
+
+        handles = getattr(self.actor_model, "_actor_handles", None)
+        if not handles:
+            return {}
+        try:
+            per_worker = ray.get([h.__ray_call__.remote(lambda _self: drain_train_metrics()) for h in handles])
+        except Exception:
+            logger.warning("Could not read Miles' optimizer metrics off the train workers", exc_info=True)
+            return {}
+
+        steps = [d for worker in per_worker if worker for d in worker if isinstance(d, dict)]
         if not steps:
             return {}
 
         totals: dict[str, list[float]] = {}
         for step in steps:
             for key, value in step.items():
-                if key == "train/step" or not isinstance(value, (int, float)) or isinstance(value, bool):
+                if key == "train/step" or isinstance(value, bool) or not isinstance(value, (int, float)):
                     continue
                 totals.setdefault(key, []).append(float(value))
         return {key: sum(vals) / len(vals) for key, vals in totals.items()}
@@ -431,9 +438,9 @@ class MilesBackend(BackendProtocol[Iterable, MilesBatch]):
             return
         rollout_id = trainer_state.global_step
         with simple_timer("update_actor", trainer_state.timing_dict):
-            results = await self.actor_model.train(rollout_id, {"data_ref": batch.data_ref, "sample_indices": batch.sample_indices})
+            await self.actor_model.train(rollout_id, {"data_ref": batch.data_ref, "sample_indices": batch.sample_indices})
 
-        trainer_state.metrics.update(self._optimizer_metrics(results))
+        trainer_state.metrics.update(self._optimizer_metrics())
 
         from miles.utils.data import remove_rollout_data_refs
 

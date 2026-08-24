@@ -183,17 +183,30 @@ def patch_respect_disable_compute_advantages() -> None:
     logger.info("Patched miles compute_advantages_and_returns to respect --disable-compute-advantages-and-returns")
 
 
+def drain_train_metrics() -> list[dict]:
+    """Return and clear this process's captured optimizer metrics.
+
+    Called on the train workers through ``actor.__ray_call__``, so the driver never has
+    to depend on the actor class being patched.
+    """
+    captured = [dict(d) for d in _TRAIN_METRICS]
+    del _TRAIN_METRICS[:]
+    return captured
+
+
 def patch_capture_train_metrics() -> None:
-    """Return Miles' optimizer metrics to the driver instead of only logging them.
+    """Make Miles' optimizer metrics readable from the driver.
 
     ``log_train_step`` builds ``train/loss``, ``train/grad_norm``, ``train/tis``, the
     learning rates and so on, returns the dict, and ``tracking.log``s it on rank 0 only.
     Nothing hands it back, so from rLLM's side the optimizer is invisible -- diagnosing
-    the attention bug meant grepping Miles' raw worker log for ``tis_abs``.
+    the attention bug meant grepping a worker log for ``tis_abs``.
 
-    ``RayTrainGroup.train`` already gathers a per-rank return list; on the FSDP path every
-    entry is ``None``. So: stash what ``log_train_step`` produced in the worker, and have
-    the actor's ``train`` drain it into its return value.
+    This only rebinds a module attribute (both callers import ``log_train_step`` by
+    value, so the holders are repointed too). It deliberately does *not* wrap the actor's
+    ``train``: that would mean patching a Ray actor class in the worker and depending on
+    patch-vs-import ordering. The driver instead pulls the buffer with ``__ray_call__``,
+    the same escape hatch used for ``train_parallel_config``.
 
     Upstream equivalent: have the actors return the accumulated log dict.
     """
@@ -203,47 +216,24 @@ def patch_capture_train_metrics() -> None:
 
     from miles.backends.training_utils import log_utils
 
-    original_log = log_utils.log_train_step
+    original = log_utils.log_train_step
 
     def log_train_step(*args, **kwargs):
-        out = original_log(*args, **kwargs)
+        out = original(*args, **kwargs)
         if isinstance(out, dict):
             _TRAIN_METRICS.append(dict(out))
         return out
 
     log_utils.log_train_step = log_train_step
     _rebind_everywhere("log_train_step", log_train_step)
-
-    for module_path, cls_name in (
-        ("miles.backends.fsdp_utils.actor", "FSDPTrainRayActor"),
-        ("miles.backends.megatron_utils.actor", "MegatronTrainRayActor"),
-    ):
-        try:
-            cls = getattr(importlib.import_module(module_path), cls_name)
-        except Exception:  # the megatron actor needs megatron installed
-            continue
-        if getattr(cls.train, "_rllm_wrapped", False):
-            continue
-        original_train = cls.train
-
-        def train(self, *args, _original=original_train, **kwargs):
-            del _TRAIN_METRICS[:]
-            result = _original(self, *args, **kwargs)
-            captured = [dict(d) for d in _TRAIN_METRICS]
-            del _TRAIN_METRICS[:]
-            # Only widen shapes we understand: None (FSDP) or a dict (megatron, which
-            # carries train_step_outcome and possibly critic values).
-            if result is None:
-                return {"miles_train_metrics": captured}
-            if isinstance(result, dict):
-                return {**result, "miles_train_metrics": captured}
-            return result
-
-        train._rllm_wrapped = True
-        cls.train = train
+    # megatron calls it from model.py, not actor.py
+    try:
+        importlib.import_module("miles.backends.megatron_utils.model").log_train_step = log_train_step
+    except Exception:
+        pass
 
     _TRAIN_METRICS_PATCHED = True
-    logger.info("Patched miles log_train_step + actor.train to return optimizer metrics")
+    logger.info("Patched miles log_train_step to capture optimizer metrics")
 
 
 def assert_patch_contracts() -> None:
