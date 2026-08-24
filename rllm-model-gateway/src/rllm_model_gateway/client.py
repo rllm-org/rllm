@@ -13,12 +13,25 @@ from rllm_model_gateway.models import TraceRecord, WorkerInfo
 # TCP connection. That avoids the race where the client and uvicorn both expire an idle
 # connection at ~5s and the next request lands on a half-closed socket (httpx.ReadError).
 #
-# What is bounded here is *connect*. The trace API is called with timeout=600s, and a
-# scalar httpx timeout applies to connect and pool acquisition too -- so a connect that
-# stalls used to hang the rollout for ten minutes with the gateway completely idle, which
-# reads as "the run is stuck on its last few trajectories". A connect to the gateway is
-# local or one hop away, so cap it and let the caller's retry handle a real failure.
-_CONNECT_TIMEOUT_S = 10.0
+# What is bounded here is *connect*. httpx's four phases are independent, and a scalar
+# timeout sets all of them: the trace API passes 600s, so a stalled connect hung the
+# rollout for ten minutes with the gateway completely idle -- which reads as "the run is
+# stuck on its last few trajectories" rather than as a connection problem.
+#
+# Only connect is capped. `read` keeps the caller's full budget, so a slow *response* is
+# unaffected; and generations never come through here anyway -- they use Proxy's own
+# client, which deliberately runs with no timeout at all.
+#
+# 30s, not something tighter: a connect to the gateway is same-node, so under a
+# millisecond, and the pathological case stalled indefinitely -- any finite bound
+# separates them. The cost of being wrong is real, because a ConnectTimeout propagates
+# out of aget_traces and makes process_task_with_retry re-run the whole rollout
+# (generation included), up to retry_limit; with the default raise_on_error=True a
+# persistent failure then takes the run down. So leave headroom for a transient stall and
+# still turn a 30-minute hang into a ~90s diagnosable failure.
+_CONNECT_TIMEOUT_S = 30.0
+# Inert as things stand: _limits() leaves max_connections unbounded, so httpx never waits
+# for a pool slot. Kept as a guard in case that cap is ever introduced.
 _POOL_TIMEOUT_S = 60.0
 
 
@@ -163,7 +176,11 @@ class GatewayClient:
     # -- Lifecycle ---------------------------------------------------------
 
     def flush(self, timeout: float = 30.0) -> bool:
-        resp = self._http.post(f"{self.gateway_url}/admin/flush", timeout=timeout)
+        # _timeout(), not the bare float: a per-request *scalar* replaces the client
+        # default outright, so passing `timeout` here would restore connect=timeout and
+        # undo the cap set above. flush is on the per-rollout path, so that matters:
+        # aget_traces calls it before reading traces, once per rollout.
+        resp = self._http.post(f"{self.gateway_url}/admin/flush", timeout=_timeout(timeout))
         resp.raise_for_status()
         return resp.json().get("status") == "flushed"
 
@@ -309,7 +326,8 @@ class AsyncGatewayClient:
     # -- Lifecycle ---------------------------------------------------------
 
     async def flush(self, timeout: float = 30.0) -> bool:
-        resp = await self._http.post(f"{self.gateway_url}/admin/flush", timeout=timeout)
+        # See GatewayClient.flush: a scalar here would undo the connect bound.
+        resp = await self._http.post(f"{self.gateway_url}/admin/flush", timeout=_timeout(timeout))
         resp.raise_for_status()
         return resp.json().get("status") == "flushed"
 
