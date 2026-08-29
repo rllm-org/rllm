@@ -348,7 +348,9 @@ def test_modal_build_reuses_or_rebuilds(monkeypatch, ref_alive, force, expected)
             object_id = "im-new"
 
         class _SB:
-            _sandbox = type("S", (), {"snapshot_filesystem": staticmethod(lambda: _Img())})()
+            # Takes the explicit capture timeout the backend passes: modal's own
+            # default is 55s, which no multi-GB image can meet.
+            _sandbox = type("S", (), {"snapshot_filesystem": staticmethod(lambda timeout=None: _Img())})()
 
             def close(self):
                 pass
