@@ -1,6 +1,33 @@
 {
   "version": 1,
   "datasets": {
+    "exploitgym": {
+      "description": "ExploitGym v1.0: 869 real-world exploitation tasks (502 userspace / 181 V8 / 186 kernel), official cybergym harness with host-side flag verification",
+      "source": "sunblaze-ucb/exploitgym",
+      "builder": "rllm.data.exploitgym_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "public"
+      ],
+      "eval_split": "public",
+      "default_agent": "exploitgym",
+      "reward_fn": "exploitgym_flag"
+    },
+    "exploitgym-sample": {
+      "description": "ExploitGym 20-task smoke subset (data/task_ids/sample.txt), official cybergym harness",
+      "source": "sunblaze-ucb/exploitgym",
+      "builder": "rllm.data.exploitgym_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "public"
+      ],
+      "eval_split": "public",
+      "default_agent": "exploitgym",
+      "reward_fn": "exploitgym_flag",
+      "builder_kwargs": {
+        "tasks_file": "sample"
+      }
+    },
     "claw_eval": {
       "description": "Claw-Eval general split: 161 personal-assistant agent tasks (sandbox; LLM-judge graded)",
       "source": "claw-eval/Claw-Eval",
@@ -109,7 +136,9 @@
       "description": "DeepScaleR-Preview: ~40K competition math problems (AIME/AMC/Omni-MATH/STILL)",
       "source": "agentica-org/DeepScaleR-Preview-Dataset",
       "category": "math",
-      "splits": ["train"],
+      "splits": [
+        "train"
+      ],
       "default_agent": "react",
       "reward_fn": "math_reward_fn",
       "eval_split": "train",
@@ -403,7 +432,7 @@
       "instruction_field": "question"
     },
     "hle": {
-      "description": "HLE: Humanity's Last Exam - expert-level questions across dozens of subjects (2,500 questions, gated — requires HF_TOKEN)",
+      "description": "HLE: Humanity's Last Exam - expert-level questions across dozens of subjects (2,500 questions, gated \u2014 requires HF_TOKEN)",
       "source": "cais/hle",
       "category": "qa",
       "splits": [
@@ -734,7 +763,7 @@
       "instruction_field": "question"
     },
     "hle_search": {
-      "description": "HLE + Search: Humanity's Last Exam with web search tools (gated — requires HF_TOKEN)",
+      "description": "HLE + Search: Humanity's Last Exam with web search tools (gated \u2014 requires HF_TOKEN)",
       "source": "cais/hle",
       "category": "search",
       "splits": [

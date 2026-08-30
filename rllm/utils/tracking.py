@@ -602,7 +602,18 @@ class UILogger:
                 "correct": result.correct,
                 "errors": result.errors,
                 "signal_averages": result.signal_averages,
-                "items": [{"idx": item.idx, "reward": item.reward, "is_correct": item.is_correct, "error": item.error, "signals": item.signals} for item in result.items],
+                "items": [
+                    {
+                        "idx": item.idx,
+                        "attempt": item.attempt,
+                        "task_id": item.task_id,
+                        "reward": item.reward,
+                        "is_correct": item.is_correct,
+                        "error": item.error,
+                        "signals": item.signals,
+                    }
+                    for item in result.items
+                ],
             }
             payload_json = json.loads(json.dumps(payload, default=self._json_serializer))
             response = self.client.post("/api/eval-results", json=payload_json)
