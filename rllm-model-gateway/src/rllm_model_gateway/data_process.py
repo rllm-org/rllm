@@ -179,6 +179,33 @@ def strip_vllm_fields(response: dict[str, Any]) -> dict[str, Any]:
 # ------------------------------------------------------------------
 
 
+# vLLM raises VLLMValidationError for an over-long prompt and FastAPI renders it
+# as an OpenAI-style 400. There is no machine-readable code on that body -- the
+# only stable discriminator is the message text every OpenAI-compatible server
+# uses -- so match on it and fall back to a generic kind.
+_CONTEXT_OVERFLOW_MARKERS = ("maximum context length", "reduce the length of the input prompt")
+
+
+def classify_upstream_error(status_code: int, response_body: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Structured marker for a non-2xx upstream reply, or None when it succeeded.
+
+    Goes into the trace's ``metadata`` so the training engine can tell a prompt
+    that outgrew the context window from any other upstream failure. Without it
+    both arrive as a trace with no completion tokens, get dropped as malformed,
+    and the episode is scored as if the policy simply failed.
+    """
+    if status_code < 400:
+        return None
+    err = (response_body or {}).get("error")
+    message = ""
+    if isinstance(err, dict):
+        message = str(err.get("message") or "")
+    elif isinstance(err, str):
+        message = err
+    kind = "context_length_exceeded" if any(m in message.lower() for m in _CONTEXT_OVERFLOW_MARKERS) else "upstream_error"
+    return {"status": status_code, "kind": kind, "message": message[:500]}
+
+
 def build_trace_record(
     session_id: str,
     request_body: dict[str, Any],

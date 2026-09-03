@@ -18,6 +18,7 @@ from starlette.responses import Response, StreamingResponse
 
 from rllm_model_gateway.data_process import (
     build_trace_record,
+    classify_upstream_error,
     build_trace_record_from_chunks,
     extract_completion_token_ids,
     extract_prompt_token_ids,
@@ -88,6 +89,19 @@ def _tool_specs(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | No
             }
         )
     return specs or None
+
+
+
+def _upstream_error_metadata(status_code: int, response_body: dict | None) -> dict | None:
+    """Trace metadata carrying a non-2xx upstream reply, or None on success.
+
+    A 400 from vLLM still produces a trace -- one with no completion tokens,
+    because the error body carries no ``choices``. The engine drops such a trace
+    as malformed, so without this marker the reason the turn failed is lost and
+    the episode is scored as an ordinary policy failure.
+    """
+    marker = classify_upstream_error(status_code, response_body)
+    return {"upstream_error": marker} if marker else None
 
 
 class ReverseProxy:
@@ -253,7 +267,14 @@ class ReverseProxy:
 
         # Persist trace
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version)
+            trace = build_trace_record(
+                session_id,
+                request_body,
+                response_body,
+                latency_ms,
+                metadata=_upstream_error_metadata(status_code, response_body),
+                weight_version=request.state.weight_version,
+            )
             await self._persist(trace)
 
             # Ingest first turn into accumulator for cumulative token mode
@@ -445,7 +466,14 @@ class ReverseProxy:
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version)
+            trace = build_trace_record(
+                session_id,
+                request_body,
+                response_body,
+                latency_ms,
+                metadata=_upstream_error_metadata(status_code, response_body),
+                weight_version=request.state.weight_version,
+            )
             await self._persist(trace)
 
         sanitized = response_body
@@ -841,7 +869,14 @@ class ReverseProxy:
 
         # Persist trace from the full response
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=weight_version)
+            trace = build_trace_record(
+                session_id,
+                request_body,
+                response_body,
+                latency_ms,
+                metadata=_upstream_error_metadata(resp.status_code, response_body),
+                weight_version=weight_version,
+            )
             await self._persist(trace)
 
         needs_strip_vllm = self.strip_vllm
