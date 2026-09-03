@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 
 from rllm.eval.types import EvalOutput, Signal
-from rllm.sandbox.protocol import Sandbox
+from rllm.sandbox.protocol import Sandbox, SandboxExecTimeout
 from rllm.types import Episode, Task
 
 logger = logging.getLogger(__name__)
@@ -87,12 +87,19 @@ class ShellScriptEvaluator:
         # and silently collect zero tests when forced into ``/workspace``.
         workdir = task.metadata.get("workdir")
         cd_prefix = f"cd {workdir} && " if workdir else ""
+        verifier_failure: str | None = None
         try:
             self.sandbox.exec(
                 f"chmod +x /tests/{script_name} && {cd_prefix}/tests/{script_name}",
                 timeout=self.verifier_timeout,
                 user=v_user,
             )
+        except SandboxExecTimeout as e:
+            # A verifier that ran out of clock did not grade anything. Scoring
+            # that 0 trains the policy as if it had failed the task, so mark it
+            # and let compact_filtering drop the episode instead.
+            logger.warning("Verifier timed out for %s: %s", task.id, e)
+            verifier_failure = "timeout"
         except Exception as e:
             # Verifier exit != 0 is the *expected* outcome when an agent
             # didn't solve the task; the reward (read from reward.txt
@@ -104,7 +111,18 @@ class ShellScriptEvaluator:
         reward_paths = list(_REWARD_PATHS)
         if self.reward_file_override:
             reward_paths.insert(0, self.reward_file_override)
-        return _read_reward_from_sandbox(self.sandbox, reward_paths, user=v_user)
+        out = _read_reward_from_sandbox(self.sandbox, reward_paths, user=v_user)
+
+        # A missing reward file means the verifier never got far enough to
+        # grade -- distinct from a verifier that graded and wrote 0. Both
+        # arrive here as reward 0.0, so the difference has to be carried
+        # explicitly; ``termination_reason`` is read by the engine
+        # (_evaluator_termination_reason) before it defaults to ENV_DONE.
+        if verifier_failure is None and out.metadata.get("error") == "no reward file found":
+            verifier_failure = "error"
+        if verifier_failure is not None:
+            out.metadata["termination_reason"] = verifier_failure
+        return out
 
 
 # ---------------------------------------------------------------------------
