@@ -179,11 +179,26 @@ def strip_vllm_fields(response: dict[str, Any]) -> dict[str, Any]:
 # ------------------------------------------------------------------
 
 
-# vLLM raises VLLMValidationError for an over-long prompt and FastAPI renders it
-# as an OpenAI-style 400. There is no machine-readable code on that body -- the
-# only stable discriminator is the message text every OpenAI-compatible server
-# uses -- so match on it and fall back to a generic kind.
-_CONTEXT_OVERFLOW_MARKERS = ("maximum context length", "reduce the length of the input prompt")
+# vLLM rejects an over-long prompt with a 400 whose body carries no
+# machine-readable code -- ErrorInfo is (message, type, param, code) and `code`
+# is just the HTTP status -- so the message text is the only discriminator.
+# Matched against the strings the pinned vLLM 0.22.1 actually raises, from both
+# paths that can reject a request:
+#   renderers/params.py:428  "This model's maximum context length is N tokens.
+#                             However, you requested ... Please reduce the length
+#                             of the input prompt or the number of requested
+#                             output tokens."
+#   v1/engine/input_processor.py:410  "The prompt (length N) is longer than the
+#                             maximum model length of M."
+# The last two entries cover wordings other OpenAI-compatible servers and older
+# vLLM releases use; they cost nothing and stop a version bump from silently
+# reclassifying a context overflow as a generic failure.
+_CONTEXT_OVERFLOW_MARKERS = (
+    "maximum context length",
+    "reduce the length of the input prompt",
+    "maximum model length",
+    "context length is only",
+)
 
 
 def classify_upstream_error(status_code: int, response_body: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -196,12 +211,20 @@ def classify_upstream_error(status_code: int, response_body: dict[str, Any] | No
     """
     if status_code < 400:
         return None
-    err = (response_body or {}).get("error")
+    body = response_body or {}
+    err = body.get("error")
     message = ""
     if isinstance(err, dict):
         message = str(err.get("message") or "")
     elif isinstance(err, str):
         message = err
+    if not message:
+        # vLLM 0.22.1 wraps the message ({"error": {"message": ...}}), but older
+        # releases and some other OpenAI-compatible servers put it at the top
+        # level ({"object": "error", "message": ..., "code": 400}). Without this
+        # fallback those bodies parse to an empty message and every failure --
+        # context overflow included -- classifies as a generic upstream error.
+        message = str(body.get("message") or "")
     kind = "context_length_exceeded" if any(m in message.lower() for m in _CONTEXT_OVERFLOW_MARKERS) else "upstream_error"
     return {"status": status_code, "kind": kind, "message": message[:500]}
 

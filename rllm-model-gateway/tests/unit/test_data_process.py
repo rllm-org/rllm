@@ -3,6 +3,7 @@
 from rllm_model_gateway.data_process import (
     build_trace_record,
     build_trace_record_from_chunks,
+    classify_upstream_error,
     extract_completion_token_ids,
     extract_delta_logprobs,
     extract_delta_token_ids,
@@ -232,3 +233,66 @@ class TestBuildTraceRecord:
         assert trace.response_message["content"] == "Hi there"
         assert trace.finish_reason == "stop"
         assert trace.token_counts == {"prompt": 3, "completion": 2}
+
+
+class TestClassifyUpstreamError:
+    """A 400 must be distinguishable from a policy that simply failed.
+
+    The message text is the only discriminator vLLM offers -- its ErrorInfo is
+    (message, type, param, code) and `code` is the HTTP status -- so these pin
+    the exact strings the pinned 0.22.1 raises.
+    """
+
+    # vllm/renderers/params.py:428, verbatim shape (this is the one observed
+    # ending a real training episode at turn 72 of 100).
+    VLLM_0_22_CONTEXT = {
+        "error": {
+            "message": (
+                "This model's maximum context length is 131072 tokens. However, you requested "
+                "4096 output tokens and your prompt contains 127075 input tokens, for a total of "
+                "131171 tokens. Please reduce the length of the input prompt or the number of "
+                "requested output tokens."
+            ),
+            "type": "BadRequestError",
+            "param": "input_tokens",
+            "code": 400,
+        }
+    }
+    # vllm/v1/engine/input_processor.py:410 -- the other path that can reject a
+    # request, and it says "model length", not "context length".
+    VLLM_INPUT_PROCESSOR = {
+        "error": {
+            "message": "The prompt (length 200000) is longer than the maximum model length of 131072.",
+            "type": "BadRequestError",
+            "code": 400,
+        }
+    }
+
+    def test_success_is_not_an_error(self):
+        assert classify_upstream_error(200, {"choices": [{}]}) is None
+        assert classify_upstream_error(204, None) is None
+
+    def test_vllm_context_overflow(self):
+        marker = classify_upstream_error(400, self.VLLM_0_22_CONTEXT)
+        assert marker["kind"] == "context_length_exceeded"
+        assert marker["status"] == 400
+
+    def test_vllm_input_processor_wording(self):
+        assert classify_upstream_error(400, self.VLLM_INPUT_PROCESSOR)["kind"] == "context_length_exceeded"
+
+    def test_flat_legacy_body(self):
+        """Older vLLM and some OpenAI-compatible servers put message at the top level."""
+        body = {"object": "error", "message": "This model's maximum context length is 32768 tokens.", "code": 400}
+        assert classify_upstream_error(400, body)["kind"] == "context_length_exceeded"
+
+    def test_string_error_body(self):
+        assert classify_upstream_error(400, {"error": "maximum context length exceeded"})["kind"] == "context_length_exceeded"
+
+    def test_other_failures_are_generic(self):
+        assert classify_upstream_error(400, {"error": {"message": '"auto" tool choice requires --enable-auto-tool-choice'}})["kind"] == "upstream_error"
+        assert classify_upstream_error(500, {})["kind"] == "upstream_error"
+        assert classify_upstream_error(503, None)["kind"] == "upstream_error"
+
+    def test_message_is_truncated(self):
+        marker = classify_upstream_error(400, {"error": {"message": "x" * 2000}})
+        assert len(marker["message"]) == 500

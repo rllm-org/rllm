@@ -109,7 +109,7 @@ _UPSTREAM_KIND_TO_REASON = {
 }
 
 
-def _upstream_termination_reason(traces: list[TraceRecord]) -> "TerminationReason | None":
+def _upstream_termination_reason(traces: list[TraceRecord]) -> TerminationReason | None:
     """Reason carried by the dropped trailing traces, latest marker winning."""
     for trace in reversed(traces):
         marker = (getattr(trace, "metadata", None) or {}).get("upstream_error")
@@ -129,7 +129,7 @@ _EVAL_REASON_KEYS = {
 }
 
 
-def _evaluator_termination_reason(eval_output) -> "TerminationReason | None":
+def _evaluator_termination_reason(eval_output) -> TerminationReason | None:
     """Reason an evaluator reported for its own failure, if any."""
     raw = (getattr(eval_output, "metadata", None) or {}).get("termination_reason")
     return _EVAL_REASON_KEYS.get(str(raw)) if raw else None
@@ -763,7 +763,7 @@ class AgentFlowEngine:
             enriched.termination_reason = TerminationReason.ENV_DONE
         return enriched
 
-    def _turn_budget_termination_reason(self, n_turns: int) -> "TerminationReason | None":
+    def _turn_budget_termination_reason(self, n_turns: int) -> TerminationReason | None:
         """MAX_TURNS_EXCEEDED when the agent used its whole turn budget.
 
         The CLI harnesses return ``None`` from ``run()`` and let the engine build

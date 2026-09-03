@@ -18,8 +18,8 @@ from starlette.responses import Response, StreamingResponse
 
 from rllm_model_gateway.data_process import (
     build_trace_record,
-    classify_upstream_error,
     build_trace_record_from_chunks,
+    classify_upstream_error,
     extract_completion_token_ids,
     extract_prompt_token_ids,
     strip_vllm_fields,
@@ -698,7 +698,18 @@ class ReverseProxy:
                     await retry_client.aclose()
                 self.router.release(worker.url)
 
-                # Ingest accumulated token data
+                # Ingest accumulated token data.
+                #
+                # KNOWN GAP: a non-2xx upstream returns a JSON error body rather
+                # than SSE, so ``chunks`` stays empty and no trace is written at
+                # all -- there is nothing to hang an upstream_error marker on,
+                # and the engine sees one fewer trace instead of a reason. The
+                # recipe's path does not come through here (cumulative token
+                # mode with tools buffers into a non-streaming upstream call),
+                # so this is left alone rather than fixed blind: recovering the
+                # message means capturing the non-SSE body from the yield loop
+                # below, and synthesizing a trace where there was none shifts
+                # trace/step alignment in enrich_episode_with_traces.
                 if chunks:
                     latency_ms = (time.perf_counter() - t0) * 1000
                     trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version)
@@ -826,6 +837,9 @@ class ReverseProxy:
                 # NOTE: We use create_task instead of await because this
                 # finally block may run during GeneratorExit, where await
                 # on real async I/O (e.g. aiosqlite) is not reliable.
+                # Same KNOWN GAP as the streaming handler above: a non-2xx
+                # upstream leaves ``chunks`` empty, so no trace and no
+                # upstream_error marker.
                 if session_id and chunks:
                     trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version)
                     task = asyncio.create_task(
@@ -874,7 +888,10 @@ class ReverseProxy:
                 request_body,
                 response_body,
                 latency_ms,
-                metadata=_upstream_error_metadata(resp.status_code, response_body),
+                # No upstream request here -- ``local_handler`` produced the
+                # body in-process -- so there is no HTTP status to classify.
+                # Passing 200 keeps the marker absent, which is correct.
+                metadata=_upstream_error_metadata(200, response_body),
                 weight_version=weight_version,
             )
             await self._persist(trace)
