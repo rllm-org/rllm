@@ -100,6 +100,41 @@ class TaskHooks(Protocol):
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext: ...
 
 
+
+# Gateway marker -> TerminationReason. ``upstream_error.kind`` is set by
+# rllm_model_gateway.data_process.classify_upstream_error.
+_UPSTREAM_KIND_TO_REASON = {
+    "context_length_exceeded": TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,
+    "upstream_error": TerminationReason.ERROR,
+}
+
+
+def _upstream_termination_reason(traces: list[TraceRecord]) -> "TerminationReason | None":
+    """Reason carried by the dropped trailing traces, latest marker winning."""
+    for trace in reversed(traces):
+        marker = (getattr(trace, "metadata", None) or {}).get("upstream_error")
+        if isinstance(marker, dict):
+            reason = _UPSTREAM_KIND_TO_REASON.get(str(marker.get("kind")))
+            if reason is not None:
+                return reason
+    return None
+
+
+
+# EvalOutput.metadata marker -> TerminationReason, set by evaluators that can
+# tell their own failure from a task the agent did not solve.
+_EVAL_REASON_KEYS = {
+    "timeout": TerminationReason.TIMEOUT,
+    "error": TerminationReason.ERROR,
+}
+
+
+def _evaluator_termination_reason(eval_output) -> "TerminationReason | None":
+    """Reason an evaluator reported for its own failure, if any."""
+    raw = (getattr(eval_output, "metadata", None) or {}).get("termination_reason")
+    return _EVAL_REASON_KEYS.get(str(raw)) if raw else None
+
+
 def enrich_episode_with_traces(
     episode: Episode,
     traces: list[TraceRecord],
@@ -161,10 +196,19 @@ def enrich_episode_with_traces(
         extra = training_steps[n_agent_steps:]
         extras_all_malformed = all(not s.model_output.prompt_ids or not s.model_output.completion_ids for s in extra)
         if extras_all_malformed:
+            # Dropping the trace is right -- it has no tokens to train on -- but
+            # the *reason* it is malformed must survive, or an episode killed by
+            # an over-long prompt is indistinguishable from one the policy
+            # simply failed, and compact_filtering has nothing to act on. The
+            # gateway stamps the reason (see classify_upstream_error).
+            reason = _upstream_termination_reason(traces[n_agent_steps:])
+            if reason is not None:
+                episode.termination_reason = reason
             logger.warning(
-                "[%s] dropping %d trailing malformed trace(s); keeping %d aligned with agent_steps",
+                "[%s] dropping %d trailing malformed trace(s)%s; keeping %d aligned with agent_steps",
                 uid,
                 len(extra),
+                f" [{reason.value}]" if reason is not None else "",
                 n_agent_steps,
             )
             training_steps = training_steps[:n_agent_steps]
@@ -707,9 +751,30 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
+        # Order matters. The evaluator's own failures (verifier timeout, no
+        # reward file) and turn exhaustion both have to be recorded *before*
+        # the ENV_DONE default, which is what previously swallowed every one of
+        # them and made an infrastructure failure look like a policy failure.
+        if enriched.termination_reason is None:
+            enriched.termination_reason = _evaluator_termination_reason(eval_output)
+        if enriched.termination_reason is None:
+            enriched.termination_reason = self._turn_budget_termination_reason(len(traces))
         if enriched.termination_reason is None:
             enriched.termination_reason = TerminationReason.ENV_DONE
         return enriched
+
+    def _turn_budget_termination_reason(self, n_turns: int) -> "TerminationReason | None":
+        """MAX_TURNS_EXCEEDED when the agent used its whole turn budget.
+
+        The CLI harnesses return ``None`` from ``run()`` and let the engine build
+        the episode from gateway traces, so the harness never gets an Episode to
+        stamp -- but it does own the budget it passed to the CLI. One trace per
+        turn, so the trace count is the turn count.
+        """
+        limit = getattr(self.agent_flow, "step_limit", 0) or 0
+        if limit > 0 and n_turns >= limit:
+            return TerminationReason.MAX_TURNS_EXCEEDED
+        return None
 
     def shutdown(self) -> None:
         """Shutdown the engine and cleanup resources."""
