@@ -239,6 +239,47 @@ class TestTrainCommand:
         # Experiment name defaults to the benchmark name.
         assert call_kwargs["config"].rllm.trainer.experiment_name == "test_math"
 
+    @pytest.mark.parametrize(
+        ("eval_only_name", "extra_args"),
+        [
+            ("test_math", []),
+            ("eval_math", ["--train-dataset", "eval_math"]),
+        ],
+        ids=["benchmark", "explicit_train_dataset"],
+    )
+    def test_train_warns_for_eval_only_catalog_entry(self, runner, tmp_rllm_home, mock_train_dataset, eval_only_name, extra_args):
+        """Training remains allowed, but eval-only benchmark and train entries warn."""
+        from rllm.data import DatasetRegistry
+
+        DatasetRegistry.register_dataset("eval_math", mock_train_dataset[0], split="train")
+        catalog = {
+            "datasets": {
+                "test_math": {"default_agent": "math", "reward_fn": "math_reward_fn", "eval_split": "test"},
+                "eval_math": {"eval_only": False},
+            }
+        }
+        catalog["datasets"][eval_only_name]["eval_only"] = True
+        mock_trainer = MagicMock()
+
+        with (
+            patch("rllm.cli.train.load_dataset_catalog", return_value=catalog),
+            patch("rllm.eval.agent_loader.load_agent", return_value=_MockAgentFlow()),
+            patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=_MockEvaluator()),
+            patch("rllm.trainer.AgentTrainer", return_value=mock_trainer),
+        ):
+            result = runner.invoke(cli, ["train", "test_math", "--model", "test-model", *extra_args])
+
+        assert result.exit_code == 0, result.output
+        assert f"{eval_only_name} is catalogued as evaluation-only" in result.output
+        assert "same task pool" in result.output
+        assert "not a held-out split" in result.output
+        assert "register a custom dataset" in result.output
+        assert "--train-dataset" in result.output
+        assert "--val-dataset" in result.output
+        assert "--train-split" in result.output
+        assert "--val-split" in result.output
+        mock_trainer.train.assert_called_once()
+
     def test_train_explicit_agent_and_evaluator(self, runner, tmp_rllm_home, mock_train_dataset):
         """Train with explicit --agent and --evaluator should use them."""
         catalog = {"datasets": {"test_math": {"eval_split": "test"}}}

@@ -10,6 +10,7 @@
         "general"
       ],
       "eval_split": "general",
+      "eval_only": true,
       "default_agent": "zeroclaw",
       "reward_fn": "claw_eval_reward_fn"
     },
@@ -34,6 +35,7 @@
         "train"
       ],
       "eval_split": "train",
+      "eval_only": true,
       "default_agent": "claude-code"
     },
     "skillsbench-no-skills": {
@@ -48,6 +50,7 @@
         "train"
       ],
       "eval_split": "train",
+      "eval_only": true,
       "default_agent": "claude-code"
     },
     "gsm8k": {

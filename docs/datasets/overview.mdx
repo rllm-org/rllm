@@ -85,14 +85,18 @@ Datasets in this category use the `search` agent, which requires a search backen
 
 Most agentic datasets are sandboxed — they ship per-task Dockerfiles and shell verifiers. See [Sandboxes](/core-concepts/sandbox) for how to pick `--sandbox-backend` and [Tasks (Harbor-compatible)](/core-concepts/tasks) for the on-disk format.
 
+<Warning>
+`claw_eval`, `skillsbench`, and `skillsbench-no-skills` are evaluation-only by project intent. Today, `rllm train <name>` may reuse the same task pool for training and validation; this is not a held-out split. For generalization experiments, create your own train/test split and [register a custom dataset](/datasets/byo-dataset).
+</Warning>
+
 | Dataset | Description | Size | Source | Default agent |
 |---------|-------------|------|--------|---------------|
 | `bfcl` | BFCL: Berkeley Function Calling Leaderboard (exec_simple) | test | [gorilla-llm/Berkeley-Function-Calling-Leaderboard](https://huggingface.co/datasets/gorilla-llm/Berkeley-Function-Calling-Leaderboard) | `react` |
 | `multichallenge` | MultiChallenge: Multi-turn conversation evaluation | test | [nmayorga7/multichallenge](https://huggingface.co/datasets/nmayorga7/multichallenge) | `react` |
-| `claw_eval` | Claw-Eval: 161 personal-assistant agent tasks in sandbox workspaces (LLM-judge graded) | 161 general | [claw-eval/Claw-Eval](https://huggingface.co/datasets/claw-eval/Claw-Eval) | `zeroclaw` |
+| `claw_eval` | **Eval-only.** Claw-Eval: 161 personal-assistant agent tasks in sandbox workspaces (LLM-judge graded) | 161 general | [claw-eval/Claw-Eval](https://huggingface.co/datasets/claw-eval/Claw-Eval) | `zeroclaw` |
 | `rllm-swesmith` | SWE-smith filtered: solvable bug-fixing tasks across 105 Python repos (in-sandbox pytest grading) | ~4.7K train | [kylemontgomery/swesmith-filtered](https://huggingface.co/datasets/kylemontgomery/swesmith-filtered) | `mini-swe-agent` |
-| `skillsbench` | SkillsBench: 91 expert-curated agentic tasks measuring skill use (per-task `tests/test.sh` verifier) | 91 train | [benchflow/skillsbench](https://huggingface.co/datasets/benchflow/skillsbench) | `claude-code` |
-| `skillsbench-no-skills` | SkillsBench baseline without the per-task `skills/` tree, for measuring skills-augmentation gain | 91 train | [benchflow/skillsbench](https://huggingface.co/datasets/benchflow/skillsbench) | `claude-code` |
+| `skillsbench` | **Eval-only.** SkillsBench: 91 expert-curated agentic tasks measuring skill use (per-task `tests/test.sh` verifier) | 91 train | [benchflow/skillsbench](https://huggingface.co/datasets/benchflow/skillsbench) | `claude-code` |
+| `skillsbench-no-skills` | **Eval-only.** SkillsBench baseline without the per-task `skills/` tree, for measuring skills-augmentation gain | 91 train | [benchflow/skillsbench](https://huggingface.co/datasets/benchflow/skillsbench) | `claude-code` |
 
 ### Harbor packages (no registry entry)
 

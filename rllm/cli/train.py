@@ -24,6 +24,18 @@ from rllm.cli._ui import console, fail, info_panel
 _CONFIG_PKG = Path(__file__).resolve().parent.parent / "trainer" / "config"
 
 
+def _warn_eval_only_dataset(name: str) -> None:
+    """Warn without blocking when RL training uses an evaluation-only dataset."""
+    console.print(
+        f"  [yellow]Warning:[/] [val]{name}[/] is catalogued as evaluation-only. "
+        "Default training and validation may use the same task pool, not a held-out split.\n"
+        "  For RL with a proper split, register a custom dataset "
+        "([bold]https://docs.rllm-project.com/datasets/byo-dataset[/]) or pass explicit "
+        "[bold]--train-dataset[/] / [bold]--val-dataset[/] and "
+        "[bold]--train-split[/] / [bold]--val-split[/]."
+    )
+
+
 # ---------------------------------------------------------------------------
 # 1. build_train_config  — CLI flags → OmegaConf DictConfig
 # ---------------------------------------------------------------------------
@@ -280,6 +292,9 @@ def _run_train(
                 console.print(f"  [success]Found Harbor dataset:[/] [val]{harbor_name}[/]")
                 benchmark = harbor_name
 
+        if catalog_entry and catalog_entry.get("eval_only"):
+            _warn_eval_only_dataset(benchmark)
+
         # ---- Docker check for Harbor datasets (local backends only) ----
         from rllm.gateway.tunnel import is_local_sandbox_backend
 
@@ -345,6 +360,9 @@ def _run_train(
         # ---- Resolve catalog entries for train + val datasets ----
         train_entry = _resolve_dataset_entry(train_ds_name, catalog, benchmark, catalog_entry)
         val_entry = _resolve_dataset_entry(val_ds_name, catalog, benchmark, catalog_entry)
+
+        if train_ds_name != benchmark and train_entry and train_entry.get("eval_only"):
+            _warn_eval_only_dataset(train_ds_name)
 
         # ---- Resolve train/val splits ----
         if train_split is None:
