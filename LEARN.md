@@ -665,3 +665,155 @@ Ray object store, vLLM/torch 컴파일 temp 같은 것들이 unlink된 뒤에도
    ```
 2. 컨테이너 안에서 대형 워크로드를 돌릴 때 `TMPDIR`은 **시작 전에** 옮겨야 한다.
    런 도중에 env를 바꿔도 이미 뜬 프로세스에는 적용되지 않는다.
+
+## compact_filtering: 인프라 실패가 모델 실패로 학습되는 문제
+
+**증상**: 없다. 그게 문제다. 학습은 정상적으로 돌고 리워드도 나오는데, verifier가 죽거나
+프롬프트가 컨텍스트를 넘겨 죽은 에피소드가 **reward 0으로 그룹에 들어간다.**
+"정책이 못 풀었다"와 "환경이 고장났다"가 구분되지 않는다.
+
+### 1. 이름이 오해를 부른다 — 마스킹이 아니라 제거
+
+config 키가 `mask_*`라서 loss masking처럼 읽히는데, 실제 동작은 에피소드를 배치에서 빼는 것이다.
+
+```python
+# rllm/trainer/algorithms/transform.py:121
+if compact_filtering_config and compact_filtering_config.should_mask(termination_reason):
+    continue                       # 에피소드가 trajectory 가 되지 못한다
+```
+
+trajectory로 변환조차 되지 않으므로 GRPO 그룹에서 사라진다. **그룹 크기가 줄면 어드밴티지의
+평균·표준편차가 남은 롤아웃만으로 계산된다.** 8개 중 3개가 걸러지면 5개짜리 그룹으로 정규화된다.
+한 태스크의 롤아웃이 전부 걸러지면 프롬프트 그룹 전체가 버려진다
+(`buffer.py:365` → `buffer.py:210` `filter_reason = "compact_filtering"`).
+
+### 2. 판정은 `termination_reason` 하나로만 — 그리고 그걸 붙이는 코드가 없었다
+
+`should_mask`(`rllm/trainer/algorithms/config.py:143`)는 `termination_reason`만 본다.
+그런데 네이티브 경로(`AgentFlowEngine` + `MiniSweAgentHarness`)에는 생산자가 사실상 없었다.
+
+| 이유 | 생산자 | 네이티브 경로 |
+|---|---|---|
+| `ERROR` | `agentflow_engine.py` 재시도 소진 | 작동 |
+| `ENV_DONE` | `agentflow_engine.py` 기본값 | **그 외 전부 여기로** |
+| `MAX_TURNS_EXCEEDED` | `rllm/workflows/*` (구형 Workflow 경로) | 없음 |
+| `MAX_PROMPT_LENGTH_EXCEEDED` | `openai_engine.py`, Harbor `trial_helper.py` | 없음 |
+| `TIMEOUT` / `MAX_RESPONSE_LENGTH_EXCEEDED` | Harbor `trial_helper.py` | 없음 |
+
+**분류 로직이 Harbor 통합에만 있고 네이티브 경로에는 대응물이 없다**는 게 핵심이었다.
+`trial_helper.map_termination_reason()`은 `finished`/`timed_out`/`exception_type`을 받아
+예외 타입을 매핑하는데, CLI 하니스 경로에는 그런 함수가 아예 없었다.
+
+**실측**: fn50 런의 에피소드 414개 **전부** `env_done`. 턴 한도를 소진한 것, verifier가
+2시간 58분 폭주한 것, 컨텍스트 초과로 72턴에서 끊긴 것(프롬프트 122,773) 전부 포함.
+그래서 지표가 이렇게 나온다:
+
+```
+groups/num_trajs_before_filter  64  →  after_filter  64
+batch/groups_before_filter       8  →  after_filter   8
+```
+
+마스크 다섯 개를 켜두고 **한 건도 걸러지지 않았다.**
+
+### 3. 왜 각 지점에서 정보가 사라지는가
+
+**verifier** — `except Exception`이 삼킨다. 주석은 이렇게 정당화한다:
+
+> Verifier exit != 0 is the *expected* outcome when an agent didn't solve the task
+
+맞는 말이지만, 그 clause는 **"채점해서 0"과 "채점 자체를 못 함"을 구분하지 않는다.**
+reward 파일이 없어도 `reward=0.0`으로 내려간다. `_read_reward_from_sandbox`가
+`{"error": "no reward file found"}`로 이미 구분해두는데 소비하는 코드가 없었다.
+
+**컨텍스트 초과** — vLLM이 400을 주면 게이트웨이가 에러 바디로도 트레이스를 만든다.
+`choices`가 없어 completion 토큰이 비고, 엔진은 그걸 "말단 malformed 트레이스"로 보고
+**경고만 남기고 버린다**. 그 자리 주석이 이미 원인을 알고 있었다:
+
+> Common case: vLLM returns an empty body on the final call (e.g. prompt hit max_model_len...)
+> Drop the trailing trace rather than burn the whole rollout
+
+버리는 건 맞다(학습할 토큰이 없다). 문제는 **이유가 실려 있지 않아** 버릴 수밖에 없었던 것.
+
+**턴 소진** — CLI 하니스는 `run()`에서 `None`을 반환하고 엔진이 트레이스로 에피소드를 만든다.
+그래서 하니스에는 도장 찍을 Episode가 없다. 대신 하니스는 CLI에 넘긴 예산(`step_limit`)을
+소유하고 있고, 턴당 트레이스가 1개다.
+
+### 4. 고친 방법 — 공통 seam은 `ENV_DONE` 기본값 직전
+
+`termination_reason`이 `None`일 때만 `ENV_DONE`이 채워지므로, 세 경로 모두 그 전에 값을 넣는다.
+
+```
+1. 게이트웨이 업스트림 표식   (enrich 단계에서 episode 에 직접 기록)
+2. evaluator 표식             EvalOutput.metadata["termination_reason"]
+3. 턴 예산                    len(traces) >= agent_flow.step_limit
+4. ENV_DONE                   (기본값)
+```
+
+순서에 의미가 있다. 컨텍스트 초과로 죽은 에피소드는 턴을 다 못 썼으니 3번에 안 걸리고,
+반대로 턴을 다 쓴 에피소드의 verifier가 타임아웃되면 2번이 이겨 `TIMEOUT`이 된다.
+**인프라 원인이 정책 원인보다 앞선다.**
+
+게이트웨이 쪽은 `classify_upstream_error()`가 non-2xx를 구조화된 표식으로 바꿔
+트레이스 `metadata`에 넣는다: `{"status", "kind", "message"}`.
+
+### 5. vLLM 에러 분류의 함정
+
+vLLM은 컨텍스트 초과를 **기계가 읽을 코드 없이** 준다. `ErrorInfo`는
+`(message, type, param, code)`이고 `code`는 그냥 HTTP 상태다. 결국 **메시지 문자열 매칭**뿐이다.
+
+그리고 요청을 거부하는 경로가 **둘**인데 문구가 다르다 (핀된 vLLM 0.22.1 기준):
+
+| 경로 | 문구 |
+|---|---|
+| `renderers/params.py:428` | `This model's maximum context length is N tokens. However, you requested ... Please reduce the length of the input prompt ...` |
+| `v1/engine/input_processor.py:410` | `The prompt (length N) is longer than the maximum model length of M.` |
+
+`"maximum context length"`만 매칭하면 **두 번째 경로를 통째로 놓친다**. 구버전 얘기가 아니라
+핀된 버전에 실재하는 경로다. 바디 형식도 버전마다 다르다 — 0.22.1은 wrapped
+(`{"error": {"message": ...}}`), 구버전·타 서버는 flat (`{"object": "error", "message": ...}`).
+
+### 6. 수정 후 실제로 걸러지는 것
+
+| 실패 | `TerminationReason` | 마스크 |
+|---|---|---|
+| 프롬프트 컨텍스트 초과 | `MAX_PROMPT_LENGTH_EXCEEDED` | `mask_max_prompt_length_exceeded` |
+| 업스트림 기타 실패 (500, tool-choice 거부) | `ERROR` | `mask_error` |
+| verifier 타임아웃 | `TIMEOUT` | `mask_timeout` |
+| reward 파일 부재 (채점 불가) | `ERROR` | `mask_error` |
+| 턴 예산 소진 | `MAX_TURNS_EXCEEDED` | `mask_max_turns_exceeded` |
+| 샌드박스 생성 실패 (재시도 소진) | `ERROR` | `mask_error` |
+
+**여전히 안 걸러지는 것**: `MAX_RESPONSE_LENGTH_EXCEEDED`(네이티브 경로에 생산자 없음.
+다만 턴당 출력이 `max_tokens`로 제한되고 그 한도에 닿으면 거부가 아니라
+`finish_reason: "length"`로 정상 응답하므로 애초에 다른 실패 유형),
+그리고 **streaming 경로의 업스트림 실패** — non-2xx면 SSE가 아니라 JSON 바디가 와서
+`chunks`가 비고 `if chunks:` 가드 때문에 트레이스가 아예 안 만들어진다. 붙일 대상이 없다.
+
+### 7. 켜는 것 자체가 학습 데이터를 줄인다
+
+이게 함정이다. **필터가 작동하기 시작하면 그만큼 데이터가 사라진다.**
+실측으로 오답의 38~55%가 턴 소진이었고, 그 에피소드들이 지금까지는 reward 0으로 그룹에
+들어갔지만 이제 제거된다. 그룹이 `min_trajs_per_group` 아래로 떨어지면 태스크가 통째로 빠지고
+(`buffer.py:200`), 전 그룹이 비면 스텝이 날아간다.
+
+**턴 소진은 마스킹 대상이 아니라고 본다.** verifier가 죽은 것과 달리
+"정책이 주어진 예산 안에 못 풀었다"는 **진짜 학습 신호**다. 그걸 버리면 어려운 태스크가
+조용히 커리큘럼에서 빠지고 빨리 끝나는 에피소드만 남는다.
+
+### 8. 규칙
+
+1. **`enable: true`만 보고 필터가 동작한다고 믿지 말 것.** 마스크는 이유를 *소비*할 뿐이고,
+   이유를 *생산*하는 코드는 경로마다 다르다. 검증은 config가 아니라 실측으로:
+   ```
+   episode/termination_reason/*        (buffer.py:344, 이유별 카운트)
+   groups/num_trajs_before/after_filter
+   ```
+   전부 `env_done` 한 종류면 필터는 장식이다.
+2. **"인프라 실패인가 정책 실패인가"를 구분하는 지점을 먼저 찾을 것.** 이 스택에서는
+   `ENV_DONE` 기본값이 그 지점이었고, 그 앞에 무엇을 끼울 수 있는지가 설계의 전부였다.
+3. **삼키는 `except Exception`은 두 가지를 합친다.** 여기서는 "채점해서 0"과 "채점 못 함"이었다.
+   리워드가 같은 값으로 내려가는 두 경로가 있으면 거의 항상 구분해야 할 것이 섞여 있다.
+4. **에러 분류를 문자열 매칭으로 할 수밖에 없다면, 서버가 그 문구를 내는 경로를 전부 찾을 것.**
+   한 경로만 보고 마커를 정하면 나머지가 조용히 generic으로 떨어진다.
+5. **필터를 켜기 전에 무엇을 얼마나 잃는지 먼저 재라.** 걸러지는 비율이 과반이면
+   그건 필터링 문제가 아니라 데이터/예산 설계 문제다.
