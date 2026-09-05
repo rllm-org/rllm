@@ -308,11 +308,7 @@ def _run_eval(
         _is_harbor_agent = _is_harbor_agent_name(agent_name)
         _is_harbor_source = bool(catalog_entry) and catalog_entry.get("source", "").startswith("harbor:")
         _source = str(catalog_entry.get("source", "")) if catalog_entry else ""
-        _is_cybergym_source = bool(catalog_entry) and (
-            catalog_entry.get("reward_fn") == "cybergym_reward_fn"
-            or _source == "sunblaze-ucb/cybergym"
-            or _source.startswith("local:cybergym")
-        )
+        _is_cybergym_source = bool(catalog_entry) and (catalog_entry.get("reward_fn") == "cybergym_reward_fn" or _source == "sunblaze-ucb/cybergym" or _source.startswith("local:cybergym"))
         if _is_cybergym_source and agent_name and not _is_harbor_agent:
             fail("Harbor CyberGym tasks require --agent cybergym:<scaffold> or --agent harbor:<scaffold>. In-sandbox test.sh would leak sidecar binaries and AUTH_TOKEN.")
         if _is_cybergym_source and agent_name and agent_name.startswith("harbor:"):
