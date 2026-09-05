@@ -1,6 +1,33 @@
 {
   "version": 1,
   "datasets": {
+    "cybergym": {
+      "description": "Official CyberGym Level 1: 1,507 Harbor sanitizer-reproduction tasks from sunblaze-ucb/cybergym (paper arXiv:2506.02548). Thin Harbor runner. Not ExploitGym / ACE, not native :8666.",
+      "source": "sunblaze-ucb/cybergym",
+      "builder": "rllm.data.cybergym_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "level1"
+      ],
+      "eval_split": "level1",
+      "default_agent": "cybergym:claude-code",
+      "reward_fn": "cybergym_reward_fn"
+    },
+    "cybergym-subset": {
+      "description": "Official CyberGym 10-task Harbor Level 1 smoke subset (download_subset.py / Harbor --subset).",
+      "source": "sunblaze-ucb/cybergym",
+      "builder": "rllm.data.cybergym_builder:build_benchmark",
+      "builder_kwargs": {
+        "subset": true
+      },
+      "category": "agentic",
+      "splits": [
+        "level1"
+      ],
+      "eval_split": "level1",
+      "default_agent": "cybergym:claude-code",
+      "reward_fn": "cybergym_reward_fn"
+    },
     "claw_eval": {
       "description": "Claw-Eval general split: 161 personal-assistant agent tasks (sandbox; LLM-judge graded)",
       "source": "claw-eval/Claw-Eval",

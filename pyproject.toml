@@ -190,6 +190,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "rllm/rewards/code_utils/**" = ["ALL"]
+"rllm/integrations/cybergym/harbor_adapter/**" = ["ALL"]
 # Prompt / string-heavy files where long lines are intentional
 "rllm/agents/system_prompts.py" = ["E501"]
 "rllm/system_prompts.py" = ["E501"]
@@ -213,7 +214,7 @@ where   = ["."]
 include = ["rllm", "rllm.*"]
 
 [tool.setuptools.package-data]
-rllm = ["trainer/**/config/**/*.yaml", "registry/*.json"]
+rllm = ["trainer/**/config/**/*.yaml", "registry/*.json", "integrations/cybergym/harbor_adapter/**"]
 
 [tool.mypy]
 plugins = ["pydantic.mypy"]

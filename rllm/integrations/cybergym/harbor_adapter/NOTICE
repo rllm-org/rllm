@@ -1,0 +1,13 @@
+This directory vendors the official Harbor CyberGym adapter
+(Apache License 2.0) from:
+
+  https://github.com/harbor-framework/harbor/tree/main/adapters/cybergym
+
+Vendored from harbor commit dcd0a7ac74b7bd417780d9cb27cd819c7ec82e4e.
+
+The adapter converts the official CyberGym benchmark
+(https://huggingface.co/datasets/sunblaze-ucb/cybergym, 1,507 tasks)
+into Harbor task directories. rLLM does not vendor CyberGym data files
+or Docker runner images; those are fetched at `docker build` time.
+
+See LICENSE in this directory for the Apache-2.0 terms.

@@ -1,0 +1,64 @@
+# CyberGym OSS-Fuzz Task Dockerfile
+#
+# Base image: vul runner (ensures shared libraries match the OS environment)
+#
+# Binaries, ground truth PoC, and verification logic are NOT in this image.
+# They live in the task-server sidecar container (see docker-compose.yaml).
+# The agent interacts with the task-server only via HTTP through submit.sh.
+#
+# From HuggingFace (downloaded during docker build via ADD):
+#   repo-vul.tar.gz, description.txt, etc. - source code and vulnerability info
+#
+# Layout inside the container (during agent execution):
+#   /workspace/task_data/    - source code and descriptions (agent reads these)
+#   /workspace/submit.sh     - agent-facing PoC submission script (curls task-server)
+
+FROM --platform=linux/amd64 {vul_image}
+
+# curl/git/build-essential for OpenHands agent,
+# pkg-config/libssl-dev for uv/pip builds, wget for other agents,
+# libevent-dev/ncurses-dev for building tmux from source.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates git build-essential pkg-config libssl-dev \
+    wget libevent-dev libncurses-dev autoconf automake bison \
+    iptables \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build tmux 3.5a from source — Ubuntu 20.04's apt tmux (3.0a) can fail
+# silently with Terminus-2's -e flag usage. Building from source ensures
+# consistent behavior with the ARVO Dockerfile.
+RUN wget -qO /tmp/tmux.tar.gz https://github.com/tmux/tmux/releases/download/3.5a/tmux-3.5a.tar.gz \
+    && tar xzf /tmp/tmux.tar.gz -C /tmp \
+    && cd /tmp/tmux-3.5a \
+    && ./configure --prefix=/usr/local \
+    && make -j"$(nproc)" \
+    && make install \
+    && rm -rf /tmp/tmux* \
+    && tmux -V
+
+# Remove vul binaries and ground truth PoC from the agent container —
+# they live in the task-server sidecar.
+RUN rm -rf /out /usr/local/bin/run_poc /tmp/poc
+
+WORKDIR /workspace
+
+# Local submit script — agent calls "bash submit.sh /path/to/poc" which
+# sends the PoC to the task-server sidecar and returns the exit code.
+COPY submit.sh /workspace/submit.sh
+RUN chmod +x /workspace/submit.sh
+
+# CyberGym task data (source code archive, description, etc.)
+# Downloaded from HuggingFace during Docker build — no local files needed.
+{task_data_directives}
+
+ENV TEST_DIR=/tests
+ENV PATH="/root/.local/bin:${PATH}"
+
+# Network restriction: iptables-based outbound firewall applied at
+# container start. Whitelists only package managers (agent install),
+# LLM API endpoints (agent runtime), and the task-server sidecar.
+# Requires cap_add: NET_ADMIN in docker-compose.yaml.
+COPY restrict-network.sh /usr/local/bin/restrict-network.sh
+RUN chmod +x /usr/local/bin/restrict-network.sh
+ENTRYPOINT ["/usr/local/bin/restrict-network.sh"]
+CMD ["bash", "-lc", "sleep infinity"]

@@ -1,0 +1,33 @@
+# CyberGym Task Server — ARVO sidecar
+#
+# Holds vul + fix binaries and ground truth PoC in an isolated container.
+# Exposes an HTTP API for the agent to test PoCs (/submit) and for the
+# verifier to run verification (/verify) and retrieve ground truth (/solve).
+#
+# The agent container never has access to these files.
+
+FROM --platform=linux/amd64 {fix_image} AS fix-runner
+
+FROM --platform=linux/amd64 {vul_image}
+
+# Vul binaries (already at /out/ and /bin/arvo in the base image)
+RUN mkdir -p /cybergym/vul/out /cybergym/vul/bin \
+    && cp -a /out/. /cybergym/vul/out/ \
+    && cp /bin/arvo /cybergym/vul/bin/arvo
+
+# Fix binaries
+RUN mkdir -p /cybergym/fix/out /cybergym/fix/bin
+COPY --from=fix-runner /out/ /cybergym/fix/out/
+COPY --from=fix-runner /bin/arvo /cybergym/fix/bin/arvo
+
+# Ground truth PoC
+RUN mkdir -p /tests \
+    && cp /tmp/poc /tests/ground_truth_poc
+
+# Clean up originals
+RUN rm -rf /out /tmp/poc
+
+COPY task_server.py /task_server.py
+
+EXPOSE 9111
+CMD ["python3", "-u", "/task_server.py"]
