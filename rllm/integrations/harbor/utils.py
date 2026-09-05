@@ -64,10 +64,10 @@ def is_harbor_source(catalog_entry: dict | None) -> bool:
 
 
 def is_harbor_agent(agent_name: str | None) -> bool:
-    """Check if an agent name refers to a Harbor agent."""
+    """Check if an agent name refers to a Harbor (or CyberGym Harbor) agent."""
     if agent_name is None:
         return False
-    return agent_name.startswith("harbor:")
+    return agent_name.startswith("harbor:") or agent_name.startswith("cybergym:")
 
 
 def resolve_harbor_task_path(task) -> str:

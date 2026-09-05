@@ -159,7 +159,9 @@ def _run_eval(
     if not _is_local and not benchmark.startswith(("./", "../", "/", "~", "harbor:")):
         _materialised = paths.rllm_path("datasets", benchmark)
         if os.path.isfile(os.path.join(_materialised, "dataset.toml")):
-            _can_redirect = bool(agent_name) and not agent_name.startswith("harbor:")
+            from rllm.integrations.harbor.utils import is_harbor_agent as _is_harbor_agent_name
+
+            _can_redirect = bool(agent_name) and not _is_harbor_agent_name(agent_name)
             if _can_redirect and BenchmarkLoader.is_local_benchmark(_materialised):
                 console.print(f"  [dim]Using materialised dataset at {_materialised}[/]")
                 _materialised_path_override = _materialised
@@ -204,6 +206,16 @@ def _run_eval(
         if agent_name is None:
             agent_name = bench_result.harness_name or "react"
 
+        # Harbor / CyberGym compose tasks must not use the in-sandbox
+        # tests/test.sh path (that leaks sidecar binaries and AUTH_TOKEN).
+        from rllm.integrations.cybergym.eval_guard import prepare_local_harbor_eval
+        from rllm.integrations.harbor.utils import is_harbor_agent as _is_harbor_agent_name
+
+        try:
+            agent_name, _cybergym_eval = prepare_local_harbor_eval(agent_name, bench_result.tasks, evaluator_name)
+        except ValueError as e:
+            fail(str(e))
+
         # Construct the AgentFlow: catalog covers built-in harnesses
         # (react/bash/claude-code) and any user-registered or plugin agents.
         try:
@@ -213,8 +225,22 @@ def _run_eval(
 
         _apply_sandbox_overrides(agent, agent_metadata)
 
+        if _is_harbor_agent_name(agent_name):
+            _eff_backend = (agent_metadata or {}).get("sandbox_backend")
+            if _eff_backend in (None, "docker"):
+                from rllm.integrations.harbor.utils import diagnose_docker
+
+                ok, reason, hint = diagnose_docker()
+                if not ok:
+                    if hint:
+                        console.print(f"  [dim]{hint}[/]")
+                    console.print("  [dim]Or run on a remote backend, e.g. [bold]--sandbox-backend modal[/].[/]")
+                    fail(f"Harbor tasks require Docker — {reason}.")
+
         # Evaluator: comes from each Task's [verifier] config by default.
         # CLI --evaluator (when provided) overrides for every task.
+        # Harbor/CyberGym compose agents use a host-side reward reader so
+        # SandboxTaskHooks does not exec test.sh next to the agent.
         evaluator = None
         evaluator_display = f"per-task ({len(bench_result.tasks)} tasks)"
         if evaluator_name is not None:
@@ -223,6 +249,12 @@ def _run_eval(
                 evaluator_display = f"{evaluator_name} (overrides per-task verifier)"
             except (KeyError, ImportError, AttributeError, TypeError) as e:
                 fail(f"Error loading evaluator '{evaluator_name}': {e}")
+        elif _cybergym_eval:
+            try:
+                evaluator = load_evaluator(_cybergym_eval)
+                evaluator_display = _cybergym_eval
+            except (KeyError, ImportError, AttributeError, TypeError) as e:
+                fail(f"Error loading evaluator '{_cybergym_eval}': {e}")
 
         # Wrap tasks in a Dataset so the existing CLI filter code (select, len) works
         from rllm.data.dataset import Dataset
@@ -271,14 +303,29 @@ def _run_eval(
             else:
                 split = "test"
 
-        _is_harbor_agent = bool(agent_name) and agent_name.startswith("harbor:")
+        from rllm.integrations.harbor.utils import is_harbor_agent as _is_harbor_agent_name
+
+        _is_harbor_agent = _is_harbor_agent_name(agent_name)
         _is_harbor_source = bool(catalog_entry) and catalog_entry.get("source", "").startswith("harbor:")
+        _source = str(catalog_entry.get("source", "")) if catalog_entry else ""
+        _is_cybergym_source = bool(catalog_entry) and (
+            catalog_entry.get("reward_fn") == "cybergym_reward_fn"
+            or _source == "sunblaze-ucb/cybergym"
+            or _source.startswith("local:cybergym")
+        )
+        if _is_cybergym_source and agent_name and not _is_harbor_agent:
+            fail("Harbor CyberGym tasks require --agent cybergym:<scaffold> or --agent harbor:<scaffold>. In-sandbox test.sh would leak sidecar binaries and AUTH_TOKEN.")
+        if _is_cybergym_source and agent_name and agent_name.startswith("harbor:"):
+            from rllm.integrations.cybergym.eval_guard import upgrade_harbor_agent_for_cybergym
+
+            agent_name = upgrade_harbor_agent_for_cybergym(agent_name)
+            _is_harbor_agent = True
 
         # Require Docker only when execution lands on the local daemon; a remote
         # backend (modal/daytona) pulls the task's image in the cloud.
         _eff_backend = (agent_metadata or {}).get("sandbox_backend")
         _runs_on_local_docker = _eff_backend in (None, "docker")
-        if (_is_harbor_agent or _is_harbor_source) and _runs_on_local_docker:
+        if (_is_harbor_agent or _is_harbor_source or _is_cybergym_source) and _runs_on_local_docker:
             from rllm.integrations.harbor.utils import diagnose_docker
 
             ok, reason, hint = diagnose_docker()
@@ -319,7 +366,7 @@ def _run_eval(
             # the eval would always score zero. Skip the catalog evaluator in
             # that case and let ``SandboxTaskHooks`` resolve a per-task verifier
             # (typically ``tests/test.sh`` inside the harbor task dir).
-            _harbor_reward_fn_skipped = catalog_entry and catalog_entry.get("reward_fn") == "harbor_reward_fn" and not _is_harbor_agent
+            _harbor_reward_fn_skipped = catalog_entry and catalog_entry.get("reward_fn") in {"harbor_reward_fn", "cybergym_reward_fn"} and not _is_harbor_agent
             if _harbor_reward_fn_skipped:
                 evaluator_display = "per-task (rllm runtime on harbor task)"
             else:
@@ -349,7 +396,7 @@ def _run_eval(
         # task-per-directory; materialising would drop their tests/ +
         # environment/, so wrap their rows directly instead.
         bench_result = None
-        if not _is_harbor_agent and not _is_harbor_source:
+        if not _is_harbor_agent and not _is_harbor_source and not _is_cybergym_source:
             _materialised = paths.rllm_path("datasets", benchmark)
             if not os.path.isfile(os.path.join(_materialised, "dataset.toml")):
                 try:
@@ -371,7 +418,7 @@ def _run_eval(
             # Harbor rows root at their task dir, so SandboxTaskHooks resolves
             # each task's own tests/test.sh — no dataset-wide evaluator needed.
             # Non-harbor rows carry no per-task verifier, so still require one.
-            if evaluator is None and not _is_harbor_source:
+            if evaluator is None and not _is_harbor_source and not _is_cybergym_source:
                 fail(f"No evaluator found for '{benchmark}'. Specify --evaluator explicitly.")
             from rllm.data.dataset import Dataset
 

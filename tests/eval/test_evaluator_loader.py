@@ -103,6 +103,18 @@ class TestResolveEvaluatorFromCatalog:
     def test_resolve_unknown_returns_none(self):
         assert resolve_evaluator_from_catalog("unknown_benchmark") is None
 
+    def test_resolve_cybergym(self):
+        from rllm.integrations.cybergym.evaluator import CyberGymEvaluator
+
+        evaluator = resolve_evaluator_from_catalog("cybergym")
+        assert isinstance(evaluator, CyberGymEvaluator)
+
+    def test_load_cybergym_reward_fn(self):
+        from rllm.integrations.cybergym.evaluator import CyberGymEvaluator
+
+        evaluator = load_evaluator("cybergym_reward_fn")
+        assert isinstance(evaluator, CyberGymEvaluator)
+
 
 class _DummyEvaluator:
     """A class that conforms to Evaluator protocol."""

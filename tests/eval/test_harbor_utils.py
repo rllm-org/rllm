@@ -12,6 +12,7 @@ from rllm.types import Task
 
 def test_is_harbor_agent_prefix():
     assert is_harbor_agent("harbor:claude-code") is True
+    assert is_harbor_agent("cybergym:openhands") is True
     assert is_harbor_agent("claude-code") is False
     assert is_harbor_agent(None) is False
 
