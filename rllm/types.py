@@ -331,11 +331,11 @@ class Episode(BaseModel):
 
     @property
     def task_id(self) -> str:
-        return self.id.split(":")[0]
+        return self.id.rsplit(":", 1)[0]
 
     @property
     def rollout_idx(self) -> str:
-        return self.id.split(":")[1]
+        return self.id.rsplit(":", 1)[1]
 
     @property
     def info(self) -> dict:
@@ -402,11 +402,11 @@ class TrajectoryGroup(BaseModel):
 
     @property
     def group_role(self) -> str:
-        return self.group_id.split(":")[1] if ":" in self.group_id[:-1] else "all_groups"
+        return self.group_id.rsplit(":", 1)[1] if ":" in self.group_id[:-1] else "all_groups"
 
     @property
     def task_id(self) -> str:
-        return self.group_id.split(":")[0]
+        return self.group_id.rsplit(":", 1)[0]
 
 
 # ---------------------------------------------------------------------------

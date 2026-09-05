@@ -66,6 +66,8 @@ class Trajectory(BaseModel):
 
 The `name` field identifies which agent produced this trajectory. During training, trajectories are grouped by `{task_id}:{trajectory.name}` for advantage computation — GRPO compares trajectories within the same group to determine which rollouts were better than average.
 
+When you use default trajectory grouping, trajectory names must not contain `:`. The final colon separates the task ID from the trajectory name.
+
 ## Episode
 
 An Episode is the top-level container for a complete rollout on a single task. Its ID encodes both the task and rollout index.
@@ -82,12 +84,16 @@ class Episode(BaseModel):
     metadata: dict                        # Arbitrary extra data
 ```
 
-The `task_id` and `rollout_idx` properties parse the ID string:
+The `task_id` and `rollout_idx` properties split the ID at the final colon. Task IDs may contain `:`; the final segment is the rollout index:
 
 ```python
 episode = Episode(id="gsm8k_42:3")
 episode.task_id     # "gsm8k_42"
 episode.rollout_idx # "3"
+
+episode = Episode(id="aeread:integration-v1:case01:s1200:0")
+episode.task_id     # "aeread:integration-v1:case01:s1200"
+episode.rollout_idx # "0"
 ```
 
 ## How they connect

@@ -112,6 +112,12 @@ def _build_trajectory_groups(episodes: list[Episode], compact_filtering_config: 
     Returns:
         List of TrajectoryGroups
     """
+    # Group IDs use the final colon to separate the task ID from the trajectory name.
+    for episode in episodes:
+        for trajectory in episode.trajectories:
+            if ":" in trajectory.name:
+                raise ValueError(f"Trajectory name {trajectory.name!r} must not contain ':' when using default trajectory grouping (episode {episode.id!r}).")
+
     trajectories_by_name: dict[str, list[Trajectory]] = defaultdict(list)
     metadata_by_name: dict[str, list[dict]] = defaultdict(list)
 
