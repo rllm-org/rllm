@@ -156,6 +156,8 @@ flash-attn = [
 
 [tool.ruff]
 line-length = 200  # slightly conservative value, turn this on later.
+# Vendored official Harbor adapter (Apache-2.0). Keep byte-stable; do not lint or format.
+extend-exclude = ["rllm/integrations/cybergym/harbor_adapter"]
 
 [tool.ruff.lint]
 isort = {known-first-party = ["rllm"], known-third-party = ["verl"]}
