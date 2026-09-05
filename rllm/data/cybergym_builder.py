@@ -38,10 +38,7 @@ HF_TASKS_FILE = "tasks.json"
 OFFICIAL_TASK_COUNT = 1507
 DEFAULT_DIFFICULTY = "level1"
 
-_DEFAULT_DESCRIPTION = (
-    "Official CyberGym Level 1 (1,507 Harbor tasks from sunblaze-ucb/cybergym). "
-    "Thin Harbor runner. Not ExploitGym / ACE, not native :8666."
-)
+_DEFAULT_DESCRIPTION = "Official CyberGym Level 1 (1,507 Harbor tasks from sunblaze-ucb/cybergym). Thin Harbor runner. Not ExploitGym / ACE, not native :8666."
 
 
 def _toml_escape(s: str) -> str:
@@ -71,18 +68,8 @@ def load_official_records(
         raise ValueError(f"{path} must be a JSON list of CyberGym task records")
 
     records = [CyberGymRecord.from_dict(dict(row)) for row in raw]
-    if (
-        not subset
-        and task_ids is None
-        and exclude_task_ids is None
-        and task_type is None
-        and limit is None
-        and len(records) != OFFICIAL_TASK_COUNT
-    ):
-        raise RuntimeError(
-            f"Expected {OFFICIAL_TASK_COUNT} official CyberGym tasks in {path}, got {len(records)}. "
-            "Refusing to register a truncated catalog."
-        )
+    if not subset and task_ids is None and exclude_task_ids is None and task_type is None and limit is None and len(records) != OFFICIAL_TASK_COUNT:
+        raise RuntimeError(f"Expected {OFFICIAL_TASK_COUNT} official CyberGym tasks in {path}, got {len(records)}. Refusing to register a truncated catalog.")
 
     if subset:
         keep = set(SUBSET_TASK_IDS)
@@ -236,9 +223,7 @@ def build_benchmark(
 
     if not subset and limit is None and task_ids is None and exclude_task_ids is None and task_type is None:
         if len(rows) != OFFICIAL_TASK_COUNT:
-            raise RuntimeError(
-                f"Official CyberGym catalog must have {OFFICIAL_TASK_COUNT} tasks, generated {len(rows)}"
-            )
+            raise RuntimeError(f"Official CyberGym catalog must have {OFFICIAL_TASK_COUNT} tasks, generated {len(rows)}")
 
     description = catalog_entry.get("description") or _DEFAULT_DESCRIPTION
     _write_dataset_toml(
