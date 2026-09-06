@@ -186,8 +186,10 @@ class OpenAIEngine(RolloutEngine):
                 try:
                     completion_ids = response.choices[0].token_ids
                     assert completion_ids is not None
+                    completion_ids_are_native = True
                 except Exception:
                     completion_ids = self.tokenizer.encode(text, add_special_tokens=False)
+                    completion_ids_are_native = False
 
                 parsed_output = self.chat_parser.parse_completion(completion_ids)
 
@@ -199,6 +201,13 @@ class OpenAIEngine(RolloutEngine):
                     assert response.choices[0].logprobs is not None
                     logprobs = response.choices[0].logprobs.token_logprobs
                 except Exception:
+                    logprobs = []
+
+                if not completion_ids_are_native:
+                    # The server's logprobs are aligned to the tokens it actually sampled,
+                    # not to completion_ids retokenized from the decoded text above
+                    # (encode(decode(ids)) == ids is not guaranteed), so pairing them here
+                    # would silently desync per-token training signal downstream.
                     logprobs = []
 
                 if sampling_params.get("echo", False) and logprobs:
