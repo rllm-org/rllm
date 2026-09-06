@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from rllm.integrations.cybergym.grade import SubmissionExits, dual_binary_reward, score_submissions
+from rllm.integrations.harbor.cybergym.grade import SubmissionExits, dual_binary_reward, score_submissions
 
 
 @pytest.mark.parametrize(

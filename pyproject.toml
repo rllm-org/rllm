@@ -157,7 +157,7 @@ flash-attn = [
 [tool.ruff]
 line-length = 200  # slightly conservative value, turn this on later.
 # Vendored official Harbor adapter (Apache-2.0). Keep byte-stable; do not lint or format.
-extend-exclude = ["rllm/integrations/cybergym/harbor_adapter"]
+extend-exclude = ["rllm/integrations/harbor/cybergym/harbor_adapter"]
 
 [tool.ruff.lint]
 isort = {known-first-party = ["rllm"], known-third-party = ["verl"]}
@@ -192,7 +192,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "rllm/rewards/code_utils/**" = ["ALL"]
-"rllm/integrations/cybergym/harbor_adapter/**" = ["ALL"]
+"rllm/integrations/harbor/cybergym/harbor_adapter/**" = ["ALL"]
 # Prompt / string-heavy files where long lines are intentional
 "rllm/agents/system_prompts.py" = ["E501"]
 "rllm/system_prompts.py" = ["E501"]
@@ -216,7 +216,7 @@ where   = ["."]
 include = ["rllm", "rllm.*"]
 
 [tool.setuptools.package-data]
-rllm = ["trainer/**/config/**/*.yaml", "registry/*.json", "integrations/cybergym/harbor_adapter/**"]
+rllm = ["trainer/**/config/**/*.yaml", "registry/*.json", "integrations/harbor/cybergym/harbor_adapter/**"]
 
 [tool.mypy]
 plugins = ["pydantic.mypy"]

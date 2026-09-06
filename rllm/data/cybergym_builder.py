@@ -23,13 +23,13 @@ import logging
 from collections.abc import Iterable
 from pathlib import Path
 
-from rllm.integrations.cybergym.harbor_adapter import (
+from rllm.integrations.harbor.cybergym.harbor_adapter import (
     SUBSET_TASK_IDS,
     CyberGymRecord,
     CyberGymToHarbor,
 )
-from rllm.integrations.cybergym.harbor_adapter.adapter import TEMPLATE_DIR
-from rllm.integrations.cybergym.source import cybergym_task_to_row
+from rllm.integrations.harbor.cybergym.harbor_adapter.adapter import TEMPLATE_DIR
+from rllm.integrations.harbor.cybergym.source import cybergym_task_to_row
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +269,7 @@ def generate_split(split: str, catalog_entry: dict) -> list[dict]:
         catalog_entry=catalog_entry,
         register=False,
     )
-    from rllm.integrations.cybergym.source import load_cybergym_rows
+    from rllm.integrations.harbor.cybergym.source import load_cybergym_rows
 
     rows = load_cybergym_rows(root)
     if not rows:

@@ -6,7 +6,7 @@ to generate the 1,507 official Level 1 Harbor task directories from
 images are not checked in.
 """
 
-from rllm.integrations.cybergym.harbor_adapter.adapter import (
+from rllm.integrations.harbor.cybergym.harbor_adapter.adapter import (
     DIFFICULTY_LEVELS,
     SUBSET_TASK_IDS,
     TASK_TYPES,
