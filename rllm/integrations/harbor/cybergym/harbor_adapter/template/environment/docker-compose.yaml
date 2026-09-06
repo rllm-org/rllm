@@ -1,0 +1,45 @@
+# CyberGym task-server sidecar.
+# Merged on top of Harbor's base docker-compose config.
+# The task-server holds vul/fix binaries and ground truth PoC
+# in an isolated container — the agent only interacts via HTTP.
+services:
+  main:
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - GOOGLE_BASE_URL=${GOOGLE_BASE_URL:-}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-}
+      - NVIDIA_BASE_URL=${NVIDIA_BASE_URL:-}
+      - AZURE_BASE_URL=${AZURE_BASE_URL:-}
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:-}
+      - DOUBAO_BASE_URL=${DOUBAO_BASE_URL:-}
+      - LITELLM_BASE_URL=${LITELLM_BASE_URL:-}
+      - DYNAMO_BASE_URL=${DYNAMO_BASE_URL:-}
+      - HF_ENDPOINT_URL=${HF_ENDPOINT_URL:-}
+    depends_on:
+      task-server:
+        condition: service_healthy
+
+  task-server:
+    build:
+      context: ./task-server
+    platform: linux/amd64
+    environment:
+      - AUTH_TOKEN={auth_token}
+    expose:
+      - "9111"
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4096M
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9111/health')"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
