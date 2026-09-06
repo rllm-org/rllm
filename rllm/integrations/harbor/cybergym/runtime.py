@@ -12,15 +12,15 @@ import os
 from typing import Any
 
 from rllm.env import env_float
-from rllm.integrations.cybergym.artifacts import score_from_harbor_result
-from rllm.integrations.cybergym.constants import (
+from rllm.integrations.harbor.cybergym.artifacts import score_from_harbor_result
+from rllm.integrations.harbor.cybergym.constants import (
     DEFAULT_SCORING_MODE,
     DEFAULT_SESSION_TIMEOUT_SEC,
     SCORING_ANY_OF,
     SCORING_FINAL,
     ScoringMode,
 )
-from rllm.integrations.cybergym.detect import is_cybergym_task_dir
+from rllm.integrations.harbor.cybergym.detect import is_cybergym_task_dir
 from rllm.integrations.harbor.runtime import HarborRuntime
 from rllm.integrations.harbor.trial_helper import MODEL_PLACEHOLDER, outcome_to_episode
 from rllm.integrations.harbor.utils import resolve_harbor_task_path

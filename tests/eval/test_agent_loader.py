@@ -44,7 +44,7 @@ class TestLoadAgent:
             load_agent("nonexistent_agent_xyz")
 
     def test_cybergym_prefix_returns_cybergym_runtime(self):
-        from rllm.integrations.cybergym.runtime import CyberGymRuntime
+        from rllm.integrations.harbor.cybergym.runtime import CyberGymRuntime
 
         agent = load_agent("cybergym:claude-code")
         assert isinstance(agent, CyberGymRuntime)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from rllm.integrations.cybergym.evaluator import CyberGymEvaluator
+from rllm.integrations.harbor.cybergym.evaluator import CyberGymEvaluator
 from rllm.types import Episode, Trajectory
 
 

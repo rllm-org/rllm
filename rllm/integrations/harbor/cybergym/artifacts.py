@@ -9,8 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from rllm.integrations.cybergym.constants import DEFAULT_SCORING_MODE, SCORING_ANY_OF, SCORING_FINAL, ScoringMode
-from rllm.integrations.cybergym.grade import DualBinaryGrade, SubmissionExits, dual_binary_reward, score_submissions
+from rllm.integrations.harbor.cybergym.constants import DEFAULT_SCORING_MODE, SCORING_ANY_OF, SCORING_FINAL, ScoringMode
+from rllm.integrations.harbor.cybergym.grade import DualBinaryGrade, SubmissionExits, dual_binary_reward, score_submissions
 
 logger = logging.getLogger(__name__)
 

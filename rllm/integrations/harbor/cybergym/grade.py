@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rllm.integrations.cybergym.constants import (
+from rllm.integrations.harbor.cybergym.constants import (
     EXCLUDE_EXIT_CODES,
     SCORING_ANY_OF,
     SCORING_FINAL,

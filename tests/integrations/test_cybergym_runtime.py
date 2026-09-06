@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rllm.integrations.cybergym.runtime import CyberGymRuntime
+from rllm.integrations.harbor.cybergym.runtime import CyberGymRuntime
 from rllm.integrations.harbor.trial_helper import HarborTaskOutcome
 from rllm.types import Task, TerminationReason
 

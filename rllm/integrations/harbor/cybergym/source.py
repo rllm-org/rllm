@@ -7,8 +7,8 @@ from pathlib import Path
 
 import tomllib
 
-from rllm.integrations.cybergym.constants import DEFAULT_SCORING_MODE, LEVEL1
-from rllm.integrations.cybergym.detect import discover_cybergym_task_dirs, is_cybergym_task_dir
+from rllm.integrations.harbor.cybergym.constants import DEFAULT_SCORING_MODE, LEVEL1
+from rllm.integrations.harbor.cybergym.detect import discover_cybergym_task_dirs, is_cybergym_task_dir
 
 __all__ = [
     "cybergym_task_to_row",

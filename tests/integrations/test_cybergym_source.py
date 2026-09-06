@@ -12,9 +12,9 @@ from rllm.data.cybergym_builder import (
     build_benchmark,
     load_official_records,
 )
-from rllm.integrations.cybergym.detect import discover_cybergym_task_dirs, is_cybergym_task_dir
-from rllm.integrations.cybergym.harbor_adapter import SUBSET_TASK_IDS
-from rllm.integrations.cybergym.source import cybergym_task_to_row, load_cybergym_rows, source_task_id_from_dir_name
+from rllm.integrations.harbor.cybergym.detect import discover_cybergym_task_dirs, is_cybergym_task_dir
+from rllm.integrations.harbor.cybergym.harbor_adapter import SUBSET_TASK_IDS
+from rllm.integrations.harbor.cybergym.source import cybergym_task_to_row, load_cybergym_rows, source_task_id_from_dir_name
 
 from .cybergym_task_factory import INSTRUCTION, write_cybergym_task
 

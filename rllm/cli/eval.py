@@ -208,7 +208,7 @@ def _run_eval(
 
         # Harbor / CyberGym compose tasks must not use the in-sandbox
         # tests/test.sh path (that leaks sidecar binaries and AUTH_TOKEN).
-        from rllm.integrations.cybergym.eval_guard import prepare_local_harbor_eval
+        from rllm.integrations.harbor.cybergym.eval_guard import prepare_local_harbor_eval
         from rllm.integrations.harbor.utils import is_harbor_agent as _is_harbor_agent_name
 
         try:
@@ -312,7 +312,7 @@ def _run_eval(
         if _is_cybergym_source and agent_name and not _is_harbor_agent:
             fail("Harbor CyberGym tasks require --agent cybergym:<scaffold> or --agent harbor:<scaffold>. In-sandbox test.sh would leak sidecar binaries and AUTH_TOKEN.")
         if _is_cybergym_source and agent_name and agent_name.startswith("harbor:"):
-            from rllm.integrations.cybergym.eval_guard import upgrade_harbor_agent_for_cybergym
+            from rllm.integrations.harbor.cybergym.eval_guard import upgrade_harbor_agent_for_cybergym
 
             agent_name = upgrade_harbor_agent_for_cybergym(agent_name)
             _is_harbor_agent = True

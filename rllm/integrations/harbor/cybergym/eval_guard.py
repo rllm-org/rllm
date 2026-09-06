@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from rllm.integrations.cybergym.detect import is_cybergym_task_dir
+from rllm.integrations.harbor.cybergym.detect import is_cybergym_task_dir
 from rllm.integrations.harbor.utils import is_harbor_agent, resolve_harbor_task_path
 
 CYBERGYM_ISOLATION_ERROR = (

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from rllm.integrations.cybergym.artifacts import parse_reward_json, parse_test_output, score_from_harbor_result
+from rllm.integrations.harbor.cybergym.artifacts import parse_reward_json, parse_test_output, score_from_harbor_result
 
 _TEST_OUTPUT = """\
 Verifying 2 PoC submission(s) via task-server

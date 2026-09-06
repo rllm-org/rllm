@@ -492,7 +492,7 @@ care less.
 ## 16. References
 
 - Harbor adapter README + template: `harbor/adapters/cybergym/`
-- Vendored adapter in rLLM: `rllm/integrations/cybergym/harbor_adapter/`
+- Vendored adapter in rLLM: `rllm/integrations/harbor/cybergym/harbor_adapter/`
 - Dataset (1,507 tasks): `sunblaze-ucb/cybergym` on HuggingFace
 - Native server / FAQ / submissions: `sunblaze-ucb/cybergym`
 - Agent examples (`--timeout 1200`): `sunblaze-ucb/cybergym-agent-examples`

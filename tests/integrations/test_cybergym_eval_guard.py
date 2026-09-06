@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from rllm.integrations.cybergym.eval_guard import (
+from rllm.integrations.harbor.cybergym.eval_guard import (
     CYBERGYM_ISOLATION_ERROR,
     prepare_local_harbor_eval,
     task_is_cybergym,
