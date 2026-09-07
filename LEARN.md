@@ -778,7 +778,8 @@ vLLM은 컨텍스트 초과를 **기계가 읽을 코드 없이** 준다. `Error
 |---|---|---|
 | 프롬프트 컨텍스트 초과 | `MAX_PROMPT_LENGTH_EXCEEDED` | `mask_max_prompt_length_exceeded` |
 | 업스트림 기타 실패 (500, tool-choice 거부) | `ERROR` | `mask_error` |
-| verifier 타임아웃 | `TIMEOUT` | `mask_timeout` |
+| verifier 타임아웃 | `VERIFIER_TIMEOUT` (구 `TIMEOUT`) | `mask_verifier_timeout` |
+| 에이전트 타임아웃 (`[agent] timeout_sec`) | `AGENT_TIMEOUT` (cli_harness가 `SandboxExecTimeout`을 잡아 stamp) | `mask_agent_timeout` -- 예산 소진이라 기본 off, 리워드 x0.5 |
 | reward 파일 부재 (채점 불가) | `ERROR` | `mask_error` |
 | 턴 예산 소진 | `MAX_TURNS_EXCEEDED` | `mask_max_turns_exceeded` |
 | 샌드박스 생성 실패 (재시도 소진) | `ERROR` | `mask_error` |

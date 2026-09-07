@@ -85,8 +85,23 @@ xargs -a "$RLLM_HOME/datasets/rllm_swesmith_50/images.txt" -P 4 -I{} docker pull
   rewritten). `--train-pool` sets how many task dirs to download before filtering -- the filter
   discards most of the pool, so it wants to be several times `--train-limit`.
 
-For both, the script patches `[agent].timeout_sec=900` / `[verifier].timeout_sec=1800` into
-each `task.toml` (upstream ships 3000/3000, which at `rollout.n=8` makes one batch take hours).
+For both, the script patches `[agent].timeout_sec=3600` / `[verifier].timeout_sec=1800` into
+each `task.toml` (upstream ships 3000/3000). The agent budget is SWE-Master's value
+(`agent.trajectory_timeout=3600` in their RL scripts) and is sized for the 150-turn limit: the
+last run measured a median of 3.9 s per turn and a p90 rollout of 567 s at 100 turns, so the
+previous 900 s would have ended the clock before the turn budget on the slower tail and reported
+`agent_timeout` where `max_turns_exceeded` was the truth. Both values are read at rollout time
+from `task.toml`, so an already-registered dataset is retimed in place, without a rebuild:
+
+```bash
+D=$RLLM_HOME/datasets
+for n in rllm_swesmith_fn50 swebench_verified_balanced; do
+  find "$D/$n" -name task.toml -exec \
+    sed -i '/^\[agent\]/,/^\[/ s/^timeout_sec = .*/timeout_sec = 3600.0/' {} +
+done
+```
+
+Do not do that under a running job — the next rollout of every task picks the new value up.
 
 ### Screen the data with the oracle first
 
@@ -157,6 +172,60 @@ bash recipe/qwen3_5_swe_grpo/train_verl.sh \
 Env knobs: `RLLM_SCRATCH` (storage root), `SANDBOX_BACKEND` (default `docker`),
 `RLLM_AGENT_IMAGE` (`auto` | `skip` | `repo:tag`), `MODEL_PATH`, `RLLM_RUN_DIR`,
 `HF_HUB_OFFLINE`.
+
+## What follows SWE-Master, and what does not
+
+The RL half of this recipe is matched to SWE-Master (arXiv 2602.03411, §3.4) item by item. The
+tables say where each item lives; the sections further down say why. Status is as of the tree,
+not as of a measured run — the termination histogram of a real run is the check
+(`batch/termination_reason/*`).
+
+### §3.4.1 policy optimization
+
+| paper | here | where |
+| --- | --- | --- |
+| leave-one-out advantage | yes | `rllm_grpo.yaml` `adv_estimator: rloo` (`n/(n-1)·(r − mean)`) |
+| no std normalization | yes | `norm_adv_by_std_in_grpo: false` (inert under rloo, pinned so a revert to `grpo` does not bring it back) |
+| fixed-constant length normalization (eq. 3) | yes | `loss_agg_mode: seq-mean-token-sum`, same as their scripts |
+| clip-higher | yes | `eps_clip_high: 0.28` |
+| no KL | yes | `kl_beta: 0.0`; the reference worker is never built |
+
+### §3.4.2 reward design
+
+| paper | here | where |
+| --- | --- | --- |
+| binary F2P+P2P reward | yes | `ShellScriptEvaluator` reads `reward.txt` |
+| forced submission on budget exhaustion | yes, for free | the verifier grades the repo however the agent stopped; the docker in-container `timeout` leaves the sandbox alive |
+| reward × γ for TIMEOUT / MAX_STEPS / MAX_TOKENS (eq. 4) | yes, γ = 0.5 | `config.yaml` `budget_reward_scale`; `train.py` `make_budget_scaled_grouping_hook` over `agent_timeout`, `max_turns_exceeded`, `max_prompt_length_exceeded` |
+| container failure masked out (eq. 5) | yes | sandbox failure → `error` after retries → `mask_error: true` |
+| verifier failure | yes, broader than the paper | `verifier_timeout` and a missing reward file are both removed |
+| infrastructure beats budget | yes | `agentflow_engine._finish_episode`: an evaluator failure overwrites the agent-side reason |
+
+The one deliberate difference: the paper's code keeps a masked rollout in the group at reward 0
+and zeroes its loss; `compact_filtering` removes it from the group, so the RLOO baseline is
+computed over the survivors only. See [Compact filtering](#compact-filtering-removal-not-masking).
+
+### §3.4.3 training tricks
+
+| paper | here | where |
+| --- | --- | --- |
+| environment response masking | yes, always on | `cumulative_token_mode: true`; observation tokens get mask 0 in `verl/transform.py` |
+| budget awareness (steps remaining in each observation) | **no** | needs a mini-swe-agent observation-template variable; not verified for the pinned version |
+| `git log` / `git show` blocked | **no** | a PATH-scoped `git` wrapper was built and then removed by decision; nothing in the tree |
+
+### Hyperparameters, against their public RL scripts
+
+| | SWE-Master `examples/swe/*.sh` | here |
+| --- | --- | --- |
+| group size `n` | 4 | 4 |
+| temperature | 1.0 | 1.0 |
+| lr | 1e-6 | 1e-6 |
+| max prompt / response | 8192 / 122880 | 8192 / 122880 |
+| max turns | 150 | 150 |
+| agent timeout | 3600 s | 3600 s (`task.toml`) |
+| train batch | 32 | 32 |
+| `mask_truncated_samples` | False | False |
+| truncated-rollout handling | `overlong_filter` (mask infra, halve budget) | `compact_filtering` + `budget_reward_scale` |
 
 ## Why the config looks like this
 
@@ -654,6 +723,37 @@ seg["mask"].extend([1] * len(action))      # what the model generated
 When the turns of an episode merge into one row, observation tokens get mask 0 and action tokens
 get mask 1, regardless of how the episode ended.
 
+#### Which reasons are dropped, and which are kept at half reward (SWE-Master)
+
+SWE-Master (arXiv 2602.03411, §3.4.2 and §6.3) sorts terminations into two families and the
+recipe follows it. The split is what `rllm_grpo.yaml`'s `compact_filtering` block and
+`config.yaml`'s `budget_reward_scale` encode between them:
+
+| family | reasons | what happens |
+| --- | --- | --- |
+| budget exhaustion | `max_turns_exceeded`, `max_prompt_length_exceeded`, `agent_timeout` | **kept**. The verifier grades whatever the agent left in the repo (the paper's "forced submission" — free here, because `ShellScriptEvaluator` runs `tests/test.sh` no matter how the agent stopped, and the docker backend's in-container `timeout` leaves the sandbox alive), then `train.py` multiplies the reward by `budget_reward_scale` (0.5, the paper's value). |
+| infrastructure | `verifier_timeout`, `error` | **dropped** by `compact_filtering`. The reward is not a measurement of anything. |
+
+The paper's reason for not dropping the first family (§6.3): the DeepSWE recipe of zeroing and
+masking truncated rollouts collapsed their training, and it also silently removes the hardest
+tasks from the curriculum, since those are the ones that run out of budget.
+
+Two things had to be true for the table to hold on this native path:
+
+* `agent_timeout` needs a producer. `cli_harness.run` used to swallow the sandbox exec timeout
+  as a warning and return `None`, so an agent that ran out of its `[agent] timeout_sec` was
+  indistinguishable from one that finished — `ENV_DONE`. It now returns an empty Episode
+  stamped `AGENT_TIMEOUT`, which enrichment preserves.
+* `timeout` had to split. The single `TIMEOUT` reason was produced by the verifier on this path
+  (infrastructure) and by the agent/trial clock on the Harbor and Workflow paths (budget), so one
+  `mask_timeout` flag could not do the right thing for both. It is now `VERIFIER_TIMEOUT` /
+  `AGENT_TIMEOUT`, with `mask_verifier_timeout` / `mask_agent_timeout`.
+
+The engine also orders the stamps as *infrastructure beats budget beats default*: an evaluator
+failure overwrites whatever the agent side reported, because an agent that timed out and whose
+grader then also timed out has no usable reward, and the filter has to see the failure that
+makes it unusable.
+
 #### There are three removal stages, and the first one does most of the work
 
 | stage | where | condition |
@@ -665,7 +765,9 @@ get mask 1, regardless of how the episode ended.
 **In every run measured here, stage 2 removed nothing.** `num_trajs_before_filter` equalled
 `num_trajs_after_filter`, and the termination histogram was all `env_done` plus some `error` —
 `max_response_length_exceeded`, `timeout` and `max_turns_exceeded` were **0.000 throughout**. So
-the `mask_timeout` / `mask_max_response_length_exceeded` paths are configured but unexercised.
+the `mask_timeout` / `mask_max_response_length_exceeded` paths were configured but unexercised.
+(That was before the reasons were actually produced on the native path and before `timeout` was
+split into `agent_timeout` / `verifier_timeout` — see the next section.)
 
 What actually happened to context overruns, traced through `train3` (`max_model_len=32768`,
 64 rollouts over 2 steps):
@@ -921,7 +1023,7 @@ recipe/qwen3_5_swe_grpo/
 ├── train_verl.sh                 # launcher: env, transcript, exec (no knobs)
 ├── smoke_test.sh                 # 1 batch, minimal everything
 ├── config/
-│   ├── config.yaml               # Hydra entry + recipe.* (datasets, turn budget, sandbox)
+│   ├── config.yaml               # Hydra entry + recipe.* (datasets, turn budget, reward scale, sandbox)
 │   ├── rllm_grpo.yaml            # the `rllm.*` tree (data, sampling, gateway, GRPO)
 │   └── verl_trainer.yaml         # verl-native (model, FSDP2 actor/ref, vLLM rollout)
 ├── patches/
