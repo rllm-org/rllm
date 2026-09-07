@@ -31,6 +31,14 @@ recipe:
   # rather than predicted here.
   agent_step_limit: 150
   agent_image: auto        # auto | skip | repo:tag  (RLLM_AGENT_IMAGE env var wins)
+  # SWE-Master reward shaping (arXiv 2602.03411, sec. 3.4.2, eq. 4): a rollout
+  # that ran out of budget -- turns, context window, or agent wall clock -- is
+  # still graded, and its reward is multiplied by this. The paper's code uses
+  # 0.5. 1.0 disables the shaping; 0.0 is the DeepSWE "zero it" variant that
+  # sec. 6.3 reports collapsed training. Which reasons count is
+  # BUDGET_EXHAUSTED in train.py; which reasons are dropped outright is
+  # rllm.compact_filtering in rllm_grpo.yaml.
+  budget_reward_scale: 0.5
 
 hydra:
   run:

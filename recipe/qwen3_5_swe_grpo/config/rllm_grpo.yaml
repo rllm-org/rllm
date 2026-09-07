@@ -76,15 +76,26 @@ rllm:
   # `continue`), before TrajectoryGroups are built -- so a filtered rollout also
   # stops contributing to its GRPO group's mean/std, not just to the loss.
   # Token-level masking of observation tokens is a separate, always-on thing.
-  # NB: in this recipe's runs only `error` ever fired; context overruns are
-  # removed a stage earlier as zero-step episodes. See README.
+  #
+  # Which reasons to drop follows SWE-Master (arXiv 2602.03411, sec. 3.4.2 and
+  # 6.3). The paper splits terminations into two kinds and treats them
+  # differently:
+  #   * budget exhaustion (turns, tokens, agent wall clock): the rollout is
+  #     *kept*, graded on whatever the repo looks like, and its reward is
+  #     scaled by 0.5. Dropping these -- the DeepSWE recipe -- collapsed
+  #     their training (sec. 6.3), and it also removes the hardest tasks
+  #     from the curriculum, since those are the ones that run out of budget.
+  #   * infrastructure failure (container, verifier): the rollout says
+  #     nothing about the policy, so it is removed.
+  # So only the infrastructure reasons are masked here; the 0.5 scaling for
+  # the budget reasons lives in train.py.
   compact_filtering:
     enable: true
-    mask_max_prompt_length_exceeded: false # ref. SWE-Master
-    mask_max_response_length_exceeded: false # no-op for native rllm workflows
-    mask_max_turns_exceeded: true # ref. SWE-Master
-    mask_timeout: true
-    mask_error: true
+    mask_max_prompt_length_exceeded: false   # budget: context window (paper's MAX_TOKENS)
+    mask_max_response_length_exceeded: false # no producer on the native path; see README
+    mask_max_turns_exceeded: false           # budget: turn limit (paper's MAX_STEPS)
+    mask_timeout: true                       # infrastructure: verifier ran out of clock
+    mask_error: true                         # infrastructure: no reward file, upstream 5xx, sandbox
 
   workflow:
     # One Docker sandbox per in-flight rollout. Each SWE image is 1-15 GB and

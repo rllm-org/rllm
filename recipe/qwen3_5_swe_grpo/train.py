@@ -27,9 +27,53 @@ from omegaconf import DictConfig
 from rllm.data.dataset import DatasetRegistry
 from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
 from rllm.trainer import AgentTrainer
+from rllm.trainer.algorithms.transform import _default_traj_grouping_hook
 from rllm.types import AgentConfig, Task
+from rllm.workflows.workflow import TerminationReason
 
 logger = logging.getLogger(__name__)
+
+# SWE-Master's "budget exhaustion" terminations (arXiv 2602.03411, sec. 3.4.2:
+# TIMEOUT, MAX_STEPS, MAX_TOKENS). The rollout is graded on whatever the
+# agent left in the repo -- the verifier runs regardless of how the agent
+# stopped, which is the paper's "forced submission" -- and its reward is then
+# scaled by a constant below 1. Not in the set: VERIFIER_TIMEOUT and ERROR,
+# which are infrastructure and are dropped by compact_filtering instead.
+BUDGET_EXHAUSTED = frozenset(
+    {
+        TerminationReason.MAX_TURNS_EXCEEDED,  # paper's MAX_STEPS
+        TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,  # paper's MAX_TOKENS: vLLM 400 on the cumulative prompt
+        TerminationReason.AGENT_TIMEOUT,  # paper's TIMEOUT: task.toml [agent] timeout_sec
+    }
+)
+
+
+def make_budget_scaled_grouping_hook(scale: float):
+    """Return a ``traj_grouping_hook`` that applies SWE-Master's reward shaping.
+
+    The hook runs before trajectory groups are built, so the scaled reward is
+    what RLOO sees. ``is_correct`` is deliberately left alone: rejection
+    sampling and the solve_all/solve_none metrics read it, and "solved but
+    slowly" is still solved for those purposes.
+
+    One caveat: the trainer runs the same hook over validation episodes, so
+    ``val/reward_*`` is scaled too. ``val/accuracy`` is built from
+    ``is_correct`` and is not affected.
+    """
+    if not 0.0 <= scale <= 1.0:
+        raise ValueError(f"budget_reward_scale must be in [0, 1], got {scale}")
+
+    def hook(episodes, transform_config, compact_filtering_config=None):
+        if scale != 1.0:
+            for episode in episodes:
+                if episode.termination_reason not in BUDGET_EXHAUSTED:
+                    continue
+                for trajectory in episode.trajectories:
+                    if trajectory.reward is not None:
+                        trajectory.reward = trajectory.reward * scale
+        return _default_traj_grouping_hook(episodes, transform_config, compact_filtering_config)
+
+    return hook
 
 # Episode logs are keyed by <project>/<experiment>, which is stable across runs,
 # so two runs of this recipe wrote into the same train_step_N_epoch_0 directory:
@@ -109,6 +153,8 @@ def main(config: DictConfig) -> None:
         val_dataset=val_dataset,
         sandbox_backend=os.environ.get("SANDBOX_BACKEND", recipe.sandbox_backend),
         sandbox_concurrency=recipe.get("sandbox_concurrency"),
+        # Passed through **kwargs to UnifiedTrainer (verl_launcher.py forwards them).
+        traj_grouping_hook=make_budget_scaled_grouping_hook(float(recipe.budget_reward_scale)),
     )
     trainer.train()
 
