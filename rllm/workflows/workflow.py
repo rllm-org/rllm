@@ -16,13 +16,42 @@ from rllm.workflows.store import Store
 
 
 class TerminationReason(Enum):
+    """Why an episode stopped.
+
+    Two families, because trainers treat them differently (see
+    ``rllm.trainer.algorithms.config.CompactFilteringConfig``):
+
+    * **Budget exhaustion** -- the policy ran out of something it was given:
+      ``MAX_TURNS_EXCEEDED``, ``MAX_PROMPT_LENGTH_EXCEEDED``,
+      ``MAX_RESPONSE_LENGTH_EXCEEDED``, ``AGENT_TIMEOUT``. The rollout is
+      real evidence about the policy and is usually kept (SWE-Master scales
+      its reward rather than dropping it).
+    * **Infrastructure failure** -- nothing the policy did: ``VERIFIER_TIMEOUT``,
+      ``ERROR``. The rollout says nothing about the policy and is usually
+      dropped.
+
+    ``AGENT_TIMEOUT`` and ``VERIFIER_TIMEOUT`` used to be one value,
+    ``"timeout"``, which made a grader that ran out of clock (drop) look like
+    an agent that ran out of clock (keep). The legacy string still
+    deserializes -- as ``AGENT_TIMEOUT``, which is what every producer but the
+    native verifier meant by it -- so episode logs written before the split
+    load without error.
+    """
+
     MAX_PROMPT_LENGTH_EXCEEDED = "max_prompt_length_exceeded"
     MAX_RESPONSE_LENGTH_EXCEEDED = "max_response_length_exceeded"
     ENV_DONE = "env_done"
     MAX_TURNS_EXCEEDED = "max_turns_exceeded"
-    TIMEOUT = "timeout"
+    AGENT_TIMEOUT = "agent_timeout"
+    VERIFIER_TIMEOUT = "verifier_timeout"
     UNKNOWN = "unknown"
     ERROR = "error"
+
+    @classmethod
+    def _missing_(cls, value):
+        if value == "timeout":
+            return cls.AGENT_TIMEOUT
+        return None
 
 
 class TerminationEvent(Exception):
@@ -95,7 +124,7 @@ class Workflow(ABC):
                 return output  # we assume it's already postprocessed
             return self.postprocess_episode(self.collect_trajectories(), TerminationReason.UNKNOWN)
         except asyncio.TimeoutError:
-            return self.postprocess_episode(self.collect_trajectories(), TerminationReason.TIMEOUT)
+            return self.postprocess_episode(self.collect_trajectories(), TerminationReason.AGENT_TIMEOUT)
         except TerminationEvent as e:
             return self.postprocess_episode(self.collect_trajectories(), e.reason)
         except Exception as e:

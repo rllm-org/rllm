@@ -55,7 +55,8 @@ rllm:
     mask_max_prompt_length_exceeded: True
     mask_max_response_length_exceeded: True
     mask_max_turns_exceeded: True
-    mask_timeout: True
+    mask_agent_timeout: True
+    mask_verifier_timeout: True
   rejection_sample:
     enable: False
     multiplier: 1

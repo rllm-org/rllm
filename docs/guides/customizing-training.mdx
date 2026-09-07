@@ -96,7 +96,8 @@ Mask out trajectories that hit error conditions, so they don't contribute to the
 rllm:
   compact_filtering:
     enable: true
-    mask_timeout: true
+    mask_agent_timeout: true
+    mask_verifier_timeout: true
     mask_error: true
     mask_max_response_length_exceeded: true
     mask_max_turns_exceeded: true

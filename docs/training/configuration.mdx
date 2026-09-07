@@ -136,9 +136,12 @@ Fine-grained filtering of trajectories based on various termination conditions.
 | `mask_max_response_length_exceeded` | `bool` | `True` | Mask trajectories that exceed max response length |
 | `mask_env_done` | `bool` | `False` | Mask trajectories where environment signaled done |
 | `mask_max_turns_exceeded` | `bool` | `True` | Mask trajectories that exceed max turns |
-| `mask_timeout` | `bool` | `True` | Mask trajectories that timed out |
+| `mask_agent_timeout` | `bool` | `True` | Mask trajectories whose agent ran out of wall clock (budget exhaustion) |
+| `mask_verifier_timeout` | `bool` | `True` | Mask trajectories whose verifier ran out of wall clock (infrastructure; the reward is not a measurement) |
 | `mask_unknown` | `bool` | `False` | Mask trajectories with unknown termination reasons |
 | `mask_error` | `bool` | `True` | Mask trajectories that encountered errors |
+
+`mask_timeout` (pre-split) is still accepted and sets both timeout keys unless they are given explicitly.
 
 ### Rejection sampling configuration
 

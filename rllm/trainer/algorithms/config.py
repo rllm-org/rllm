@@ -125,7 +125,12 @@ class CompactFilteringConfig:
     mask_max_response_length_exceeded: bool = False
     mask_env_done: bool = False
     mask_max_turns_exceeded: bool = False
-    mask_timeout: bool = False
+    # The agent ran out of wall clock. Budget exhaustion, like max turns: the
+    # repo state it left behind is still graded, so keeping it is a choice.
+    mask_agent_timeout: bool = False
+    # The grader ran out of wall clock. Infrastructure: the reward is not a
+    # measurement of anything, so this is normally dropped.
+    mask_verifier_timeout: bool = False
     mask_unknown: bool = False
     mask_error: bool = False
 
@@ -138,7 +143,15 @@ class CompactFilteringConfig:
         Returns:
             CompactFilteringConfig: The CompactFilteringConfig built from the configuration.
         """
-        return cls(**OmegaConf.to_container(config))  # type: ignore
+        raw = dict(OmegaConf.to_container(config))  # type: ignore[arg-type]
+        # ``mask_timeout`` predates the agent/verifier split and covered both.
+        # Honour it for configs written before the split, unless the caller
+        # already sets the new keys.
+        if "mask_timeout" in raw:
+            legacy = bool(raw.pop("mask_timeout"))
+            raw.setdefault("mask_agent_timeout", legacy)
+            raw.setdefault("mask_verifier_timeout", legacy)
+        return cls(**raw)
 
     def should_mask(self, termination_reason: TerminationReason) -> bool:
         """Check if a specific termination reason should be masked/filtered out.
@@ -155,7 +168,8 @@ class CompactFilteringConfig:
             or (self.mask_max_response_length_exceeded and termination_reason == TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED)
             or (self.mask_env_done and termination_reason == TerminationReason.ENV_DONE)
             or (self.mask_max_turns_exceeded and termination_reason == TerminationReason.MAX_TURNS_EXCEEDED)
-            or (self.mask_timeout and termination_reason == TerminationReason.TIMEOUT)
+            or (self.mask_agent_timeout and termination_reason == TerminationReason.AGENT_TIMEOUT)
+            or (self.mask_verifier_timeout and termination_reason == TerminationReason.VERIFIER_TIMEOUT)
             or (self.mask_unknown and termination_reason == TerminationReason.UNKNOWN)
             or (self.mask_error and termination_reason == TerminationReason.ERROR)
         )

@@ -99,7 +99,7 @@ class ShellScriptEvaluator:
             # that 0 trains the policy as if it had failed the task, so mark it
             # and let compact_filtering drop the episode instead.
             logger.warning("Verifier timed out for %s: %s", task.id, e)
-            verifier_failure = "timeout"
+            verifier_failure = "verifier_timeout"
         except Exception as e:
             # Verifier exit != 0 is the *expected* outcome when an agent
             # didn't solve the task; the reward (read from reward.txt

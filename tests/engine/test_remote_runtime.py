@@ -150,7 +150,7 @@ class TestRunOneTransportError:
         assert "network down" in (result.error or "")
 
     def test_result_async_timeout(self):
-        """asyncio.TimeoutError -> termination_reason=TIMEOUT."""
+        """asyncio.TimeoutError -> termination_reason=AGENT_TIMEOUT (the trial ran out of clock)."""
         runtime = _make_runtime()
         sub = _make_submission()
         future = AsyncMock()
@@ -161,7 +161,7 @@ class TestRunOneTransportError:
         result = asyncio.run(runtime._run_one(sub, timeout=1.0))
 
         assert result.finished is False
-        assert result.termination_reason == TerminationReason.TIMEOUT
+        assert result.termination_reason == TerminationReason.AGENT_TIMEOUT
         assert result.elapsed == 1.7
         assert "Timeout after 1.7s" in (result.error or "")
 

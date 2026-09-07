@@ -75,6 +75,50 @@ def test_run_single_passes_validation_flag_and_preserves_termination_reason():
     assert episode.termination_reason == TerminationReason.ERROR
 
 
+class _TimedOutAgent:
+    """A CLI-style flow whose agent ran out of its wall-clock budget."""
+
+    async def arun(self, task, config):
+        return Episode(id=task.id, termination_reason=TerminationReason.AGENT_TIMEOUT, trajectories=[Trajectory(name="solver")])
+
+
+class _TimedOutVerifier:
+    def evaluate(self, task, episode):
+        return EvalOutput(reward=0.0, is_correct=False, metadata={"termination_reason": "verifier_timeout"})
+
+
+def _run(agent, evaluator):
+    engine = AgentFlowEngine(agent_flow=agent, evaluator=evaluator, gateway=_Gateway(), model="m", n_parallel_tasks=1)
+    try:
+        return asyncio.run(engine._run_single(task_from_row({"question": "q"}, "task"), "task:0", is_validation=True))
+    finally:
+        engine.shutdown()
+
+
+def test_agent_timeout_stamp_survives_a_healthy_verifier():
+    """Budget exhaustion reported by the harness is kept when the grader worked:
+    the repo state was graded, and the reason is what reward shaping keys on."""
+    episode = _run(_TimedOutAgent(), _Evaluator())
+    assert episode.termination_reason == TerminationReason.AGENT_TIMEOUT
+
+
+def test_verifier_failure_overrides_agent_side_reason():
+    """Infrastructure beats budget: an agent that timed out *and* whose grader
+    then timed out has no usable reward, so the reason compact_filtering sees
+    must be the verifier's, not the agent's."""
+    episode = _run(_TimedOutAgent(), _TimedOutVerifier())
+    assert episode.termination_reason == TerminationReason.VERIFIER_TIMEOUT
+
+
+def test_legacy_timeout_marker_from_evaluator_maps_to_verifier_timeout():
+    class _LegacyVerifier:
+        def evaluate(self, task, episode):
+            return EvalOutput(reward=0.0, is_correct=False, metadata={"termination_reason": "timeout"})
+
+    episode = _run(_TimedOutAgent(), _LegacyVerifier())
+    assert episode.termination_reason == TerminationReason.VERIFIER_TIMEOUT
+
+
 def _empty_token_trace(session_id: str):
     from rllm_model_gateway.models import TraceRecord
 

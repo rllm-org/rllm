@@ -334,7 +334,8 @@ Filter trajectories based on termination reasons:
 rllm:
   compact_filtering:
     enable: true
-    mask_timeout: true
+    mask_agent_timeout: true
+    mask_verifier_timeout: true
     mask_error: true
     mask_max_turns_exceeded: true
 ```

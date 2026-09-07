@@ -122,9 +122,11 @@ def _upstream_termination_reason(traces: list[TraceRecord]) -> TerminationReason
 
 
 # EvalOutput.metadata marker -> TerminationReason, set by evaluators that can
-# tell their own failure from a task the agent did not solve.
+# tell their own failure from a task the agent did not solve. These are all
+# infrastructure failures: the reward that came back is not a measurement.
 _EVAL_REASON_KEYS = {
-    "timeout": TerminationReason.TIMEOUT,
+    "verifier_timeout": TerminationReason.VERIFIER_TIMEOUT,
+    "timeout": TerminationReason.VERIFIER_TIMEOUT,  # pre-split spelling, still the grader's clock
     "error": TerminationReason.ERROR,
 }
 
@@ -751,12 +753,17 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
-        # Order matters. The evaluator's own failures (verifier timeout, no
-        # reward file) and turn exhaustion both have to be recorded *before*
-        # the ENV_DONE default, which is what previously swallowed every one of
-        # them and made an infrastructure failure look like a policy failure.
-        if enriched.termination_reason is None:
-            enriched.termination_reason = _evaluator_termination_reason(eval_output)
+        # Order matters, and it is "infrastructure beats budget beats default".
+        # The evaluator's own failures (verifier timeout, no reward file) win
+        # even over a reason the agent side already stamped -- an agent that
+        # timed out *and* whose grader then timed out has no usable reward,
+        # and compact_filtering must see the failure that makes it unusable.
+        # Turn exhaustion and the ENV_DONE default only fill an empty slot;
+        # ENV_DONE is what previously swallowed every one of these and made an
+        # infrastructure failure look like a policy failure.
+        evaluator_reason = _evaluator_termination_reason(eval_output)
+        if evaluator_reason is not None:
+            enriched.termination_reason = evaluator_reason
         if enriched.termination_reason is None:
             enriched.termination_reason = self._turn_budget_termination_reason(len(traces))
         if enriched.termination_reason is None:

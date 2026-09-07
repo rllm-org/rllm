@@ -241,7 +241,7 @@ class DeepResearchWorkflow(Workflow):
         """
         mapping = {
             "answer": TerminationReason.ENV_DONE,
-            "timeout": TerminationReason.TIMEOUT,
+            "timeout": TerminationReason.AGENT_TIMEOUT,
             "max_rounds_reached": TerminationReason.MAX_TURNS_EXCEEDED,
             "token_limit_no_answer": TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED,
             "answer_token_limit": TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED,

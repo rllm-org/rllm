@@ -87,7 +87,7 @@ class AgentCoreRuntime(RemoteAgentRuntime):
                 session_id=sub.session_id,
                 task_id=sub.task_id,
                 error=f"Timeout after {elapsed:.1f}s",
-                termination_reason=TerminationReason.TIMEOUT,
+                termination_reason=TerminationReason.AGENT_TIMEOUT,
                 elapsed=elapsed,
             )
         except Exception as e:

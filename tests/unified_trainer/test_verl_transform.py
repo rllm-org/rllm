@@ -8,6 +8,7 @@ so that downstream importance sampling and bypass mode work.
 
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 
 from rllm.agents.agent import Episode, Step, Trajectory
@@ -50,8 +51,8 @@ def _make_episode(
 
 
 def test_transform_metrics_handle_all_filtered_groups():
-    episodes = [Episode(id=f"task:{i}", trajectories=[], termination_reason=TerminationReason.TIMEOUT) for i in range(2)]
-    cf_config = CompactFilteringConfig(enable=True, mask_timeout=True)
+    episodes = [Episode(id=f"task:{i}", trajectories=[], termination_reason=TerminationReason.VERIFIER_TIMEOUT) for i in range(2)]
+    cf_config = CompactFilteringConfig(enable=True, mask_verifier_timeout=True)
 
     groups, metrics = transform_episodes_to_trajectory_groups(
         episodes,
@@ -65,6 +66,32 @@ def test_transform_metrics_handle_all_filtered_groups():
     assert metrics["groups/avg_group_size"] == 0.0
     assert metrics["groups/max_group_size"] == 0
     assert metrics["groups/min_group_size"] == 0
+
+
+def test_compact_filtering_splits_agent_and_verifier_timeouts():
+    """One flag per family: dropping a grader that ran out of clock must not
+    also drop an agent that ran out of clock (SWE-Master keeps the latter)."""
+    cf = CompactFilteringConfig(enable=True, mask_verifier_timeout=True)
+    assert cf.should_mask(TerminationReason.VERIFIER_TIMEOUT)
+    assert not cf.should_mask(TerminationReason.AGENT_TIMEOUT)
+
+
+def test_compact_filtering_accepts_pre_split_mask_timeout():
+    from omegaconf import OmegaConf
+
+    cf = CompactFilteringConfig.from_config(OmegaConf.create({"enable": True, "mask_timeout": True}))
+    assert cf.mask_agent_timeout and cf.mask_verifier_timeout
+
+    explicit = CompactFilteringConfig.from_config(OmegaConf.create({"enable": True, "mask_timeout": True, "mask_agent_timeout": False}))
+    assert not explicit.mask_agent_timeout and explicit.mask_verifier_timeout
+
+
+def test_legacy_timeout_string_deserializes():
+    """Episode logs written before the split carry ``"timeout"``."""
+    assert TerminationReason("timeout") is TerminationReason.AGENT_TIMEOUT
+    assert TerminationReason("verifier_timeout") is TerminationReason.VERIFIER_TIMEOUT
+    with pytest.raises(ValueError):
+        TerminationReason("not_a_reason")
 
 
 class TestRolloutLogProbsPropagation:

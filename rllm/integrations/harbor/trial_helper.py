@@ -252,7 +252,7 @@ def _get_exception_type_map() -> dict[str, Any]:
         from rllm.workflows.workflow import TerminationReason
 
         _EXCEPTION_TYPE_MAP = {
-            "AgentTimeoutError": TerminationReason.TIMEOUT,
+            "AgentTimeoutError": TerminationReason.AGENT_TIMEOUT,
             "ContextLengthExceededError": TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,
             "OutputLengthExceededError": TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED,
         }
@@ -273,7 +273,7 @@ def map_termination_reason(
     if finished:
         return TerminationReason.ENV_DONE
     if timed_out:
-        return TerminationReason.TIMEOUT
+        return TerminationReason.AGENT_TIMEOUT
     if exception_type:
         return _get_exception_type_map().get(exception_type, TerminationReason.ERROR)
     return TerminationReason.ERROR
@@ -362,7 +362,7 @@ async def run_harbor_task(
         return HarborTaskOutcome(
             finished=False,
             error=f"harbor trial timed out after {timeout:.1f}s" if timeout else "harbor trial timed out",
-            termination_reason=TerminationReason.TIMEOUT,
+            termination_reason=TerminationReason.AGENT_TIMEOUT,
             elapsed=elapsed,
         )
     except Exception as e:

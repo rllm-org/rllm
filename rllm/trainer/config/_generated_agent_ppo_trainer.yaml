@@ -393,7 +393,8 @@ rllm:
     mask_max_prompt_length_exceeded: true
     mask_max_response_length_exceeded: true
     mask_max_turns_exceeded: true
-    mask_timeout: true
+    mask_agent_timeout: true
+    mask_verifier_timeout: true
   rejection_sample:
     enable: false
     multiplier: 1
