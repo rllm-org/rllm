@@ -34,9 +34,10 @@ import uuid
 from abc import abstractmethod
 
 from rllm.env import env_int
-from rllm.sandbox.protocol import Sandbox
+from rllm.sandbox.protocol import Sandbox, SandboxExecTimeout
 from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-from rllm.types import AgentConfig, Task
+from rllm.types import AgentConfig, Episode, Task, Trajectory
+from rllm.workflows.workflow import TerminationReason
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +274,7 @@ class BaseCliHarness(SandboxedAgentFlow):
     # Lifecycle
     # ---------------------------------------------------------------------
 
-    def run(self, task: Task, config: AgentConfig, *, env: Sandbox) -> None:
+    def run(self, task: Task, config: AgentConfig, *, env: Sandbox) -> Episode | None:
         """Exec the CLI in the sandbox; let the gateway build the trajectory.
 
         The install has already happened by the time this runs — either
@@ -281,6 +282,17 @@ class BaseCliHarness(SandboxedAgentFlow):
         sandbox. Returns ``None`` so :func:`rllm.types._coerce_to_episode`
         builds an empty single-trajectory Episode whose Steps the engine
         enriches from gateway-captured traces.
+
+        The one thing the harness reports itself is the agent running out
+        of wall clock (``task.metadata["agent_timeout"]``, i.e. task.toml's
+        ``[agent] timeout_sec``). Nothing downstream can see that: the
+        gateway traces look like any other episode's, and the verifier
+        still grades whatever the agent left in the repo -- the docker
+        backend's in-container ``timeout`` leaves the sandbox alive. So the
+        harness returns an otherwise-empty Episode stamped
+        ``AGENT_TIMEOUT``; enrichment preserves the stamp and the engine
+        only fills a reason that is still ``None``. Every other failure is
+        logged and left to the engine, as before.
         """
         sandbox = env
         env_vars = self.build_env(task, config)
@@ -292,6 +304,13 @@ class BaseCliHarness(SandboxedAgentFlow):
 
         try:
             self._exec_agent(sandbox, cmd, timeout=timeout, env=env_vars)
+        except SandboxExecTimeout as e:
+            logger.warning("%s ran out of its %.0fs agent budget: %s", type(self).__name__, timeout, e)
+            return Episode(
+                task=task.metadata,
+                trajectories=[Trajectory(name=self.name, steps=[])],
+                termination_reason=TerminationReason.AGENT_TIMEOUT,
+            )
         except Exception as e:
             # Surface as a warning for operator visibility; the engine
             # still gets None and the gateway traces (if any LLM calls

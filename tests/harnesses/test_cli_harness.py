@@ -122,6 +122,36 @@ def test_run_swallows_cli_failure_and_returns_none():
     assert result is None
 
 
+def test_run_reports_agent_timeout_as_termination_reason():
+    """The one failure the harness names itself. A CLI that runs out of its
+    ``agent_timeout`` leaves a gradable repo behind (the docker backend's
+    in-container ``timeout`` keeps the sandbox alive), so the episode must
+    stay in the batch -- but stamped AGENT_TIMEOUT, or it is indistinguishable
+    from ENV_DONE and SWE-Master's budget reward shaping has nothing to key on."""
+    from rllm.sandbox.protocol import SandboxExecTimeout
+    from rllm.types import Episode
+    from rllm.workflows.workflow import TerminationReason
+
+    class TimingOutSandbox(FakeSandbox):
+        def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:
+            if "opencode --model" in command:
+                raise SandboxExecTimeout(f"exec exceeded {timeout:.0f}s")
+            return super().exec(command, timeout=timeout, user=user)
+
+    h = OpenCodeHarness()
+    task = _make_task()
+    task.metadata["agent_timeout"] = 900
+
+    result = h.run(task, _make_config(), env=TimingOutSandbox())
+
+    assert isinstance(result, Episode)
+    assert result.termination_reason == TerminationReason.AGENT_TIMEOUT
+    # Still an *empty* episode: Steps come from gateway traces at enrichment.
+    assert len(result.trajectories) == 1
+    assert result.trajectories[0].steps == []
+    assert result.trajectories[0].name == h.name
+
+
 @pytest.mark.parametrize(
     ("workdir", "expected_prefix"),
     [
