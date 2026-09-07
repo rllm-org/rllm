@@ -16,8 +16,8 @@ rllm:
     # has to cover a whole multi-turn episode, not a single completion.
     # 8 tasks x rollout.n=8 = 64 trajectories per step. verl requires
     # train_batch_size * rollout.n to divide n_gpus (64 % 8 = 0).
-    train_batch_size: 16
-    val_batch_size: 16
+    train_batch_size: 32
+    val_batch_size: 32
     # Only max_prompt_length is a real choice here: it is the padded width of
     # the initial prompt (system + tool spec + issue statement; observed 1.1-1.3K,
     # so 8K is roomy). max_response_length is whatever is left of the context
@@ -28,8 +28,14 @@ rllm:
     max_response_length: 122880
 
   algorithm:
-    adv_estimator: grpo
-    norm_adv_by_std_in_grpo: true
+    # SWE-Master leave-one-out estimator: rllm/trainer/algorithms/rl_algo.py:26
+    adv_estimator: rloo
+    # Inert while adv_estimator=rloo -- calculate_rloo_advantages_per_group
+    # takes no such argument -- but it is also the value the paper argues for:
+    # dividing by the group std biases the update by task-difficulty variance.
+    # Stated explicitly so a revert to `grpo` does not silently bring it back.
+    norm_adv_by_std_in_grpo: false
+    eps_clip_high: 0.28
     # kl_beta=0 is the real switch, and it does more than zero a loss term:
     # verl's need_reference_policy() is (use_kl_in_reward or use_kl_loss), and
     # use_kl_loss is *derived* from kl_beta by sync_config. At 0 the reference
@@ -37,9 +43,10 @@ rllm:
     # pass and its memory. Do not set actor.use_kl_loss directly -- that
     # suppresses the derivation and hides where the knob lives.
     kl_beta: 0.0
+    loss_agg_mode: seq-mean-token-sum
 
   rollout:
-    n: 8        # GRPO group size
+    n: 4        # GRPO group size
     n_val: 1
     train:
       temperature: 1.0
@@ -73,9 +80,9 @@ rllm:
   # removed a stage earlier as zero-step episodes. See README.
   compact_filtering:
     enable: true
-    mask_max_prompt_length_exceeded: true
-    mask_max_response_length_exceeded: true
-    mask_max_turns_exceeded: true
+    mask_max_prompt_length_exceeded: false # ref. SWE-Master
+    mask_max_response_length_exceeded: false # no-op for native rllm workflows
+    mask_max_turns_exceeded: true # ref. SWE-Master
     mask_timeout: true
     mask_error: true
 

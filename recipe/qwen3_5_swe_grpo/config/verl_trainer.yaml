@@ -54,10 +54,10 @@ actor_rollout_ref:
     use_dynamic_bsz: false
     ppo_micro_batch_size_per_gpu: 1
 
-    # rllm.data.train_batch_size (8) x rollout.n (8) = 64 trajectories; 8 x 8 = 64
+    # rllm.data.train_batch_size (32) x rollout.n (8) = 64 trajectories; 8 x 8 = 64
     # rows here makes that exactly one optimizer update per step, i.e. strictly
     # on-policy GRPO.
-    ppo_mini_batch_size: 16
+    ppo_mini_batch_size: 8
 
     optim:
       lr: 1e-6
