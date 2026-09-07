@@ -71,7 +71,7 @@ UNSCORABLE = {
 # at rollout.n=8 makes a single training batch take hours. These are sized for
 # a 4B policy: enough for a few dozen mini-swe-agent turns, and enough for the
 # verifier's `pip install -e .` / `uv add` step plus the test file.
-AGENT_TIMEOUT_SEC = 900.0
+AGENT_TIMEOUT_SEC = 3600.0
 VERIFIER_TIMEOUT_SEC = 1800.0
 
 _FROM_RE = re.compile(r"^\s*FROM\s+(\S+)", re.MULTILINE)
