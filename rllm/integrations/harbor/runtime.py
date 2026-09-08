@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 from rllm.env import env_float
@@ -22,6 +23,19 @@ from rllm.integrations.harbor.trial_helper import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Harbor uses ``trial_name`` as a directory name under ``trials/`` and then
+# bind-mounts ``trials/<trial_name>/verifier`` into the container. Docker's
+# ``host:container`` volume syntax splits on ``:``, so the engine's
+# ``<task_id>:<rollout_idx>`` session uid fails with "mount path must be
+# absolute". Keep the name unique but filesystem- and docker-safe.
+_TRIAL_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def safe_trial_name(name: str) -> str:
+    """Map a session uid onto a name Harbor can use as a trial directory."""
+    return _TRIAL_NAME_UNSAFE.sub("-", name).strip("-") if name else name
+
 
 _DEFAULT_SESSION_TIMEOUT_S = env_float("RLLM_HARBOR_SESSION_TIMEOUT_S", 900.0)  # set env var: export RLLM_HARBOR_SESSION_TIMEOUT_S=xxx
 
@@ -111,6 +125,7 @@ class HarborRuntime:
     ) -> HarborTaskOutcome:
         """Run a single harbor task.  Shared by both eval and training."""
         self._ensure_initialized()
+        trial_name = safe_trial_name(trial_name)
         return await run_harbor_task(
             task_path=task_path,
             agent_name=self.agent_name,

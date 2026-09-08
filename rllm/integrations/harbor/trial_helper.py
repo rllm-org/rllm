@@ -13,9 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import logging
 import os
+import platform
+import subprocess
 import time
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -69,21 +73,72 @@ def silence_harbor() -> None:
         setattr(h, _HARBOR_FILTER_ATTR, True)
 
 
-def _rewrite_url_for_container(url: str) -> str:
-    """Rewrite localhost URLs so they're reachable from inside a Docker container.
+@functools.lru_cache(maxsize=1)
+def container_host_for_gateway() -> str:
+    """Hostname/IP a Harbor task container should use to reach this process.
 
-    On macOS/Windows Docker Desktop, ``host.docker.internal`` resolves to the
-    host machine. On Linux with default bridge networking, the same hostname
-    is available in Docker 20.10+.
+    Harbor's docker-compose files do not add ``host.docker.internal`` to the
+    task container, and Linux Docker Engine does not define it by default (only
+    Docker Desktop does), so an agent inside the container fails with
+    ``Name or service not known``. On Linux use the default bridge gateway IP
+    instead: the rLLM gateway binds ``0.0.0.0``, and containers on compose's
+    per-project bridge networks can route to any host address. This assumes
+    the rLLM process shares the host's network namespace (bare metal, or a
+    container started with ``--network host``).
+    """
+    if platform.system() != "Linux":
+        return "host.docker.internal"
+    try:
+        out = subprocess.run(
+            ["docker", "network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        ip = out.stdout.strip()
+        if out.returncode == 0 and ip:
+            return ip
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "host.docker.internal"
+
+
+def _rewrite_url_for_container(url: str) -> str:
+    """Rewrite loopback URLs so they're reachable from inside a Docker container.
+
+    ``127.0.0.1`` / ``localhost`` inside the container is the container itself,
+    so point at the host instead — see :func:`container_host_for_gateway` for
+    which name that is on which platform.
     """
     import re
 
+    host = container_host_for_gateway()
     # Match http://127.0.0.1:PORT or http://localhost:PORT (with optional path)
     return re.sub(
         r"(https?://)(?:127\.0\.0\.1|localhost)(:\d+)",
-        r"\1host.docker.internal\2",
+        rf"\g<1>{host}\g<2>",
         url,
     )
+
+
+def harbor_trials_dir() -> Path:
+    """Directory Harbor writes ``trials/<trial_name>/`` into.
+
+    Harbor defaults to ``./trials`` relative to the cwd, and bind-mounts
+    ``<trials>/<name>/verifier`` (and ``agent``, ``artifacts``) into the task
+    container. That bind mount is resolved by the **Docker daemon**, so when
+    rLLM itself runs in a container that talks to the host's daemon over
+    ``/var/run/docker.sock``, the path must exist *on the host* at the same
+    location — otherwise the verifier's ``reward.txt`` lands in a directory
+    only the host can see and Harbor reports ``RewardFileNotFoundError`` for a
+    trial that actually scored. Use ``$RLLM_HOME/harbor_trials``: teams already
+    mount that volume at the same path on both sides for datasets.
+    """
+    from rllm import paths
+
+    trials = Path(paths.rllm_path("harbor_trials")).expanduser().resolve()
+    trials.mkdir(parents=True, exist_ok=True)
+    return trials
 
 
 def _infer_provider_prefix(model_name: str) -> str:
@@ -102,6 +157,27 @@ def _infer_provider_prefix(model_name: str) -> str:
     # Default to openai — works for gpt-*, o1-*, etc. and also when going
     # through a LiteLLM proxy which accepts openai/ for any backend.
     return f"openai/{model_name}"
+
+
+def qualify_model_name(model_name: str) -> str:
+    """Return *model_name* in the ``provider/model`` form Harbor scaffolds need.
+
+    Bare names get a provider inferred (``gpt-5.5`` → ``openai/gpt-5.5``).
+    Names already led by a litellm provider slug pass through. HF-style ids
+    such as ``Qwen/Qwen3-8B`` look qualified but ``Qwen`` is not a provider:
+    Harbor's mini-swe-agent then fails pre-flight with ``Unknown model``. Those
+    get the inferred prefix in front of the *whole* id (``openai/Qwen/Qwen3-8B``),
+    so litellm strips ``openai/`` and the served model name reaches the
+    gateway unchanged.
+    """
+    if "/" not in model_name:
+        return _infer_provider_prefix(model_name)
+    from rllm.harnesses.cli_harness import BaseCliHarness
+
+    head = model_name.split("/", 1)[0].lower()
+    if head in BaseCliHarness._LITELLM_PROVIDER_SLUGS:
+        return model_name
+    return _infer_provider_prefix(model_name)
 
 
 def build_harbor_trial_config(
@@ -150,9 +226,9 @@ def build_harbor_trial_config(
         TrialConfig,
     )
 
-    # Ensure model_name has provider/ prefix (Harbor agents require it)
-    if model_name and "/" not in model_name:
-        model_name = _infer_provider_prefix(model_name)
+    # Ensure model_name has a real provider/ prefix (Harbor agents require it)
+    if model_name:
+        model_name = qualify_model_name(model_name)
 
     env: dict[str, str] = {}
     if inference_url:
@@ -180,6 +256,7 @@ def build_harbor_trial_config(
     return TrialConfig(
         task=TaskConfig(path=Path(task_path)),
         trial_name=trial_name,
+        trials_dir=harbor_trials_dir(),
         agent_timeout_multiplier=agent_timeout_multiplier,
         verifier_timeout_multiplier=verifier_timeout_multiplier,
         agent_setup_timeout_multiplier=agent_setup_timeout_multiplier,
