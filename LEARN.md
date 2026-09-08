@@ -109,7 +109,6 @@ python3 << 'PY'
 import subprocess, json
 from datasets import load_dataset
 from rllm.data.swebench_pro_builder import build_benchmark
-
 local = set(subprocess.check_output(
     ["docker","images","jefzda/sweap-images","--format","{{.Tag}}"], text=True # text=False -> Bytes
 ).split())
@@ -638,37 +637,9 @@ export TMPDIR=$RLLM_SCRATCH/tmp        # torch inductor 등 /tmp 기본값까지
 export UV_CACHE_DIR=$RLLM_SCRATCH/uv
 ```
 
-### 9. 이번 사고 결론 — 그리고 오진
-
-- **직접 원인**: 호스트 md0(`/`) 100%, 0바이트. 컨테이너 `/`가 그 위에 있어 같이 0
-- **내 작업물 위치**: SWE 이미지 71개·모델·데이터셋 전부 md1/gpfs. 여기까진 맞음
-
-**오진했던 것**: 진행 중에 `du`로 "내 기여분은 2.6G뿐, 나머지는 컨테이너 밖 소비자"라고 결론냈다.
-그런데 **학습 프로세스를 종료한 직후 `/`가 0 → 14G로 회복**했다. 종료 시점과 정확히 일치하므로
-상당 부분이 내 프로세스가 붙잡고 있던 것이었을 가능성이 높다.
-
-원인은 이 문서 6절에서 스스로 적어둔 함정이다:
-
-> **`du`는 "삭제됐지만 프로세스가 열고 있는 파일"을 못 본다.**
-
-Ray object store, vLLM/torch 컴파일 temp 같은 것들이 unlink된 뒤에도 fd로 살아 있으면
-`df`는 차 있는데 `du`로는 안 보인다. 프로세스가 죽는 순간 공간이 돌아온다.
-게다가 이번 런은 `TMPDIR`을 설정하기 *전에* 시작했으므로 vLLM 8개의 컴파일 캐시가 md0으로 갔다.
-
-**교훈 두 개:**
-
-1. `du`만 보고 "내 것이 아니다"라고 결론내지 말 것. `df`와 `du`가 안 맞으면 **거의 항상**
-   삭제-열린 파일이다. 확인:
-   ```bash
-   sudo lsof -nP +L1 | awk '/deleted/'          # NLINK=0 인 열린 파일
-   # 또는 결정적 검증: 의심 프로세스를 멈추고 df가 회복되는지 본다
-   ```
-2. 컨테이너 안에서 대형 워크로드를 돌릴 때 `TMPDIR`은 **시작 전에** 옮겨야 한다.
-   런 도중에 env를 바꿔도 이미 뜬 프로세스에는 적용되지 않는다.
-
 ## compact_filtering: 인프라 실패가 모델 실패로 학습되는 문제
 
-**증상**: 없다. 그게 문제다. 학습은 정상적으로 돌고 리워드도 나오는데, verifier가 죽거나
+**증상**: 학습은 정상적으로 돌고 리워드도 나오는데, verifier가 죽거나
 프롬프트가 컨텍스트를 넘겨 죽은 에피소드가 **reward 0으로 그룹에 들어간다.**
 "정책이 못 풀었다"와 "환경이 고장났다"가 구분되지 않는다.
 
