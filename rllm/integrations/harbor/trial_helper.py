@@ -75,6 +75,39 @@ def silence_harbor() -> None:
         setattr(h, _HARBOR_FILTER_ATTR, True)
 
 
+_RETRY_PATCH_ATTR = "_rllm_single_attempt"
+
+
+def disable_harbor_trial_retries() -> None:
+    """Make Harbor 0.3.0 run the verifier and the environment start once.
+
+    Harbor 0.3.0 wraps ``Trial._verify_with_retry`` and
+    ``Trial._start_environment_with_retry`` in tenacity ``stop_after_attempt(2)``:
+    a verifier that exceeds ``verifier.timeout_sec`` is re-run from scratch, and
+    an environment start that exceeds ``build_timeout_sec`` gets a second try.
+    Harbor 0.22.0 removed both retries. Keeping the second verifier pass means
+    a task can score differently from upstream Harbor (a Go suite that warmed
+    its build cache on the timed-out first pass may pass on the second) and
+    the worst case per trial is twice the verifier budget. Replace the
+    decorated methods with single-attempt copies via tenacity's ``retry_with``,
+    which keeps the coroutine wrapper intact. Idempotent; a Harbor version
+    without these methods (or without tenacity wrappers on them) is left alone.
+    """
+    from harbor.trial.trial import Trial
+
+    if getattr(Trial, _RETRY_PATCH_ATTR, False):
+        return
+    from tenacity import stop_after_attempt
+
+    for name in ("_verify_with_retry", "_start_environment_with_retry"):
+        method = getattr(Trial, name, None)
+        retry_with = getattr(method, "retry_with", None)
+        if retry_with is None:
+            continue
+        setattr(Trial, name, retry_with(stop=stop_after_attempt(1)))
+    setattr(Trial, _RETRY_PATCH_ATTR, True)
+
+
 @functools.lru_cache(maxsize=1)
 def container_host_for_gateway() -> str:
     """Hostname/IP a Harbor task container should use to reach this process.

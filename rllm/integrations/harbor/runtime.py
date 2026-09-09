@@ -18,6 +18,7 @@ from rllm.env import env_float
 from rllm.integrations.harbor.trial_helper import (
     MODEL_PLACEHOLDER,
     HarborTaskOutcome,
+    disable_harbor_trial_retries,
     ensure_dummy_api_keys,
     outcome_to_episode,
     run_harbor_task,
@@ -119,6 +120,7 @@ class HarborRuntime:
             return
         ensure_dummy_api_keys()
         silence_harbor()
+        disable_harbor_trial_retries()
         self._initialized = True
 
     def initialize(self) -> None:
