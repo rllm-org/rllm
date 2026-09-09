@@ -370,39 +370,88 @@ PY
 
 #### 1.2.1 subset을 Harbor harness로 평가
 
-Harbor harness(`harbor:*`)가 필요로 하는 것은 데이터셋 이름이 `harbor:`로 시작하는 것이 아니라, **parquet 행에 `task_path`가 있는 것**이다(`HarborRuntime`은 `task.metadata["task_path"]`로 Trial을 만든다). 
-그래서 native와 같은 방법으로 task directory를 `$RLLM_HOME` 아래에 복사해 등록한 subset도 Harbor harness로 돌릴 수 있다. 
+Harbor harness(`harbor:*`)가 필요로 하는 것은 데이터셋 이름이 `harbor:`로 시작하는 것이 아니라, **parquet 행에 `task_path`가 있는 것**이다(`HarborRuntime`은 `task.metadata["task_path"]`로 trial을 만든다). 그래서 native와 같은 방법으로 task directory를 `$RLLM_HOME` 아래에 복사해 등록한 subset도 Harbor harness로 실행할 수 있다.
 단, 1.2 방법으로 충분히 같은 일을 할 수 있기에 권장하지 않는다. 별도의 이유로 subset을 분리하고 싶은 경우에만 참고로 사용한다.
 
-조건: 
-- **parquet 행에 task_path 추가** 
+조건:
+- **소스는 `harbor:swebenchpro`(Harbor cache)에서 복사한다.** rLLM builder(`swebench_pro`)의 task directory는 Harbor harness로 채점되지 않는다. 이유는 아래와 같다: 
+  - builder의 `tests/test.sh`가 결과를 `/tmp/rllm/reward.json`에만 쓰는데(rLLM 규약), Harbor verifier는 `/logs/verifier/reward.txt|json`만 읽기 때문이다(`RewardFileNotFoundError`). 
+  - builder `task.toml`의 `docker_image` 때문에 Harbor가 Dockerfile을 건너뛰어 Container가 `exit 126`으로 죽는다. 
+- **parquet 행에 `task_path` 추가**: 사본 경로를 가리키는 행으로 `DatasetRegistry.register_dataset` 한다.
 - **`--evaluator harbor_reward_fn` 명시**: `harbor:` 이름이 아니면 CLI가 catalog에서 Evaluator를 찾지 못해 멈추는데, 이 플래그가 그 분기를 지나게 한다.
-- **사본의 `task.toml`에서 `docker_image` 줄 삭제**: 이 값이 있으면 Harbor는 Dockerfile을 빌드하지 않고 베이스 이미지를 그대로 `sh -c "sleep infinity"`로 띄운다.
 
-예시:
+<harbor:swebenchpro subset 100 예시> 
+
 ```bash
-python - <<'PY'
-import os, re, shutil, pandas as pd
+export RLLM_HOME=/raid/rllm-work/rllm-home
+rllm dataset pull harbor:swebenchpro
+```
+
+`$RLLM_HOME/datasets/swebench_pro_100/<task_id>/` 100개 복사 + registry 등록
+
+```python
+import json
+import re
+import shutil
+import sys
 from pathlib import Path
+
+from rllm import paths
 from rllm.data import DatasetRegistry
-home = Path(os.environ["RLLM_HOME"]); name = "swebench_pro_mine"
-want = {"instance_qutebrowser__qutebrowser-e64622cd2df5b521342cf4a62e0d4cb8f8c9ae5a-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d"}
-src = pd.read_parquet(home / "datasets/swebench_pro/test.parquet")        # harbor 소스면 datasets/swebenchpro/default.parquet, 열 이름은 task_id
-out = home / "datasets" / name; out.mkdir(parents=True, exist_ok=True)
-rows = []
-for r in src.itertuples():
-    tid = r.id
-    if tid not in want: continue
-    dst = out / tid
-    if not dst.exists(): shutil.copytree(r.task_path, dst)
+
+src = DatasetRegistry.load_dataset(src_name, src_split)
+if src is None:
+    sys.exit(f"source dataset '{src_name}/{src_split}' is not registered. Run: rllm dataset pull " + ("swebench_pro" if args.source == "builder" else "harbor:swebenchpro"))
+# Harbor lower-cases some ids (instance_NodeBB__NodeBB-... -> instance_nodebb__nodebb-...).
+by_id = {row[id_col].lower(): row for row in src}
+
+out = Path(paths.rllm_path("datasets", name))
+out.mkdir(parents=True, exist_ok=True)
+rows, missing = [], []
+for iid in want:
+    row = by_id.get(iid.lower())
+    if row is None:
+        missing.append(iid)
+        continue
+    src_dir = Path(row["task_path"])
+    dst = out / src_dir.name
+    if dst.exists() and args.force:
+        shutil.rmtree(dst)
+    if not dst.exists():
+        shutil.copytree(src_dir, dst)
     toml = dst / "task.toml"
-    toml.write_text(re.sub(r"^docker_image\s*=.*\n", "", toml.read_text(), flags=re.M))   # Harbor가 Dockerfile을 빌드할 수 있도록
-    rows.append({"id": tid, "task_id": tid, "task_path": str(dst), "instruction": r.instruction, "question": r.instruction})
-DatasetRegistry.register_dataset(name=name, data=rows, split="test", source="swebench_pro (subset)", category="agentic")
-print(len(rows), "tasks ->", out)
-PY
-rllm eval swebench_pro_mine --split test \
-    --agent harbor:mini-swe-agent --evaluator harbor_reward_fn --sandbox-backend docker ...
+    if not args.keep_docker_image:
+        toml.write_text(re.sub(r"^docker_image\s*=.*\n", "", toml.read_text(), flags=re.M))
+    instruction = row.get("instruction") or (dst / "instruction.md").read_text()
+    rows.append({"id": src_dir.name, "task_id": src_dir.name, "instruction": instruction, "question": instruction, "task_path": str(dst), "design_id": iid})
+
+if missing:
+    sys.exit(f"{len(missing)} ids not found in source '{src_name}': {missing[:5]}")
+
+DatasetRegistry.register_dataset(
+    name=name,
+    data=rows,
+    split=args.split,
+    source=f"{src_name} subset from {Path(args.design).name}",
+    description=f"SWE-bench Pro subset '{design.get('name', '')}' ({len(rows)} tasks) from {args.source} source",
+    category="agentic",
+)
+print(f"{name}/{args.split}: {len(rows)} tasks -> {out}")
+print("harbor harness :", f"rllm eval {name} --split {args.split} --agent harbor:mini-swe-agent --evaluator harbor_reward_fn --sandbox-backend docker ...")
+```
+
+평가 수행
+```bash
+export RLLM_HARBOR_SESSION_TIMEOUT_S=3300
+rllm eval swebench_pro_100 --split test \
+    --agent harbor:oracle --evaluator harbor_reward_fn \
+    --sandbox-backend docker --concurrency 8 --sandbox-concurrency 8 --no-ui \
+    --base-url http://127.0.0.1:1/v1 --model oracle-dummy         # oracle 점검
+rllm eval swebench_pro_100 --split test \
+    --agent harbor:mini-swe-agent --evaluator harbor_reward_fn \
+    --sandbox-backend docker --concurrency 8 --sandbox-concurrency 8 --no-ui \
+    --base-url http://127.0.0.1:8000/v1 --model Qwen/Qwen3.5-4B \
+    --sampling-params @recipe/eval/config/qwen3_5.yaml            # 모델 평가
 ```
 
 ### 1.3 Harbor 경로에서 알아둘 것
@@ -501,6 +550,7 @@ HF 데이터셋에는 CPU·메모리 정보가 없다. 4 / 16384는 업스트림
 | `rllm eval harbor:swebenchpro --agent harbor:mini-swe-agent` | Harbor | CPU 1, 4 GB |
 | `rllm eval harbor:swebenchpro --agent mini-swe-agent` | **Harbor** (native harness라도 task directory는 Harbor) | CPU 1, 4 GB. native 경로도 `task.toml` 값을 그대로 적용한다 |
 | `rllm eval swebench_pro --agent mini-swe-agent` | rLLM builder | CPU 4, 16 GB |
+| `rllm eval swebench_pro --agent harbor:*` | — | **불가.** builder의 `test.sh`는 `/tmp/rllm/reward.json`에만 쓰고 Harbor verifier는 `/logs/verifier/`만 읽는다. Harbor harness로 subset을 돌리려면 1.2.1절대로 `harbor:swebenchpro`에서 복사한다 |
 
 ### 2.3 Subset만 평가
 
