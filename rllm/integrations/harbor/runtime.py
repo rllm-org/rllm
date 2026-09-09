@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import secrets
+import time
 from typing import Any
 
 from rllm.env import env_float
@@ -31,10 +33,26 @@ logger = logging.getLogger(__name__)
 # absolute". Keep the name unique but filesystem- and docker-safe.
 _TRIAL_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
+# The session uid repeats across runs (same task, same rollout index), and
+# Harbor creates the trial directory with ``exist_ok=True`` and never clears
+# it. A ``reward.txt`` left by an earlier run would then be read by a later
+# run whose own verifier wrote nothing, reporting a score for work that did
+# not happen. One tag per process keeps every run's trials apart, the way
+# Harbor's own CLI appends a random suffix to its trial names.
+_RUN_TAG = time.strftime("%Y%m%dT%H%M%S") + "-" + secrets.token_hex(2)
+
 
 def safe_trial_name(name: str) -> str:
-    """Map a session uid onto a name Harbor can use as a trial directory."""
-    return _TRIAL_NAME_UNSAFE.sub("-", name).strip("-") if name else name
+    """Map a session uid onto a name Harbor can use as a trial directory.
+
+    ``astropy__astropy-7606:0`` becomes ``astropy__astropy-7606-0__20260909T051500-3f2a``:
+    the task id and rollout index stay readable, the run tag keeps this run's
+    directory apart from any earlier run of the same task.
+    """
+    if not name:
+        return name
+    base = _TRIAL_NAME_UNSAFE.sub("-", name).strip("-")
+    return f"{base}__{_RUN_TAG}"
 
 
 _DEFAULT_SESSION_TIMEOUT_S = env_float("RLLM_HARBOR_SESSION_TIMEOUT_S", 900.0)  # set env var: export RLLM_HARBOR_SESSION_TIMEOUT_S=xxx
