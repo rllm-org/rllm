@@ -72,8 +72,6 @@ rLLM은 데이터셋, 평가 결과, Harbor trial log를 `$RLLM_HOME`(기본 `~/
 export RLLM_HOME=/raid/rllm-work/rllm-home
 ```
 
-`recipe/qwen3_5_swe_grpo/env.sh`를 `source`해도 같은 값이 잡힌다.
-
 ### 0.3.1 환경변수
 
 | Var | Default | Why |
@@ -194,10 +192,112 @@ rllm eval <benchmark> --agent <agent> --sandbox-backend docker \
 남는다. 콘솔에는 Accuracy, Errors, `--attempts`를 썼다면 pass@k가 찍힌다.
 
 ```bash
-rllm view <run-id>          # 에피소드를 브라우저에서 훑어보기
+rllm view <run-id> 
 ```
 
 `Errors`는 모델이 못 푼 것이 아니라 **인프라 실패**(이미지 빌드 실패, timeout, gateway 접속 불가 등)다. 0이 아니면 먼저 원인을 잡는다. Console에 처음 다섯 개가 찍히고 나머지는 `results.json`에 있다.
+
+### 0.6 `rllm eval` 옵션 정리
+
+`rllm eval <benchmark> [옵션]`. 전체는 `rllm eval --help`.
+
+**샘플링 (gateway가 세션 단위로 강제)**
+
+| 옵션 | 설명 |
+| --- | --- |
+| `--temperature FLOAT` | 온도. `--sampling-params temperature=...`의 단축 |
+| `--top-p FLOAT` | nucleus sampling |
+| `--max-tokens INT` | 호출당 최대 생성 토큰 |
+| `--sampling-params TEXT` | `"temperature=0.6,top_p=0.95,top_k=20,presence_penalty=0.1"` 형식 또는 `@file.yaml` / `@file.json`. 핵심 키 `temperature`, `top_p`, `top_k`, `max_tokens` 외의 키(`presence_penalty`, `min_p`, `repetition_penalty` ...)는 백엔드(vLLM 등)에 그대로 전달 |
+
+`@file`은 샘플링 파라미터를 담은 YAML/JSON 파일이다. 키는 `key=value`로 줄 때와 같다. `--sampling-params`에는 문자열과 `@file` 중 하나만 줄 수 있고, `--temperature` 같은 단축 옵션이 파일 값을 덮는다.
+그래서 팀 공통 파일을 두고 실험별로 `--temperature`만 바꾸는 식으로 쓴다.
+
+```yaml
+# sampling.yaml
+temperature: 0.7
+top_p: 0.95
+top_k: 20
+max_tokens: 8192
+```
+
+```bash
+rllm eval ... --sampling-params @/path/to/sampling.yaml                     
+rllm eval ... --sampling-params @/path/to/sampling.yaml --temperature 1.0  
+```
+
+파일에 적을 수 있는 키는 핵심 4개(`temperature`, `top_p`, `top_k`, `max_tokens`)에 한정되지 않는다. gateway가 키들을 요청 JSON의 최상위에 그대로 합치므로(`payload.update`), vLLM/SGLang의 `extra_body`에 넣을 수 있는 키(`min_p`, `repetition_penalty`, `presence_penalty`, `seed`, `stop`, `chat_template_kwargs` ...)는 전부 쓸 수 있다. proprietary 모델 경로의 LiteLLM proxy는 `drop_params`로 띄워져 provider가 모르는 키를 **조용히 버린다**(OpenAI 모델에 `top_k`를 주면 오류 없이 무시됨). `model`, `logprobs`, `return_token_ids`는 gateway가 관리하므로 적지 않는다.
+
+예시 파일이 `recipe/eval/sampling_qwen3_5_4b.yaml`에 있다. Qwen3.5-4B 모델 카드의 "thinking mode, precise coding
+tasks" 프리셋(`temperature=0.6, top_p=0.95, top_k=20, min_p=0, presence_penalty=0, repetition_penalty=1.0`)에
+recipe의 val과 같은 턴당 `max_tokens: 8192`를 붙인 것이다. Qwen3.5-4B는 chat template이 기본으로 thinking을 켜므로
+thinking 프리셋이 맞다. 반복 루프가 보이면 `presence_penalty`를 0~2 사이로 올린다(모델 카드 권고).
+
+```bash
+# vLLM. Qwen3.5는 128K context를 권하므로 recipe와 같은 131072로 띄운다 (8192 prompt + 122880 response)
+vllm serve Qwen/Qwen3.5-4B --port 8000 --served-model-name Qwen/Qwen3.5-4B \
+    --max-model-len 131072 --reasoning-parser qwen3
+
+rllm eval harbor:swebench-verified --agent mini-swe-agent --sandbox-backend docker --agent-image auto \
+    --base-url http://127.0.0.1:8000/v1 --model Qwen/Qwen3.5-4B \
+    --sampling-params @recipe/eval/sampling_qwen3_5_4b.yaml \
+    --task-indices 0-9 --attempts 4 --sandbox-concurrency 8 --no-ui
+```
+
+이 값들은 **rLLM gateway가 요청 payload을 덮어써서** 적용한다. harness(mini-swe-agent 등)가 자체 설정으로 보내는 temperature가 있어도 여기서 설정한 값이 이긴다. 우선순위(낮은 쪽부터): 설정 파일 기본값 < `@file` < `key=value` < `--temperature` 같은 단축 옵션. 아무것도 주지 않으면 harness가 보낸 값이 그대로 사용된다.
+
+**반복·표본 수**
+
+| 옵션 | 설명 |
+| --- | --- |
+| `--attempts INT` | task당 독립 rollout 수. `k=1..N`의 pass@k를 보고 (기본 1). 온도 0이면 시도가 같아지므로 `--temperature 0.7`처럼 함께 준다 |
+| `--max-examples INT` | 앞에서 N개만 |
+| `--task-indices TEXT` | `'0'`, `'3,7,12'`, `'0-9'`, 조합 가능 |
+| `--split TEXT` | dataset split. 기본은 catalog의 eval_split (Harbor 소스는 `default`, 등록한 사본은 등록 시 이름) |
+
+**모델 연결**
+
+| 옵션 | 설명 |
+| --- | --- |
+| `--model TEXT` | 모델명. `--base-url`을 주면 필수(서빙 이름과 일치), 아니면 `rllm model setup` 값 |
+| `--base-url TEXT` | OpenAI 호환 endpoint. 생략하면 setup 설정으로 LiteLLM proxy 자동 시작 |
+
+**agent·채점**
+
+| 옵션 | 설명 |
+| --- | --- |
+| `--agent TEXT` | harness 이름(`mini-swe-agent`, `oracle`, `harbor:mini-swe-agent` ...) 또는 `module:object` |
+| `--evaluator TEXT` | 채점기 강제 지정. 등록한 사본을 Harbor harness로 돌릴 때 `harbor_reward_fn` (1.2.1절) |
+
+**sandbox**
+
+| 옵션 | 설명 |
+| --- | --- |
+| `--sandbox-backend` | `docker`, `local`, `modal`, `daytona`, `e2b`, `runloop`, `gke`, `apple-container` |
+| `--sandbox-concurrency INT` | 동시에 뜨는 sandbox 수 (기본 64). 로컬 Docker에서는 8 안팎부터 |
+| `--concurrency INT` | LLM 호출 동시성 (기본 64). sandbox 수와 별개 |
+| `--agent-image TEXT` | native 전용. `auto`(기본) / `skip` / `repo:tag`. mini-swe-agent, opencode, claude-code 지원 |
+| `--snapshot / --no-snapshot` | modal, daytona snapshot 사용 여부. docker에는 영향 없음 |
+| `--warm-queue-size INT` | sandbox N개 선생성. `-1`이면 `--concurrency`와 동일 |
+
+**출력**
+
+| 옵션 | 설명 |
+| --- | --- |
+| `--output TEXT` | 결과 JSON 경로 (기본 run directory의 `results.json`) |
+| `--episodes-dir TEXT` | run directory 위치 (기본 `$RLLM_HOME/eval_results/<bench>_<model>_<timestamp>/`) |
+| `--save-episodes / --no-save-episodes` | episode JSON 저장 (기본 저장) |
+| `--ui / --no-ui` | rLLM UI 서버로 실시간 업로드. 로그인 상태면 자동 켜짐. 외부로 나가면 안 되는 결과는 `--no-ui` 명시 |
+
+자주 쓰는 조합:
+
+```bash
+# ex. local vLLM, 10 task, 4 runs/task, pass@k
+rllm eval harbor:swebench-verified --agent mini-swe-agent --sandbox-backend docker --agent-image auto \
+    --base-url http://127.0.0.1:8000/v1 --model Qwen/Qwen3-8B \
+    --task-indices 0-9 --attempts 4 --temperature 0.7 --top-p 0.95 --max-tokens 8192 \
+    --sandbox-concurrency 8 --no-ui
+```
 
 ---
 
