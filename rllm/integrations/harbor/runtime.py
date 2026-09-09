@@ -179,11 +179,16 @@ class HarborRuntime:
         if not task_path:
             raise ValueError(f"Harbor task missing 'task_path' field in task data: {list(task.metadata.keys())}")
 
+        # Cap the trial like the training path does. Without this the eval path
+        # ran Trial.run() unbounded: Harbor retries a verifier timeout once, so
+        # a hung verifier held a slot for 2 x task.toml's timeout (100 min on
+        # SWE-bench Pro) although RLLM_HARBOR_SESSION_TIMEOUT_S was set.
         outcome = await self._run_one(
             task_path=task_path,
             model_name=config.model,
             inference_url=config.base_url,
             trial_name=config.session_uid,
+            timeout=self.session_timeout,
         )
 
         # Surface infrastructure failures as exceptions so run_dataset counts

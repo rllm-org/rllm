@@ -458,6 +458,7 @@ rllm eval swebench_pro_100 --split test \
 
 * **timeout**: Harbor trial 하나에 rLLM이 거는 상한은 `RLLM_HARBOR_SESSION_TIMEOUT_S`(기본 900초)다. SWE-bench 태스크의 `task.toml`은 Agent와 Verifier에 각 3000초를 주므로 기본값이면 긴 rollout이 먼저 잘린다. 3600 이상으로 올리는 것을 권장한다. 단, harbor와 동일한 평가 결과를 재현하고자 할 경우, task.toml 설정을 따른다.
   - `[agent].timeout_sec`와 `[verifier].timeout_sec`(두 벤치마크 모두 3000초)를 Harbor가 그대로 적용하고, 그 위에 rLLM의 `RLLM_HARBOR_SESSION_TIMEOUT_S`가 Trial 전체 상한으로 한 번 더 걸린다. 둘 중 짧은 쪽이 이긴다. 단, Harbor는 Verifier 타임아웃을 **한 번 재시도**한다(`stop_after_attempt(2)`).
+  - 세션 상한에 걸린 trial은 0점이 아니라 **Errors**로 집계되고, 컨테이너·network·파생 이미지는 rLLM이 직접 정리한다(`run_harbor_trial`). 이 수정 이전 트리에서는 이 상한이 `rllm eval`에 적용되지 않았다(학습 경로에만 적용).
 * **concurrency**: `--sandbox-concurrency`가 동시에 뜨는 sandbox 수(default 64)이며, 로컬 Docker에서는 CPU, 메모리, 디스크 I/O를 보고 8 안팎에서 시작한다. `--concurrency`는 LLM 호출 동시성으로 별도다.
 * **자원 제한**: `task.toml` 그대로. Harbor는 `[environment]`의 cpus/memory를 compose `deploy.resources.limits`로 적용하고, rLLM은 이를 바꾸지 않는다. 레지스트리의 `swebenchpro`는 CPU 1개, 4GB라서 Go 저장소의 Verifier가 시간 안에 끝나지 않는다(task instance: flipt). 이 태스크들을 Harbor 방식으로 채점하려면 자원 상한을 올릴 방법이 필요하다.
 * **태스크마다 Harness 설치**: Harbor의 mini-swe-agent는 컨테이너 안에서 `apt-get install build-essential` 후 `uv tool install mini-swe-agent`를 매번 실행한다. native 방식의 `--agent-image`에 해당하는 캐시가 없어 태스크당 1~2분이 추가된다.

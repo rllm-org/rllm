@@ -37,6 +37,8 @@ _DUMMY_API_KEYS = {
 
 # Placeholder model when the real model is irrelevant (training via gateway)
 MODEL_PLACEHOLDER = "openai/placeholder"
+# How long to wait for Harbor's container teardown after a session timeout.
+_TIMEOUT_CLEANUP_S = 120.0
 
 _HARBOR_FILTER_ATTR = "_rllm_drop_harbor_installed"
 
@@ -284,9 +286,42 @@ async def run_harbor_trial(trial_config, timeout: float | None = None):
     from harbor.trial.trial import Trial
 
     trial = await Trial.create(trial_config)
-    if timeout is not None:
-        return await asyncio.wait_for(trial.run(), timeout=timeout)
-    return await trial.run()
+    if timeout is None:
+        return await trial.run()
+
+    # Cancelling Trial.run() hands the container teardown to an
+    # ``asyncio.shield`` inside Harbor, which only completes if this event loop
+    # keeps running. At the tail of an eval the process exits first and the
+    # task's container, compose network and built image stay behind. Two
+    # shapes of that were seen: the cap fires mid-trial (wait_for raises), or
+    # it fires during Harbor's own cleanup, where Harbor swallows the
+    # cancellation and *returns a result* while its teardown is still
+    # detached. Tear the environment down here in both cases, bounded.
+    started = time.monotonic()
+    try:
+        result = await asyncio.wait_for(trial.run(), timeout=timeout)
+    except asyncio.TimeoutError:
+        await _stop_trial_environment(trial, trial_config.trial_name)
+        raise
+    if time.monotonic() - started >= timeout:
+        await _stop_trial_environment(trial, trial_config.trial_name)
+    return result
+
+
+async def _stop_trial_environment(trial, trial_name: str) -> None:
+    """Explicit, bounded teardown of a trial's environment after a session timeout.
+
+    ``_environment`` is Harbor's private attribute; Trial has no public
+    accessor. ``stop`` runs ``docker compose down``, which is harmless when
+    Harbor's own shielded teardown already finished.
+    """
+    env = getattr(trial, "_environment", None)
+    if env is None:
+        return
+    try:
+        await asyncio.wait_for(env.stop(delete=True), timeout=_TIMEOUT_CLEANUP_S)
+    except Exception:
+        logger.warning("Trial %s: environment cleanup after session timeout did not complete", trial_name, exc_info=True)
 
 
 def trial_result_to_reward(result) -> tuple[float | None, bool, str | None]:
