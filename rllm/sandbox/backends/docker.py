@@ -31,6 +31,7 @@ class _ExecFailed(RuntimeError):
         super().__init__(message)
         self.exit_code = exit_code
 
+
 # Linux Docker does not define ``host.docker.internal`` unless the container
 # is started with ``--add-host=host.docker.internal:host-gateway``.
 # CLI harnesses inside sandboxes reach the rLLM gateway via that hostname
@@ -62,7 +63,7 @@ class DockerSandbox:
 
         self.name = name
         self.image = image
-        self._timeout_cmd: bool | None = None
+        self._timeout_fmt: str | None = None  # probed once per container, see _timeout_wrapper
         self._client = docker.from_env()
         run_kwargs: dict = {
             "command": "sleep infinity",
@@ -130,8 +131,9 @@ class DockerSandbox:
             return self._exec_now(command, user)
 
         deadline = float(timeout)
-        if self._has_timeout_cmd():
-            command = f"timeout --kill-after={_EXEC_KILL_GRACE_SEC}s {deadline:.0f} bash -c {shlex.quote(command)}"
+        wrapper = self._timeout_wrapper()
+        if wrapper:
+            command = wrapper.format(grace=_EXEC_KILL_GRACE_SEC, deadline=f"{deadline:.0f}") + f" bash -c {shlex.quote(command)}"
 
         box: dict = {}
 
@@ -160,25 +162,50 @@ class DockerSandbox:
         err = box.get("err")
         if err is not None:
             # GNU timeout exits 124 when SIGTERM did the job, but 137 (128+9)
-            # when it had to escalate to --kill-after's SIGKILL -- and 137 is
-            # also what an OOM kill looks like. Elapsed time separates them:
-            # a timeout runs out the clock, an OOM kill usually does not.
+            # when it had to escalate to the SIGKILL -- and 137 is also what
+            # an OOM kill looks like. BusyBox timeout has no 124: it reports
+            # the child's death by signal, 143 (128+15) after SIGTERM. Elapsed
+            # time separates a timeout from an OOM or a self-inflicted signal:
+            # a timeout runs out the clock, the others usually do not.
             code = getattr(err, "exit_code", None)
-            timed_out = code == 124 or (code == 137 and time.monotonic() - started >= deadline)
+            timed_out = code == 124 or (code in (137, 143) and time.monotonic() - started >= deadline)
             if timed_out:
                 raise SandboxExecTimeout(f"exec exceeded {deadline:.0f}s in container {self.name} (exit {code})") from err
             raise err
         return box["ok"]
 
-    def _has_timeout_cmd(self) -> bool:
-        """Whether GNU ``timeout`` exists in the image. Probed once per container."""
-        if self._timeout_cmd is None:
-            try:
-                code, _ = self._container.exec_run(["bash", "-c", "command -v timeout"], demux=True)
-                self._timeout_cmd = code == 0
-            except Exception:
-                self._timeout_cmd = False
-        return self._timeout_cmd
+    # Candidate ``timeout`` invocations, most specific first. GNU coreutils
+    # takes ``--kill-after=15s``; BusyBox (Alpine images) only ``-k 15`` and
+    # rejects the long option with exit 1 -- which, wrapped around a verifier,
+    # was indistinguishable from the verifier failing and scored the task 0.
+    _TIMEOUT_CANDIDATES = (
+        "timeout --kill-after={grace}s {deadline}",
+        "timeout -k {grace} {deadline}",
+    )
+
+    def _timeout_wrapper(self) -> str:
+        """The ``timeout`` invocation this image accepts, or ``""`` for none.
+
+        Probed once per container by *running* each candidate on a no-op, not
+        by checking that a ``timeout`` binary exists: the binary's dialect is
+        what varies between images. With no working candidate the exec runs
+        unwrapped and the client-side deadline (which kills the container) is
+        the only enforcement.
+        """
+        if self._timeout_fmt is None:
+            self._timeout_fmt = ""
+            for fmt in self._TIMEOUT_CANDIDATES:
+                probe = fmt.format(grace=1, deadline=5) + " true"
+                try:
+                    code, _ = self._container.exec_run(["bash", "-c", probe], demux=True)
+                except Exception:
+                    break
+                if code == 0:
+                    self._timeout_fmt = fmt
+                    break
+            if not self._timeout_fmt:
+                logger.warning("Sandbox %s: no usable `timeout` in image — exec deadlines fall back to killing the container", self.name)
+        return self._timeout_fmt
 
     def _exec_now(self, command: str, user: str | None) -> str:
         kwargs: dict = {"demux": True}
