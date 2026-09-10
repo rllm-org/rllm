@@ -105,11 +105,35 @@ def _coerce(value: str) -> Any:
         return value
 
 
-def _load_file(path: str) -> dict[str, Any]:
-    """Load a flat YAML/JSON mapping of sampling params."""
+def parse_mapping_spec(source: str | None, *, flag: str = "--sampling-params") -> dict[str, Any]:
+    """Parse a ``"key=value,..."`` string or ``@file.yaml`` / ``@file.json`` into a dict.
+
+    Shared by ``--sampling-params`` and ``--agent-kwargs``. The ``key=value``
+    form is flat (values coerced to int/float when they look like one); nested
+    mappings need the ``@file`` form. ``flag`` only names the option in errors.
+    """
+    source = (source or "").strip()
+    if not source:
+        return {}
+    if source.startswith("@"):
+        return _load_file(source[1:], flag=flag)
+    raw: dict[str, Any] = {}
+    for token in source.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "=" not in token:
+            raise ValueError(f"Invalid {flag} token {token!r}; expected key=value")
+        key, _, value = token.partition("=")
+        raw[key.strip()] = _coerce(value.strip())
+    return raw
+
+
+def _load_file(path: str, *, flag: str = "--sampling-params") -> dict[str, Any]:
+    """Load a YAML/JSON mapping from *path* (top level must be a mapping)."""
     expanded = os.path.expanduser(path)
     if not os.path.isfile(expanded):
-        raise FileNotFoundError(f"sampling-params file not found: {path}")
+        raise FileNotFoundError(f"{flag} file not found: {path}")
     with open(expanded) as f:
         text = f.read()
     try:
@@ -121,7 +145,7 @@ def _load_file(path: str) -> dict[str, Any]:
     if data is None:
         return {}
     if not isinstance(data, Mapping):
-        raise ValueError(f"sampling-params file {path} must contain a mapping at the top level")
+        raise ValueError(f"{flag} file {path} must contain a mapping at the top level")
     return dict(data)
 
 

@@ -1,0 +1,8 @@
+# harbor:opencode against an OpenAI-compatible server (vLLM).
+# opencode hard-wires the Responses API for the "openai" provider id, so register
+# the model under another id on the chat-completions SDK. rllm fills
+# options.baseURL/apiKey per trial and re-prefixes the model name to this id.
+opencode_config:
+  provider:
+    openrouter:
+      npm: "@ai-sdk/openai-compatible"

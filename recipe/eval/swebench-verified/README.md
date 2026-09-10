@@ -103,7 +103,7 @@ rllm eval swebench_verified_100 \
     --sampling-params @recipe/eval/config/qwen3_5.yaml
 ```
 
-두 harness의 차이는 `../README.md` Appendix 2 참고.
+두 harness의 차이는 `../README.md` Appendix 2 참고. mini-swe-agent 외의 harness(opencode)로 평가하려면 `../README.md` 3장 참고.
 
 ## 4. 결과
 

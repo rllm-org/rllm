@@ -12,6 +12,7 @@ errors → map termination reason.
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import functools
 import logging
@@ -215,6 +216,46 @@ def qualify_model_name(model_name: str) -> str:
     return _infer_provider_prefix(model_name)
 
 
+def _apply_opencode_provider_config(agent_kwargs: dict[str, Any] | None, model_name: str | None, container_url: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Reconcile ``opencode_config.provider`` from ``--agent-kwargs`` with the trial.
+
+    Harbor's opencode scaffold registers the model under the provider id in
+    front of ``model_name`` and leaves that provider on its default SDK. For
+    ``openai/`` opencode hard-wires the Responses API (``/v1/responses``),
+    which not every OpenAI-compatible server implements, so users point a
+    *different* provider id at ``@ai-sdk/openai-compatible`` via
+    ``opencode_config``. Two things only rLLM can fill in at trial time:
+
+    * ``options.baseURL`` / ``options.apiKey`` -- that SDK ignores
+      ``OPENAI_BASE_URL``, and the gateway URL differs per trial.
+    * the provider prefix of ``model_name`` -- the gateway pins ``body.model``
+      to ``--model``, so the user cannot pass ``openrouter/<model>`` as
+      ``--model``; instead the single declared provider replaces the
+      inferred one (``openai/Qwen/X`` -> ``openrouter/Qwen/X``).
+
+    Values the user set explicitly are never overridden.
+    """
+    if not agent_kwargs:
+        return agent_kwargs, model_name
+    config = agent_kwargs.get("opencode_config")
+    if not isinstance(config, dict) or not isinstance(config.get("provider"), dict):
+        return agent_kwargs, model_name
+    out = copy.deepcopy(dict(agent_kwargs))
+    providers = out["opencode_config"]["provider"]
+    for provider in providers.values():
+        if not isinstance(provider, dict):
+            continue
+        options = provider.setdefault("options", {})
+        options.setdefault("baseURL", container_url)
+        options.setdefault("apiKey", os.environ.get("OPENAI_API_KEY", "empty"))
+    if model_name and len(providers) == 1:
+        declared = next(iter(providers))
+        head, _, rest = model_name.partition("/")
+        if rest and head != declared:
+            model_name = f"{declared}/{rest}"
+    return out, model_name
+
+
 def build_harbor_trial_config(
     task_path: str,
     agent_name: str,
@@ -281,6 +322,9 @@ def build_harbor_trial_config(
         env["OPENAI_BASE_URL"] = container_url
         env["LLM_BASE_URL"] = container_url
         env["ANTHROPIC_BASE_URL"] = container_url
+
+        if agent_name == "opencode":
+            agent_kwargs, model_name = _apply_opencode_provider_config(agent_kwargs, model_name, container_url)
 
     env_type = None
     if environment_type:

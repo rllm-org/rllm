@@ -109,6 +109,13 @@ class HarborRuntime:
         concurrency = leftovers.pop("sandbox_concurrency", None)
         if concurrency is not None:
             self.max_concurrent = concurrency
+        # ``--agent-kwargs``: extra kwargs for the Harbor agent scaffold
+        # (e.g. ``opencode_config`` for opencode). Same dict the training
+        # path sets via
+        # ``HarborRuntimeConfig.agent_kwargs``; CLI values win per key.
+        agent_kwargs = leftovers.pop("agent_kwargs", None)
+        if agent_kwargs:
+            self.agent_kwargs = {**self.agent_kwargs, **dict(agent_kwargs)}
         return leftovers
 
     # ------------------------------------------------------------------

@@ -18,6 +18,7 @@ from rich.status import Status
 from rllm import paths
 from rllm.cli._pull import load_dataset_catalog, pull_dataset
 from rllm.cli._sampling import SAMPLING_PARAMS_HELP as _SAMPLING_PARAMS_HELP
+from rllm.cli._sampling import parse_mapping_spec
 from rllm.cli._ui import console, fail, info_panel, not_found, parse_index_spec
 from rllm.types import Task
 
@@ -559,9 +560,16 @@ def _run_eval(
     "--agent-image",
     "agent_image",
     default=None,
+    help=("Pre-built CLI agent image for Docker: 'auto' (default), 'skip' (per-task install), or a local repo:tag. Supported harnesses: mini-swe-agent, opencode, claude-code."),
+)
+@click.option(
+    "--agent-kwargs",
+    "agent_kwargs",
+    default=None,
     help=(
-        "Pre-built CLI agent image for Docker: 'auto' (default), 'skip' (per-task install), "
-        "or a local repo:tag. Supported harnesses: mini-swe-agent, opencode, claude-code."
+        "Extra kwargs for the agent scaffold as 'key=value,...' or @file.yaml / @file.json "
+        "(nested mappings need the @file form). Harbor agents (--agent harbor:*) pass them to the "
+        "scaffold, e.g. an 'opencode_config' mapping for harbor:opencode."
     ),
 )
 @click.option(
@@ -599,6 +607,7 @@ def eval_cmd(
     sandbox_backend: str | None,
     sandbox_concurrency: int | None,
     agent_image: str | None,
+    agent_kwargs: str | None,
     use_snapshot: bool,
     warm_queue_size: int,
     enable_ui: bool | None,
@@ -683,6 +692,10 @@ def eval_cmd(
         agent_metadata["sandbox_concurrency"] = sandbox_concurrency
     if agent_image is not None:
         agent_metadata["agent_image"] = agent_image
+    if agent_kwargs:
+        parsed_agent_kwargs = parse_mapping_spec(agent_kwargs, flag="--agent-kwargs")
+        if parsed_agent_kwargs:
+            agent_metadata["agent_kwargs"] = parsed_agent_kwargs
 
     parsed_indices = parse_index_spec(task_indices) if task_indices is not None else None
 

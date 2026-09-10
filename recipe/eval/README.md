@@ -336,7 +336,7 @@ rllm eval harbor:swebenchpro       --agent harbor:mini-swe-agent --sandbox-backe
     --base-url http://127.0.0.1:8000/v1 --model Qwen/Qwen3-8B --sandbox-concurrency 8
 ```
 
-`--agent`를 생략하면 Harbor 데이터셋의 기본값인 `harbor:mini-swe-agent`가 쓰인다. 다른 Harbor 스캐폴드도 같은 형식으로 고른다: `harbor:terminus-2`, `harbor:swe-agent`, `harbor:openhands`, `harbor:codex`, `harbor:claude-code`, `harbor:oracle`(정답 패치만 적용, LLM 미호출) 등.
+`--agent`를 생략하면 Harbor 데이터셋의 기본값인 `harbor:mini-swe-agent`가 쓰인다. 다른 Harbor 스캐폴드도 같은 형식으로 고른다: `harbor:terminus-2`, `harbor:swe-agent`, `harbor:codex`, `harbor:claude-code`, `harbor:oracle`(정답 패치만 적용, LLM 미호출) 등.
 
 ### 1.2 Subset 평가
 
@@ -562,6 +562,60 @@ HF 데이터셋에는 CPU·메모리 정보가 없다. 4 / 16384는 업스트림
 
 * **이미지 자원 제한**: `task.toml`의 `[environment]` cpus/memory를 Docker 컨테이너에 적용한다. Verified는 CPU 1, 메모리 4 GB로 작다.
 * **네트워크**: task container는 기본 bridge 네트워크에 붙고 `--add-host=host.docker.internal:host-gateway`가 자동으로 들어간다.
+
+---
+
+## 3. 다른 harness로 평가 (mini-swe-agent 외)
+
+원칙은 `--agent`만 바꾸는 것이지만, harness마다 설치 방식과 모델 연결 방식이 달라 확인된 조합만 사용한다. 
+
+### 3.1 지원 표
+
+| harness | native (`--agent <이름>`) | Harbor (`--agent harbor:<이름>`) |
+| --- | --- | --- |
+| mini-swe-agent | O  | O  |
+| opencode | O. `--agent opencode --agent-image auto` | O. `--agent-kwargs @recipe/eval/config/harbor-opencode-vllm.yaml` **필수** (3.3) |
+| claude-code, codex, aider, ... | 미확인 | 미확인 |
+
+### 3.2 `--agent-kwargs`
+
+- Harbor harness 생성자에 넘길 kwargs.
+- 형식은 `--sampling-params`와 같다: `"key=value,..."` 또는 `@file.yaml` / `@file.json`. 
+- nested dictionary는 `@file`로만 주며, CLI 값이 키 단위로 우선한다. 
+- native harness에는 효과가 없고 경고만 발생한다.
+
+### 3.3 opencode
+
+- **native.** 추가 옵션 없다. rLLM harness가 gateway를 openai-compatible custom provider(`rllm-gateway`)로 등록하고 Chat Completions로 호출한다.
+
+```bash
+rllm eval swebenchpro_100 --split test --agent opencode --agent-image auto \
+    --sandbox-backend docker --concurrency 8 --sandbox-concurrency 8 --no-ui \
+    --base-url http://127.0.0.1:8000/v1 --model Qwen/Qwen3.5-4B \
+    --sampling-params @recipe/eval/config/qwen3_5.yaml
+```
+
+- **Harbor.** `--agent-kwargs`가 없으면 모든 태스크가 LLM 1회 호출 후 0점으로 끝난다. Harbor의 opencode는 모델을 `openai/<모델>`로 받아 provider `openai`로 등록하고, opencode는 provider id가 `openai`이면 SDK와 무관하게 **Responses API**(`/v1/responses`)를 쓴다. vLLM의 Responses API는 두 번째 턴의 assistant 메시지를 거부해 400이 난다. 그래서 다른 provider id에 Chat Completions SDK(`@ai-sdk/openai-compatible`)를 붙인 설정을 넘긴다.
+
+```bash
+rllm eval swebenchpro_100 --split test --agent harbor:opencode --evaluator harbor_reward_fn \
+    --sandbox-backend docker --concurrency 8 --sandbox-concurrency 8 --no-ui \
+    --base-url http://127.0.0.1:8000/v1 --model Qwen/Qwen3.5-4B \
+    --sampling-params @recipe/eval/config/qwen3_5.yaml \
+    --agent-kwargs @recipe/eval/config/harbor-opencode-vllm.yaml
+```
+
+```yaml
+# recipe/eval/config/harbor-opencode-vllm.yaml
+opencode_config:
+  provider:
+    openrouter:
+      npm: "@ai-sdk/openai-compatible"
+```
+
+- `--model`은 서빙 이름 그대로 둔다. gateway가 요청의 `model`을 `--model` 값으로 고정하므로 `--model openrouter/...`로 주면 vLLM이 404를 낸다.
+- provider id는 Harbor가 아는 이름이어야 한다(`openai`, `anthropic`, `deepseek`, `openrouter`, `huggingface`, ... `harbor/agents/installed/opencode.py`). 이름만 빌리는 것이고 해당 서비스와는 무관하다. `openai`는 위 이유로 쓸 수 없다.
+- 나머지는 rLLM이 trial마다 채운다(`trial_helper._apply_opencode_provider_config`): `options.baseURL`을 그 trial의 gateway 세션 URL로, `options.apiKey`를 `OPENAI_API_KEY`(없으면 `empty`)로, Harbor에 넘기는 model_name의 접두어를 선언된 provider id로(`openai/Qwen/X` → `openrouter/Qwen/X`). 파일에 `options`를 직접 적으면 그 값이 우선한다.
 
 ---
 
