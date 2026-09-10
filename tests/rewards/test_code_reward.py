@@ -1,7 +1,28 @@
+import os
+import time
+
 import pytest
 
+import rllm.rewards.code_reward as code_reward_module
 from rllm.rewards import RewardConfig, RewardType
-from rllm.rewards.code_reward import RewardCodeFn
+from rllm.rewards.code_reward import RewardCodeFn, check_correctness, lcb_check_correctness_v2
+
+
+def _child_process_states(parent_pid):
+    """States of the immediate child processes of parent_pid, read from /proc."""
+    states = []
+    for pid_str in os.listdir("/proc"):
+        if not pid_str.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid_str}/stat") as f:
+                after_comm = f.read().rsplit(")", 1)[1].split()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        state, ppid = after_comm[0], after_comm[1]
+        if ppid == str(parent_pid):
+            states.append(state)
+    return states
 
 
 class TestCodeReward:
@@ -441,3 +462,34 @@ def test_longest_subsequence_empty_list():
         task_info = {"problem": "", "problem_type": RewardType.CODE, "data_source": "kodcode", "ground_truth": tests}
         output = reward(task_info, model_response)
         assert output.is_correct
+
+
+class TestCodeRewardTimeoutCleanup:
+    """A timeout on the sandboxed process must not leave a zombie behind."""
+
+    def test_check_correctness_reaps_killed_process_on_timeout(self):
+        def hanging_test_fn(tests, test, debug=False, timeout=1):
+            time.sleep(30)
+            return [True]
+
+        pid = os.getpid()
+        result, _ = check_correctness({"inputs": ["1\n"], "outputs": ["1\n"]}, "print(1)", hanging_test_fn, timeout_per_test=1, max_tests=15)
+        time.sleep(0.5)  # let the kernel finish updating the child's state after the kill signal
+
+        assert result is False
+        assert "Z" not in _child_process_states(pid)
+
+    def test_lcb_check_correctness_v2_reaps_killed_process_on_timeout(self, monkeypatch):
+        def hanging_run_test(sample, test=None, debug=False, timeout=6):
+            time.sleep(30)
+            return [1], {}
+
+        monkeypatch.setattr(code_reward_module, "lcb_run_test", hanging_run_test)
+
+        pid = os.getpid()
+        sample = [{"input": "1\n", "output": "1\n", "testtype": "stdin"}]
+        result, _ = lcb_check_correctness_v2(sample, "print(1)", timeout=1)
+        time.sleep(0.5)
+
+        assert result is False
+        assert "Z" not in _child_process_states(pid)
