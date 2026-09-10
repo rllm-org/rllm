@@ -25,6 +25,12 @@ Fixes applied to the copies (the Harbor cache itself is left untouched):
   it). In-band Jest lets ``@matrix-org/matrix-wysiwyg`` WASM state leak across
   test files and instance aec454dd then fails its own gold patch. The flags
   are the only difference from upstream, so they are removed.
+* ``environment/Dockerfile`` -- appends an apt config that disables
+  ``Check-Valid-Until``. Harbor's mini-swe-agent scaffold runs ``apt-get update``
+  in the task container before installing itself; the Debian bullseye images
+  (nodebb, element-web) fail that with ``Release file ... is expired`` since
+  bullseye's archive metadata lapsed, so the agent never starts
+  (``NonZeroAgentExitCodeError`` exit 100). The oracle harness is unaffected.
 * ids: the registry lower-cases some instance ids (``instance_nodebb__...``);
   the id list is matched case-insensitively.
 """
@@ -73,6 +79,18 @@ def set_resources(task_toml: Path, cpus: int, memory_mb: int) -> None:
     task_toml.write_text(text)
 
 
+APT_NO_VALID_UNTIL = "RUN mkdir -p /etc/apt/apt.conf.d && echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99rllm-no-valid-until  # rllm: expired Debian Release files"
+
+
+def patch_dockerfile(dockerfile: Path) -> bool:
+    """Append the apt Check-Valid-Until override once (no-op on images without apt)."""
+    text = dockerfile.read_text()
+    if "99rllm-no-valid-until" in text:
+        return False
+    dockerfile.write_text(text.rstrip("\n") + "\n" + APT_NO_VALID_UNTIL + "\n")
+    return True
+
+
 def strip_jest_flags(run_script: Path) -> bool:
     text = run_script.read_text()
     new = JEST_FLAGS.sub("", text)
@@ -116,6 +134,7 @@ def main() -> None:
         set_resources(dst / "task.toml", args.cpus, args.memory_mb)
         if strip_jest_flags(dst / "tests" / "run_script.sh"):
             patched += 1
+        patch_dockerfile(dst / "environment" / "Dockerfile")
         instruction = row.get("instruction") or (dst / "instruction.md").read_text()
         rows.append({"id": src_dir.name, "task_id": src_dir.name, "instruction": instruction, "question": instruction, "task_path": str(dst), "design_id": iid})
 
@@ -131,7 +150,7 @@ def main() -> None:
         category="agentic",
     )
     print(f"{args.name}/{args.split}: {len(rows)} tasks -> {out}")
-    print(f"  task.toml: cpus={args.cpus} memory_mb={args.memory_mb}; run_script.sh jest flags stripped in {patched} tasks")
+    print(f"  task.toml: cpus={args.cpus} memory_mb={args.memory_mb}; run_script.sh jest flags stripped in {patched} tasks; Dockerfile apt Check-Valid-Until off")
     print(f"  harbor harness: rllm eval {args.name} --split {args.split} --agent harbor:mini-swe-agent --evaluator harbor_reward_fn --sandbox-backend docker ...")
     print(f"  native harness: rllm eval {args.name} --split {args.split} --agent mini-swe-agent --sandbox-backend docker --agent-image auto ...")
 
