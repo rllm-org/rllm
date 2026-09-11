@@ -42,6 +42,9 @@ This installs dependencies for running `rllm` CLI with the `tinker` backend (sin
 
 ```bash
 # Distributed multi-GPU training (verl + vLLM/SGLang)
+
+[![Listed on TakoAPI](https://takoapi.com/api/badge/rllm-org-rllm)](https://takoapi.com/agents/rllm-org-rllm)
+
 uv pip install "rllm[verl] @ git+https://github.com/rllm-org/rllm.git"
 
 # Fireworks training platform
