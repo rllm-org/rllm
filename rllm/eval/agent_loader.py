@@ -128,7 +128,12 @@ def load_agent(name_or_path: str) -> AgentFlow:
     Returns:
         An AgentFlow instance with a ``.run()`` method.
     """
-    # 0. Harbor agent prefix: "harbor:claude-code" -> HarborRuntime(agent_name="claude-code")
+    # 0. Harbor / CyberGym prefixes. CyberGym is a thin Harbor runner that
+    # parses dual-binary artifacts; it still speaks the Harbor compose contract.
+    if name_or_path.startswith("cybergym:"):
+        from rllm.integrations.harbor.cybergym.runtime import CyberGymRuntime
+
+        return CyberGymRuntime(agent_name=name_or_path.removeprefix("cybergym:"))
     if name_or_path.startswith("harbor:"):
         harbor_agent_name = name_or_path.removeprefix("harbor:")
         from rllm.integrations.harbor.runtime import HarborRuntime

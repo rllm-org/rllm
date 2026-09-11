@@ -110,6 +110,7 @@ _EVALUATOR_REGISTRY: dict[str, str] = {
 # Lazy-loaded evaluators (optional deps)
 _LAZY_EVALUATOR_REGISTRY: dict[str, str] = {
     "harbor_reward_fn": "rllm.integrations.harbor.evaluator:HarborEvaluator",
+    "cybergym_reward_fn": "rllm.integrations.harbor.cybergym.evaluator:CyberGymEvaluator",
 }
 
 
