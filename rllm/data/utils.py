@@ -16,12 +16,28 @@ def task_from_row(row: dict[str, Any], task_id: str) -> Task:
 
     Shared by the engine (per-task at rollout) and the sandbox warm-pool
     schedule so both derive the same ``env_key`` for a given row.
+
+    Harbor-sourced rows (r2egym, swebench-verified, swesmith, …) carry a
+    ``task_path`` pointing at the per-task directory. Root the Task there and
+    merge its ``task.toml`` + ``environment/Dockerfile`` metadata so per-task
+    verifier resolution and per-task image selection work on the sandbox path
+    — mirroring the eval CLI's ``_dict_rows_to_tasks``. Rows without
+    ``task_path`` keep ``dataset_dir=Path(".")`` and rely on a fixed evaluator.
     """
+    task_path = row.get("task_path")
+    metadata: dict[str, Any] = dict(row)
+    if task_path:
+        from rllm.tasks.loader import _merge_task_toml_metadata
+
+        dataset_dir = Path(task_path)
+        metadata = _merge_task_toml_metadata(dataset_dir, metadata)
+    else:
+        dataset_dir = Path(".")
     return Task(
         id=str(task_id),
         instruction=str(row.get("question", row.get("instruction", ""))),
-        metadata=row,
-        dataset_dir=Path("."),
+        metadata=metadata,
+        dataset_dir=dataset_dir,
     )
 
 

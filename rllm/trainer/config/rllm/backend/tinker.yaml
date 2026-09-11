@@ -12,6 +12,10 @@ fuse_forward_backward_and_optim_step: false
 # Model Configuration
 model:
   name: "Qwen/Qwen3-8B"  # Default model for MATH dataset
+  # HF repo id used to load the tokenizer/renderer. Set this when model.name is a
+  # Tinker model id that isn't HF-resolvable (e.g. "nvidia/...:peft:262144").
+  # null -> tokenizer falls back to model.name.
+  tokenizer_model: null
   lora_rank: 32
   train_unembed: true  # Train LoRA on output embedding layer (set to false for Fireworks compatibility)
   train_attn: true     # Train LoRA on attention layers

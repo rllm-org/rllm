@@ -4,7 +4,12 @@ Common utilities for rLLM trainers.
 This module provides shared functionality across different trainer backends (verl, tinker, etc.).
 """
 
-from rllm.trainer.algorithms.advantage import collect_reward_and_advantage_from_trajectory_groups
+from rllm.trainer.algorithms.advantage import (
+    RLLM_ADV_ESTIMATOR_REGISTRY,
+    collect_reward_and_advantage_from_trajectory_groups,
+    get_adv_estimator,
+    register_adv_estimator,
+)
 from rllm.trainer.algorithms.config import (
     AlgorithmConfig,
     AsyncTrainingConfig,
@@ -13,6 +18,17 @@ from rllm.trainer.algorithms.config import (
     RolloutCorrectionConfig,
     TransformConfig,
     rLLMAdvantageEstimator,
+)
+from rllm.trainer.algorithms.loss import (
+    RLLM_LOSS_REGISTRY,
+    LossContext,
+    ResolvedLoss,
+    get_loss,
+    is_custom_loss,
+    load_loss_plugins,
+    native_loss_names,
+    register_loss,
+    resolve_loss,
 )
 from rllm.trainer.algorithms.metrics import reduce_metrics_by_trajectory_name, reduce_metrics_lists
 from rllm.trainer.algorithms.performance import marked_timer, simple_timer
@@ -43,6 +59,19 @@ __all__ = [
     # Advantage computation
     "rLLMAdvantageEstimator",
     "collect_reward_and_advantage_from_trajectory_groups",
+    "register_adv_estimator",
+    "get_adv_estimator",
+    "RLLM_ADV_ESTIMATOR_REGISTRY",
+    # Custom losses (single-selector, verl-style)
+    "register_loss",
+    "get_loss",
+    "is_custom_loss",
+    "load_loss_plugins",
+    "native_loss_names",
+    "resolve_loss",
+    "LossContext",
+    "ResolvedLoss",
+    "RLLM_LOSS_REGISTRY",
     # Metrics
     "reduce_metrics_by_trajectory_name",
     "reduce_metrics_lists",

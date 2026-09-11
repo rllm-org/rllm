@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 import tinker
 from fireworks.training.sdk import WeightSyncer
+from omegaconf import OmegaConf
 from tinker.types import AdamParams
 from training.utils.client import ReconnectableClient
 
@@ -29,6 +30,7 @@ from rllm.trainer.algorithms import (
     CompactFilteringConfig,
     TransformConfig,
 )
+from rllm.trainer.algorithms.loss import native_loss_names, offpolicy_metrics, resolve_loss
 from rllm.trainer.tinker.tinker_policy_trainer import (
     compute_schedule_lr_multiplier,
     require_training_client,
@@ -41,35 +43,30 @@ logger = logging.getLogger(__name__)
 DEFAULT_DCP_TIMEOUT = 2700
 
 
-def builtin_loss_args(algorithm_config: AlgorithmConfig):
-    """Map an rllm ``AlgorithmConfig`` to the cookbook's ``LossArgs`` for the
-    builtin (server-side) loss path."""
-    from training.utils.rl.cispo import CISPOConfig
-    from training.utils.rl.dapo import DAPOConfig
-    from training.utils.rl.gspo import GSPOConfig
-    from training.utils.rl.losses import LossConfig
-
+def builtin_loss_args(algorithm_config: AlgorithmConfig) -> tuple[str, object | None]:
+    """rllm ``AlgorithmConfig`` -> Fireworks builtin ``(loss_fn, loss_fn_config)`` (fireworks-ai
+    >=1.2.1). No ``grpo`` kernel: GRPO is build_grpo_datums + ``importance_sampling``, so
+    unset/"grpo" maps there; dapo/gspo/cispo carry their own clip config."""
     eps = algorithm_config.eps_clip
     eps_high = algorithm_config.eps_clip_high
-    return LossConfig(
-        policy_loss=algorithm_config.loss_fn or "grpo",
-        loss_path="builtin",
-        kl_beta=algorithm_config.kl_beta,
-        eps_clip=eps,
-        eps_clip_high=eps_high,
-        dapo=DAPOConfig(
-            eps_clip=eps,
-            eps_clip_high=eps_high if eps_high is not None else 0.28,
-        ),
-        gspo=GSPOConfig(
-            clip_ratio_low=eps,
-            clip_ratio_high=eps_high,
-        ),
-        cispo=CISPOConfig(
-            eps_low=eps,
-            eps_high=eps_high if eps_high is not None else 0.28,
-        ),
-    )
+    name = algorithm_config.loss_fn or "grpo"
+    if name == "grpo":
+        name = "importance_sampling"
+
+    config: object | None = None
+    if name == "dapo":
+        from training.utils.rl.dapo import DAPOConfig
+
+        config = DAPOConfig(eps_clip=eps, eps_clip_high=eps_high if eps_high is not None else 0.28)
+    elif name == "gspo":
+        from training.utils.rl.gspo import GSPOConfig
+
+        config = GSPOConfig(clip_ratio_low=eps, clip_ratio_high=eps_high)
+    elif name == "cispo":
+        from training.utils.rl.cispo import CISPOConfig
+
+        config = CISPOConfig(eps_low=eps, eps_high=eps_high if eps_high is not None else 0.28)
+    return name, config
 
 
 class FireworksPolicyTrainer:
@@ -108,6 +105,9 @@ class FireworksPolicyTrainer:
         self.weight_syncer = weight_syncer
         self._rlor_mgr = rlor_mgr
         self._policy_job_id = policy_job_id
+        # Transient-fault tolerance for training-client RPCs (see _run_training_op).
+        self._step_max_retries = max(0, int(OmegaConf.select(config, "fireworks_infra.common.step_max_retries", default=2)))
+        self._step_retry_backoff_s = float(OmegaConf.select(config, "fireworks_infra.common.step_retry_backoff_s", default=10.0))
         self._resume_checkpoint_name = self.config.training.get("resume_from_dcp_checkpoint")
         self._resume_source_job_id = self.config.training.get("resume_from_fireworks_job_id") or policy_job_id
 
@@ -115,6 +115,122 @@ class FireworksPolicyTrainer:
         self.transform_config = transform_config or TransformConfig()
         self.algorithm_config = algorithm_config or AlgorithmConfig.from_config(self.config.rllm.algorithm)
         self.resolve_builtin_loss(self.algorithm_config)
+
+    def _get_vocab_size(self) -> int | None:
+        """Tokenizer vocab bound for the out-of-vocab trajectory filter (None = disabled).
+
+        The serving stack can (rarely) return a sampled token id past the trainer's
+        embedding (a padded-lm-head slot); one such id fails the whole
+        forward_backward with "Invalid token id", so the transform drops those
+        trajectories up front. The tokenizer is the authority on the bound —
+        the served model path is not HF-resolvable, but ``model.tokenizer_model`` is.
+        """
+        if not hasattr(self, "_vocab_size_cache"):
+            try:
+                from transformers import AutoTokenizer
+
+                tok_name = OmegaConf.select(self.config, "model.tokenizer_model")
+                self._vocab_size_cache = len(AutoTokenizer.from_pretrained(tok_name)) if tok_name else None
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Out-of-vocab trajectory filter disabled (could not resolve tokenizer vocab size): %s", e)
+                self._vocab_size_cache = None
+        return self._vocab_size_cache
+
+    # ------------------------------------------------------------------
+    # Transient-fault tolerance for training-client RPCs
+    # ------------------------------------------------------------------
+
+    # Substrings marking a retryable transient failure on the shared training
+    # client — channel/deadline blips (typically around the per-step weight
+    # hot-load), not data errors. Mirrors the rollout engine's transient markers.
+    _TRANSIENT_MARKERS = (
+        "timeout",
+        "timed out",
+        "deadline",
+        "unavailable",
+        "connection",
+        "connection reset",
+        "broken pipe",
+        "eof",
+        "502",
+        "503",
+        "504",
+        "goaway",
+        "rst_stream",
+    )
+
+    def _is_transient(self, exc: BaseException) -> bool:
+        """Whether *exc* looks like a transient channel/timeout fault (vs a data error)."""
+        if isinstance(exc, TimeoutError | ConnectionError):
+            return True
+        text = f"{type(exc).__name__}: {exc}".lower()
+        return any(marker in text for marker in self._TRANSIENT_MARKERS)
+
+    def _reconnect_training_client(self) -> bool:
+        """Best-effort refresh of the training client's channel to the **same** job.
+
+        Re-resolves the trainer endpoint via the job manager and rebinds the
+        ``ReconnectableClient`` to it (the SDK's own ``_connect`` path, which we
+        replicate here because ``from_training_client`` instances carry no job
+        manager). Server-side optimizer/gradient state lives with the job, which
+        is unchanged — this only replaces a stale channel. Returns True on success.
+
+        Note: this refreshes ``self.training_client`` (used by forward / fwd-bwd /
+        optim_step) only; the ``WeightSyncer`` holds the raw client, so its calls
+        are retried without reconnect.
+        """
+        mgr, job_id = self._rlor_mgr, self._policy_job_id
+        if mgr is None or not job_id:
+            logger.warning("Cannot reconnect training client: rlor_mgr/policy_job_id unset")
+            return False
+        try:
+            endpoint = mgr.wait_for_existing(job_id)
+            self.training_client._use_endpoint(endpoint)
+            logger.info("Reconnected training client to job %s", job_id)
+            return True
+        except Exception as exc:
+            logger.warning("Training client reconnect failed for job %s: %s", job_id, exc)
+            return False
+
+    async def _run_training_op(self, fn, *args, op_name: str, reconnect: bool = False, **kwargs):
+        """Run a blocking training-client RPC in a thread, retrying transient faults.
+
+        On a transient error (timeout / connection / channel reset — typically a
+        blip on the shared training client around the per-step weight hot-load)
+        we optionally reconnect to the same job and retry, up to
+        ``step_max_retries`` times with linear backoff. Non-transient errors
+        (e.g. malformed data) and cancellation propagate immediately.
+
+        CAVEAT: forward_backward / optim_step mutate server-side state (gradient
+        accumulation / optimizer). A retry assumes the failed RPC did NOT commit
+        that mutation — true for channel/dispatch failures, where the server
+        never ran it. A *false* timeout (server finished but the ack was lost)
+        could double-apply for that one step; retries are kept low and this
+        bounded, rare perturbation is preferred over crashing a multi-hour run.
+        For genuine slowness, raise ``step_timeout`` instead of relying on retry.
+        """
+        attempt = 0
+        while True:
+            try:
+                return await asyncio.to_thread(fn, *args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 — re-raised below unless transient
+                if attempt >= self._step_max_retries or not self._is_transient(exc):
+                    raise
+                attempt += 1
+                backoff = self._step_retry_backoff_s * attempt
+                logger.warning(
+                    "Training op %r failed (%s: %s); %sretry %d/%d after %.0fs",
+                    op_name,
+                    type(exc).__name__,
+                    exc,
+                    "reconnect+" if reconnect else "",
+                    attempt,
+                    self._step_max_retries,
+                    backoff,
+                )
+                if reconnect:
+                    self._reconnect_training_client()
+                await asyncio.sleep(backoff)
 
     # ------------------------------------------------------------------
     # Initialization
@@ -224,10 +340,13 @@ class FireworksPolicyTrainer:
         Returns the snapshot_name on success, None on failure."""
         if self.weight_syncer is None:
             return None
-        snapshot_name = await asyncio.to_thread(
+        # reconnect=False: the syncer holds the raw client, not self.training_client;
+        # re-dispatching save_and_hotload (idempotent) is the available recovery.
+        snapshot_name = await self._run_training_op(
             self.weight_syncer.save_and_hotload,
             name,
             checkpoint_type=checkpoint_type,
+            op_name="save_and_hotload",
         )
         logger.debug("Weights synced to deployment: %s", name)
         return snapshot_name
@@ -281,10 +400,12 @@ class FireworksPolicyTrainer:
 
         Only called when ``bypass_mode=False`` (3-policy / decoupled PPO).
         """
-        prox_fwd = await asyncio.to_thread(
+        prox_fwd = await self._run_training_op(
             self.training_client.forward,
             datums,
             "cross_entropy",
+            op_name="forward",
+            reconnect=True,
         )
         return [out["logprobs"].data for out in prox_fwd.loss_fn_outputs]
 
@@ -311,90 +432,15 @@ class FireworksPolicyTrainer:
 
     @staticmethod
     def _compute_offpolicy_metrics(
-        old_logprobs: list[list[float]],
+        curr_logprobs: list[list[float]],
         rollout_logprobs: list[list[float]],
         masks: list[list[int]],
     ) -> dict[str, float]:
-        import torch
-
-        safety_bound = 20.0
-        training_means = []
-        rollout_means = []
-        log_ratio_sums = []
-        token_old = []
-        token_rollout = []
-
-        for old_lp, rollout_lp, mask in zip(old_logprobs, rollout_logprobs, masks, strict=False):
-            active_old = []
-            active_rollout = []
-            for old, rollout, m in zip(old_lp, rollout_lp, mask, strict=False):
-                if m:
-                    active_old.append(float(old))
-                    active_rollout.append(float(rollout))
-            if not active_old:
-                continue
-
-            old_t = torch.tensor(active_old, dtype=torch.float32)
-            rollout_t = torch.tensor(active_rollout, dtype=torch.float32)
-            training_means.append(old_t.mean())
-            rollout_means.append(rollout_t.mean())
-            log_ratio_sums.append((old_t - rollout_t).sum())
-            token_old.append(old_t)
-            token_rollout.append(rollout_t)
-
-        if not token_old:
-            return {}
-
-        mean_log_prob_training = torch.stack(training_means)
-        mean_log_prob_rollout = torch.stack(rollout_means)
-        old_flat = torch.cat(token_old)
-        rollout_flat = torch.cat(token_rollout)
-        log_ratio = old_flat - rollout_flat
-        logprob_abs_diff = log_ratio.abs()
-        old_prob = torch.exp(old_flat)
-        rollout_prob = torch.exp(rollout_flat)
-        prob_abs_diff = (old_prob - rollout_prob).abs()
-        log_ratio_safe = torch.clamp(log_ratio, min=-safety_bound, max=safety_bound)
-        ratio = torch.exp(log_ratio_safe)
-        log_ppl_diff = mean_log_prob_rollout - mean_log_prob_training
-
-        metrics = {
-            "offpolicy/kl": (rollout_flat - old_flat).mean().item(),
-            "offpolicy/k3_kl": (torch.exp(log_ratio) - log_ratio - 1).mean().item(),
-            "offpolicy/logprob_abs_diff/mean": logprob_abs_diff.mean().item(),
-            "offpolicy/logprob_abs_diff/min": logprob_abs_diff.min().item(),
-            "offpolicy/logprob_abs_diff/max": logprob_abs_diff.max().item(),
-            "offpolicy/prob_abs_diff/mean": prob_abs_diff.mean().item(),
-            "offpolicy/prob_abs_diff/min": prob_abs_diff.min().item(),
-            "offpolicy/prob_abs_diff/max": prob_abs_diff.max().item(),
-            "offpolicy/training_ppl": torch.exp(-mean_log_prob_training).mean().item(),
-            "offpolicy/training_log_ppl": (-mean_log_prob_training).mean().item(),
-            "offpolicy/rollout_ppl": torch.exp(-mean_log_prob_rollout).mean().item(),
-            "offpolicy/rollout_log_ppl": (-mean_log_prob_rollout).mean().item(),
-            "offpolicy/log_ppl_diff": log_ppl_diff.mean().item(),
-            "offpolicy/log_ppl_abs_diff": log_ppl_diff.abs().mean().item(),
-            "offpolicy/log_ppl_diff_min": log_ppl_diff.min().item(),
-            "offpolicy/log_ppl_diff_max": log_ppl_diff.max().item(),
-            "offpolicy/ppl_ratio": torch.exp(log_ppl_diff).mean().item(),
-            "offpolicy/ratio/mean": ratio.mean().item(),
-            "offpolicy/ratio/min": ratio.min().item(),
-            "offpolicy/ratio/max": ratio.max().item(),
-        }
-
-        if old_prob.numel() > 1:
-            old_centered = old_prob - old_prob.mean()
-            rollout_centered = rollout_prob - rollout_prob.mean()
-            denom = torch.sqrt(old_centered.square().sum() * rollout_centered.square().sum())
-            if denom.item() > 0.0:
-                metrics["offpolicy/prob_pearson_corr"] = ((old_centered * rollout_centered).sum() / denom).item()
-
-        metrics["offpolicy/chi2_token"] = (ratio.square().mean() - 1.0).item()
-
-        log_ratio_sum = torch.stack(log_ratio_sums)
-        log_ratio_sum_safe = torch.clamp(log_ratio_sum, min=-safety_bound, max=safety_bound)
-        metrics["offpolicy/chi2_seq"] = (torch.exp(2.0 * log_ratio_sum_safe).mean() - 1.0).item()
-
-        return metrics
+        # Non-bypass builtin path: curr_logprobs is the proximal forward, i.e. the current
+        # policy at batch start (a single pre-optimizer-step forward, so proximal == current).
+        # Delegate to the shared helper so this and the custom-loss path emit the same curated
+        # offpolicy/* set (current vs rollout).
+        return offpolicy_metrics(curr_logprobs, rollout_logprobs, masks)
 
     def resolve_builtin_loss(self, algorithm_config: AlgorithmConfig, profile=None):
         """Resolve the builtin server-side loss kernel at setup time.
@@ -403,13 +449,18 @@ class FireworksPolicyTrainer:
         Raises ValueError if the loss has no builtin kernel or the config is
         incompatible with the builtin path (e.g. kl_beta > 0).
         """
-        from training.utils.rl.losses import get_builtin_loss_config, validate_loss_path
+        from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
 
-        args = builtin_loss_args(algorithm_config)
-        validate_loss_path(args, profile)
-        result = get_builtin_loss_config(args)
-        self._builtin_loss = result
-        logger.info("Resolved builtin loss: kernel=%s, config=%s", result[0], result[1])
+        # Custom rLLM loss (icepop/dppo_tv) -> forward_backward_custom, no builtin kernel. Check
+        # first so a custom-loss run never imports the (1.2.1-reshaped) builtin API.
+        if resolve_loss(algorithm_config, native_losses=native_loss_names("fireworks")) is not None:
+            self._builtin_loss = None
+            logger.info("Custom rLLM loss %r -> forward_backward_custom (no builtin kernel)", algorithm_config.loss_fn)
+            return
+
+        # Builtin kernel: just a (loss_fn, config) name pair for forward_backward.
+        self._builtin_loss = builtin_loss_args(algorithm_config)
+        logger.info("Resolved builtin loss: kernel=%s, config=%s", self._builtin_loss[0], self._builtin_loss[1])
 
     # ------------------------------------------------------------------
     # Forward-backward
@@ -430,7 +481,7 @@ class FireworksPolicyTrainer:
         Returns:
             ``(training_datums, training_logprobs, adv_metrics)``
         """
-        from training.utils.rl.losses import build_builtin_loss_datums
+        from training.utils.rl.losses import build_grpo_datums
         from training.utils.rl.tis import TISConfig
 
         if algorithm_config is None:
@@ -439,55 +490,123 @@ class FireworksPolicyTrainer:
         raw_datums, adv_metrics = transform_trajectory_groups_to_datums(
             trajectory_groups,
             algorithm_config=algorithm_config,
+            vocab_size=self._get_vocab_size(),
         )
+
+        # Whole batch dropped as malformed (e.g. empty logprobs from overloaded generations).
+        # forward_backward([]) would raise; skip the pass (the training loop then skips optim +
+        # weight sync when no sequences are produced).
+        if not raw_datums:
+            logger.warning(
+                "All %d trajectory group(s) dropped (no trainable sequences); skipping forward-backward for this batch. "
+                "Common cause: inference overload/errors yielding empty logprobs — check async/dropped and reduce rollout concurrency.",
+                len(trajectory_groups),
+            )
+            adv_metrics["train/num_sequences"] = 0
+            adv_metrics["train/dropped_all_sequences"] = 1.0
+            return raw_datums, [], adv_metrics
 
         adv_metrics["train/num_sequences"] = len(raw_datums)
         adv_metrics["train/active_tokens"] = sum(int(sum(datum.loss_fn_inputs["mask"].data)) for datum in raw_datums)
         adv_metrics.update(self._compute_rollout_entropy_metrics(raw_datums))
 
+        # Custom-loss path (shared with Tinker via forward_backward_custom): when
+        # algorithm.loss_fn names an rLLM loss (e.g. dppo_tv, or echo which folds
+        # in ECHO), evaluate it client-side in one pass over the rollout log-probs instead
+        # of the server-side builtin kernel. mu defaults to the sampling (inference)
+        # log-probs — the tmax DPPO choice.
+        # native-first: a loss Fireworks has a builtin (server-side fused) kernel for
+        # (grpo/importance_sampling/dapo/dro/gspo/cispo) runs there; only rLLM losses it
+        # can't run natively (e.g. dppo_tv, echo) take the forward_backward_custom path.
+        resolved = resolve_loss(algorithm_config, native_losses=native_loss_names("fireworks"))
+        if resolved is not None:
+            from rllm.trainer.tinker.custom_loss import build_custom_loss
+
+            # Custom (DPPO) path: logp_old = the inference log-probs on the datums, so pi_old is
+            # never recomputed. offpolicy/* IS logged even under bypass_mode: the closure compares
+            # logp_curr (the current-policy forward this pass already runs) against the rollout
+            # log-probs — the off-policy gap (staleness + train/inference mismatch), free, no
+            # proximal forward. (The bypass gate below only applies to the native builtin path.)
+
+            # server_normalized=False: rLLM normalizes the loss client-side (the closure divides
+            # by this pass's global token/sequence count per resolved.agg_mode), so optim_step
+            # passes GradAccNormalization.NONE. Correct because the Fireworks path runs a single
+            # forward_backward_custom over the whole batch (one pass); under multi-pass grad
+            # accumulation the client divisor would be per-pass. Matches the Tinker path.
+            stripped, loss_fn = build_custom_loss(resolved, raw_datums, server_normalized=False)
+            fwd_bwd_result = await self._run_training_op(
+                self.training_client.forward_backward_custom,
+                stripped,
+                loss_fn,
+                op_name="forward_backward_custom",
+                reconnect=True,
+            )
+            if hasattr(fwd_bwd_result, "metrics") and fwd_bwd_result.metrics:
+                for k, v in fwd_bwd_result.metrics.items():
+                    if k in self._METRIC_SKIP_KEYS:
+                        continue
+                    # keep the offpolicy/ namespace consistent with the builtin path
+                    adv_metrics[k if k.startswith("offpolicy/") else f"train/{k}"] = v
+            logger.info("Fireworks custom-loss pass: loss_fn=%s agg_mode=%s params=%s", resolved.name, resolved.agg_mode, resolved.params)
+            return raw_datums, [], adv_metrics
+
         rc = algorithm_config.rollout_correction
         clean_datums, advantages, inf_logprobs, prompt_lens, num_loss_tokens = self._process_datums(raw_datums)
 
-        # seq-mean-token-mean: normalize advantages by number of loss tokens so that
-        # token-sum within each sequence equals token-mean, then NUM_SEQUENCES
-        # at optim_step gives seq-mean-token-mean overall.
-        if algorithm_config.loss_agg_mode == "seq-mean-token-mean":
-            for i in range(len(advantages)):
-                advantages[i] /= max(1, num_loss_tokens[i])
+        # Builtin server kernel: the loss is computed server-side (Σ -(ratio·adv)), so rLLM cannot
+        # normalize the loss client-side. We leave it at its default raw token-SUM (optim_step
+        # passes GradAccNormalization.NONE) — same as the Tinker builtin path. loss_agg_mode is
+        # honored only on the custom-loss path (forward_backward_custom), which computes the loss
+        # client-side. Warn so a requested mode is not silently ignored here.
+        if algorithm_config.loss_agg_mode not in (None, "token-sum") and not getattr(self, "_warned_builtin_agg", False):
+            self._warned_builtin_agg = True  # log once, not every step
+            logger.warning(
+                "loss_agg_mode=%r is not applied to the builtin loss kernel %r, which uses raw token-sum. loss_agg_mode is honored only for rLLM custom losses.",
+                algorithm_config.loss_agg_mode,
+                self._builtin_loss[0],
+            )
 
-        # Proximal logprobs
+        # bypass_mode defaults True: one optim step per batch means a recomputed proximal ==
+        # pi_theta, so the clip ratio is ~1 (inert) and the recompute is wasted. Using the rollout
+        # logprobs as pi_old makes the clip a real trust region vs the behavior policy (DPPO/SAO).
+        # Set bypass_mode=false only for multi-update-per-batch PPO.
+        bypass = rc.bypass_mode if rc.bypass_mode is not None else True
         t0 = time.perf_counter()
-        if rc.bypass_mode:
+        if bypass:
             prox_logprobs = inf_logprobs
         else:
             prox_logprobs = await self._compute_proximal_logprobs(clean_datums)
-        adv_metrics.update(
-            self._compute_offpolicy_metrics(
-                old_logprobs=prox_logprobs,
-                rollout_logprobs=inf_logprobs,
-                masks=[list(datum.loss_fn_inputs["mask"].data) for datum in raw_datums],
+            # offpolicy/* compares a real proximal against rollout (meaningless under bypass,
+            # where prox == rollout), so only compute it when we did the proximal forward.
+            adv_metrics.update(
+                self._compute_offpolicy_metrics(
+                    curr_logprobs=prox_logprobs,
+                    rollout_logprobs=inf_logprobs,
+                    masks=[list(datum.loss_fn_inputs["mask"].data) for datum in raw_datums],
+                )
             )
-        )
-        adv_metrics["time/proximal_forward"] = time.perf_counter() - t0
+            adv_metrics["time/proximal_forward"] = time.perf_counter() - t0
 
-        # Build datums for the builtin kernel.
+        # build_grpo_datums folds advantage + TIS into per-token advantages (fireworks-ai 1.2.1);
+        # the loss name is passed separately to forward_backward (self._builtin_loss).
         tis_config = TISConfig(level=rc.tis_mode or "token", cap=rc.tis_cap) if rc.tis_mode else None
-        builtin_datums = build_builtin_loss_datums(
+        builtin_datums = build_grpo_datums(
             clean_datums,
             advantages,
             prox_logprobs,
             inf_logprobs,
             prompt_lens,
             tis_config=tis_config,
-            policy_loss=algorithm_config.loss_fn or "grpo",
         )
 
         kernel_loss, kernel_config = self._builtin_loss
-        fwd_bwd_result = await asyncio.to_thread(
+        fwd_bwd_result = await self._run_training_op(
             self.training_client.forward_backward,
             builtin_datums,
             kernel_loss,
             loss_fn_config=kernel_config,
+            op_name="forward_backward",
+            reconnect=True,
         )
 
         # Merge remote fwd/bwd metrics (e.g. loss) into adv_metrics
@@ -512,7 +631,7 @@ class FireworksPolicyTrainer:
         beta2: float = 0.999,
         eps: float = 1e-8,
         weight_decay: float = 0.01,
-        grad_clip_norm: float = 1.0,
+        grad_clip_norm: float = 0.0,  # 0.0 = no clipping (opt-in); see AdamParams grad_clip_norm semantics
     ) -> tuple[float, dict]:
         """Run optimizer step. Returns (scheduled_lr, metrics)."""
         scheduled_lr = learning_rate * compute_schedule_lr_multiplier(
@@ -529,19 +648,20 @@ class FireworksPolicyTrainer:
             eps=eps,
             weight_decay=weight_decay,
             grad_clip_norm=grad_clip_norm,
+            emit_grad_norm_metrics=True,
         )
         from fireworks.training.sdk.client import GradAccNormalization
 
-        _LOSS_AGG_MAP = {
-            "token-mean": GradAccNormalization.NUM_LOSS_TOKENS,
-            "seq-mean-token-sum": GradAccNormalization.NUM_SEQUENCES,
-            "seq-mean-token-mean": GradAccNormalization.NUM_SEQUENCES,
-        }
-        grad_norm = _LOSS_AGG_MAP.get(self.algorithm_config.loss_agg_mode)
-        optim_result = await asyncio.to_thread(
+        # No server-side normalization (GradAccNormalization.NONE), matching the Tinker path:
+        # - builtin loss kernel: left at raw token-sum (loss is server-side; not normalized here).
+        # - custom loss (forward_backward_custom): normalized client-side per loss_agg_mode by
+        #   build_custom_loss (server_normalized=False).
+        optim_result = await self._run_training_op(
             self.training_client.optim_step,
             adam_params,
-            grad_accumulation_normalization=grad_norm,
+            grad_accumulation_normalization=GradAccNormalization.NONE,
+            op_name="optim_step",
+            reconnect=True,
         )
 
         metrics = {}

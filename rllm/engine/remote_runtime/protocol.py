@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from rllm.workflows.workflow import TerminationReason
+from rllm.types import TerminationReason
 
 # ---------------------------------------------------------------------------
 # Common protocol (backend-agnostic)

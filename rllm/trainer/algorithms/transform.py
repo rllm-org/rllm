@@ -17,8 +17,7 @@ from collections.abc import Callable
 import numpy as np
 
 from rllm.trainer.algorithms.config import CompactFilteringConfig, TransformConfig
-from rllm.types import Episode, Trajectory, TrajectoryGroup
-from rllm.workflows.workflow import TerminationReason
+from rllm.types import Episode, TerminationReason, Trajectory, TrajectoryGroup
 
 logger = logging.getLogger(__name__)
 LOG_N_WARNINGS = 1

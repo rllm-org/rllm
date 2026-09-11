@@ -16,7 +16,7 @@ from rllm.engine.remote_runtime.protocol import (
     RemoteTaskResult,
     TaskSubmission,
 )
-from rllm.workflows.workflow import TerminationReason
+from rllm.types import TerminationReason
 
 logger = logging.getLogger(__name__)
 

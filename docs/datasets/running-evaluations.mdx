@@ -164,7 +164,11 @@ These flags shape how the evaluation executes and what it leaves behind.
 </ParamField>
 
 <ParamField path="--save-episodes / --no-save-episodes" default="enabled">
-  Save each task's full trajectory as JSON for later inspection with `rllm view`.
+  Save each task's trajectory as JSON for later inspection with `rllm view`.
+</ParamField>
+
+<ParamField path="--compact-episodes / --full-episodes" default="compact">
+  Store cumulative messages and token IDs as a compact trajectory graph. `rllm view` materializes the graph only when you open an episode. Use `--full-episodes` for the legacy flat files.
 </ParamField>
 
 ```bash

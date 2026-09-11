@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from rllm.eval.curation import CurationConfig, CurationError, curate
+from rllm.eval.curation import CurationConfig, CurationError, _text_content, curate
 from rllm.eval.results import EvalItem, EvalResult
 
 
@@ -102,14 +102,14 @@ def test_select_shortest(run_dir):
     rows, _ = curate([run_dir], CurationConfig(filter_expr="avg == 1", select="shortest", max_per_task=1))
     # only t2 has avg==1; shortest of its two correct answers
     assert len(rows) == 1
-    assert rows[0]["messages"][-1]["content"] == "t2 correct short"
+    assert _text_content(rows[0]["messages"][-1]["content"]) == "t2 correct short"
 
 
 def test_select_all_includes_failures(run_dir):
     rows, _ = curate([run_dir], CurationConfig(filter_expr="solved", select="all"))
     # t1 (2 attempts) + t2 (2 attempts) = 4, including the t1 failure
     assert len(rows) == 4
-    contents = {r["messages"][-1]["content"] for r in rows}
+    contents = {_text_content(r["messages"][-1]["content"]) for r in rows}
     assert "t1 wrong" in contents
 
 
@@ -155,7 +155,7 @@ def test_metric_reward_with_min_reward(tmp_path):
     # metric=reward, keep tasks with avg>0, select trajectories with reward>=1.0
     rows, _ = curate([rd], CurationConfig(metric="reward", filter_expr="avg > 0", min_reward=1.0))
     assert len(rows) == 1
-    assert rows[0]["messages"][-1]["content"] == "good"
+    assert _text_content(rows[0]["messages"][-1]["content"]) == "good"
 
 
 def test_skips_missing_messages(tmp_path):

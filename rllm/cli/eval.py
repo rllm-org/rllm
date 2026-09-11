@@ -1,6 +1,6 @@
 """Eval CLI command.
 
-``rllm eval <benchmark> --agent <name> [--evaluator <name>] [--base-url <url>] [--model <name>]``
+``rllm eval <benchmark> --agent <name> [--evaluator <name>] [--provider <name>] [--base-url <url>] [--model <name>]``
 
 When ``--base-url`` is omitted, a LiteLLM proxy is auto-started using the
 configuration from ``rllm setup`` (stored in ``~/.rllm/config.json``).
@@ -19,9 +19,12 @@ from rllm import paths
 from rllm.cli._pull import load_dataset_catalog, pull_dataset
 from rllm.cli._sampling import SAMPLING_PARAMS_HELP as _SAMPLING_PARAMS_HELP
 from rllm.cli._ui import console, fail, info_panel, not_found, parse_index_spec
-from rllm.types import Task
+from rllm.eval.config import SUPPORTED_PROVIDERS
+from rllm.types import Task, _materialize_trajectory_deltas
 
 logger = logging.getLogger(__name__)
+
+_EVAL_PROVIDERS = [provider for provider in SUPPORTED_PROVIDERS if provider != "custom"]
 
 
 def _suggest_benchmarks(name: str, catalog_names: list[str], max_suggestions: int = 3) -> list[str]:
@@ -41,6 +44,43 @@ def _apply_sandbox_overrides(agent, agent_metadata: dict | None) -> None:
     leftovers.pop("sandbox_backend", None)
     for flag in leftovers:
         logger.warning("--%s has no effect for agent %s", flag.replace("_", "-"), type(agent).__name__)
+
+
+# Agent knobs surfaced in the eval header, in display order. Each entry is
+# (attribute, label, formatter); a flow that doesn't expose an attribute (or
+# leaves it ``None``) simply omits that pair, so this works across harnesses.
+# NB: temperature is intentionally omitted — sampling params (temperature,
+# top_p, …) are shown in the gateway-enforced "Sampling" row, which is
+# authoritative; listing the harness's requested temperature here too just
+# duplicated it with a (usually different, since the gateway wins) value.
+_AGENT_CONFIG_SPECS = (
+    ("max_turns", "max turns", str),
+    ("max_steps", "max steps", str),
+    ("max_concurrent", "max concurrent", str),
+    ("run_timeout", "run timeout", lambda v: f"{v}s"),
+    ("install_timeout", "install timeout", lambda v: f"{v}s"),
+)
+
+
+def _agent_config_rows(agent) -> list[tuple[str, str]]:
+    """Build the ``Config`` panel row from the loaded flow's effective knobs.
+
+    Reads the curated attributes off the agent instance (max turns, temperature,
+    timeouts, …) and renders each present one as a ``key value`` chip — dim key,
+    bold value — with chips separated by a dim ``·``. Spaces *within* a chip are
+    non-breaking (`` ``) so a pair never splits across a line wrap; wraps
+    fall on the separators instead. Returns an empty list when the flow exposes
+    none of the knobs.
+    """
+    chips = []
+    for attr, label, fmt in _AGENT_CONFIG_SPECS:
+        value = getattr(agent, attr, None)
+        if value is not None:
+            key = label.replace(" ", " ")
+            chips.append(f"[dim]{key}[/] [val]{fmt(value)}[/]")
+    if not chips:
+        return []
+    return [("Config", "  [dim]·[/]  ".join(chips))]
 
 
 def _dict_rows_to_tasks(rows: list[dict]) -> list[Task]:
@@ -91,6 +131,7 @@ def _run_eval(
     agent_metadata: dict | None = None,
     enable_ui: bool = False,
     save_episodes: bool = True,
+    compact_episodes: bool = True,
     episodes_dir: str | None = None,
     use_snapshot: bool = True,
     warm_queue_size: int = 0,
@@ -363,6 +404,7 @@ def _run_eval(
         ("Benchmark", f"[val]{benchmark}[/]  [dim]({split}, {len(dataset)} examples)[/]"),
         ("Model", f"[val]{model}[/]"),
         ("Agent", agent_text),
+        *_agent_config_rows(agent),
         ("Evaluator", f"[dim]{evaluator_display}[/]"),
     ]
     if not use_snapshot:
@@ -400,6 +442,7 @@ def _run_eval(
             "split": split,
             "timestamp": timestamp,
             "attempts": attempts,
+            "episode_format": "compact" if compact_episodes else "full",
         }
     )
     episode_store = run_store if save_episodes else None
@@ -452,7 +495,7 @@ def _run_eval(
                 except Exception:
                     logger.debug("episode_store.write failed", exc_info=True)
             if _ui_callback is not None:
-                _ui_callback(episode)
+                _ui_callback(_materialize_trajectory_deltas(episode))
 
     # Single execution path: every Task goes through ``AgentFlowEngine``
     # via ``SandboxTaskHooks``. The engine fronts every LLM call with the rLLM
@@ -478,6 +521,7 @@ def _run_eval(
             evaluator=evaluator,
             sampling_params=(sampling_config.as_dict() if sampling_config is not None else None),
             attempts=attempts,
+            compact_episodes=save_episodes and compact_episodes,
         )
     )
 
@@ -498,6 +542,16 @@ def _run_eval(
     ]
     for k, v in sorted(result.pass_at.items()):
         res_rows.append((f"pass@{k}", f"[bold]{v * 100:.1f}%[/]"))
+
+    # Per-category completion breakdown (env_done / timeout / verifier_timeout / ...),
+    # infra-error reasons highlighted so a flaky endpoint or broken verifier is
+    # visible at a glance instead of hiding inside a single "Errors" count.
+    if result.termination_breakdown:
+        from rllm.types import INFRA_ERROR_REASONS
+
+        infra_vals = {r.value for r in INFRA_ERROR_REASONS}
+        parts = [f"[{'red' if reason in infra_vals else 'dim'}]{reason} {count}[/]" for reason, count in sorted(result.termination_breakdown.items(), key=lambda kv: (-kv[1], kv[0]))]
+        res_rows.append(("Terminations", "  ".join(parts)))
 
     # Display signal breakdown if any
     if result.signal_averages:
@@ -540,7 +594,17 @@ def _run_eval(
 @click.option("--agent", "agent_name", default=None, help="Agent scaffold: registry name or module:object path.")
 @click.option("--evaluator", "evaluator_name", default=None, help="Evaluator: registry name or module:class path.")
 @click.option("--base-url", default=None, help="OpenAI-compatible API endpoint URL. If omitted, a proxy is auto-started using 'rllm setup' config.")
-@click.option("--model", default=None, help="Model name to evaluate. Defaults to configured model from 'rllm setup'.")
+@click.option(
+    "--proxy-port", "proxy_port", default=None, type=int, help="Pin the auto-started LiteLLM proxy to this port. Default: a free port is picked automatically (so concurrent eval jobs don't collide)."
+)
+@click.option(
+    "--provider",
+    "provider_override",
+    default=None,
+    type=click.Choice(_EVAL_PROVIDERS, case_sensitive=False),
+    help="Provider to use for this run, overriding 'rllm setup' without changing it. Requires --model and uses the provider's stored API key.",
+)
+@click.option("--model", default=None, help="Model name to evaluate. Defaults to the configured model unless --provider or --base-url is used.")
 @click.option("--split", default=None, help="Dataset split (default: from catalog eval_split).")
 @click.option("--concurrency", default=64, type=int, help="Number of parallel requests.")
 @click.option("--attempts", default=1, type=int, help="Independent rollouts per task; reports pass@k for k=1..N (default: 1).")
@@ -570,16 +634,34 @@ def _run_eval(
 )
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
 @click.option("--save-episodes/--no-save-episodes", "save_episodes", default=True, help="Save each Episode as its own JSON file for later visualization (default: enabled).")
+@click.option(
+    "--compact-episodes/--full-episodes",
+    default=True,
+    help="Save graph-backed Episode JSONs without repeated cumulative messages and token IDs (default: compact).",
+)
 @click.option("--episodes-dir", "episodes_dir", default=None, help="Directory to write the episode JSONs into. Default: ~/.rllm/eval_results/<bench>_<model>_<timestamp>/.")
 @click.option("--sampling-params", "sampling_params", default=None, help=_SAMPLING_PARAMS_HELP)
 @click.option("--temperature", default=None, type=float, help="Sampling temperature (shortcut for --sampling-params temperature=...).")
 @click.option("--top-p", "top_p", default=None, type=float, help="Nucleus sampling top_p (shortcut for --sampling-params top_p=...).")
 @click.option("--max-tokens", "max_tokens", default=None, type=int, help="Max generated tokens per call (shortcut for --sampling-params max_tokens=...).")
+@click.option(
+    "--agent-timeout",
+    "agent_timeout",
+    default=None,
+    type=int,
+    metavar="SECONDS",
+    help=(
+        "Per-rollout agent wall-clock timeout in seconds for sandboxed CLI harnesses (e.g. terminus2). "
+        "Default 3600. Sandbox lifetimes are sized to outlast this, so the environment isn't torn down mid-rollout."
+    ),
+)
 def eval_cmd(
     benchmark: str,
     agent_name: str | None,
     evaluator_name: str | None,
     base_url: str | None,
+    proxy_port: int | None,
+    provider_override: str | None,
     model: str | None,
     split: str | None,
     concurrency: int,
@@ -593,11 +675,13 @@ def eval_cmd(
     warm_queue_size: int,
     enable_ui: bool | None,
     save_episodes: bool,
+    compact_episodes: bool,
     episodes_dir: str | None,
     sampling_params: str | None,
     temperature: float | None,
     top_p: float | None,
     max_tokens: int | None,
+    agent_timeout: int | None,
 ):
     """Evaluate a model on a benchmark dataset."""
     from rllm.cli._sampling import resolve_eval_sampling
@@ -624,38 +708,67 @@ def eval_cmd(
     proxy_manager = None
 
     if base_url is not None:
+        if provider_override is not None:
+            fail("--provider cannot be used with --base-url; the direct endpoint already defines routing.")
         # Direct mode: user provided --base-url, require --model too
         if model is None:
             fail("--model is required when --base-url is provided.")
     else:
         # Proxy mode: auto-start LiteLLM proxy from config
+        import os as _os
+
         from rllm.eval.config import load_config
 
         config = load_config()
-        if not config.is_configured():
-            fail("No configuration found. Run `rllm setup` first to configure your provider and API key.")
+        if provider_override is not None and model is None:
+            fail("--model is required when --provider is provided.")
+        if provider_override is not None:
+            config.provider = provider_override
 
-        # --model overrides configured model
-        if model is None:
-            model = config.model
+        # A ``tinker://`` sampler-checkpoint path (produced by ``rllm sft`` on the
+        # tinker backend) is served by the Tinker OAI endpoint, which the built-in
+        # "tinker" provider is pinned to. Route it there automatically no matter
+        # which provider the local config selects — or whether a config exists at
+        # all — since the checkpoint path alone determines where it can run.
+        resolved_model = model if model is not None else config.model
+        is_tinker_checkpoint = bool(resolved_model) and resolved_model.startswith("tinker://")
 
-        if config.provider == "custom":
+        if is_tinker_checkpoint:
+            api_key = _os.environ.get("TINKER_API_KEY", "")
+            if not api_key:
+                fail("tinker:// checkpoint models require TINKER_API_KEY in the environment.\n\n  Export your Tinker key and re-run, e.g.:\n    export TINKER_API_KEY=<your-tinker-key>")
+            provider = "tinker"
+            model = resolved_model
+            console.print("  [success]tinker:// checkpoint detected[/] → routing through the Tinker OAI endpoint")
+        else:
+            if not config.is_configured():
+                fail("No configuration found. Run `rllm setup` first to configure your provider and API key.")
+            provider = config.provider
+            api_key = config.api_key
+            # --model overrides configured model
+            if model is None:
+                model = config.model
+
+        if provider == "custom":
             # Custom provider: skip LiteLLM proxy, use base_url directly
-            import os as _os
-
             base_url = config.base_url
-            if config.api_key:
-                _os.environ.setdefault("OPENAI_API_KEY", config.api_key)
+            if api_key:
+                _os.environ.setdefault("OPENAI_API_KEY", api_key)
             console.print(f"  [success]Using custom endpoint[/] at [dim]{base_url}[/]")
         else:
             from rllm.eval.proxy import EvalProxyManager
 
             proxy_manager = EvalProxyManager(
-                provider=config.provider,
+                provider=provider,
                 model_name=model,
-                api_key=config.api_key,
+                api_key=api_key,
+                proxy_port=proxy_port,
+                # Non-core sampling params (reasoning_effort, …) the proxy must
+                # forward instead of dropping. The gateway enforces them per
+                # call; this keeps litellm from deleting them en route.
+                sampling_extra=sampling_config.extra if sampling_config else None,
             )
-            with Status(f"[dim]Starting LiteLLM proxy for [bold]{config.provider}/{model}[/bold]...[/]", console=console):
+            with Status(f"[dim]Starting LiteLLM proxy for [bold]{provider}/{model}[/bold]...[/]", console=console):
                 try:
                     proxy_manager.start_proxy_subprocess(proxy_manager.build_proxy_config())
                 except (RuntimeError, TimeoutError) as e:
@@ -671,6 +784,17 @@ def eval_cmd(
         agent_metadata["sandbox_backend"] = sandbox_backend
     if sandbox_concurrency is not None:
         agent_metadata["sandbox_concurrency"] = sandbox_concurrency
+    if agent_timeout is not None:
+        if agent_timeout < 1:
+            fail("--agent-timeout must be >= 1 second.")
+        # Consumed by BaseCliHarness.configure() → sets the harness run_timeout.
+        agent_metadata["agent_timeout"] = agent_timeout
+        # Also publish it as the canonical env knob so the Modal backend derives
+        # a sandbox lifetime with headroom over it (else a raised timeout would
+        # still be reaped at the default lifetime).
+        import os
+
+        os.environ["RLLM_HARNESS_RUN_TIMEOUT_S"] = str(agent_timeout)
 
     parsed_indices = parse_index_spec(task_indices) if task_indices is not None else None
 
@@ -689,6 +813,7 @@ def eval_cmd(
             agent_metadata=agent_metadata,
             enable_ui=enable_ui,
             save_episodes=save_episodes,
+            compact_episodes=compact_episodes,
             episodes_dir=episodes_dir,
             use_snapshot=use_snapshot,
             warm_queue_size=warm_queue_size,

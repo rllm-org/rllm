@@ -12,7 +12,7 @@ from verl.workers.rollout.llm_server import LLMServerClient
 from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.engine.rollout.types import Processor, TokenInput, Tokenizer, TokenOutput, VerlTokenOutput
 from rllm.parser import ChatTemplateParser
-from rllm.workflows import TerminationEvent, TerminationReason
+from rllm.types import TerminationEvent, TerminationReason
 
 logger = logging.getLogger(__name__)
 

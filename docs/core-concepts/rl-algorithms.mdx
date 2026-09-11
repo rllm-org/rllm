@@ -1,450 +1,167 @@
 ---
-title: RL Algorithms
-description: Understanding PPO, GRPO, and other RL algorithms in rLLM for language agent training
+title: RL algorithms
+description: The RL algorithms rLLM supports — advantage estimators and auxiliary losses — and how to build your own.
 ---
 
-rLLM supports multiple reinforcement learning algorithms optimized for training language agents. This guide explains the algorithms, their advantages, and how to configure them.
+<Note>
+**Modules**: `rllm.trainer.algorithms.advantage` (advantage estimators) · `rllm.trainer.algorithms.aux_loss` (auxiliary losses) · `rllm.trainer.algorithms.config` (`AlgorithmConfig`)
+</Note>
 
-## Overview
+In rLLM an RL "algorithm" is assembled from two composable, backend-agnostic pieces, both configured under `rllm.algorithm`:
 
-RL algorithms in rLLM differ primarily in how they compute **advantages** - the signals that guide policy optimization. The advantage function $A(s,a)$ estimates how much better an action $a$ is compared to the average action in state $s$.
+1. An **advantage estimator** — turns per-trajectory rewards into advantages (the GRPO family).
+2. Zero or more **auxiliary losses** — extra loss terms on tokens the policy gradient ignores (for example ECHO's loss on environment-observation tokens).
 
-### Supported Algorithms
+The backend then applies a policy **loss function** (`ppo`, `importance_sampling`, …) using those advantages. The same registries feed all three training backends (**verl**, **tinker**, **fireworks**), so flipping algorithms is a one-line config change that works everywhere.
 
-- **GRPO (Group Relative Policy Optimization)**: Efficient algorithm using group-based baselines
-- **PPO (Proximal Policy Optimization)**: Industry-standard policy gradient method
-- **ReMax**: Reward maximization with KL regularization
-- **Custom**: Define your own advantage computation
+## How advantages are computed
 
-## GRPO (Group Relative Policy Optimization)
+Advantages are computed on `TrajectoryGroup`s, partitioned by `group_role`. The estimator hook is **scalar reward per trajectory in, scalar advantage per trajectory out** — the unified trainer broadcasts each trajectory's advantage across its response tokens. This single contract is what lets the same estimator code serve every backend.
 
-GRPO is rLLM's recommended algorithm for most use cases. It's efficient, stable, and doesn't require a value network.
-
-### How GRPO Works
-
-GRPO groups multiple rollouts for the same task and computes advantages relative to the group:
-
-```python
-# For each task, generate N rollouts
-trajectories = [
-    rollout(task, policy) for _ in range(N)
-]
-
-# Compute baseline from the group
-baseline = mean([traj.reward for traj in trajectories])
-# Or: baseline = max([traj.reward for traj in trajectories])
-
-# Compute advantages
-for traj in trajectories:
-    advantage = traj.reward - baseline
-    # Apply to each step in trajectory
-```
-
-### Mathematical Formulation
-
-For a task $x$, we generate $N$ trajectories $\{y_1, \ldots, y_N\}$ and compute:
-
-$$
-A_i = R(x, y_i) - b(\{R(x, y_j)\}_{j=1}^N)
-$$
-
-Where:
-- $R(x, y_i)$ is the reward for trajectory $y_i$
-- $b(\cdot)$ is the baseline function (mean or max)
-- $A_i$ is the advantage for trajectory $y_i$
-
-### Configuration
-
-```yaml
-algorithm:
-  advantage:
-    kl_ctrl:
-      type: "grpo"              # Use GRPO
-      coeff: 0.05               # KL coefficient
-  
-  # GRPO-specific settings
-  grpo:
-    baseline: "mean"            # or "max"
-```
-
-### Advantages
-
-<Tip>
-**No Value Network**: GRPO doesn't require training a value function, reducing complexity and compute.
-</Tip>
-
-<Tip>
-**Stable**: Group-based baselines provide stable advantage estimates even with sparse rewards.
-</Tip>
-
-<Tip>
-**Efficient**: Lower memory footprint than PPO (no value network state).
-</Tip>
-
-### When to Use GRPO
-
-GRPO works well when:
-- You can generate multiple rollouts per task (typical: 4-8)
-- Rewards are sparse or noisy
-- You want simpler training (no value network)
-- You're working with limited compute resources
-
-### Example Configuration
-
-```python
-@hydra.main(config_path="pkg://rllm.trainer.config", config_name="ppo_trainer", version_base=None)
-def main(config):
-    # Override to use GRPO
-    config.algorithm.advantage.kl_ctrl.type = "grpo"
-    config.algorithm.grpo.baseline = "mean"
-    config.actor_rollout_ref.rollout.n = 8  # 8 rollouts per task
-    
-    trainer = AgentTrainer(
-        agent_class=MyAgent,
-        env_class=MyEnv,
-        config=config,
-        ...
-    )
-    trainer.train()
-```
-
-## PPO (Proximal Policy Optimization)
-
-PPO is the industry-standard policy gradient algorithm. It uses a learned value function to estimate advantages.
-
-### How PPO Works
-
-PPO trains two networks:
-1. **Policy network** $\pi_\theta(a|s)$: The agent's policy
-2. **Value network** $V_\phi(s)$: Estimates expected return from state $s$
-
-Advantages are computed using Generalized Advantage Estimation (GAE):
-
-$$
-A_t = \sum_{l=0}^{\infty} (\gamma \lambda)^l \delta_{t+l}
-$$
-
-Where $\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$ is the TD error.
-
-### Mathematical Formulation
-
-The PPO objective is:
-
-$$
-L^{\text{CLIP}}(\theta) = \mathbb{E}_t \left[ \min(r_t(\theta) A_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) A_t) \right]
-$$
-
-Where:
-- $r_t(\theta) = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{\text{old}}}(a_t|s_t)}$ is the probability ratio
-- $\epsilon$ is the clip ratio (typically 0.2)
-- $A_t$ is the advantage estimate
-
-### Configuration
-
-```yaml
-algorithm:
-  advantage:
-    kl_ctrl:
-      type: "ppo"               # Use PPO
-      coeff: 0.05               # KL coefficient
-  
-  # PPO-specific settings
-  clip_ratio: 0.2               # Clip parameter ε
-  ppo_epochs: 4                 # Number of PPO epochs per update
-  ppo_mini_batch_size: 256      # Mini-batch size
-  gamma: 0.99                   # Discount factor
-  gae_lambda: 0.95              # GAE lambda parameter
-  value_loss_coeff: 0.5         # Value loss coefficient
-  entropy_coeff: 0.01           # Entropy bonus coefficient
-```
-
-### Advantages
-
-<Tip>
-**Sample Efficient**: Value network provides better advantage estimates, improving sample efficiency.
-</Tip>
-
-<Tip>
-**Dense Feedback**: Works well with dense, intermediate rewards.
-</Tip>
-
-<Tip>
-**Stable**: Clipping prevents large policy updates.
-</Tip>
-
-### When to Use PPO
-
-PPO works well when:
-- You have dense, intermediate rewards
-- You can't generate many rollouts per task
-- Sample efficiency is critical
-- You have compute for training a value network
-
-### Example Configuration
-
-```python
-@hydra.main(config_path="pkg://rllm.trainer.config", config_name="ppo_trainer", version_base=None)
-def main(config):
-    # PPO is the default in ppo_trainer.yaml
-    config.algorithm.advantage.kl_ctrl.type = "ppo"
-    config.algorithm.clip_ratio = 0.2
-    config.algorithm.ppo_epochs = 4
-    config.algorithm.gamma = 0.99
-    config.algorithm.gae_lambda = 0.95
-    
-    trainer = AgentTrainer(
-        agent_class=MyAgent,
-        env_class=MyEnv,
-        config=config,
-        ...
-    )
-    trainer.train()
-```
-
-## ReMax (Reward Maximization)
-
-ReMax is a simpler algorithm that directly maximizes rewards with KL regularization.
-
-### How ReMax Works
-
-ReMax uses the trajectory reward directly as the advantage:
-
-$$
-A_i = R(\tau_i)
-$$
-
-With KL regularization to prevent the policy from diverging too far from the reference policy:
-
-$$
-L(\theta) = \mathbb{E}_{\tau \sim \pi_\theta} \left[ R(\tau) - \beta \cdot D_{\text{KL}}(\pi_\theta || \pi_{\text{ref}}) \right]
-$$
-
-### Configuration
-
-```yaml
-algorithm:
-  advantage:
-    kl_ctrl:
-      type: "remax"             # Use ReMax
-      coeff: 0.1                # KL coefficient β
-```
-
-### When to Use ReMax
-
-ReMax works well when:
-- You have very sparse rewards (only final outcome matters)
-- Task is simple (limited need for step-level credit assignment)
-- You want the simplest possible algorithm
-
-## Stepwise vs. Trajectory-Level Advantages
-
-rLLM supports two modes for applying advantages:
-
-### Trajectory-Level (Default)
+Select the estimator with `adv_estimator`:
 
 ```yaml
 rllm:
-  stepwise_advantage:
-    enable: false               # Trajectory-level
+  algorithm:
+    adv_estimator: grpo
+    norm_adv_by_std_in_grpo: true   # GRPO only; false = center by mean only
 ```
 
-Advantages are computed at the trajectory level and applied uniformly:
+See [Advantage estimator](/training/advantage-estimator) for the full data contract, per-role estimator maps, and what the scalar hook intentionally cannot express (GAE and other per-token / critic-based estimators — for those, see [Pre-computing advantage](/training/precompute-advantage)).
 
-```python
-# Compute advantage for entire trajectory
-advantage = trajectory.reward - baseline
+## Built-in advantage estimators
 
-# Apply to all tokens in the trajectory
-for token in trajectory.response_tokens:
-    token.advantage = advantage
+| Estimator | `adv_estimator` | What it computes |
+|---|---|---|
+| **GRPO** *(default)* | `grpo` | Center rewards within each group by the group mean; optionally divide by the group std (`norm_adv_by_std_in_grpo`, default `true`). No value network. |
+| **REINFORCE** | `reinforce` | No baseline — the reward *is* the advantage. |
+| **REINFORCE++ baseline** | `reinforce_plus_plus_baseline` | Per-group mean baseline, then whiten by the role-batch std. |
+| **PRPO** | `prpo` | Center and normalize across the **whole batch** (flatten all groups), not per-group. |
+| **RLOO** | `rloo` | Leave-one-out baseline per group: each trajectory is scored against the mean of the *others*. |
+| **ECHO** | `echo` | GRPO's advantage **unchanged**, plus an environment-observation auxiliary loss (see below). |
+
+All six live in one registry and run on every backend. (The verl backend can also be pointed at its native estimators, but the rLLM-native set above is the portable path.)
+
+## ECHO and auxiliary losses
+
+[ECHO](https://arxiv.org/abs/2605.24517) keeps GRPO's advantage exactly and **adds a cross-entropy auxiliary loss on the environment-observation tokens** (tool / terminal output) that the policy conditions on but the policy gradient never trains. For tool-use and terminal agents — where rollouts are dominated by observation tokens and many rollouts fail — this turns *every* rollout, including the failures, into dense supervision at no extra rollout cost.
+
+`adv_estimator=echo` defaults the env-loss weight λ to the paper's `0.05`. Tune it explicitly (productive range `0.01–0.05`; `0.0` reproduces plain GRPO):
+
+```bash
+# any backend — verl / tinker / fireworks
+... rllm.algorithm.adv_estimator=echo
+... rllm.algorithm.adv_estimator=echo rllm.algorithm.env_loss_coef=0.03
 ```
 
-**Use when**: Final outcome is what matters (e.g., math problem solved correctly)
+### The auxiliary-loss framework
 
-### Step-Level
+`env_loss_coef` is shorthand for the general `aux_losses` mechanism. An auxiliary loss is a **named** loss applied to a **token subset (a "mask")**. These two configs are equivalent:
 
 ```yaml
 rllm:
-  stepwise_advantage:
-    enable: true                # Step-level
+  algorithm:
+    env_loss_coef: 0.05                       # shorthand
+    # — or, the general form —
+    aux_losses:
+      - { type: env_prediction, coef: 0.05 }  # ECHO's loss, by name
 ```
 
-Advantages are computed separately for each step:
+`env_prediction` is the one built-in client (length-normalized cross-entropy on observation tokens). You can list several aux losses; each is added to the policy loss with its own `coef`.
+
+The **same config runs on every backend**, with different mechanics and cost:
+
+| Backend | How the aux term is applied | Metric to watch |
+|---|---|---|
+| **verl** | Folded into GRPO's single forward/backward pass — free and exact. | `actor/aux_env_prediction_loss` |
+| **tinker / fireworks** | A second, gradient-accumulated `cross_entropy` pass over the *same* rollouts — no extra rollouts, one extra backward. | `train/aux_*` |
+
+<Tip>
+Because loss normalization differs across managed services, λ (the `coef`) may need per-backend retuning. Watch the metric above to confirm the auxiliary loss is actually falling.
+</Tip>
+
+## Building custom RL algorithms
+
+Both extension points are registries — register a function or a class and reference it by name from config. **No backend code to touch.**
+
+### A custom advantage estimator
+
+Decorate a function with `@register_rllm_adv_estimator("name")`. It is scalar-per-trajectory in, scalar-per-trajectory out; `**kwargs` carries `traj_groups` when you need per-trajectory metadata.
 
 ```python
-# Compute advantage for each step
-for step in trajectory.steps:
-    step.advantage = step.reward - baseline
+import numpy as np
+from rllm.trainer.algorithms.advantage import register_rllm_adv_estimator
+
+@register_rllm_adv_estimator("batch_mean_baseline")
+def batch_mean_baseline(rewards, algorithm_config, **kwargs):
+    # rewards: list of 1-D arrays (one per TrajectoryGroup)
+    batch_mean = np.mean(np.concatenate(rewards)) if rewards else 0.0
+    adv = [group - batch_mean for group in rewards]
+    return adv, adv          # (advantages_by_group, returns_by_group)
 ```
-
-**Use when**: Intermediate rewards are meaningful (e.g., progressive task completion)
-
-<Warning>
-Step-level advantages require that `max_prompt_length` and `max_response_length` are enforced per-step, not per-trajectory. Set `enforce_max_prompt_length: true` in the execution engine.
-</Warning>
-
-## Compact Filtering
-
-rLLM can filter out invalid trajectories based on termination reason:
 
 ```yaml
 rllm:
-  compact_filtering:
-    enable: true
-    mask_max_prompt_length_exceeded: true
-    mask_max_response_length_exceeded: true
-    mask_env_done: false
-    mask_max_turns_exceeded: true
-    mask_timeout: true
-    mask_error: true
-    mask_unknown: true
+  algorithm:
+    adv_estimator: batch_mean_baseline
 ```
 
-Filtered trajectories have their `response_mask` set to 0, excluding them from training.
+The full contract, role-level estimator maps, and a complete worked example (porting OPO from verl) are in [Advantage estimator](/training/advantage-estimator).
 
-<Info>
-Compact filtering is useful for removing low-quality trajectories that hit limits or errors, improving training efficiency.
-</Info>
+### A custom auxiliary loss
 
-## Algorithm Comparison
-
-| Feature | GRPO | PPO | ReMax |
-|---------|------|-----|-------|
-| **Value Network** | No | Yes | No |
-| **Sample Efficiency** | Medium | High | Low |
-| **Compute Cost** | Low | High | Low |
-| **Stability** | High | Medium | Medium |
-| **Best For** | Sparse rewards, multi-rollout | Dense rewards, sample efficiency | Very sparse rewards, simplicity |
-| **Rollouts per Task** | 4-8 | 1-2 | 1-4 |
-| **Hyperparameter Sensitivity** | Low | Medium | Low |
-
-## Advanced: Custom Advantage Computation
-
-You can implement custom advantage computation:
+Subclass `AuxiliaryLoss`, choose a token mask, and register it. The default weighting is uniform (every masked token gets `coef`); override `weight(ctx)` to return a per-token tensor instead.
 
 ```python
-from rllm.trainer.verl.agent_ppo_trainer import AgentPPOTrainer
+from rllm.trainer.algorithms import register_aux_loss, AuxiliaryLoss, MASK_ACTION
 
-class CustomAdvantageTrainer(AgentPPOTrainer):
-    def compute_advantages(self, rollout_data):
-        """Custom advantage computation."""
-        
-        # Group trajectories by task
-        task_groups = defaultdict(list)
-        for traj in rollout_data:
-            task_id = traj.task_id
-            task_groups[task_id].append(traj)
-        
-        # Compute custom advantages
-        for task_id, trajectories in task_groups.items():
-            # Your custom logic here
-            rewards = [traj.reward for traj in trajectories]
-            
-            # Example: Use median as baseline
-            baseline = np.median(rewards)
-            
-            for traj in trajectories:
-                advantage = traj.reward - baseline
-                
-                # Apply advantage to all steps
-                for step in traj.steps:
-                    step.advantage = advantage
-        
-        return rollout_data
+@register_aux_loss("entropy_bonus")
+class EntropyBonus(AuxiliaryLoss):
+    mask = MASK_ACTION          # or MASK_OBSERVATION
+    # def weight(self, ctx):    # optional — return a per-token tensor; None = uniform `coef`
+    #     ...
 ```
 
-## Hyperparameter Tuning Guide
+```yaml
+rllm:
+  algorithm:
+    aux_losses:
+      - { type: entropy_bonus, coef: 0.01 }
+```
 
-### GRPO Tuning
+The same class runs on all three backends (verl folds it into the policy pass; tinker/fireworks add the extra cross-entropy pass). Dynamic per-token weights and auxiliary losses that need a *separate* model call (e.g. a teacher branch) are an in-progress extension — see the design note `design/auxiliary-losses.md`.
 
-<Steps>
-  <Step title="Rollouts per task">
-    Start with 4-8 rollouts. More rollouts = better baseline estimates but higher compute cost.
-  </Step>
-  
-  <Step title="Baseline function">
-    Try both `mean` and `max`. Mean is more stable, max can help with very sparse rewards.
-  </Step>
-  
-  <Step title="KL coefficient">
-    Start with 0.05. Increase if policy changes too fast, decrease if learning is too slow.
-  </Step>
-</Steps>
+<Note>
+Need a **per-token** advantage signal (GAE, reward-to-go, a custom detector) that the scalar estimator hook can't express? Compute it in your workflow and feed it through [`use_precomputed_advantage`](/training/precompute-advantage) to bypass the estimator entirely.
+</Note>
 
-### PPO Tuning
+## Configuration quick reference
 
-<Steps>
-  <Step title="Clip ratio">
-    Default 0.2 works well. Increase for more aggressive updates, decrease for more conservative.
-  </Step>
-  
-  <Step title="GAE lambda">
-    Start with 0.95. Closer to 1.0 = lower bias but higher variance.
-  </Step>
-  
-  <Step title="PPO epochs">
-    Start with 4. Too many epochs can lead to overfitting, too few can underfit.
-  </Step>
-  
-  <Step title="Mini-batch size">
-    Balance between compute efficiency and gradient variance. Typical: 64-256.
-  </Step>
-</Steps>
+All under `rllm.algorithm` ([full reference](/training/configuration)):
 
-### General Tips
+| Field | Default | Purpose |
+|---|---|---|
+| `adv_estimator` | `grpo` | Global advantage estimator (registry name). |
+| `norm_adv_by_std_in_grpo` | `true` | GRPO: divide centered rewards by group std (`false` = center only). |
+| `env_loss_coef` | `0.05` if `adv_estimator=echo`, else `0.0` | Shorthand for `aux_losses: [{type: env_prediction, coef: …}]`. |
+| `aux_losses` | `[]` | List of `{type, coef}` auxiliary-loss specs. |
+| `loss_fn` | backend default | Policy loss function (`ppo`, `importance_sampling`, …). |
 
-<Tip>
-**Learning Rate**: Start with 1e-6 for language models. rLLM uses small LRs to avoid catastrophic forgetting.
-</Tip>
+Per-role estimator overrides are set via `traj_group_adv_estimator_map` on the `AgentTrainer` constructor — see [Advantage estimator](/training/advantage-estimator).
 
-<Tip>
-**Batch Size**: Larger batches = more stable gradients but slower iteration. Typical: 128-512.
-</Tip>
-
-<Tip>
-**KL Coefficient**: Controls how much the policy can deviate from reference. Typical: 0.01-0.1.
-</Tip>
-
-<Warning>
-RL is sensitive to hyperparameters. Always start with defaults and change one thing at a time.
-</Warning>
-
-## Monitoring Algorithm Performance
-
-Key metrics to watch during training:
-
-### Reward Metrics
-- **mean_reward**: Average trajectory reward (should increase)
-- **max_reward**: Best trajectory reward (indicates ceiling)
-- **reward_std**: Reward variance (high variance = unstable)
-
-### Policy Metrics
-- **kl_divergence**: KL from reference policy (should stay small)
-- **policy_loss**: Policy gradient loss (should decrease)
-- **entropy**: Policy entropy (too low = policy collapse)
-
-### Training Metrics
-- **explained_variance** (PPO only): How well value network predicts returns (should be >0.5)
-- **value_loss** (PPO only): Value network loss (should decrease)
-- **gradient_norm**: Gradient magnitude (too high = unstable)
-
-<Info>
-If `kl_divergence` grows too large, increase `kl_ctrl.coeff`. If `entropy` drops to near 0, add `entropy_coeff` or reduce temperature.
-</Info>
-
-## Next Steps
+## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Training" icon="brain" href="/core-concepts/training">
-    Learn how to use these algorithms in training
+  <Card title="Advantage estimator" icon="function" href="/training/advantage-estimator">
+    The estimator hook contract, role-level maps, and the OPO worked example
   </Card>
-  <Card title="Cookbooks" icon="book" href="/cookbooks/overview">
-    See algorithms in action across the cookbook examples
+  <Card title="Configuration" icon="gear" href="/training/configuration">
+    Every `AlgorithmConfig` field
   </Card>
-  <Card title="Configuration" icon="gear" href="/core-concepts/rl-algorithms">
-    Detailed algorithm config reference
+  <Card title="Capability matrix" icon="table-cells" href="/training/capability-matrix">
+    Which algorithms and losses each backend supports
   </Card>
-  <Card title="Debugging" icon="bug" href="/guides/distributed-training">
-    Troubleshoot RL training issues
+  <Card title="Backends" icon="server" href="/backends/comparison">
+    verl vs tinker vs fireworks
   </Card>
 </CardGroup>

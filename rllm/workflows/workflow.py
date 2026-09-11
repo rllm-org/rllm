@@ -3,7 +3,6 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from enum import Enum
 from functools import partial
 
 import numpy as np
@@ -11,24 +10,14 @@ import numpy as np
 from rllm.agents.agent import BaseAgent
 from rllm.engine.rollout.rollout_engine import RolloutEngine
 from rllm.environments.base.base_env import BaseEnv
-from rllm.types import Episode, Trajectory
+from rllm.types import Episode, TerminationEvent, TerminationReason, Trajectory
 from rllm.workflows.store import Store
 
-
-class TerminationReason(Enum):
-    MAX_PROMPT_LENGTH_EXCEEDED = "max_prompt_length_exceeded"
-    MAX_RESPONSE_LENGTH_EXCEEDED = "max_response_length_exceeded"
-    ENV_DONE = "env_done"
-    MAX_TURNS_EXCEEDED = "max_turns_exceeded"
-    TIMEOUT = "timeout"
-    UNKNOWN = "unknown"
-    ERROR = "error"
-
-
-class TerminationEvent(Exception):
-    def __init__(self, reason: TerminationReason = TerminationReason.UNKNOWN):
-        super().__init__(f"Terminated: {reason}")
-        self.reason = reason
+# ``TerminationReason``/``TerminationEvent`` moved to ``rllm.types`` — they are no
+# longer workflow-specific (the engine, harnesses, eval, and trainer all use
+# them). Re-exported here so existing ``from rllm.workflows.workflow import
+# TerminationReason`` imports keep working.
+__all__ = ["TerminationEvent", "TerminationReason", "Workflow"]
 
 
 class Workflow(ABC):

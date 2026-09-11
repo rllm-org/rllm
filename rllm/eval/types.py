@@ -28,3 +28,10 @@ class EvalOutput:
     is_correct: bool
     signals: list[Signal] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
+    # Set when grading ITSELF failed (verifier timeout/crash, missing reward
+    # file, ...) — distinct from a legitimate ``reward=0``. Carries the
+    # exception class name (Harbor-aligned where applicable, e.g.
+    # ``"VerifierTimeoutError"``, ``"RewardFileNotFoundError"``). The engine
+    # promotes this to an infra ``TerminationReason`` so the reward isn't
+    # mistaken for a real task failure. ``None`` means grading succeeded.
+    error: str | None = None

@@ -12,7 +12,7 @@ from rllm.env import env_int
 from rllm.globals import THOUGHT_DELIMITER_END, THOUGHT_DELIMITER_START
 from rllm.parser import ChatTemplateParser
 from rllm.tools.tool_base import Tool
-from rllm.workflows import TerminationEvent, TerminationReason
+from rllm.types import TerminationEvent, TerminationReason
 
 _REQUEST_TIMEOUT_S = env_int("RLLM_OPENAI_REQUEST_TIMEOUT_S", 3600)  # set env var: export RLLM_OPENAI_REQUEST_TIMEOUT_S=xxx
 

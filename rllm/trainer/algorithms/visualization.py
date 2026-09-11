@@ -4,7 +4,7 @@ from typing import Any
 
 import click
 
-from rllm.types import Trajectory, TrajectoryGroup
+from rllm.types import Trajectory, TrajectoryDelta, TrajectoryGroup, _index_step_deltas, _resolve_step_delta_prompt
 
 
 @dataclass
@@ -234,7 +234,7 @@ def visualize_trajectory_last_steps(
         # 3. Render Prompt and Response
         last_step = trajectory.steps[-1]
         # extract the prompt and response
-        prompt_ids = last_step.prompt_ids
+        prompt_ids = _resolve_step_delta_prompt(last_step, _index_step_deltas(trajectory.steps)[0]) if isinstance(trajectory, TrajectoryDelta) else last_step.prompt_ids
         response_ids = last_step.response_ids
 
         # special handling for prompt ids, we will skip any non-int elements

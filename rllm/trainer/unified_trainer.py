@@ -42,10 +42,10 @@ from rllm.trainer.backend_protocol import BackendProtocol
 from rllm.trainer.buffer import TrajectoryGroupBuffer
 from rllm.trainer.metrics_aggregator import MetricsAggregator
 from rllm.trainer.sync_coordinator import SyncCoordinator, SyncCoordinatorConfig
-from rllm.types import Episode, TrajectoryGroup
+from rllm.types import INFRA_ERROR_REASONS, Episode, TerminationReason, TrajectoryGroup
 from rllm.utils import EpisodeLogger, Tracking, extract_source_metadata
 from rllm.workflows.store import Store
-from rllm.workflows.workflow import TerminationReason, Workflow
+from rllm.workflows.workflow import Workflow
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,19 @@ class UnifiedTrainer:
         remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)
         if not has_agent_flow and not remote_runtime_enabled:
             assert workflow_class is not None, "Either workflow_class, (agent_flow AND (evaluator OR hooks)), or remote_runtime must be provided"
+
+        if has_agent_flow or remote_runtime_enabled:
+            # Gateway runs bind their port only in GatewayManager.start(), after
+            # the backend has provisioned rollout infra (minutes on Fireworks) —
+            # check the port here so a conflict fails before any of that.
+            from rllm.gateway.manager import DEFAULT_GATEWAY_PORT, preflight_gateway_port
+            from rllm.gateway.tunnel import parse_tunnel
+
+            gateway = config.rllm.get("gateway", {}) or {}
+            configured_port = gateway.get("port", None)
+            _, owned_backend = parse_tunnel(gateway.get("tunnel", None))
+            if configured_port is not None or not owned_backend:
+                preflight_gateway_port(int(configured_port) if configured_port is not None else DEFAULT_GATEWAY_PORT)
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
@@ -351,6 +364,20 @@ class UnifiedTrainer:
             estimator_map=self.traj_group_adv_estimator_map,
         )
 
+    @property
+    def _run_stamp(self) -> str:
+        """Per-run UTC timestamp shared by all of this run's artifact trees.
+
+        Run outputs follow ``<experiment dir>/<stamp>/<content>`` so relaunches
+        with the same project/experiment name never clobber or interleave with
+        an earlier run's artifacts.
+        """
+        stamp = getattr(self, "_run_stamp_cache", None)
+        if stamp is None:
+            stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+            self._run_stamp_cache = stamp
+        return stamp
+
     def _setup_logging(self):
         """Setup up both the tracking and episode logging."""
         # create episode logger if enabled in config
@@ -360,6 +387,8 @@ class UnifiedTrainer:
                 "episode_log_dir",
                 f"logs/{self.rllm_config.trainer.project_name}/{self.rllm_config.trainer.experiment_name}",
             )
+            # <experiment dir>/<run stamp>/episodes — relaunches never clobber.
+            episode_log_dir = f"{episode_log_dir}/{self._run_stamp}"
             self.episode_logger = EpisodeLogger(base_dir=episode_log_dir, subdirectory="episodes")
 
         source_metadata = extract_source_metadata(
@@ -535,6 +564,9 @@ class UnifiedTrainer:
         total_counts = max(sum(termination_counts.values()), 1)
         for r in TerminationReason:
             trainer_state.metrics[f"batch/termination_reason/{r.value}"] = termination_counts[r.value] / total_counts
+        # Aggregate infra/grading-failure rate (sandbox/setup/verifier/grading),
+        # mirroring the buffer/async path's episode/infra_error.
+        trainer_state.metrics["batch/infra_error"] = sum(termination_counts[r.value] for r in INFRA_ERROR_REASONS) / total_counts
 
         # stage 2: transform episodes to trajectory groups (sync)
         trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
@@ -591,6 +623,7 @@ class UnifiedTrainer:
             group_size=self.rllm_config.rollout.n,
             staleness_threshold=self.async_config.staleness_threshold,
             trigger_parameter_sync_step=self.async_config.trigger_parameter_sync_step,
+            max_concurrent_rollouts=self.agent_workflow_engine.n_parallel_tasks,
         )
         coordinator = SyncCoordinator(coord_config)
         aggregator = MetricsAggregator()
@@ -614,6 +647,22 @@ class UnifiedTrainer:
         pbar = tqdm(total=total_tasks, desc="Tasks", unit="task")
         buffer._pbar = pbar
 
+        # Trainer event-loop health monitor (diagnostic). Mirrors the gateway's:
+        # high lag + high thread_cpu => the trainer loop is self-CPU bound (e.g.
+        # on-loop enrich / batch prep); high lag + low thread_cpu => starved.
+        # inflight/pending come from the agent-flow engine's concurrency slots.
+        from rllm.utils.loop_health import run_loop_health_monitor
+
+        def _trainer_gauges() -> str:
+            eng = self.agent_workflow_engine
+            parts = []
+            for name in ("inflight", "pending"):
+                v = getattr(eng, name, None)
+                if isinstance(v, int) and v >= 0:
+                    parts.append(f"{name}={v}")
+            return " ".join(parts)
+
+        monitor_task = asyncio.create_task(run_loop_health_monitor("trainer", gauges=_trainer_gauges))
         try:
             gen_task = asyncio.create_task(self._generation_loop(trainer_state, buffer, coordinator))
             await self._training_loop(trainer_state, buffer, coordinator, aggregator)
@@ -624,6 +673,7 @@ class UnifiedTrainer:
                 except asyncio.CancelledError:
                     pass
         finally:
+            monitor_task.cancel()
             pbar.close()
 
     async def _generation_loop(
@@ -646,16 +696,27 @@ class UnifiedTrainer:
                     task = batch[0]
 
                     await coordinator.wait_for_generation_allowed()
-                    if not coordinator.has_quota():
-                        await coordinator.wait_for_throttle()
+                    await coordinator.wait_for_capacity()
                     coordinator.on_group_dispatched()
 
                     task_id = str(uuid.uuid4())
                     for rollout_idx in range(group_size):
 
                         async def _run_rollout(t=task, tid=task_id, ridx=rollout_idx):
-                            _, _, _, episode = await self.agent_workflow_engine.process_task_with_retry(task=t, task_id=tid, rollout_idx=ridx, result_idx=0)
-                            await buffer.add_episode(tid, episode)
+                            uid = f"{tid}:{ridx}"
+                            try:
+                                _, _, _, episode = await self.agent_workflow_engine.process_task_with_retry(task=t, task_id=tid, rollout_idx=ridx, result_idx=0)
+                                await buffer.add_episode(tid, episode)
+                            finally:
+                                # Release the gateway session (traces are already in `episode`).
+                                # This async loop never calls engine.run(), whose end-of-step
+                                # batch_delete would otherwise do this -- without it the gateway's
+                                # in-memory trace store grows unbounded for the whole run.
+                                if self._gateway is not None:
+                                    try:
+                                        await self._gateway.adelete_session(uid)
+                                    except Exception:
+                                        logger.warning("gateway session cleanup failed for %s", uid)
 
                         t = asyncio.create_task(_run_rollout())
                         coordinator.track_task(t)
@@ -697,6 +758,7 @@ class UnifiedTrainer:
 
             # 1. Pull mini_batch_size task batches total, split into
             #    num_fwd_bwd_passes forward-backward passes of fwd_bwd_group_size each.
+            sequences_this_step = 0  # trainable sequences produced across all passes this step
             for pass_idx in range(num_fwd_bwd_passes):
                 chunk_groups: list[TrajectoryGroup] = []
 
@@ -717,10 +779,12 @@ class UnifiedTrainer:
                     all_trajectory_groups.extend(task_batch.groups)
                     all_episodes.extend(task_batch.episodes)
 
-                if not chunk_groups or done:
+                if done:
                     break
 
-                # Forward-backward on this chunk
+                # chunk_groups empty = this pass was all uniform-group placeholders
+                # (refill_filtered_uniform_groups=false): counts toward the step, trains nothing
+                # (has_trajectory_groups guard below skips fwd-bwd).
                 trainer_state.trajectory_groups = chunk_groups
 
                 if trainer_state.has_trajectory_groups:
@@ -728,6 +792,12 @@ class UnifiedTrainer:
                     await self.backend.on_batch_start(trainer_state)
                     trainer_state.backend_batch = self.backend.transform_to_backend_batch(trainer_state)
                     await self.backend.process_backend_batch(trainer_state)
+
+                    # Count trainable sequences this pass. A pass can yield zero when every
+                    # trajectory was dropped as malformed (backend_batch = []); those passes
+                    # contribute no gradient (forward-backward was skipped).
+                    bb = trainer_state.backend_batch
+                    sequences_this_step += len(bb) if bb is not None else 0
 
                     # Drain per-chunk backend metrics into aggregator
                     aggregator.record_dict(trainer_state.metrics)
@@ -738,29 +808,42 @@ class UnifiedTrainer:
                 logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: incomplete batch ({groups_consumed}/{mini_batch_size}), stopping")
                 break
 
-            # 2. Optimizer step
-            logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: optimizer step")
-            await self.backend.update_policy(trainer_state)
+            # 2. Optimizer step — only when the batch produced trainable sequences. If every
+            #    trajectory was dropped (e.g. an inference-overload spike -> empty logprobs),
+            #    no gradient was accumulated, so stepping the optimizer would apply an
+            #    undefined/zero-gradient update (and bump the LR schedule + trigger a weight
+            #    sync) for nothing. Skip optim + sync and ride out the bad batch.
+            trained_this_step = sequences_this_step > 0
+            if trained_this_step:
+                logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: optimizer step")
+                await self.backend.update_policy(trainer_state)
+            else:
+                logger.warning(f"[TrainingLoop] Step {trainer_state.global_step}: all {groups_consumed} groups dropped (no trainable sequences); skipping optimizer step + weight sync.")
+            aggregator.record("async/trained_this_step", float(trained_this_step))
 
-            # 3. Capture pre-sync metrics (before weight sync resets coordinator state)
-            staleness_values = [coordinator.weight_version - v for v in weight_versions]
-            aggregator.record("async/staleness_mean", float(np.mean(staleness_values)))
-            aggregator.record("async/staleness_min", float(np.min(staleness_values)))
-            aggregator.record("async/staleness_max", float(np.max(staleness_values)))
+            # 3. Capture pre-sync metrics (before weight sync resets coordinator state).
+            #    weight_versions is empty if the whole step was uniform-group placeholders -- np.min([]) raises.
+            if weight_versions:
+                staleness_values = [coordinator.weight_version - v for v in weight_versions]
+                aggregator.record("async/staleness_mean", float(np.mean(staleness_values)))
+                aggregator.record("async/staleness_min", float(np.min(staleness_values)))
+                aggregator.record("async/staleness_max", float(np.max(staleness_values)))
             aggregator.record("async/groups_consumed", groups_consumed)
             aggregator.record("time/buffer_wait", buffer_wait_time)
             pre_sync_coordinator_stats = coordinator.stats()
             pre_sync_buffer_stats = buffer.stats()
 
-            # 4. Weight sync
-            coordinator.on_training_step_complete()
+            # 4. Weight sync — only counts as a training step (toward the sync trigger) when we
+            #    actually stepped; a skipped batch changed no weights, so nothing to sync.
             sync_time = 0.0
-            if coordinator.should_sync():
-                logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: triggering weight sync")
-                t0 = time.perf_counter()
-                await self._perform_weight_sync(trainer_state, coordinator, rollout_engine)
-                sync_time = time.perf_counter() - t0
-                logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: weight sync complete ({sync_time:.2f}s)")
+            if trained_this_step:
+                coordinator.on_training_step_complete()
+                if coordinator.should_sync():
+                    logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: triggering weight sync")
+                    t0 = time.perf_counter()
+                    await self._perform_weight_sync(trainer_state, coordinator, rollout_engine)
+                    sync_time = time.perf_counter() - t0
+                    logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: weight sync complete ({sync_time:.2f}s)")
             if sync_time > 0:
                 aggregator.record("time/weight_sync", sync_time)
             step_time = time.perf_counter() - step_start
@@ -800,9 +883,13 @@ class UnifiedTrainer:
                 trajectory_groups=trainer_state.trajectory_groups,
             )
 
-            # Periodic validation
+            # Periodic validation. Eval rollouts run on the shared rollout pool
+            # and preempt training rollouts for slots (PrioritySemaphore), so no
+            # dispatch pause / drain barrier is needed -- eval saturates the pool
+            # and training fills the leftover. Weights stay frozen for the duration
+            # because this await blocks the training loop, so no weight sync runs.
             if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
-                await self._validate_async_with_pause(trainer_state, coordinator)
+                await self._validate_async(trainer_state)
 
             trainer_state.global_step += 1
 
@@ -824,15 +911,6 @@ class UnifiedTrainer:
         coordinator.on_sync_complete()
 
         if not self.async_config.partial_rollout:
-            coordinator.resume_generation()
-
-    async def _validate_async_with_pause(self, trainer_state: TrainerState, coordinator: SyncCoordinator) -> dict:
-        """Validation with dispatch-level pause. Waits for workflows to drain, then runs validation."""
-        coordinator.pause_generation()
-        await coordinator.wait_for_drain()
-        try:
-            return await self._validate_async(trainer_state)
-        finally:
             coordinator.resume_generation()
 
     async def _validate_async(self, trainer_state: TrainerState) -> dict:

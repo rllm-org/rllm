@@ -58,7 +58,25 @@ if ! command -v mini-swe-agent >/dev/null 2>&1; then
         fi
     fi
     if ! command -v uv >/dev/null 2>&1; then
-        curl -LsSf https://astral.sh/uv/install.sh | sh
+        # Sandbox->GitHub egress (astral.sh redirects to
+        # release-assets.githubusercontent.com) intermittently resets the
+        # connection on cloud backends (Modal/Daytona). Without a retry a
+        # single ``curl: (35/56) Connection reset by peer`` aborts the whole
+        # install under ``set -e`` and the rollout scores 0. Retry a few times
+        # with backoff before giving up.
+        uv_installed=0
+        for attempt in 1 2 3 4 5; do
+            if curl -LsSf https://astral.sh/uv/install.sh | sh; then
+                uv_installed=1
+                break
+            fi
+            echo "uv install attempt ${attempt} failed; retrying in $((attempt * 3))s" >&2
+            sleep $((attempt * 3))
+        done
+        if [ "$uv_installed" -ne 1 ]; then
+            echo "uv install failed after 5 attempts" >&2
+            exit 1
+        fi
     fi
     export PATH="$HOME/.local/bin:$PATH"
     # Pin a modern interpreter for the tool's ISOLATED venv. mini-swe-agent

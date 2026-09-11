@@ -147,14 +147,21 @@ def _flags(temperature: float | None, top_p: float | None, max_tokens: int | Non
     return SamplingConfig.from_obj(d)
 
 
+# Default sampling params applied to every ``rllm eval`` run unless the user
+# overrides them — surfaced in the eval header's Sampling row and
+# gateway-enforced. Mirrors the cookbook training rollout so eval samples the
+# model the same way it was trained.
+_EVAL_DEFAULT_SAMPLING = SamplingConfig(temperature=1.0, top_p=1.0)
+
+
 def resolve_eval_sampling(
     sampling_params: str | None,
     temperature: float | None = None,
     top_p: float | None = None,
     max_tokens: int | None = None,
 ) -> SamplingConfig:
-    """Resolve the SamplingConfig for ``rllm eval`` (string/@file, overridden by flags)."""
-    return _parse(sampling_params).merged(_flags(temperature, top_p, max_tokens))
+    """Resolve the SamplingConfig for ``rllm eval``: defaults < string/@file < flags."""
+    return _EVAL_DEFAULT_SAMPLING.merged(_parse(sampling_params)).merged(_flags(temperature, top_p, max_tokens))
 
 
 def resolve_train_sampling(

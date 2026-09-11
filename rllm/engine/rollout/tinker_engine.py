@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Any, cast
 
 import tinker
@@ -7,11 +8,16 @@ from tinker_cookbook import model_info, renderers
 from tinker_cookbook.renderers import Message
 from typing_extensions import override  # need to use typing_extensions for python < 3.12
 
+from rllm.engine.rollout.httpx_utils import install_httpx_response_cycle_patch
 from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.engine.rollout.types import ImageProcessor, Processor, TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput
 from rllm.parser import ChatTemplateParser
 from rllm.tools.tool_base import ToolCall
-from rllm.workflows import TerminationEvent, TerminationReason
+from rllm.types import TerminationEvent, TerminationReason
+
+logger = logging.getLogger(__name__)
+
+install_httpx_response_cycle_patch()
 
 """
 Utility functions for Tinker engine. Partly borrowed from
@@ -125,21 +131,40 @@ def _parse_tinker_message(message: Message) -> tuple[str, str, list[Any]]:
     else:  # no reasoning parsed
         content = tinker_content
         reasoning = ""
-    # Convert tinker-cookbook ToolCall (function.name/function.arguments) to rllm ToolCall (name/arguments)
-    raw_tool_calls = message.get("tool_calls", [])
-    tool_calls = []
-    for tc in raw_tool_calls:
-        if hasattr(tc, "function"):
-            # tinker-cookbook ToolCall: ToolCall(function=FunctionBody(name, arguments), id)
-            args = tc.function.arguments
-            tool_calls.append(ToolCall(name=tc.function.name, arguments=json.loads(args) if isinstance(args, str) else args))
-        elif isinstance(tc, ToolCall):
-            tool_calls.append(tc)
-        elif isinstance(tc, dict):
-            tool_calls.append(ToolCall(name=tc.get("name", ""), arguments=tc.get("arguments", {})))
+    return content, reasoning, _to_rllm_tool_calls(message.get("tool_calls", []))
+
+
+def _to_rllm_tool_calls(raw_tool_calls: list[Any] | None) -> list[ToolCall]:
+    """Normalize parser-owned tool calls before they enter ``ModelOutput``."""
+    normalized: list[ToolCall] = []
+    for index, tool_call in enumerate(raw_tool_calls or []):
+        status = tool_call.get("status") if isinstance(tool_call, dict) else getattr(tool_call, "status", None)
+        if status is not None and getattr(status, "value", status) != "ok":
+            continue
+        if isinstance(tool_call, ToolCall):
+            normalized.append(tool_call)
+            continue
+
+        if isinstance(tool_call, dict):
+            function = tool_call.get("function")
+            source = function if isinstance(function, dict) else tool_call
+            name = source.get("name", "")
+            arguments = source.get("arguments", {})
         else:
-            raise TypeError(f"Unrecognized tool_call type: {type(tc)}")
-    return content, reasoning, tool_calls
+            function = getattr(tool_call, "function", None)
+            source = function if function is not None else tool_call
+            name = getattr(source, "name", "")
+            arguments = getattr(source, "arguments", {})
+
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"tool call {index} has invalid JSON arguments") from error
+        if not isinstance(arguments, dict):
+            raise ValueError(f"tool call {index} arguments must decode to an object")
+        normalized.append(ToolCall(name=name, arguments=arguments))
+    return normalized
 
 
 class TinkerEngine(RolloutEngine):
@@ -157,13 +182,14 @@ class TinkerEngine(RolloutEngine):
         max_response_length: int = 4096,
         max_model_length: int = 32768,
         sampling_params: dict | None = None,
-        bypass_render_with_parser: bool = True,  # default to True now
+        bypass_render_with_parser: bool = False,
         processor: Processor | None = None,
         image_processor: ImageProcessor | None = None,
         disable_thinking: bool = False,
         accumulate_reasoning: bool = False,
         reasoning_effort: str = "medium",
         renderer_name: str | None = None,
+        renderer_family: str = "auto",
         **kwargs,
     ):
         """
@@ -178,13 +204,24 @@ class TinkerEngine(RolloutEngine):
             max_response_length: Maximum response length in tokens
             max_model_length: Maximum total length (prompt + response) in tokens
             sampling_params: Default sampling parameters (temperature, top_p, etc.)
-            bypass_render_with_parser: If True, use ChatTemplateParser instead of Tinker's renderer
-            processor: Optional processor for multimodal models (used when bypass_render_with_parser=True)
-            image_processor: Optional image processor for vision-language models (used with renderer)
-            disable_thinking: Whether to disable thinking in generation prompt (used when bypass_render_with_parser=True)
-            accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
-            reasoning_effort: The effort level for reasoning (used when bypass_render_with_parser=True)
-            renderer_name: The name of the renderer to use (used when bypass_render_with_parser=True)
+            bypass_render_with_parser: Escape hatch. If True, force the legacy
+                ChatTemplateParser for rendering+parsing and skip the unified
+                renderer entirely. Default False: resolve the rllm.renderers
+                unified renderer (the same one the gateway uses for the
+                cumulative-token bridge), which owns rendering AND completion
+                parsing — including tool_calls. The tinker_cookbook renderer is
+                used only for VLM (image chunking); ChatTemplateParser is the
+                extreme fallback (no unified renderer resolves for the model).
+            processor: Optional processor for multimodal models (ChatTemplateParser path)
+            image_processor: Optional image processor for vision-language models
+                (VLM keeps the tinker_cookbook renderer, which owns image chunking)
+            disable_thinking: Whether to disable thinking in generation prompt (ChatTemplateParser path)
+            accumulate_reasoning: Whether to accumulate reasoning (ChatTemplateParser path)
+            reasoning_effort: The effort level for reasoning (ChatTemplateParser path)
+            renderer_name: Pin a specific renderer (tinker-style name, e.g. "qwen3_5").
+            renderer_family: Pin a prime-rl renderer family (e.g. "qwen3.6"); "auto"
+                infers from the model id. Should match rllm.gateway.renderer_family
+                so the engine renders turn 0 like the gateway bridges turns 1+.
         """
         super().__init__()
         self.base_url = base_url
@@ -193,29 +230,79 @@ class TinkerEngine(RolloutEngine):
         self.max_response_length = max_response_length
         self.max_model_length = max_model_length - 1
         self.tokenizer = tokenizer
-        self.bypass_render_with_parser = bypass_render_with_parser
         self.accumulate_reasoning = accumulate_reasoning
         self.reasoning_effort = reasoning_effort
+        # Retained so a separate-process gateway can rebuild an equivalent engine.
+        self.renderer_family = renderer_family
 
         self.train_sampling_params = dict(sampling_params.get("train", {})) if sampling_params else {}
         self.val_sampling_params = dict(sampling_params.get("val", {})) if sampling_params else {}
         # Initialize Tinker service client
         self.service_client = service_client
 
-        # Initialize the renderer
-        if renderer_name is None:
-            try:
-                renderer_name = model_info.get_recommended_renderer_name(self.model_name)
-            except KeyError as e:
-                raise ValueError(
-                    f"tinker_cookbook's model_info does not know '{self.model_name}' (the cookbook release can lag "
-                    f"models the Tinker service already supports). Set rollout_engine.renderer_name explicitly to a "
-                    f"renderer matching the model's chat template (e.g. 'qwen3_5' for Qwen3.6 models)."
-                ) from e
-        # Pass image_processor for VLM support with Tinker renderer
-        self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
+        # --- Renderer / parser resolution --------------------------------------
+        # Mirror FireworksEngine so the engine renders turn 0 with the SAME renderer
+        # the gateway uses for the turn-1+ cumulative bridge (rllm.renderers, resolved
+        # from the model id + renderer_family/renderer_name). Priority:
+        #   1. rllm.renderers unified renderer (prime-rl / tinker-cookbook adapter):
+        #      owns rendering AND completion parsing, incl. <tool_call> -> tool_calls.
+        #      This is the default — Tinker's OpenAI endpoint and ChatTemplateParser do
+        #      NOT surface structured tool_calls, so function-calling harnesses
+        #      (opencode) get an empty tool call and take no action without a real
+        #      renderer. (assemble_model_output / _render_prompt_token_input prefer it.)
+        #   2. tinker_cookbook renderer: VLM only (owns image-chunk rendering).
+        #   3. ChatTemplateParser: extreme fallback — explicit bypass_render_with_parser,
+        #      or no unified renderer resolves for a text model.
+        self.unified_renderer = None
+        self.renderer = None
+        self.chat_parser = None
 
-        if bypass_render_with_parser:
+        if not bypass_render_with_parser and image_processor is None:
+            from rllm.renderers import resolve as _resolve_unified
+
+            res = _resolve_unified(
+                self.model_name,
+                self.tokenizer,
+                backend="tinker",
+                family=renderer_family,
+                renderer_name=renderer_name,
+            )
+            if res.source != "chat_template":
+                self.unified_renderer = res.renderer
+                logger.info("TinkerEngine rendering via %s renderer (source=%s)", res.name, res.source)
+            else:
+                logger.warning(
+                    "No prime-rl/tinker renderer resolved for model=%r (renderer_family=%r, renderer_name=%r); "
+                    "falling back to ChatTemplateParser. Tool-call parsing then depends on the served model "
+                    "matching the hand-rolled template — pin rollout_engine.renderer_name or "
+                    "rllm.gateway.renderer_family to a renderer matching the served model.",
+                    self.model_name,
+                    renderer_family,
+                    renderer_name,
+                )
+
+        if self.unified_renderer is not None:
+            # Unified renderer owns render+parse. bypass stays False so
+            # assemble_model_output/_render_prompt_token_input take the unified branch.
+            self.bypass_render_with_parser = False
+            self.stop_sequences = self.unified_renderer.get_stop_token_ids()
+        elif not bypass_render_with_parser and image_processor is not None:
+            # VLM: the tinker_cookbook renderer owns multimodal (image chunk) rendering.
+            self.bypass_render_with_parser = False
+            if renderer_name is None:
+                try:
+                    renderer_name = model_info.get_recommended_renderer_name(self.model_name)
+                except KeyError as e:
+                    raise ValueError(
+                        f"tinker_cookbook's model_info does not know '{self.model_name}' (the cookbook release can lag "
+                        f"models the Tinker service already supports). Set rollout_engine.renderer_name explicitly to a "
+                        f"renderer matching the model's chat template (e.g. 'qwen3_5' for Qwen3.6 models)."
+                    ) from e
+            self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
+            self.stop_sequences = self.renderer.get_stop_sequences()
+        else:
+            # Extreme fallback / explicit escape hatch: ChatTemplateParser owns render+parse.
+            self.bypass_render_with_parser = True
             self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
             if hasattr(self.chat_parser, "stop_sequences") and self.chat_parser.stop_sequences:
                 self.stop_sequences = self.chat_parser.stop_sequences
@@ -223,9 +310,6 @@ class TinkerEngine(RolloutEngine):
                 self.stop_sequences = [tokenizer.eos_token_id]
             else:
                 raise ValueError("No stop sequences found for tokenizer or chat parser")
-        else:
-            self.chat_parser = None
-            self.stop_sequences = self.renderer.get_stop_sequences()
 
         # Sampling client will be set via set_sampling_client()
         self.sampling_client = None
@@ -339,12 +423,19 @@ class TinkerEngine(RolloutEngine):
         sampled_sequence = cast(TinkerTokenOutput, token_output)
         response_tokens, logprobs = sampled_sequence.tokens, sampled_sequence.logprobs
 
-        if self.bypass_render_with_parser:
+        if self.unified_renderer is not None:
+            # Unified rllm.renderers layer (prime-rl / Fireworks-cookbook): parse
+            # the completion into a ParsedResponse. Shared by both backends.
+            parsed = self.unified_renderer.parse_response(response_tokens)
+            content = parsed.content or ""
+            reasoning = parsed.reasoning_content or ""
+            tool_calls = _to_rllm_tool_calls(parsed.tool_calls)
+        elif self.bypass_render_with_parser:
             assert self.chat_parser is not None, "chat_parser must be set when bypass_render_with_parser=True"
             parsed_output = self.chat_parser.parse_completion(response_tokens)
             content = parsed_output.get("content", "")
             reasoning = parsed_output.get("reasoning", "")
-            tool_calls = parsed_output.get("tool_calls", [])
+            tool_calls = _to_rllm_tool_calls(parsed_output.get("tool_calls", []))
         else:
             assert isinstance(self.renderer, renderers.Renderer), "self.renderer must be a valid Tinker Renderer"
             response_message, _ = self.renderer.parse_response(response_tokens)
@@ -374,6 +465,32 @@ class TinkerEngine(RolloutEngine):
             finish_reason=finish_reason,
         )
 
+    def _render_prompt_token_input(self, messages: list[dict], *, tools=None, reasoning_effort=None, accumulate_reasoning=None):
+        """Render messages to this engine's token input. Shared by both backends.
+
+        Order mirrors ``assemble_model_output``'s parse branches: unified
+        rllm.renderers renderer (``render_ids``) -> ChatTemplateParser
+        (text -> encode) -> tinker_cookbook renderer (``build_generation_prompt``
+        chunks, incl. VLM image chunks).
+        """
+        if self.unified_renderer is not None:
+            return self.unified_renderer.render_ids(messages, tools=tools or None, add_generation_prompt=True)
+        if self.bypass_render_with_parser:
+            prompt = self.chat_parser.parse(  # type: ignore
+                messages,
+                add_generation_prompt=True,
+                is_first_msg=True,
+                tools=tools,
+                reasoning_effort=reasoning_effort,
+                accumulate_reasoning=accumulate_reasoning,
+            )
+            return self.tokenizer.encode(prompt, add_special_tokens=False)  # type: ignore
+        converted_messages = self._convert_images_to_content_list(messages)
+        tinker_messages = _convert_openai_messages(converted_messages)
+        if tools:
+            tinker_messages = _prepare_messages_with_tools(self.renderer, tinker_messages, tools)
+        return self.renderer.build_generation_prompt(tinker_messages).chunks  # type: ignore
+
     @override
     async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         """
@@ -398,27 +515,12 @@ class TinkerEngine(RolloutEngine):
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
         reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
 
-        if self.bypass_render_with_parser:
-            # Use ChatTemplateParser
-            prompt = self.chat_parser.parse(  # type: ignore
-                messages,
-                add_generation_prompt=True,
-                is_first_msg=True,
-                tools=tools,
-                reasoning_effort=reasoning_effort,
-                accumulate_reasoning=accumulate_reasoning,
-            )
-            token_input = self.tokenizer.encode(prompt, add_special_tokens=False)  # type: ignore
-        else:
-            # Use Tinker renderer
-            # Convert images, then convert OpenAI messages to renderer format
-            converted_messages = self._convert_images_to_content_list(messages)
-            tinker_messages = _convert_openai_messages(converted_messages)
-            # Inject tool definitions via renderer if tools are provided
-            if tools:
-                tinker_messages = _prepare_messages_with_tools(self.renderer, tinker_messages, tools)
-            # Build prompt using renderer
-            token_input: TinkerTokenInput = self.renderer.build_generation_prompt(tinker_messages).chunks  # type: ignore
+        token_input = self._render_prompt_token_input(
+            messages,
+            tools=tools,
+            reasoning_effort=reasoning_effort,
+            accumulate_reasoning=accumulate_reasoning,
+        )
 
         sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs)
         return self.assemble_model_output(token_input=token_input, token_output=sampled_sequence)

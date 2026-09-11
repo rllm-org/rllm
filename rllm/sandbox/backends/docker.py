@@ -87,6 +87,21 @@ class DockerSandbox:
         tar_stream.seek(0)
         self._container.put_archive(remote_dir, tar_stream)
 
+    def download_file(self, remote_path: str) -> bytes:
+        """Read a file out of the container via tar archive (``docker cp``)."""
+        try:
+            stream, _ = self._container.get_archive(remote_path)
+        except Exception as e:
+            raise FileNotFoundError(f"download_file: {remote_path} not readable in container {self.name}: {e}") from e
+        buf = io.BytesIO(b"".join(stream))
+        buf.seek(0)
+        with tarfile.open(fileobj=buf, mode="r") as tar:
+            member = next((m for m in tar.getmembers() if m.isfile()), None)
+            if member is None:
+                raise FileNotFoundError(f"download_file: {remote_path} is not a regular file")
+            extracted = tar.extractfile(member)
+            return extracted.read() if extracted else b""
+
     def upload_dir(self, local_path: str, remote_path: str) -> None:
         """Upload a directory tree into the container via tar archive."""
         remote_parent = os.path.dirname(remote_path.rstrip("/"))

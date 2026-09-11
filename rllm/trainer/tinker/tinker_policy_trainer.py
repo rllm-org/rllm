@@ -34,12 +34,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Mapping from rLLMAdvantageEstimator to their default Tinker loss function (overriding is allowed through config)
+# Mapping from rLLMAdvantageEstimator to their default Tinker loss function (overriding is allowed through config).
+# ECHO selects the `echo` rLLM loss (set in AlgorithmConfig.__post_init__), which
+# runs on the forward_backward_custom path and folds the env-prediction term into one pass.
 ADV_TO_LOSS_FN_AUTO_MAP = {
     rLLMAdvantageEstimator.REINFORCE: "importance_sampling",
     rLLMAdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE: "importance_sampling",
     rLLMAdvantageEstimator.GRPO: "ppo",
     rLLMAdvantageEstimator.RLOO: "importance_sampling",
+    rLLMAdvantageEstimator.ECHO: "ppo",
     rLLMAdvantageEstimator.OTHER: "importance_sampling",
 }
 
@@ -172,6 +175,24 @@ class TinkerPolicyTrainer:
         estimator_map: dict[str, rLLMAdvantageEstimator | str],
         algorithm_config: AlgorithmConfig,
     ) -> list[tinker.APIFuture]:
+        """Submit the policy-gradient forward/backward pass(es); returns their futures."""
+        # Custom-loss path: a single forward_backward_custom pass runs the rLLM loss
+        # (e.g. dppo_tv, or echo which folds in ECHO) over per-datum log-probs.
+        # Engaged when algorithm.loss_fn names an rLLM loss; else the native string path runs.
+        from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
+
+        # native-first: a loss Tinker has a server-side kernel for (importance_sampling/ppo/
+        # cispo/dro/cross_entropy) runs there; only non-native rLLM losses take the custom path.
+        resolved = resolve_loss(algorithm_config, native_losses=native_loss_names("tinker"))
+        if resolved is not None:
+            from rllm.trainer.tinker.custom_loss import build_custom_loss
+
+            flat = [d for datums in training_datums.values() for d in datums] if isinstance(training_datums, dict) else list(training_datums)
+            stripped, loss_fn = build_custom_loss(resolved, flat)
+            fwd_bwd_future = await self.training_client.forward_backward_custom_async(stripped, loss_fn)  # type: ignore[attr-defined]
+            logger.info("Tinker custom-loss pass: loss_fn=%s params=%s", resolved.name, resolved.params)
+            return [fwd_bwd_future]
+
         fwd_bwd_futures = []
         if isinstance(training_datums, dict):
             for group_role, datums in training_datums.items():
@@ -224,7 +245,22 @@ class TinkerPolicyTrainer:
         training_datums, adv_metrics = transform_trajectory_groups_to_datums(
             trajectory_groups,
             algorithm_config=algorithm_config,
+            vocab_size=self._get_vocab_size(),
         )
+
+        # Every trajectory dropped as malformed (e.g. empty logprobs from failed/overloaded
+        # generations) -> nothing to train on, and forward_backward([]) would raise "No data
+        # provided". Skip the pass; the training loop skips the optimizer step + weight sync
+        # when no sequences are produced. (training_datums is a list, or a dict keyed by role.)
+        is_empty = (not training_datums) if isinstance(training_datums, list) else (not any(training_datums.values()))
+        if is_empty:
+            logger.warning(
+                "All %d trajectory group(s) dropped (no trainable sequences); skipping forward-backward for this batch.",
+                len(trajectory_groups),
+            )
+            adv_metrics["train/num_sequences"] = 0
+            adv_metrics["train/dropped_all_sequences"] = 1.0
+            return training_datums, [], adv_metrics
 
         # Forward-backward pass
         fwd_bwd_futures = await self._get_forward_backward_futures(
@@ -240,6 +276,11 @@ class TinkerPolicyTrainer:
         training_logprobs = []
         for fwd_bwd_result in fwd_bwd_results:
             for output in fwd_bwd_result.loss_fn_outputs:
+                # The custom-loss path (forward_backward_custom) reproduces gradients via a
+                # weighted-CE pass whose outputs need not expose per-token logprobs; skip
+                # gracefully (downstream tolerates empty logprobs, as the Fireworks path does).
+                if "logprobs" not in output:
+                    continue
                 logprobs = output["logprobs"].to_torch()
                 training_logprobs.append(logprobs)
             # Capture server-side metrics (e.g. loss) under train/ prefix
@@ -297,9 +338,10 @@ class TinkerPolicyTrainer:
         training_datums, adv_metrics = transform_trajectory_groups_to_datums(
             trajectory_groups,
             algorithm_config=self.algorithm_config,
+            vocab_size=self._get_vocab_size(),
         )
 
-        # Forward-backward and optimizer future together
+        # Forward-backward and optimizer future together.
         fwd_bwd_futures = await self._get_forward_backward_futures(
             training_datums=training_datums,
             estimator_map=self.algorithm_config.estimator_map,
@@ -316,11 +358,16 @@ class TinkerPolicyTrainer:
         )
         # Retrieve the results together
         fwd_bwd_results = await asyncio.gather(*fwd_bwd_futures)
-        await optim_step_future.result_async()
+        optim_result = await optim_step_future.result_async()
 
         training_logprobs = []
         for fwd_bwd_result in fwd_bwd_results:
             for output in fwd_bwd_result.loss_fn_outputs:
+                # The custom-loss path (forward_backward_custom) reproduces gradients via a
+                # weighted-CE pass whose outputs need not expose per-token logprobs; skip
+                # gracefully (downstream tolerates empty logprobs, as the Fireworks path does).
+                if "logprobs" not in output:
+                    continue
                 logprobs = output["logprobs"].to_torch()
                 training_logprobs.append(logprobs)
             if fwd_bwd_result.metrics:
@@ -328,6 +375,13 @@ class TinkerPolicyTrainer:
                     if k.startswith("clock_cycle"):
                         continue
                     adv_metrics[f"train/{k.replace(':', '/')}"] = v
+
+        # Surface optimizer-step metrics (e.g. grad norm) emitted by the Tinker server.
+        if optim_result.metrics:
+            for k, v in optim_result.metrics.items():
+                if k.startswith("clock_cycle"):
+                    continue
+                adv_metrics[f"train/{k.replace(':', '/')}"] = v
 
         return training_datums, training_logprobs, adv_metrics, scheduled_learning_rate
 
@@ -403,6 +457,21 @@ class TinkerPolicyTrainer:
     def get_tokenizer(self) -> Tokenizer:
         """Get tokenizer from training client."""
         return self.training_client.get_tokenizer()  # type: ignore[attr-defined]
+
+    def _get_vocab_size(self) -> int | None:
+        """Tokenizer vocab bound for the out-of-vocab trajectory filter (None = disabled).
+
+        A rare corrupt sampled id past the trainer's vocab fails the whole
+        forward_backward with "Invalid token id"; the transform drops those
+        trajectories up front (metric: ``batch/oov_drop_rate``).
+        """
+        if not hasattr(self, "_vocab_size_cache"):
+            try:
+                self._vocab_size_cache = len(self.get_tokenizer())
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Out-of-vocab trajectory filter disabled (could not resolve tokenizer vocab size): %s", e)
+                self._vocab_size_cache = None
+        return self._vocab_size_cache
 
 
 """

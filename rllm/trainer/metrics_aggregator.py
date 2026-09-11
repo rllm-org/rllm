@@ -37,7 +37,8 @@ def _infer_rule(key: str) -> str:
     Resolution order:
     1. Explicit sum keys
     2. Prefix-based rules (last or mean)
-    3. Keyword-based rules (/max, /min, /mean, /avg, /std, /fraction)
+    3. Keyword-based rules in the final metric component
+       (max, min, mean, avg, std, fraction)
     4. Default: mean
     """
     if key in _SUM_KEYS:
@@ -51,14 +52,17 @@ def _infer_rule(key: str) -> str:
         if key.startswith(prefix):
             return "mean"
 
-    # Keyword inference from the key name
-    if "/max" in key:
+    # Infer from the metric name, not arbitrary path components. A role such as
+    # ``mini-swe-agent`` must not make every reward metric use the ``min``
+    # reducer. Splitting on ``_`` preserves names such as ``max_group_size``.
+    metric_tokens = set(key.rsplit("/", 1)[-1].replace(":", "_").split("_"))
+    if "max" in metric_tokens:
         return "max"
-    if "/min" in key:
+    if "min" in metric_tokens:
         return "min"
-    if "/mean" in key or "/avg" in key:
+    if "mean" in metric_tokens or "avg" in metric_tokens:
         return "mean"
-    if "/std" in key or "/fraction" in key:
+    if "std" in metric_tokens or "fraction" in metric_tokens:
         return "mean"
 
     return "mean"

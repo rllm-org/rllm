@@ -1,18 +1,82 @@
-"""Tests for tinker_engine OpenAI-to-renderer conversion helpers."""
+"""Tests for Tinker rollout conversion helpers and shared HTTP lifecycle."""
 
+import asyncio
+import gc
 import json
+import weakref
+from types import SimpleNamespace
 
+import httpx
 import pytest
+import tinker
+from tinker._client import AsyncTinker
 from tinker_cookbook.renderers import get_renderer
 from tinker_cookbook.renderers.base import ToolCall as TinkerToolCall
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
+from rllm.engine.rollout.rollout_engine import ModelOutput
 from rllm.engine.rollout.tinker_engine import (
+    TinkerEngine,
     _convert_openai_messages,
     _parse_tinker_message,
     _prepare_messages_with_tools,
+    _to_rllm_tool_calls,
 )
+from rllm.renderers.types import ParsedResponse
 from rllm.tools.tool_base import ToolCall as RllmToolCall
+
+
+def test_tinker_sampling_response_does_not_wait_for_cyclic_gc():
+    """Exercise Tinker's real async sampling resource with cyclic GC disabled."""
+
+    class PayloadStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"request_id":"request-1"}'
+
+        async def aclose(self) -> None:
+            pass
+
+    response_refs: list[weakref.ReferenceType[httpx.Response]] = []
+
+    async def respond(_request: httpx.Request) -> httpx.Response:
+        response = httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=PayloadStream(),
+            request=_request,
+        )
+        response_refs.append(weakref.ref(response))
+        return response
+
+    async def exercise() -> None:
+        gc.collect()
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            http_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+            client = AsyncTinker(
+                api_key="tml-test",
+                base_url="https://example.test",
+                max_retries=0,
+                http_client=http_client,
+            )
+            try:
+                future = await client.sampling.asample(
+                    request=tinker.SampleRequest(
+                        prompt=tinker.ModelInput.from_ints([1]),
+                        sampling_params=tinker.SamplingParams(max_tokens=1),
+                    )
+                )
+                assert future.request_id == "request-1"
+                assert response_refs[0]() is None
+            finally:
+                await client.close()
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+
+    asyncio.run(exercise())
+
 
 # ------------------------------------------------------------------
 # Fixtures
@@ -158,6 +222,62 @@ class TestPrepareMessagesWithTools:
 
 
 class TestParseTinkerMessage:
+    @pytest.mark.parametrize(
+        "tool_call",
+        [
+            pytest.param(_make_tinker_tool_call(), id="cookbook-object"),
+            pytest.param(
+                {"id": "call_0", "type": "function", "function": {"name": "calculator", "arguments": '{"expression": "2+2"}'}},
+                id="nested-dict",
+            ),
+            pytest.param({"name": "calculator", "arguments": {"expression": "2+2"}}, id="flat-dict"),
+        ],
+    )
+    def test_tool_call_shapes_are_serializable_model_output(self, tool_call):
+        engine = object.__new__(TinkerEngine)
+        engine.unified_renderer = SimpleNamespace(
+            parse_response=lambda _tokens: ParsedResponse(
+                content="",
+                reasoning_content=None,
+                tool_calls=[tool_call],
+            )
+        )
+        engine.bypass_render_with_parser = False
+        engine.tokenizer = SimpleNamespace(decode=lambda *_args, **_kwargs: "")
+        sampled = SimpleNamespace(tokens=[7], logprobs=[0.0], stop_reason="stop")
+
+        output = engine.assemble_model_output([1], sampled)
+
+        assert output.to_dict()["tool_calls"] == [{"name": "calculator", "arguments": {"expression": "2+2"}}]
+
+    def test_invalid_json_arguments_fail_at_parser_boundary(self):
+        with pytest.raises(ValueError, match="invalid JSON arguments"):
+            _to_rllm_tool_calls([{"function": {"name": "calculator", "arguments": "{"}}])
+
+    def test_non_ok_parsed_tool_calls_are_not_executed(self):
+        renderers = pytest.importorskip("renderers")
+        parsed_tool_call_type = getattr(renderers, "ParsedToolCall", None)
+        status_type = getattr(renderers, "ToolCallParseStatus", None)
+        if parsed_tool_call_type is None or status_type is None:
+            pytest.skip("installed renderer API does not expose typed tool-call status")
+
+        valid = parsed_tool_call_type(
+            raw='<tool_call>{"name":"calculator","arguments":{"expression":"2+2"}}</tool_call>',
+            name="calculator",
+            arguments={"expression": "2+2"},
+            status=status_type.OK,
+        )
+        malformed = parsed_tool_call_type(
+            raw='<tool_call>{"name":"calculator","arguments":{</tool_call>',
+            name="calculator",
+            arguments="{",
+            status=status_type.INVALID_JSON,
+        )
+
+        normalized = _to_rllm_tool_calls([valid, malformed])
+
+        assert ModelOutput(tool_calls=normalized).to_dict()["tool_calls"] == [{"name": "calculator", "arguments": {"expression": "2+2"}}]
+
     def test_tinker_tool_calls_converted_to_rllm(self):
         """Tinker ToolCall(function=FunctionBody(...)) should become rllm ToolCall(name, arguments)."""
         tc = _make_tinker_tool_call()

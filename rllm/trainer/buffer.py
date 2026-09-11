@@ -28,8 +28,8 @@ from rllm.trainer.algorithms import (
 from rllm.trainer.algorithms.transform import transform_episodes_to_trajectory_groups
 from rllm.trainer.metrics_aggregator import MetricsAggregator
 from rllm.trainer.sync_coordinator import SyncCoordinator
-from rllm.types import Episode, TrajectoryGroup
-from rllm.workflows.workflow import TerminationReason
+from rllm.types import INFRA_ERROR_REASONS, Episode, StepDelta, TerminationReason, TrajectoryDelta, TrajectoryGroup, _index_step_deltas, _resolve_step_delta_prompt, _trajectory_prompt_lengths
+from rllm.utils.group_summary import format_group_finished
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +53,9 @@ class TrajectoryGroupBuffer:
     5. If rejection sampling enabled: drop groups with all-zero advantage
     6. Queue the task batch for training
 
-    Filtered groups are reported directly to the coordinator (which tracks
-    throttle slots and filter counts). Only non-empty task batches are queued.
-    All metrics flow through the shared MetricsAggregator.
+    A dropped group frees its slot for backfill. Exception: a uniform (zero-advantage)
+    group with refill_filtered_uniform_groups False is queued as an empty placeholder
+    that counts toward the step but trains nothing. Metrics flow through the aggregator.
 
     Optionally offloads pending episodes and/or queued task batches to
     disk to reduce memory pressure (disabled by default).
@@ -198,6 +198,14 @@ class TrajectoryGroupBuffer:
         )
         self._aggregator.record_dict(transform_metrics)
 
+        # reward/{role}/all: reward per role over EVERY trajectory that ran,
+        # before min-trajs / uniform-reward filtering -- and including
+        # compact-filtered trajectories (they still carry a real reward). The
+        # transform above imputed trajectory names, so traj.name is the resolved
+        # role. This is the pre-filter `all` half of the {all, effective} matrix;
+        # the `effective` half is recorded on the queued path below.
+        self._record_reward_by_role("all", [traj for ep in episodes for traj in ep.trajectories], with_difficulty=True)
+
         # 3. Drop groups with too few trajectories
         before_min_traj = len(traj_groups)
         traj_groups = [g for g in traj_groups if len(g.trajectories) >= self._rs_config.min_trajs_per_group]
@@ -219,6 +227,7 @@ class TrajectoryGroupBuffer:
                 groups_after_min_trajs=0,
                 groups_after_reward_filter=0,
             )
+            # Missing/broken data (min-trajs / compact-filtered / empty) always refills.
             self._coordinator.on_group_filtered()
             self._filtered_count += 1
             self._record_classified_prompt_group()
@@ -249,10 +258,25 @@ class TrajectoryGroupBuffer:
                 groups_after_min_trajs=before_adv,
                 groups_after_reward_filter=0,
             )
-            self._coordinator.on_group_filtered()
             self._filtered_count += 1
+            if self._rs_config.refill_filtered_uniform_groups:
+                self._coordinator.on_group_filtered()  # default: free slot, backfill a replacement
+            else:
+                # Count toward the step: queue an empty placeholder (one slot, trains nothing).
+                # Survivors renormalize over their own tokens; effective batch shrinks. `all`
+                # already counted these trajectories; `effective` excludes them.
+                self._queue.put_nowait(TaskBatch(groups=[], episodes=[]))
+                self._training_queue_size += 1
+                self._queue_update_event.set()
             self._record_classified_prompt_group()
             return True
+
+        # reward/{role}/effective: reward per role over only the trajectories
+        # that survived every filter (compact-filtering, min-trajs, uniform-
+        # reward) and will enter the loss. Pairs with reward/{role}/all (pre-
+        # filter): effective = "what we trained on", all = "what actually ran";
+        # their per-role gap is the filtered mass.
+        self._record_reward_by_role("effective", [traj for g in traj_groups for traj in g.trajectories])
 
         # 6. Set weight version and queue
         for g in traj_groups:
@@ -267,6 +291,13 @@ class TrajectoryGroupBuffer:
         self._queue_update_event.set()
         self._record_classified_prompt_group()
 
+        # Prefix-merge accounting: a task's steps collapse into training rows/datums
+        # under prefix-merge; surface the ratio per task (not just as a batch
+        # aggregate) on the group summary below. Reward distribution is shown there
+        # too, per trajectory name.
+        n_steps = sum(len(t.steps) for g in traj_groups for t in g.trajectories)
+        n_datums = sum(self._segment_count(t) for g in traj_groups for t in g.trajectories)
+
         self._log_prompt_group_finished(
             task_id=task_id,
             episodes=episodes,
@@ -275,6 +306,8 @@ class TrajectoryGroupBuffer:
             groups_after_transform=before_min_traj,
             groups_after_min_trajs=len(traj_groups) + filtered_zero_adv,
             groups_after_reward_filter=len(traj_groups),
+            n_steps=n_steps,
+            n_datums=n_datums,
         )
 
         return True
@@ -347,6 +380,9 @@ class TrajectoryGroupBuffer:
                     f"episode/termination_reason/{r.value}",
                     1.0 if reason == r else 0.0,
                 )
+            # Aggregate infra/grading-failure rate (sandbox/setup/verifier/grading),
+            # so it's trackable without summing the per-reason series by hand.
+            self._aggregator.record("episode/infra_error", 1.0 if reason in INFRA_ERROR_REASONS else 0.0)
             for k, v in ep.metrics.items():
                 try:
                     self._aggregator.record(f"episode/{k}", float(v))
@@ -355,12 +391,57 @@ class TrajectoryGroupBuffer:
 
             # Episode-level totals across all trajectories
             total_turns = sum(len(traj.steps) for traj in ep.trajectories)
-            total_prompt_tokens = sum(len(s.prompt_ids) for traj in ep.trajectories for s in traj.steps)
+            total_prompt_tokens = sum(length for traj in ep.trajectories for length in _trajectory_prompt_lengths(traj))
             total_response_tokens = sum(len(s.response_ids) for traj in ep.trajectories for s in traj.steps)
             self._aggregator.record("episode/num_turns", total_turns)
             self._aggregator.record("episode/prompt_tokens", total_prompt_tokens)
             self._aggregator.record("episode/response_tokens", total_response_tokens)
             self._aggregator.record("episode/correct", 1.0 if ep.is_correct else 0.0)
+
+    def _record_reward_by_role(self, subset: str, trajectories: list, *, with_difficulty: bool = False) -> None:
+        """Record reward/{role}/{subset}/{mean,std,max,min}, grouped by trajectory
+        role (``traj.name``) -- so multi-agent runs (e.g. solver/judge) report
+        each role separately, matching the existing reward/{role}/* convention.
+
+        ``subset`` is "all" (every trajectory that ran, pre-filter) or
+        "effective" (survived every filter, enters the loss). With
+        ``with_difficulty`` also record reward/{role}/solved_{none,all,some}:
+        the fraction of prompt groups (per role) that are all-failed / all-solved
+        / mixed -- the interpretable, filter-independent replacement for
+        advantage/*/fraction_zero (binary-reward oriented, cf. prime-rl's
+        solve_rates). Fully-errored episodes carry no trajectory (hence no role);
+        they are captured by episode/correct and episode/infra_error, not here."""
+        rewards_by_role: dict[str, list[float]] = {}
+        for traj in trajectories:
+            reward = traj.reward if traj.reward is not None else (traj.steps[-1].reward if traj.steps else None)
+            if reward is not None:
+                rewards_by_role.setdefault(traj.name, []).append(float(reward))
+        for role, rewards in rewards_by_role.items():
+            self._record_reward_stats(f"reward/{role}/{subset}", rewards)
+            if with_difficulty:
+                n = len(rewards)
+                n_solved = sum(1 for r in rewards if r > 0.0)
+                self._aggregator.record(f"reward/{role}/solved_none", 1.0 if n_solved == 0 else 0.0)
+                self._aggregator.record(f"reward/{role}/solved_all", 1.0 if n_solved == n else 0.0)
+                self._aggregator.record(f"reward/{role}/solved_some", 1.0 if 0 < n_solved < n else 0.0)
+
+    def _record_reward_stats(self, prefix: str, rewards: list[float]) -> None:
+        """Record mean/std/max/min of a reward distribution under ``prefix``.
+
+        No-op on an empty list (e.g. a fully-filtered task contributes no
+        effective rewards, so it drops out of reward/effective/* -- exactly the
+        asymmetry the {all, effective} split is meant to surface). The
+        aggregator reduces /mean and /std across tasks by mean and /max,/min by
+        max,min (see ``metrics_aggregator._infer_rule``)."""
+        if not rewards:
+            return
+        n = len(rewards)
+        mean = sum(rewards) / n
+        std = (sum((r - mean) ** 2 for r in rewards) / n) ** 0.5
+        self._aggregator.record(f"{prefix}/mean", mean)
+        self._aggregator.record(f"{prefix}/std", std)
+        self._aggregator.record(f"{prefix}/max", max(rewards))
+        self._aggregator.record(f"{prefix}/min", min(rewards))
 
     def _all_episodes_compact_filtered(self, episodes: list[Episode]) -> bool:
         return all(self._cf_config.should_mask(ep.termination_reason or TerminationReason.UNKNOWN) for ep in episodes)
@@ -368,6 +449,28 @@ class TrajectoryGroupBuffer:
     @staticmethod
     def _termination_value(reason: TerminationReason | str) -> str:
         return str(getattr(reason, "value", reason))
+
+    @staticmethod
+    def _segment_count(traj) -> int:
+        """Number of training rows/datums a trajectory becomes under prefix-merge.
+
+        Each step whose ``prompt_ids`` is NOT a byte-prefix-extension of the
+        running cumulative sequence starts a new row — mirroring the backend
+        transform's datum split. =1 for a healthy cumulative trajectory (all
+        turns merge into one row); >1 when the prefix chain breaks.
+        """
+        by_id = _index_step_deltas(traj.steps)[0] if isinstance(traj, TrajectoryDelta) else {}
+        full: list[int] | None = None
+        segments = 0
+        previous = None
+        for step in traj.steps:
+            direct = isinstance(step, StepDelta) and previous is not None and step.parent_step_id == previous.id
+            prompt = list(step.prompt_ids_suffix) if direct else (_resolve_step_delta_prompt(step, by_id) if isinstance(step, StepDelta) else list(step.prompt_ids))
+            if full is None or (not direct and prompt[: len(full)] != full):
+                segments += 1
+            full = [*(full or []), *prompt, *step.response_ids] if direct else [*prompt, *step.response_ids]
+            previous = step
+        return max(segments, 1)
 
     def _log_prompt_group_finished(
         self,
@@ -379,6 +482,8 @@ class TrajectoryGroupBuffer:
         groups_after_transform: int,
         groups_after_min_trajs: int,
         groups_after_reward_filter: int,
+        n_steps: int | None = None,
+        n_datums: int | None = None,
     ) -> None:
         termination_counts = Counter(self._termination_value(ep.termination_reason or TerminationReason.UNKNOWN) for ep in episodes)
         compact_masked = Counter(
@@ -409,6 +514,15 @@ class TrajectoryGroupBuffer:
             groups_after_min_trajs,
             groups_after_reward_filter,
         )
+
+        # Colorful per-group readout (the async training path's counterpart to the
+        # engine's execute_tasks summary). Carries the buffer verdict — queued vs.
+        # filtered:<reason> — that only this path knows. Best-effort: never let a
+        # formatting error interfere with buffering.
+        try:
+            print(format_group_finished(task_id, episodes, status=status, reason=reason, n_steps=n_steps, n_datums=n_datums), flush=True)
+        except Exception:
+            logger.debug("group summary formatting error", exc_info=True)
 
     @staticmethod
     def _min_weight_version(episodes: list[Episode]) -> int:

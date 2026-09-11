@@ -253,3 +253,37 @@ class TestDatasetLoadDataArrow:
         ds = Dataset.load_data(path)
         assert len(ds) == 1
         assert ds[0]["img"] == b"\x89PNG_data"
+
+
+class TestDatasetLoadDataParquet:
+    def test_nested_columns_are_python_lists(self, tmp_path):
+        """Direct SFT files must not leak pandas/NumPy container types."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        rows = [
+            {
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hi"},
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "parameters": {"type": "object"},
+                        },
+                    }
+                ],
+            }
+        ]
+        path = tmp_path / "nested.parquet"
+        pq.write_table(pa.Table.from_pylist(rows), path)
+
+        row = Dataset.load_data(str(path))[0]
+
+        assert isinstance(row["messages"], list)
+        assert isinstance(row["messages"][0], dict)
+        assert isinstance(row["tools"], list)
+        assert isinstance(row["tools"][0], dict)

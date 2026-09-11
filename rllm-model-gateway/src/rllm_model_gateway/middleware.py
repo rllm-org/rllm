@@ -13,6 +13,8 @@ from typing import Any
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from rllm_model_gateway import fastjson
+
 logger = logging.getLogger(__name__)
 
 # ``.+?`` (non-greedy) so multi-segment session IDs work — e.g.
@@ -92,15 +94,15 @@ class SessionRoutingMiddleware:
         raw = b"".join(body_parts)
         if raw:
             try:
-                payload = json.loads(raw)
+                payload = fastjson.loads(raw)
                 if isinstance(payload, dict):
                     # Record whether the client originally requested logprobs
                     # so the proxy can strip them from the response if not.
                     state = scope["state"]
                     state["originally_requested_logprobs"] = "logprobs" in payload and payload["logprobs"]
                     self._mutate(payload, session_id)
-                    raw = json.dumps(payload).encode("utf-8")
-            except (json.JSONDecodeError, UnicodeDecodeError):
+                    raw = fastjson.dumps(payload)
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
                 pass  # non-JSON body — forward as-is
 
         # Build a receive that replays the (possibly mutated) body once,

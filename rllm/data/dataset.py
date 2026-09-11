@@ -163,9 +163,12 @@ class Dataset:
 
             data = pd.read_csv(path).to_dict("records")
         elif file_ext == ".parquet":
-            import pandas as pd
+            import pyarrow.parquet as pq
 
-            data = pd.read_parquet(path).to_dict("records")
+            # pandas materializes nested list columns as ``numpy.ndarray``
+            # objects. Conversation and tool schemas require ordinary Python
+            # lists, and PyArrow preserves that shape directly.
+            data = pq.read_table(path).to_pylist()
         elif file_ext == ".arrow":
             data = DatasetRegistry._load_arrow_ipc(path)
         else:

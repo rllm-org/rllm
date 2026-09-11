@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tmax"
+version = "0.1.0"
+description = "Reproduce Ai2's Tmax terminal-agent RL recipe in rLLM: train Qwen3.5-9B on the tmax-15k corpus, eval on Terminal-Bench"
+requires-python = ">=3.10"
+dependencies = ["rllm"]
+
+[tool.setuptools]
+py-modules = ["prepare_data", "train"]

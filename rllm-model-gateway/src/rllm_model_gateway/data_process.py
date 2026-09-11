@@ -187,8 +187,19 @@ def build_trace_record(
     *,
     metadata: dict[str, Any] | None = None,
     weight_version: int | None = None,
+    lineage_id: str | None = None,
+    trace_id: str | None = None,
+    capture_raw: bool = False,
 ) -> TraceRecord:
-    """Assemble a ``TraceRecord`` from raw request/response dicts."""
+    """Assemble a ``TraceRecord`` from raw request/response dicts.
+
+    ``capture_raw`` retains the full ``raw_request``/``raw_response`` on the
+    record. Defaults to False: training reads only the token-id / logprob /
+    message fields (see ``rllm.engine.trace_converter``), and keeping the raw
+    dicts (a ≤120K-token prompt + its full response) balloons ``model_dump``
+    serialization on the gateway's event loop — the dominant per-request CPU
+    cost at high concurrency. Enable only for debugging.
+    """
     choices = response_body.get("choices") or []
     first_choice = choices[0] if choices else {}
 
@@ -199,13 +210,15 @@ def build_trace_record(
     if "completion_tokens" in usage:
         token_counts["completion"] = usage["completion_tokens"]
 
-    response_weight_version = extract_weight_version(response_body)
-    if response_weight_version is not None:
-        weight_version = response_weight_version
+    # Proxy's fanned-out version wins; the engine-stamped response value is only a fallback.
+    # (A multi-worker subprocess's rebuilt engine stamps a stale version that must not override it.)
+    if weight_version is None:
+        weight_version = extract_weight_version(response_body)
 
     return TraceRecord(
-        trace_id=str(uuid.uuid4()),
+        trace_id=trace_id or str(uuid.uuid4()),
         session_id=session_id,
+        lineage_id=lineage_id,
         model=request_body.get("model", response_body.get("model", "")),
         messages=request_body.get("messages", []),
         prompt_token_ids=extract_prompt_token_ids(response_body),
@@ -219,8 +232,8 @@ def build_trace_record(
         token_counts=token_counts,
         timestamp=time.time(),
         metadata=metadata or {},
-        raw_request=request_body,
-        raw_response=response_body,
+        raw_request=request_body if capture_raw else None,
+        raw_response=response_body if capture_raw else None,
     )
 
 
@@ -232,6 +245,9 @@ def build_trace_record_from_chunks(
     *,
     metadata: dict[str, Any] | None = None,
     weight_version: int | None = None,
+    lineage_id: str | None = None,
+    trace_id: str | None = None,
+    capture_raw: bool = False,
 ) -> TraceRecord:
     """Assemble a ``TraceRecord`` from accumulated streaming SSE chunks.
 
@@ -291,8 +307,9 @@ def build_trace_record_from_chunks(
         token_counts["completion"] = usage["completion_tokens"]
 
     return TraceRecord(
-        trace_id=str(uuid.uuid4()),
+        trace_id=trace_id or str(uuid.uuid4()),
         session_id=session_id,
+        lineage_id=lineage_id,
         model=model,
         messages=request_body.get("messages", []),
         prompt_token_ids=prompt_ids,
@@ -305,6 +322,6 @@ def build_trace_record_from_chunks(
         token_counts=token_counts,
         timestamp=time.time(),
         metadata=metadata or {},
-        raw_request=request_body,
+        raw_request=request_body if capture_raw else None,
         raw_response=None,  # Too large for streaming; individual chunks not stored
     )

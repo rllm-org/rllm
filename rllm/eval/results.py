@@ -22,6 +22,10 @@ class EvalItem:
     error: str | None = None
     signals: dict[str, float] = field(default_factory=dict)
     attempt: int = 0
+    # Coarse outcome bucket (TerminationReason.value), e.g. "env_done", "timeout",
+    # "verifier_timeout", "grading_error". Lets the report break failures down by
+    # cause — agent timeouts vs infra/grading errors vs genuine wrong answers.
+    termination_reason: str | None = None
 
 
 def _pass_at_k(per_task_counts: list[tuple[int, int]], k: int) -> float:
@@ -60,6 +64,9 @@ class EvalResult:
     timestamp: str = ""
     attempts: int = 1
     pass_at: dict[int, float] = field(default_factory=dict)
+    # Count of rollouts per termination_reason (e.g. {"env_done": 95,
+    # "timeout": 66, "verifier_timeout": 3}). The per-category error rate.
+    termination_breakdown: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_items(cls, dataset_name: str, model: str, agent: str, items: list[EvalItem], attempts: int = 1) -> EvalResult:
@@ -93,6 +100,12 @@ class EvalResult:
                 signal_counts[name] = signal_counts.get(name, 0) + 1
         signal_averages = {name: signal_sums[name] / signal_counts[name] for name in signal_sums}
 
+        # Per-category outcome counts (agent timeouts vs infra/grading errors vs done).
+        termination_breakdown: dict[str, int] = {}
+        for item in items:
+            key = item.termination_reason or "unknown"
+            termination_breakdown[key] = termination_breakdown.get(key, 0) + 1
+
         return cls(
             dataset_name=dataset_name,
             model=model,
@@ -106,6 +119,7 @@ class EvalResult:
             timestamp=timestamp,
             attempts=attempts,
             pass_at=pass_at,
+            termination_breakdown=termination_breakdown,
         )
 
     def summary_table(self) -> str:
@@ -119,6 +133,10 @@ class EvalResult:
         ]
         for k, v in sorted(self.pass_at.items()):
             lines.append(f"  pass@{k}:    {v * 100:.1f}%")
+        if self.termination_breakdown:
+            lines.append("  Terminations:")
+            for reason, count in sorted(self.termination_breakdown.items(), key=lambda kv: (-kv[1], kv[0])):
+                lines.append(f"    {reason}: {count}")
         return "\n".join(lines)
 
     def save(self, path: str | None = None) -> str:
@@ -150,7 +168,19 @@ class EvalResult:
             "signal_averages": self.signal_averages,
             "attempts": self.attempts,
             "pass_at": {str(k): v for k, v in self.pass_at.items()},
-            "items": [{"idx": item.idx, "attempt": item.attempt, "reward": item.reward, "is_correct": item.is_correct, "error": item.error, "signals": item.signals} for item in self.items],
+            "termination_breakdown": self.termination_breakdown,
+            "items": [
+                {
+                    "idx": item.idx,
+                    "attempt": item.attempt,
+                    "reward": item.reward,
+                    "is_correct": item.is_correct,
+                    "error": item.error,
+                    "signals": item.signals,
+                    "termination_reason": item.termination_reason,
+                }
+                for item in self.items
+            ],
         }
 
         with open(path, "w", encoding="utf-8") as f:
@@ -165,7 +195,15 @@ class EvalResult:
             data = json.load(f)
 
         items = [
-            EvalItem(idx=item["idx"], reward=item["reward"], is_correct=item["is_correct"], error=item.get("error"), signals=item.get("signals", {}), attempt=item.get("attempt", 0))
+            EvalItem(
+                idx=item["idx"],
+                reward=item["reward"],
+                is_correct=item["is_correct"],
+                error=item.get("error"),
+                signals=item.get("signals", {}),
+                attempt=item.get("attempt", 0),
+                termination_reason=item.get("termination_reason"),
+            )
             for item in data["items"]
         ]
 
@@ -182,4 +220,5 @@ class EvalResult:
             timestamp=data.get("timestamp", ""),
             attempts=data.get("attempts", 1),
             pass_at={int(k): v for k, v in data.get("pass_at", {}).items()},
+            termination_breakdown=data.get("termination_breakdown", {}),
         )

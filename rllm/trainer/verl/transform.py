@@ -8,10 +8,10 @@ import torch
 from verl.protocol import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
+import rllm.types as rllm_types
 from rllm.engine.rollout import VerlEngine
 from rllm.trainer.verl.dataclass import AccumulatedData, ProcessedStepData
-from rllm.types import Episode, Trajectory, TrajectoryGroup
-from rllm.workflows.workflow import TerminationReason
+from rllm.types import Episode, StepDelta, TerminationReason, Trajectory, TrajectoryDelta, TrajectoryGroup, _index_step_deltas, _resolve_step_delta_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -245,7 +245,7 @@ def _decode_routing_matrices(encoded: list[str] | None) -> torch.Tensor | None:
     return torch.from_numpy(arr.copy())
 
 
-def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: AccumulatedData) -> int:
+def _process_trajectory(trajectory: Trajectory | TrajectoryDelta, task_id: str, accumulated: AccumulatedData) -> int:
     """Processes a trajectory and returns an AccumulatedData.
 
     Multi-turn trajectories whose steps form a cumulative-prefix chain
@@ -264,11 +264,18 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
     Tinker's per-Datum aggregation. Without merging, verl emits one row per
     step and per-trajectory weight scales with step count.
 
-    A step that is *not* a prefix-extension of the running segment (e.g.
-    the agent reset its context mid-trajectory) closes the current segment
-    and starts a new one — the trajectory then contributes multiple rows.
-    For typical agents this never fires, so the common case is one row per
-    trajectory.
+    Steps are first partitioned by gateway ``lineage_id`` (parent agent vs each
+    subagent — a subagent runs under the same session but with its own system
+    prompt, so its turns are not prefix-extensions of the parent). Each lineage
+    is merged independently, so interleaved sub-conversations each become their
+    own row instead of fragmenting the trajectory into one row per turn. Steps
+    with no lineage tag (cumulative mode off / eval) form a single partition —
+    the original behavior.
+
+    Within a partition, a step that is *not* a prefix-extension of the running
+    segment (e.g. a mid-lineage context reset) closes the current segment and
+    starts a new one. For typical single-lineage trajectories this never fires,
+    so the common case is one row per trajectory.
 
     Args:
         trajectory: Trajectory to process.
@@ -290,7 +297,8 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
     # assumes every entry has prompt_ids and completion_ids.
     valid_steps = []
     for step_idx, step in enumerate(trajectory.steps):
-        if step.model_output is None or step.model_output.prompt_ids is None:
+        valid = isinstance(step, StepDelta) or step.model_output is not None and step.model_output.prompt_ids is not None
+        if not valid:
             logger.warning(f"Step {step_idx} in trajectory {trajectory_id} has no valid model_output, skipping")
             continue
         valid_steps.append(step)
@@ -313,22 +321,22 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
     # that segment. ``full_seq`` tracks prompt+all-action-and-obs tokens
     # so we can detect prefix-extension on the next step.
 
-    def _new_segment(step):
-        prompt = list(step.model_output.prompt_ids)
-        action = list(step.model_output.completion_ids)
-        action_lp = list(step.model_output.logprobs or [])
-        # If logprobs missing/short, pad to action length with zeros so
-        # accumulator lists stay aligned. add_step skips logprobs entirely
-        # when the list is empty, but we keep parity with action_tokens.
-        if action_lp and len(action_lp) != len(action):
-            action_lp = list(action_lp) + [0.0] * (len(action) - len(action_lp))
+    def _action_and_logprobs(step):
+        action = list(step.response_ids if isinstance(step, StepDelta) else step.model_output.completion_ids)
+        logprobs = list((step.logprobs if isinstance(step, StepDelta) else step.model_output.logprobs) or [])
+        if logprobs and len(logprobs) != len(action):
+            logprobs += [0.0] * (len(action) - len(logprobs))
+        return action, logprobs
+
+    def _new_segment(step, prompt):
+        action, action_lp = _action_and_logprobs(step)
         return {
             "prompt": prompt,
-            "response": list(action),
+            "response": action,
             "mask": [1] * len(action),
-            "logprobs": list(action_lp),
-            "full_seq": list(prompt) + list(action),
-            "multi_modal": step.model_output.multi_modal_inputs or {},
+            "logprobs": action_lp,
+            "full_seq": [*prompt, *action],
+            "multi_modal": {} if isinstance(step, StepDelta) else step.model_output.multi_modal_inputs or {},
             # Hold the latest step that produced routing in this segment. Each step's
             # routing covers (step.prompt + step.action), and the segment is cumulative
             # by construction, so the last step's routing covers seg["full_seq"]. We
@@ -368,38 +376,43 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             group_role=name,
         )
 
-    seg = _new_segment(valid_steps[0])
-    segments_emitted = 0
-    for step in valid_steps[1:]:
-        prompt_ids = list(step.model_output.prompt_ids)
-        if len(prompt_ids) >= len(seg["full_seq"]) and prompt_ids[: len(seg["full_seq"])] == seg["full_seq"]:
-            # Cumulative — extend the current segment.
-            delta_obs = prompt_ids[len(seg["full_seq"]) :]
-            action = list(step.model_output.completion_ids)
-            action_lp = list(step.model_output.logprobs or [])
-            if action_lp and len(action_lp) != len(action):
-                action_lp = list(action_lp) + [0.0] * (len(action) - len(action_lp))
+    def _merge_lineage(steps) -> int:
+        """Linear-merge one lineage's steps into segments; return rows emitted."""
+        first = steps[0]
+        first_prompt = _resolve_step_delta_prompt(first, delta_index) if isinstance(first, StepDelta) else list(first.model_output.prompt_ids)
+        seg = _new_segment(first, first_prompt)
+        emitted = 0
+        previous = first
+        for step in steps[1:]:
+            direct_child = isinstance(step, StepDelta) and step.parent_step_id == previous.id
+            prompt_ids = list(step.prompt_ids_suffix) if direct_child else (_resolve_step_delta_prompt(step, delta_index) if isinstance(step, StepDelta) else list(step.model_output.prompt_ids))
+            if direct_child or (len(prompt_ids) >= len(seg["full_seq"]) and prompt_ids[: len(seg["full_seq"])] == seg["full_seq"]):
+                # Cumulative — extend the current segment.
+                delta_obs = prompt_ids if direct_child else prompt_ids[len(seg["full_seq"]) :]
+                action, action_lp = _action_and_logprobs(step)
 
-            seg["response"].extend(delta_obs)
-            seg["response"].extend(action)
-            seg["mask"].extend([0] * len(delta_obs))
-            seg["mask"].extend([1] * len(action))
-            seg["logprobs"].extend([0.0] * len(delta_obs))
-            seg["logprobs"].extend(action_lp)
-            seg["full_seq"].extend(delta_obs)
-            seg["full_seq"].extend(action)
+                seg["response"].extend(delta_obs)
+                seg["response"].extend(action)
+                seg["mask"].extend([0] * len(delta_obs))
+                seg["mask"].extend([1] * len(action))
+                seg["logprobs"].extend([0.0] * len(delta_obs))
+                seg["logprobs"].extend(action_lp)
+                seg["full_seq"].extend(delta_obs)
+                seg["full_seq"].extend(action)
 
-            if step.routing_matrices is not None:
-                seg["last_routing_step"] = step
-        else:
-            # Non-cumulative — close out current segment, start a new one.
-            _emit(seg)
-            segments_emitted += 1
-            seg = _new_segment(step)
+                if step.routing_matrices is not None:
+                    seg["last_routing_step"] = step
+            else:
+                # Non-cumulative — close out current segment, start a new one.
+                _emit(seg)
+                emitted += 1
+                seg = _new_segment(step, prompt_ids)
+            previous = step
+        _emit(seg)
+        return emitted + 1
 
-    _emit(seg)
-    segments_emitted += 1
-    return segments_emitted
+    delta_index = _index_step_deltas(trajectory.steps)[0] if isinstance(trajectory, TrajectoryDelta) else {}
+    return sum(_merge_lineage(lineage_steps) for lineage_steps in rllm_types._partition_steps_by_lineage(valid_steps))
 
 
 def _process_episode(episode: Episode, task_id: str, accumulated: AccumulatedData) -> int:
@@ -454,13 +467,16 @@ def _process_trajectory_group(trajectory_group: TrajectoryGroup, task_id: str, a
     return total_steps
 
 
-def _compute_merge_metrics(accumulated: AccumulatedData, total_agent_steps: int) -> dict[str, float]:
+def _compute_merge_metrics(accumulated: AccumulatedData, total_agent_steps: int, unmerged_steps_per_traj: list[int]) -> dict[str, float]:
     """Per-batch metrics characterising the merge step.
 
     Naming matches Tinker's transform_trajectory_groups_to_datums so the
     same metric paths show up regardless of backend:
 
-    - batch/steps_per_traj/{mean,min,max}: number of rows emitted per
+    - batch/steps_per_traj/{mean,min,max}: unmerged agent steps (LLM turns)
+      per trajectory, before prefix-merging (len(traj.steps)).
+
+    - batch/merged_steps_per_traj/{mean,min,max}: number of rows emitted per
       trajectory after prefix-merging. =1 for cumulative trajectories,
       >1 if a prefix break forced a split mid-trajectory.
 
@@ -496,10 +512,10 @@ def _compute_merge_metrics(accumulated: AccumulatedData, total_agent_steps: int)
             action_token_ratios.append(float(mask.sum().item()) / n)
     total_emitted_rows = len(accumulated.responses)
 
-    return {
-        "batch/steps_per_traj/mean": float(_np.mean(rows_per_traj)),
-        "batch/steps_per_traj/min": int(_np.min(rows_per_traj)),
-        "batch/steps_per_traj/max": int(_np.max(rows_per_traj)),
+    metrics = {
+        "batch/merged_steps_per_traj/mean": float(_np.mean(rows_per_traj)),
+        "batch/merged_steps_per_traj/min": int(_np.min(rows_per_traj)),
+        "batch/merged_steps_per_traj/max": int(_np.max(rows_per_traj)),
         "batch/step_response_length/mean": float(_np.mean(response_lens)),
         "batch/step_response_length/min": int(_np.min(response_lens)),
         "batch/step_response_length/max": int(_np.max(response_lens)),
@@ -508,6 +524,11 @@ def _compute_merge_metrics(accumulated: AccumulatedData, total_agent_steps: int)
         "batch/action_token_ratio/max": float(_np.max(action_token_ratios)) if action_token_ratios else 0.0,
         "batch/merge_compression_ratio": (total_agent_steps / total_emitted_rows if total_emitted_rows > 0 else 0.0),
     }
+    if unmerged_steps_per_traj:
+        metrics["batch/steps_per_traj/mean"] = float(_np.mean(unmerged_steps_per_traj))
+        metrics["batch/steps_per_traj/min"] = int(_np.min(unmerged_steps_per_traj))
+        metrics["batch/steps_per_traj/max"] = int(_np.max(unmerged_steps_per_traj))
+    return metrics
 
 
 def transform_episodes_to_dataproto(
@@ -527,25 +548,33 @@ def transform_episodes_to_dataproto(
         stepwise_advantage_mode: The mode of stepwise advantage computation.
     Returns:
         DataProto: The DataProto built from the episodes. Per-batch merge
-        metrics (batch/steps_per_traj, batch/step_response_length) are
+        metrics (batch/steps_per_traj, batch/merged_steps_per_traj,
+        batch/step_response_length) are
         stashed on ``meta_info["merge_metrics"]`` so the caller can lift
         them into trainer_state.metrics without a signature change.
     """
     tokenizer = rollout_engine.tokenizer
     processor = getattr(rollout_engine, "processor", None)
+    if processor is not None:
+        # StepDelta has no multimodal payload; preserve the existing processor
+        # path by materializing only these trajectories.
+        episodes = [rllm_types._materialize_trajectory_deltas(episode) for episode in episodes]
 
     accumulated = AccumulatedData()
     total_agent_steps = 0
+    unmerged_steps_per_traj: list[int] = []
     for episode in episodes:
         task_id = episode.task_id
-        total_agent_steps += sum(len(traj.steps) for traj in episode.trajectories)
+        traj_step_counts = [len(traj.steps) for traj in episode.trajectories]
+        total_agent_steps += sum(traj_step_counts)
+        unmerged_steps_per_traj.extend(traj_step_counts)
         total_steps = _process_episode(episode, task_id, accumulated)
         accumulated.repeat_counts.append(total_steps)
 
     assert hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
     pad_token_id = tokenizer.pad_token_id
     batch = _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, processor)
-    batch.meta_info["merge_metrics"] = _compute_merge_metrics(accumulated, total_agent_steps)
+    batch.meta_info["merge_metrics"] = _compute_merge_metrics(accumulated, total_agent_steps, unmerged_steps_per_traj)
     return batch
 
 
@@ -561,6 +590,8 @@ def transform_trajectory_groups_to_dataproto(
     """
     tokenizer = rollout_engine.tokenizer
     processor = getattr(rollout_engine, "processor", None)
+    if processor is not None:
+        trajectory_groups = [rllm_types._materialize_trajectory_deltas(group) for group in trajectory_groups]
 
     accumulated = AccumulatedData()
     for trajectory_group in trajectory_groups:

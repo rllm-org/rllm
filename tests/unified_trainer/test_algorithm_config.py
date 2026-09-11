@@ -16,6 +16,7 @@ _spec = importlib.util.spec_from_file_location("rllm_common_config", _CONFIG_PAT
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 AlgorithmConfig = _mod.AlgorithmConfig
+rLLMAdvantageEstimator = _mod.rLLMAdvantageEstimator
 
 
 def _make_config(norm_adv_by_std_in_grpo: bool = True, warmup_steps: int = -1):
@@ -63,3 +64,41 @@ def test_warmup_steps_from_algorithm():
     config = _make_config(warmup_steps=25)
     algo_config = AlgorithmConfig.from_config(config.rllm.algorithm, stepwise_advantage_mode=config.rllm.stepwise_advantage.mode)
     assert algo_config.warmup_steps == 25
+
+
+# --- ECHO (arXiv:2605.24517) -------------------------------------------------
+
+
+def _echo_config(adv_estimator: str = "echo", loss_fn=None):
+    section = {
+        "adv_estimator": adv_estimator,
+        "norm_adv_by_std_in_grpo": True,
+    }
+    if loss_fn is not None:
+        section["loss_fn"] = loss_fn
+    return OmegaConf.create({"rllm": {"algorithm": section, "stepwise_advantage": {"mode": "broadcast"}}})
+
+
+def test_echo_estimator_resolves():
+    """adv_estimator=echo resolves to the ECHO enum (not OTHER)."""
+    config = _echo_config()
+    algo_config = AlgorithmConfig.from_config(config.rllm.algorithm)
+    assert algo_config.estimator == rLLMAdvantageEstimator.ECHO
+
+
+def test_echo_defaults_loss_fn_to_echo():
+    """adv_estimator=echo defaults loss_fn to the `echo` loss (env_loss_coef now lives in loss_params)."""
+    algo_config = AlgorithmConfig.from_config(_echo_config().rllm.algorithm)
+    assert algo_config.loss_fn == "echo"
+
+
+def test_grpo_leaves_loss_fn_unset():
+    """Non-echo estimators get no default loss_fn (backend default / native kernel)."""
+    algo_config = AlgorithmConfig.from_config(_echo_config(adv_estimator="grpo").rllm.algorithm)
+    assert algo_config.loss_fn is None
+
+
+def test_explicit_loss_fn_overrides_estimator_default():
+    """An explicit loss_fn wins over the estimator's default (echo → dppo_tv here)."""
+    algo_config = AlgorithmConfig.from_config(_echo_config(loss_fn="dppo_tv").rllm.algorithm)
+    assert algo_config.loss_fn == "dppo_tv"

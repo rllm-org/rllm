@@ -17,20 +17,37 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from rllm.engine.rollout.tinker_engine import TinkerEngine
+from rllm.types import TerminationEvent, TerminationReason
 
 logger = logging.getLogger(__name__)
 
 
 def _to_openai_tool_calls(tool_calls: list) -> list[dict[str, Any]]:
-    """Convert rLLM ToolCall objects to OpenAI-format tool_calls."""
+    """Convert tool calls from any producer shape to the OpenAI wire format.
+
+    ``ModelOutput.tool_calls`` arrives in one of three shapes depending on which parser
+    ``assemble_model_output`` used:
+
+    * prime-rl ``renderers`` (the unified renderer, e.g. ``parse_qwen35``): a **nested**
+      dict ``{"function": {"name", "arguments"}}`` — the OpenAI-ish shape.
+    * rLLM ``ToolCall`` object: ``.name`` / ``.arguments`` attributes.
+    * flat dict: ``{"name", "arguments"}``.
+
+    The nested form is easy to mis-read: pulling top-level ``name``/``arguments`` off it
+    yields empty tool calls (name=""), which is exactly what broke OpenAI function-calling
+    clients like opencode — they received a structurally-present but empty tool call and
+    took no action. Extract ``function`` first, then object attrs, then flat keys.
+    """
     result = []
     for i, tc in enumerate(tool_calls):
-        name = tc.name if hasattr(tc, "name") else tc.get("name", "")
-        args = tc.arguments if hasattr(tc, "arguments") else tc.get("arguments", {})
-        if isinstance(args, dict):
-            args_str = json.dumps(args)
-        else:
-            args_str = str(args)
+        fn = tc.get("function") if isinstance(tc, dict) else None
+        if isinstance(fn, dict):  # prime-rl nested shape
+            name, args = fn.get("name", ""), fn.get("arguments", {})
+        elif isinstance(tc, dict):  # flat dict
+            name, args = tc.get("name", ""), tc.get("arguments", {})
+        else:  # rLLM ToolCall object
+            name, args = getattr(tc, "name", ""), getattr(tc, "arguments", {})
+        args_str = json.dumps(args) if isinstance(args, dict) else str(args)
         result.append(
             {
                 "id": f"call_{i}",
@@ -39,6 +56,102 @@ def _to_openai_tool_calls(tool_calls: list) -> list[dict[str, Any]]:
             }
         )
     return result
+
+
+def _termination_http_error(reason: TerminationReason) -> Exception:
+    """Map a ``TerminationEvent`` to a non-retryable OpenAI-style 400.
+
+    For CLI harnesses the agent loop runs inside the sandbox, so the only way
+    to stop it is the HTTP response — a 500 makes the LLM client retry the
+    (still-too-long) call until the harness run-timeout SIGKILLs it, stalling
+    the whole group. ``context_length_exceeded`` maps to a NON-retryable
+    ContextWindowExceededError in litellm/openai SDKs, so the agent raises and
+    the rollout returns immediately with the turns so far.
+    """
+    from fastapi import HTTPException
+
+    is_prompt_limit = reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED
+    return HTTPException(
+        status_code=400,
+        detail={
+            "error": {
+                "message": f"Rollout terminated: {reason}. The conversation exceeded the model's prompt window.",
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded" if is_prompt_limit else "rollout_terminated",
+                "param": "messages",
+            }
+        },
+    )
+
+
+async def _token_prompt_completion(
+    engine: TinkerEngine,
+    request_body: dict[str, Any],
+    prompt_ids: list[int],
+    sampling_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Sample from a pre-tokenized prompt (cumulative-token mode).
+
+    Bypasses message rendering entirely: ``prompt_ids`` is fed straight to the
+    engine's token-input sampler. Returns a **completions-style** response dict
+    (``choices[0].text`` + ``token_ids``, root ``prompt_token_ids``,
+    ``logprobs.token_logprobs``) — the exact shape the gateway's cumulative-turn
+    handler extracts token IDs from and translates back to chat format.
+    """
+    token_output = await engine.get_token_output_from_token_input(prompt_ids, **sampling_kwargs)
+    model_output = engine.assemble_model_output(prompt_ids, token_output)
+
+    # Structured tool calls (parsed by the engine's renderer). Carried on the choice
+    # so the gateway's cumulative-turn translation can surface them to OpenAI
+    # function-calling clients (opencode) — the token-in bridge skips the serving
+    # stack's own chat parser, so this is the only place they get produced here.
+    raw_tool_calls = getattr(model_output, "tool_calls", None)
+    tool_calls = _to_openai_tool_calls(raw_tool_calls) if raw_tool_calls else None
+    # Text the agent sees as the assistant turn. With structured tool calls, use the
+    # parse-stripped content (may be "") — don't fall back to model_output.text, which
+    # would reinject the raw <tool_call> XML. Without tool calls, keep the text fallback
+    # so text-protocol harnesses (Terminus-2) still see the full output.
+    text = (model_output.content or "") if tool_calls else (model_output.content or model_output.text or "")
+    out_prompt_ids = list(model_output.prompt_ids) if model_output.prompt_ids else list(prompt_ids)
+    completion_ids = list(model_output.completion_ids) if model_output.completion_ids else []
+    logprobs = model_output.logprobs or []
+    finish_reason = model_output.finish_reason or "stop"
+    if tool_calls and finish_reason == "stop":
+        finish_reason = "tool_calls"
+    prompt_len = model_output.prompt_length or len(out_prompt_ids)
+    completion_len = model_output.completion_length or len(completion_ids)
+    # R3 router replay: read matrices off the TokenOutput (assemble_model_output
+    # drops them) and carry on the choice like the chat path, else the trace loses
+    # them every cumulative turn.
+    routing_matrices = getattr(token_output, "routing_matrices", None)
+
+    choice: dict[str, Any] = {
+        "index": 0,
+        "text": text,
+        "token_ids": completion_ids,
+        "finish_reason": finish_reason,
+        "routing_matrices": routing_matrices,
+        "logprobs": {"token_logprobs": logprobs},
+    }
+    if tool_calls:
+        choice["tool_calls"] = tool_calls
+    if getattr(model_output, "reasoning", None):
+        choice["reasoning"] = model_output.reasoning
+
+    return {
+        "id": f"cmpl-{uuid.uuid4().hex[:12]}",
+        "object": "text_completion",
+        "created": int(time.time()),
+        "model": request_body.get("model", getattr(engine, "model_name", "default")),
+        "choices": [choice],
+        "usage": {
+            "prompt_tokens": prompt_len,
+            "completion_tokens": completion_len,
+            "total_tokens": prompt_len + completion_len,
+        },
+        "prompt_token_ids": out_prompt_ids,
+        "weight_version": getattr(model_output, "weight_version", None),
+    }
 
 
 def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
@@ -50,26 +163,55 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
     """
 
     async def handler(request_body: dict[str, Any]) -> dict[str, Any]:
+        # Sampling params shared by the chat and pre-tokenized paths.
+        sampling_kwargs: dict[str, Any] = {}
+        if request_body.get("temperature") is not None:
+            sampling_kwargs["temperature"] = request_body["temperature"]
+        if request_body.get("top_p") is not None:
+            sampling_kwargs["top_p"] = request_body["top_p"]
+        if request_body.get("top_k") is not None:
+            sampling_kwargs["top_k"] = request_body["top_k"]
+        if request_body.get("max_tokens") is not None:
+            sampling_kwargs["max_tokens"] = request_body["max_tokens"]
+        if request_body.get("max_completion_tokens") is not None:
+            sampling_kwargs["max_completion_tokens"] = request_body["max_completion_tokens"]
+
+        # Per-trajectory session id (injected by the gateway) — forwarded only to
+        # engines that use it for inference session affinity (Fireworks prefix-cache
+        # reuse across a rollout's turns). Popped so it never reaches a chat body.
+        session_id = request_body.pop("rllm_session_id", None)
+        if session_id and getattr(engine, "supports_session_affinity", False):
+            sampling_kwargs["rllm_session_id"] = session_id
+
+        # Cumulative-token-mode path: the gateway rewrites turn 2+ to a
+        # completions-style request whose ``prompt`` is raw token IDs built by
+        # ``renderers.bridge_to_next_turn`` (= prior turns' prompt+completion
+        # tokens + the new messages). Sample straight from those tokens — no
+        # re-render, no re-tokenization — so the sequence the optimizer trains on
+        # is byte-for-byte what was generated. Mirrors the vLLM /v1/completions
+        # path the HTTP backend uses for the same feature.
+        prompt = request_body.get("prompt")
+        if isinstance(prompt, list) and prompt and isinstance(prompt[0], int):
+            try:
+                return await _token_prompt_completion(engine, request_body, prompt, sampling_kwargs)
+            except TerminationEvent as e:
+                raise _termination_http_error(e.reason) from e
+
         messages = request_body.get("messages", [])
         tools = request_body.get("tools", [])
-
-        kwargs: dict[str, Any] = {}
+        kwargs = dict(sampling_kwargs)
         if tools:
             kwargs["tools"] = tools
-        if request_body.get("temperature") is not None:
-            kwargs["temperature"] = request_body["temperature"]
-        if request_body.get("top_p") is not None:
-            kwargs["top_p"] = request_body["top_p"]
-        if request_body.get("top_k") is not None:
-            kwargs["top_k"] = request_body["top_k"]
-        if request_body.get("max_tokens") is not None:
-            kwargs["max_tokens"] = request_body["max_tokens"]
-        if request_body.get("max_completion_tokens") is not None:
-            kwargs["max_completion_tokens"] = request_body["max_completion_tokens"]
 
-        model_output = await engine.get_model_response(messages, **kwargs)
+        try:
+            model_output = await engine.get_model_response(messages, **kwargs)
+        except TerminationEvent as e:
+            raise _termination_http_error(e.reason) from e
 
-        response_text = model_output.content or model_output.text or ""
+        # With structured tool calls, use parse-stripped content (don't fall back to
+        # model_output.text, which reinjects the raw <tool_call> XML); otherwise keep
+        # the text fallback so text-protocol harnesses see the full output.
+        response_text = (model_output.content or "") if model_output.tool_calls else (model_output.content or model_output.text or "")
         prompt_ids = list(model_output.prompt_ids) if model_output.prompt_ids else []
         completion_ids = list(model_output.completion_ids) if model_output.completion_ids else []
         logprobs = model_output.logprobs or []

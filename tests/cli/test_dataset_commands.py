@@ -188,3 +188,39 @@ class TestDatasetRegister:
         result = runner.invoke(cli, ["dataset", "inspect", "rt_ds", "--split", "test", "-n", "1"])
         assert result.exit_code == 0
         assert "Best pizza?" in result.output
+
+
+class TestDatasetImport:
+    def test_import_preserves_reasoning_tools_and_whitespace(self, runner, tmp_rllm_home, tmp_path):
+        source = {
+            "messages": [
+                {"role": "system", "content": "sys\n\n"},
+                {"role": "user", "content": "  fix it\n"},
+                {
+                    "role": "assistant",
+                    "content": "\n\nTHOUGHT: look\n",
+                    "reasoning_content": "Let me explore.\n\n",
+                    "tool_calls": '[{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{\\"cmd\\": \\"ls\\"}"}}]',
+                },
+            ],
+            "task_id": "t1",
+        }
+        path = tmp_path / "traces.jsonl"
+        path.write_text(json.dumps(source))
+
+        result = runner.invoke(cli, ["dataset", "import", str(path), "--name", "imported-sft"])
+        assert result.exit_code == 0, result.output
+
+        from rllm.data import DatasetRegistry
+        from rllm.data.sft_schema import normalize_row
+
+        stored = DatasetRegistry.load_dataset("imported-sft", "train").get_data()[0]
+        row = normalize_row(stored)
+        assistant = row.messages[-1]
+        assert row.messages[0].text() == "sys\n\n"
+        assert row.messages[1].text() == "  fix it\n"
+        assert assistant.thinking() == "Let me explore.\n\n"
+        assert assistant.text() == "\n\nTHOUGHT: look\n"
+        assert assistant.tool_calls[0].function.name == "bash"
+        assert assistant.tool_calls[0].function.arguments == '{"cmd": "ls"}'
+        assert row.to_record()["task_id"] == "t1"

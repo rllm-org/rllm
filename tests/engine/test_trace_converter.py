@@ -1,11 +1,15 @@
 """Tests for trace_converter: trace_record_to_step with tool_calls support."""
 
-from rllm_model_gateway.models import TraceRecord
+from rllm_model_gateway.models import TraceGraph, TraceRecord
 
 from rllm.engine.trace_converter import (
     _parse_openai_tool_calls,
+    filter_empty_response_traces,
+    is_empty_response_trace,
+    trace_delta_to_step_delta,
     trace_record_to_step,
 )
+from rllm.types import StepDelta, resolve_step_deltas
 
 # ------------------------------------------------------------------
 # _parse_openai_tool_calls
@@ -211,3 +215,106 @@ class TestTraceRecordToStep:
         )
         step = trace_record_to_step(trace)
         assert step.model_output.tool_calls is None
+
+    def test_trace_delta_maps_to_the_exact_flat_step(self):
+        first = self._make_trace(trace_id="first", lineage_id="lineage")
+        second = self._make_trace(
+            trace_id="second",
+            lineage_id="lineage",
+            messages=[*first.messages, first.response_message, {"role": "user", "content": "weather?"}],
+            prompt_token_ids=[*first.prompt_token_ids, *first.completion_token_ids, 4],
+            response_message={
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "Need the weather.",
+                "tool_calls": [{"type": "function", "function": {"name": "weather", "arguments": '{"city":"London"}'}}],
+            },
+            completion_token_ids=[12],
+            logprobs=[-0.2],
+            finish_reason="tool_calls",
+        )
+        graph = TraceGraph(format="compact", version=1, deltas=[])
+        graph.add(first)
+        graph.add(second)
+
+        actual = resolve_step_deltas([trace_delta_to_step_delta(delta) for delta in graph.deltas])
+        expected = [trace_record_to_step(trace) for trace in (first, second)]
+
+        assert [step.model_dump(mode="json") for step in actual] == [step.model_dump(mode="json") for step in expected]
+
+    def test_trace_delta_preserves_missing_token_ids(self):
+        trace = self._make_trace(prompt_token_ids=[], completion_token_ids=[], logprobs=None)
+        graph = TraceGraph(format="compact", version=1, deltas=[])
+        delta = trace_delta_to_step_delta(graph.add(trace))
+
+        actual = resolve_step_deltas([StepDelta.model_validate_json(delta.model_dump_json())])[0]
+
+        assert actual.model_dump(mode="json") == trace_record_to_step(trace).model_dump(mode="json")
+
+    def test_arbitrary_metadata_does_not_override_graph_parentage(self):
+        first = self._make_trace(trace_id="first", lineage_id=None, metadata={"lineage_id": "user-a"})
+        second = self._make_trace(
+            trace_id="second",
+            lineage_id=None,
+            metadata={"lineage_id": "user-b"},
+            messages=[*first.messages, first.response_message],
+            prompt_token_ids=[*first.prompt_token_ids, *first.completion_token_ids],
+        )
+        graph = TraceGraph(format="compact", version=1, deltas=[])
+        graph.add(first)
+        graph.add(second)
+
+        actual = resolve_step_deltas([trace_delta_to_step_delta(delta) for delta in graph.deltas])
+
+        assert graph.deltas[1].parent_trace_id == first.trace_id
+        assert [step.model_dump(mode="json") for step in actual] == [trace_record_to_step(trace).model_dump(mode="json") for trace in (first, second)]
+
+
+class TestEmptyResponseTraceFilter:
+    def _make_trace(self, **overrides) -> TraceRecord:
+        defaults = {
+            "trace_id": "t-001",
+            "session_id": "s-001",
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "prompt_token_ids": [],
+            "response_message": {},
+            "completion_token_ids": [],
+            "logprobs": [],
+            "finish_reason": None,
+        }
+        defaults.update(overrides)
+        return TraceRecord(**defaults)
+
+    def test_detects_empty_response_without_consulting_logprobs(self):
+        trace = self._make_trace(logprobs=[-0.1])
+
+        assert is_empty_response_trace(trace)
+        assert filter_empty_response_traces([trace]) == []
+
+    def test_preserves_external_response_without_token_ids(self):
+        trace = self._make_trace(
+            response_message={"role": "assistant", "content": "answer"},
+            finish_reason="stop",
+        )
+
+        assert not is_empty_response_trace(trace)
+        assert filter_empty_response_traces([trace]) == [trace]
+
+    def test_preserves_tool_only_response_with_empty_content(self):
+        trace = self._make_trace(
+            response_message={
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command":"pwd"}'},
+                    }
+                ],
+            },
+            finish_reason="tool_calls",
+        )
+
+        assert not is_empty_response_trace(trace)

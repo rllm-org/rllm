@@ -65,6 +65,10 @@ class AgentSFTTrainer:
         else:
             backend.fit()
 
+    def preflight(self) -> None:
+        """Validate SFT rendering locally without launching training."""
+        self.prepare().preflight()
+
     def _make_backend(self) -> SFTBackend:
         name = self.backend_name
         if name == "tinker":
