@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+from copy import copy
+from functools import lru_cache
 from typing import Literal
 
 import datasets
@@ -18,6 +20,7 @@ import torch
 from tinker_cookbook.renderers import Message
 from tinker_cookbook.supervised.common import datum_from_model_input_weights
 from tinker_cookbook.supervised.types import SupervisedDataset
+from tqdm.auto import tqdm
 
 from rllm.data.sft_schema import SFTMessage, SFTSchemaError, normalize_messages
 from rllm.renderers.types import Renderer
@@ -92,6 +95,25 @@ def _validate_trainable_targets_represented(
             )
 
 
+def _preflight_renderer(renderer: Renderer) -> Renderer:
+    """Cache Inkling text encoding for one row's full/prefix renders.
+
+    Keep every render and comparison: only repeated, context-independent BPE
+    work is reused. A local shallow copy leaves the training renderer untouched
+    and releases the bounded cache after the row. Other renderer families and
+    subclasses retain the generic path; their encoding may depend on context.
+    """
+    try:
+        from renderers.inkling import InklingRenderer
+    except ImportError:
+        return renderer
+    if type(renderer) is not InklingRenderer:
+        return renderer
+    cached = copy(renderer)
+    cached._encode = lru_cache(maxsize=4096)(renderer._encode)
+    return cached
+
+
 def conversation_to_datum(
     conversation: list[Message],
     renderer: Renderer,
@@ -121,6 +143,8 @@ def conversation_to_datum(
         messages = normalize_messages(conversation, default_trainable=default_trainable)
         renderer_messages = [_to_renderer_message(message) for message in messages]
         renderer_tools = _validate_tools(tools)
+        if validate_prefix_stability:
+            renderer = _preflight_renderer(renderer)
         rendered = renderer.render(
             renderer_messages,
             tools=renderer_tools,
@@ -357,7 +381,7 @@ class TinkerSFTDataset(SupervisedDataset):
         """Render every dataset batch once."""
         if len(self) == 0:
             raise SFTConfigError(f"{label} preflight failed: dataset contains no batches.")
-        for batch_idx in range(len(self)):
+        for batch_idx in tqdm(range(len(self)), desc=f"{label} preflight", unit="batch", mininterval=1, disable=None):
             try:
                 if not self.get_batch(batch_idx, validate_prefix_stability=True):
                     raise SFTConfigError("rendered batch is empty")
