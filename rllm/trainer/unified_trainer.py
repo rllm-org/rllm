@@ -232,6 +232,13 @@ class UnifiedTrainer:
         evaluator = kwargs.get("evaluator")
         hooks = kwargs.get("hooks")
 
+        from rllm.rewards.cheating_judge import build_cheating_judge
+
+        judge_config = self.rllm_config.get("cheating_judge", {})
+        if judge_config.get("enabled", False) and not (agent_flow is not None and (evaluator is not None or hooks is not None)):
+            raise ValueError("Cheating judge currently requires the local AgentFlowEngine path")
+        cheating_judge = build_cheating_judge(judge_config, self.cf_config)
+
         remote_runtime_cfg = self.rllm_config.get("remote_runtime", {})
 
         if agent_flow is not None and (evaluator is not None or hooks is not None):
@@ -257,6 +264,7 @@ class UnifiedTrainer:
                 train_sampling_params=training_sampling_params,
                 val_sampling_params=val_sampling_params,
                 hooks=hooks,
+                cheating_judge=cheating_judge,
             )
 
         elif remote_runtime_cfg.get("enabled", False):

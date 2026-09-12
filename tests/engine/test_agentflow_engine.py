@@ -27,6 +27,67 @@ class _Evaluator:
         return EvalOutput(reward=0.0, is_correct=False)
 
 
+@pytest.mark.parametrize("answer,is_validation", [("### PASS", False), ("### FAIL", False), ("malformed", False), ("unused", True)])
+def test_judge_after_teardown_before_logging_without_solver_retry(monkeypatch, answer, is_validation):
+    import httpx
+
+    from rllm.engine.agentflow_engine import TaskContext
+    from rllm.rewards.cheating_judge import CheatingJudge, CheatingJudgeConfig
+    from rllm.trainer.algorithms.config import CompactFilteringConfig, TransformConfig
+    from rllm.trainer.algorithms.transform import _default_traj_grouping_hook
+    from rllm.types import Step
+
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test-key")
+    events = []
+    saved = []
+
+    def handler(request):
+        assert "teardown" in events
+        events.append("judge")
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": answer}}]})
+
+    judge = CheatingJudge(CheatingJudgeConfig(model="judge", api_key_env="TEST_JUDGE_KEY", max_attempts=2, retry_delay_s=0), transport=httpx.MockTransport(handler))
+    scored = Episode(is_correct=True, termination_reason=TerminationReason.ENV_DONE,
+                     trajectories=[Trajectory(name="solver", reward=1.0, steps=[Step(chat_completions=[{"role": "assistant", "content": "Done"}])])])
+
+    class Recorder:
+        def log_episode(self, ep, *args):
+            events.append("logged")
+            saved.append(ep.to_dict())
+
+    engine = AgentFlowEngine(agent_flow=_Agent(), evaluator=_Evaluator(), gateway=_Gateway(), model="policy",
+                             cheating_judge=judge, n_parallel_tasks=1, retry_limit=3, episode_logger=Recorder())
+
+    async def flow(**kwargs):
+        events.append("solver")
+        return scored, TaskContext(evaluator=_Evaluator(), teardown=lambda: events.append("teardown"))
+
+    async def finish(**kwargs):
+        events.append("verifier")
+        return scored
+
+    monkeypatch.setattr(engine, "_run_flow_only", flow)
+    monkeypatch.setattr(engine, "_finish_episode", finish)
+    try:
+        result = asyncio.run(engine.process_task_with_retry({"instruction": "Solve this task."}, "task", 0, 0, is_validation=is_validation))[-1]
+    finally:
+        engine.shutdown()
+    assert events[:3] == ["solver", "verifier", "teardown"]
+    assert events[-1] == "logged" and events.count("solver") == 1
+    assert events.count("judge") == (0 if is_validation else 2 if answer == "malformed" else 1)
+    expected_correct = is_validation or answer == "### PASS"
+    assert result.is_correct == saved[0]["is_correct"] == expected_correct
+    assert result.trajectories[0].reward == float(expected_correct)
+    filtering = CompactFilteringConfig(enable=True, mask_termination_reasons=["grading_error"])
+    groups = _default_traj_grouping_hook([result], TransformConfig(), filtering)
+    if answer == "malformed":
+        assert result.termination_reason == TerminationReason.GRADING_ERROR
+        assert groups == [] and "cheat_frac" not in result.metrics
+    else:
+        assert len(groups) == 1  # A detected cheat remains a real negative sample.
+        assert groups[0].trajectories[0].reward == float(expected_correct)
+
+
 class _Gateway:
     """Minimal gateway double; stocked traces are returned for every session."""
 

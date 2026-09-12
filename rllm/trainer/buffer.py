@@ -397,6 +397,10 @@ class TrajectoryGroupBuffer:
             self._aggregator.record("episode/prompt_tokens", total_prompt_tokens)
             self._aggregator.record("episode/response_tokens", total_response_tokens)
             self._aggregator.record("episode/correct", 1.0 if ep.is_correct else 0.0)
+            # Conditional success rate after judging, before any filtering.
+            # Other termination reasons must not contribute to the denominator.
+            if reason == TerminationReason.ENV_DONE:
+                self._aggregator.record("episode/env_done_correct_frac", float(ep.is_correct))
 
     def _record_reward_by_role(self, subset: str, trajectories: list, *, with_difficulty: bool = False) -> None:
         """Record reward/{role}/{subset}/{mean,std,max,min}, grouped by trajectory

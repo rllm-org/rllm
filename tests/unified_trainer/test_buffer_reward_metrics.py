@@ -10,6 +10,7 @@ See buffer._record_reward_by_role / _record_reward_stats.
 from rllm.agents.agent import Step, Trajectory
 from rllm.trainer.buffer import TrajectoryGroupBuffer
 from rllm.trainer.metrics_aggregator import MetricsAggregator
+from rllm.types import Episode, TerminationReason
 
 
 def _buffer_with_aggregator() -> TrajectoryGroupBuffer:
@@ -122,3 +123,30 @@ def test_reward_by_role_empty_is_noop():
     buf = _buffer_with_aggregator()
     buf._record_reward_by_role("effective", [])
     assert buf._aggregator.flush() == {}
+
+
+def test_env_done_correct_frac_excludes_other_terminations():
+    buf = _buffer_with_aggregator()
+    buf._record_episode_metrics(
+        [
+            Episode(is_correct=True, termination_reason=TerminationReason.ENV_DONE),
+            Episode(is_correct=False, termination_reason=TerminationReason.ENV_DONE),
+            Episode(is_correct=True, termination_reason=TerminationReason.MAX_TURNS_EXCEEDED),
+            Episode(is_correct=False, termination_reason=TerminationReason.GRADING_ERROR),
+            Episode(is_correct=False),
+        ]
+    )
+    assert buf._aggregator.flush()["episode/env_done_correct_frac"] == 0.5
+
+
+def test_env_done_correct_frac_weights_episodes_not_groups():
+    buf = _buffer_with_aggregator()
+    buf._record_episode_metrics([Episode(is_correct=True, termination_reason=TerminationReason.ENV_DONE)])
+    buf._record_episode_metrics([Episode(is_correct=False, termination_reason=TerminationReason.ENV_DONE) for _ in range(3)])
+    assert buf._aggregator.flush()["episode/env_done_correct_frac"] == 0.25
+
+
+def test_env_done_correct_frac_absent_without_env_done():
+    buf = _buffer_with_aggregator()
+    buf._record_episode_metrics([Episode(is_correct=False, termination_reason=TerminationReason.GRADING_ERROR)])
+    assert "episode/env_done_correct_frac" not in buf._aggregator.flush()

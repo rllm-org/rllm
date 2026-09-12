@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from rllm_model_gateway.models import TraceRecord
 
     from rllm.gateway.manager import GatewayManager
+    from rllm.rewards.cheating_judge import CheatingJudge
     from rllm.types import AgentFlow, Evaluator
     from rllm.utils.episode_logger import EpisodeLogger
 
@@ -459,6 +460,7 @@ class AgentFlowEngine:
         train_sampling_params: dict | None = None,
         val_sampling_params: dict | None = None,
         compact_episodes: bool = False,
+        cheating_judge: CheatingJudge | None = None,
     ) -> None:
         if evaluator is None and hooks is None:
             raise ValueError("AgentFlowEngine requires either an `evaluator` (single evaluator for every task) or `hooks` (per-task evaluator + setup/teardown). Both cannot be None.")
@@ -483,6 +485,7 @@ class AgentFlowEngine:
         self.train_sampling_params = train_sampling_params
         self.val_sampling_params = val_sampling_params
         self.compact_episodes = compact_episodes
+        self.cheating_judge = cheating_judge
 
         self.n_parallel_tasks = n_parallel_tasks
         self.executor = ThreadPoolExecutor(max_workers=n_parallel_tasks)
@@ -769,7 +772,6 @@ class AgentFlowEngine:
             )
             enriched.metrics.update(timings)
             result_holder["episode"] = enriched
-            return enriched
         finally:
             # Offload Modal's blocking terminate()/detach() to the executor.
             t = time.perf_counter()
@@ -782,6 +784,16 @@ class AgentFlowEngine:
             ep = result_holder.get("episode")
             if ep is not None:
                 ep.metrics.update(timings)
+
+        # Verification is complete and the sandbox has been released. Judge
+        # only the recorded episode, before logging/filtering/advantage math.
+        # The judge handles its own failures as GRADING_ERROR, never by rerunning
+        # the solver or treating a missing judgment as a policy failure.
+        judge = getattr(self, "cheating_judge", None)
+        if judge is not None:
+            await judge.apply(task_obj, enriched, is_validation=is_validation)
+            enriched.metrics["time/rollout_s"] = time.perf_counter() - rollout_start
+        return enriched
 
     async def _run_flow_only(
         self,

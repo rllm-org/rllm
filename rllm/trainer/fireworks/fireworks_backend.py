@@ -331,10 +331,12 @@ class FireworksBackend(TinkerBackend):
     async def on_train_start(self, trainer_state: TrainerState) -> None:
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
-        start_step = await self.policy_trainer.initialize_async(
+        start_step, dataloader_state = await self.policy_trainer.initialize_async(
             resume_from_checkpoint=True,
         )
         trainer_state.global_step = start_step
+        if dataloader_state is not None and trainer_state.train_dataloader is not None:
+            trainer_state.train_dataloader.load_state_dict(dataloader_state)
 
     async def _save_and_sync(
         self,
@@ -366,7 +368,8 @@ class FireworksBackend(TinkerBackend):
 
             if should_save:
                 with simple_timer("save_checkpoint", trainer_state.timing_dict):
-                    await self.policy_trainer.save_dcp_checkpoint(global_step)
+                    dataloader_state = trainer_state.train_dataloader.state_dict() if trainer_state.train_dataloader is not None else None
+                    await self.policy_trainer.save_dcp_checkpoint(global_step, dataloader_state=dataloader_state)
                 if snapshot_name:
                     experiment = self.full_config.rllm.trainer.get("experiment_name", "default")
                     output_model_id = f"{experiment}-step-{global_step}"

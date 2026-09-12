@@ -42,6 +42,20 @@ workflow:
   # negative matches the sandbox-creation frontier, positive = literal cap.
   warm_queue_size: -1
 
+# Optional host-side terminal attempted-cheating judge, after the task verifier.
+# Exactly one request per correct episode (plus bounded retries on failures).
+# Requires compact_filtering to mask grading_error. No key is saved in config.
+cheating_judge:
+  enabled: false
+  model: null
+  url: https://api.fireworks.ai/inference/v1/chat/completions
+  api_key_env: FIREWORKS_API_KEY
+  reasoning_effort: high
+  timeout_s: 600
+  max_attempts: 3
+  retry_delay_s: 2
+  apply_to_validation: false
+
 # Rollout configuration: backend-agnostic source of truth for sampling params.
 # For AgentFlow, rollout.{train,val} are attached to the gateway session and
 # enforced on every LLM call; extra keys (e.g. presence_penalty) pass through.

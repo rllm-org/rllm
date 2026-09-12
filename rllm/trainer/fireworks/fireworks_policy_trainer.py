@@ -10,8 +10,10 @@ It does NOT contain any environment or agent logic.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
+import os
 import re
 import time
 from typing import TYPE_CHECKING
@@ -239,7 +241,7 @@ class FireworksPolicyTrainer:
     async def initialize_async(
         self,
         resume_from_checkpoint: bool = True,
-    ) -> int:
+    ) -> tuple[int, dict | None]:
         """Initialize or resume training.
 
         Handles checkpoint resume via ``FiretitanTrainingClient.list_checkpoints``
@@ -250,23 +252,25 @@ class FireworksPolicyTrainer:
                 last DCP checkpoint.
 
         Returns:
-            The starting global step (0 when training from scratch).
+            The starting global step and dataloader state, or ``(0, None)``
+            when training from scratch.
         """
-        start_step = 0
+        resume_state = (0, None)
 
         if resume_from_checkpoint:
-            start_step = await self._try_resume()
+            resume_state = await self._try_resume()
 
-        if start_step == 0:
+        if resume_state[0] == 0:
             logger.info("Starting training from scratch with model: %s", self.config.model.name)
 
-        return start_step
+        return resume_state
 
-    async def _try_resume(self) -> int:
+    async def _try_resume(self) -> tuple[int, dict | None]:
         """Attempt to resume from a DCP checkpoint.
 
         Returns:
-            The step to resume from, or 0 if no checkpoint was found.
+            The step and dataloader state to resume from, or ``(0, None)`` if
+            no checkpoint was found.
         """
         source_job_id = self._resume_source_job_id
         checkpoint_name = self._resume_checkpoint_name
@@ -283,7 +287,7 @@ class FireworksPolicyTrainer:
             checkpoints = self._list_resume_checkpoints(source_job_id)
             if not checkpoints:
                 logger.info("No existing checkpoints found.")
-                return 0
+                return 0, None
 
             checkpoint_name = checkpoints[-1]
             logger.info("Resuming from latest DCP checkpoint: %s", checkpoint_name)
@@ -292,9 +296,30 @@ class FireworksPolicyTrainer:
         await asyncio.to_thread(self.training_client.load_state_with_optimizer, checkpoint_ref, timeout=DEFAULT_DCP_TIMEOUT)
 
         step = self._parse_checkpoint_step(checkpoint_name)
+        dataloader_state = self._load_dataloader_state(step)
 
         await self._sync_weights(f"resume-{step}")
-        return step
+        return step, dataloader_state
+
+    def _checkpoint_metadata_path(self, step: int) -> str:
+        return os.path.join(
+            str(self.config.training.default_local_dir),
+            f"global_step_{step}",
+            "checkpoint.json",
+        )
+
+    def _load_dataloader_state(self, step: int) -> dict | None:
+        path = self._checkpoint_metadata_path(step)
+        if not os.path.exists(path):
+            logger.warning(
+                "No local dataloader state found for Fireworks checkpoint step-%d; dataloader will start from scratch",
+                step,
+            )
+            return None
+
+        with open(path) as f:
+            metadata = json.load(f)
+        return metadata.get("dataloader_state")
 
     @staticmethod
     def _parse_checkpoint_spec(spec: str) -> tuple[str | None, str]:
@@ -723,11 +748,23 @@ class FireworksPolicyTrainer:
         logger.info("Promoted checkpoint '%s' -> model '%s'", snapshot_name, output_model_id)
 
     @require_training_client
-    async def save_dcp_checkpoint(self, step: int) -> None:
+    async def save_dcp_checkpoint(self, step: int, dataloader_state: dict | None = None) -> None:
         """Save a DCP checkpoint for resume."""
         name = f"step-{step}"
         try:
             await asyncio.to_thread(self.training_client.save_state, name, timeout=DEFAULT_DCP_TIMEOUT)
+            metadata_path = self._checkpoint_metadata_path(step)
+            os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+            with open(metadata_path, "w") as f:
+                json.dump(
+                    {
+                        "name": name,
+                        "dataloader_state": dataloader_state,
+                    },
+                    f,
+                )
+            with open(os.path.join(str(self.config.training.default_local_dir), "latest_checkpointed_iteration.txt"), "w") as f:
+                f.write(str(step))
             logger.info("DCP checkpoint saved: %s", name)
         except Exception:
             logger.exception("Failed to save DCP checkpoint %s", name)
