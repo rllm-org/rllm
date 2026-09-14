@@ -106,8 +106,13 @@ class BaseCliHarness(SandboxedAgentFlow):
         command: str,
         timeout: float | None = None,
         env: dict[str, str] | None = None,
+        user: str | None = None,
     ) -> str:
         """Run *command* in *sandbox* as the agent user, with *env* exported.
+
+        *user* overrides the class-level ``agent_user`` for a single call, for
+        harnesses whose solver identity is a per-task property and so cannot be
+        stashed on an instance shared by concurrent rollouts.
 
         Uses ``export`` (not the inline ``K=V cmd`` prefix), because
         invocations like ``cd /workspace && claude ...`` are compound
@@ -119,7 +124,7 @@ class BaseCliHarness(SandboxedAgentFlow):
         if env:
             exports = "; ".join(f"export {k}={shlex.quote(v)}" for k, v in env.items() if v is not None)
             command = f"{exports}; {command}"
-        return sandbox.exec(command, timeout=timeout, user=self.agent_user)
+        return sandbox.exec(command, timeout=timeout, user=user if user is not None else self.agent_user)
 
     def _effective_timeout(self, task: Task) -> float:
         """The agent's wall-clock budget for this task, in seconds.

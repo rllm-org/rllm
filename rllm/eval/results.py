@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from rllm import paths
 
@@ -21,6 +22,9 @@ class EvalItem:
     is_correct: bool
     error: str | None = None
     signals: dict[str, float] = field(default_factory=dict)
+    # Provider-reported solver usage for this rollout. Judge usage is
+    # intentionally excluded: this describes the model being evaluated.
+    metrics: dict[str, Any] = field(default_factory=dict)
     attempt: int = 0
     # Coarse outcome bucket (TerminationReason.value), e.g. "env_done", "timeout",
     # "verifier_timeout", "grading_error". Lets the report break failures down by
@@ -67,6 +71,9 @@ class EvalResult:
     # Count of rollouts per termination_reason (e.g. {"env_done": 95,
     # "timeout": 66, "verifier_timeout": 3}). The per-category error rate.
     termination_breakdown: dict[str, int] = field(default_factory=dict)
+    # Solver token usage: turns and input/answer/reasoning/output counts.
+    # No cost — vendor rates move, so pricing is left to the reader.
+    usage: dict[str, float | int | None] = field(default_factory=dict)
 
     @classmethod
     def from_items(cls, dataset_name: str, model: str, agent: str, items: list[EvalItem], attempts: int = 1) -> EvalResult:
@@ -106,6 +113,8 @@ class EvalResult:
             key = item.termination_reason or "unknown"
             termination_breakdown[key] = termination_breakdown.get(key, 0) + 1
 
+        usage = _usage_summary(items)
+
         return cls(
             dataset_name=dataset_name,
             model=model,
@@ -120,6 +129,7 @@ class EvalResult:
             attempts=attempts,
             pass_at=pass_at,
             termination_breakdown=termination_breakdown,
+            usage=usage,
         )
 
     def summary_table(self) -> str:
@@ -137,6 +147,17 @@ class EvalResult:
             lines.append("  Terminations:")
             for reason, count in sorted(self.termination_breakdown.items(), key=lambda kv: (-kv[1], kv[0])):
                 lines.append(f"    {reason}: {count}")
+        if self.usage:
+            lines.extend(
+                [
+                    "  Solver usage:",
+                    f"    Average turns/task: {self.usage['average_turns_per_task']:.2f}",
+                    f"    Input tokens/task: {self.usage['average_input_tokens_per_task']:.2f}",
+                    f"    Output tokens/task: {self.usage['average_output_tokens_per_task']:.2f}",
+                    f"    Total input tokens: {self.usage['total_input_tokens']}",
+                    f"    Total output tokens: {self.usage['total_output_tokens']}",
+                ]
+            )
         return "\n".join(lines)
 
     def save(self, path: str | None = None) -> str:
@@ -169,6 +190,7 @@ class EvalResult:
             "attempts": self.attempts,
             "pass_at": {str(k): v for k, v in self.pass_at.items()},
             "termination_breakdown": self.termination_breakdown,
+            "usage": self.usage,
             "items": [
                 {
                     "idx": item.idx,
@@ -177,6 +199,7 @@ class EvalResult:
                     "is_correct": item.is_correct,
                     "error": item.error,
                     "signals": item.signals,
+                    "metrics": item.metrics,
                     "termination_reason": item.termination_reason,
                 }
                 for item in self.items
@@ -201,6 +224,7 @@ class EvalResult:
                 is_correct=item["is_correct"],
                 error=item.get("error"),
                 signals=item.get("signals", {}),
+                metrics=item.get("metrics", {}),
                 attempt=item.get("attempt", 0),
                 termination_reason=item.get("termination_reason"),
             )
@@ -221,4 +245,41 @@ class EvalResult:
             attempts=data.get("attempts", 1),
             pass_at={int(k): v for k, v in data.get("pass_at", {}).items()},
             termination_breakdown=data.get("termination_breakdown", {}),
+            usage=data.get("usage", _usage_summary(items)),
         )
+
+
+def _usage_summary(items: list[EvalItem]) -> dict[str, float | int | None]:
+    """Aggregate solver-only token usage.
+
+    Averages use every rollout as the denominator, including failed rollouts.
+    This matches the benchmark's per-task reporting and prevents failures from
+    making the averages look artificially high by silently shrinking the run.
+
+    Tokens only: cost depends on vendor rates that move and vary per account,
+    so it is left to whoever reads these counts rather than frozen into them.
+    """
+    count = len(items)
+
+    def total(name: str) -> int:
+        return sum(int(item.metrics.get(name, 0) or 0) for item in items)
+
+    turns = total("turns")
+    answer = total("answer_tokens")
+    reasoning = total("reasoning_tokens")
+    output = total("output_tokens")
+    input_tokens = total("input_tokens")
+    divisor = count or 1
+
+    return {
+        "tasks": count,
+        "average_turns_per_task": turns / divisor,
+        "average_answer_tokens_per_task": answer / divisor,
+        "average_reasoning_tokens_per_task": reasoning / divisor,
+        "average_output_tokens_per_task": output / divisor,
+        "average_input_tokens_per_task": input_tokens / divisor,
+        "total_input_tokens": input_tokens,
+        "total_answer_tokens": answer,
+        "total_reasoning_tokens": reasoning,
+        "total_output_tokens": output,
+    }
