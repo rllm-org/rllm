@@ -70,6 +70,17 @@ def _attach_run_tags(sandbox, tags: dict[str, str], name: str) -> None:
         logger.debug("could not tag sandbox %s", name, exc_info=True)
 
 
+def _registry_image(modal_module, reference: str):
+    """Import a registry image without retaining its Docker ``ENTRYPOINT``.
+
+    Modal appends the positional arguments passed to ``Sandbox.create`` to a
+    registry image's entrypoint. rLLM supplies its own keepalive command, so a
+    task image with ``ENTRYPOINT [\"/bin/bash\"]`` would otherwise try to parse
+    the keepalive executable as a shell script and exit immediately.
+    """
+    return modal_module.Image.from_registry(reference).entrypoint([])
+
+
 # Modal caps an exec's total argv at 64 KiB (ARG_MAX); payloads above this go
 # through a chunked temp-file path instead of being inlined in the command.
 _B64_ARGV_LIMIT = 50_000
@@ -246,7 +257,7 @@ class ModalSandbox:
             if from_snapshot:
                 modal_image = modal.Image.from_id(image)
             elif isinstance(image, str):
-                modal_image = modal.Image.from_registry(image)
+                modal_image = _registry_image(modal, image)
             else:
                 modal_image = image  # already a modal.Image
 

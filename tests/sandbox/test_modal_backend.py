@@ -78,3 +78,28 @@ def test_attach_run_tags_swallows_set_tags_failure():
 
     _attach_run_tags(Ok(), {"rllm_run_id": "x"}, "sb")
     assert seen == {"rllm_run_id": "x"}
+
+
+def test_registry_image_clears_docker_entrypoint():
+    from rllm.sandbox.backends.modal_backend import _registry_image
+
+    seen = {}
+
+    class Image:
+        def entrypoint(self, command):
+            seen["entrypoint"] = command
+            return self
+
+    class Images:
+        @staticmethod
+        def from_registry(reference):
+            seen["reference"] = reference
+            return Image()
+
+    class Modal:
+        Image = Images
+
+    image = _registry_image(Modal, "example/task:latest")
+
+    assert isinstance(image, Image)
+    assert seen == {"reference": "example/task:latest", "entrypoint": []}
