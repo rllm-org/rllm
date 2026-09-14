@@ -142,9 +142,9 @@ class HarborRuntime:
         Returns:
             Episode with harbor_reward and harbor_is_correct in artifacts.
         """
-        task_path = task.metadata.get("task_path")
-        if not task_path:
-            raise ValueError(f"Harbor task missing 'task_path' field in task data: {list(task.metadata.keys())}")
+        from rllm.integrations.harbor.utils import resolve_harbor_task_path
+
+        task_path = resolve_harbor_task_path(task)
 
         outcome = await self._run_one(
             task_path=task_path,
@@ -199,9 +199,9 @@ class HarborRuntime:
             timeout = self.session_timeout
 
         async def _run_submission(sub) -> RemoteTaskResult:
-            task_path = sub.task.get("task_path")
-            if not task_path:
-                raise ValueError(f"Submission {sub.session_id} missing 'task_path' in task dict")
+            from rllm.integrations.harbor.utils import resolve_harbor_task_path
+
+            task_path = resolve_harbor_task_path(sub.task)
 
             outcome = await self._run_one(
                 task_path=task_path,

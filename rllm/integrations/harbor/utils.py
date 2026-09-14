@@ -68,3 +68,27 @@ def is_harbor_agent(agent_name: str | None) -> bool:
     if agent_name is None:
         return False
     return agent_name.startswith("harbor:")
+
+
+def resolve_harbor_task_path(task) -> str:
+    """Resolve the on-disk Harbor task directory from a Task, row, or dict.
+
+    Prefers ``metadata['task_path']`` (catalog / Harbor rows). Falls back to
+    ``task.task_dir`` so local ``BenchmarkLoader`` tasks work with Harbor
+    runtimes without requiring the row wrapper.
+    """
+    meta = getattr(task, "metadata", None)
+    if meta is None and isinstance(task, dict):
+        meta = task
+    if isinstance(meta, dict):
+        path = meta.get("task_path")
+        if path:
+            return str(path)
+    task_dir = getattr(task, "task_dir", None)
+    if task_dir is not None:
+        return str(task_dir)
+    dataset_dir = getattr(task, "dataset_dir", None)
+    if dataset_dir is not None:
+        return str(dataset_dir)
+    keys = list(meta.keys()) if isinstance(meta, dict) else []
+    raise ValueError(f"Harbor task missing 'task_path' (and no task_dir): {keys}")
