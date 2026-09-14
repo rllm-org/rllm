@@ -263,7 +263,17 @@ class ModalSandbox:
                 create_kwargs["tags"] = run_tags
             else:
                 post_create_tags = run_tags
-            for key in ("secrets", "volumes", "workdir", "gpu", "cpu", "memory"):
+            for key in (
+                "secrets",
+                "volumes",
+                "workdir",
+                "gpu",
+                "cpu",
+                "memory",
+                "block_network",
+                "outbound_cidr_allowlist",
+                "outbound_domain_allowlist",
+            ):
                 if key in kwargs:
                     create_kwargs[key] = kwargs.pop(key)
 
