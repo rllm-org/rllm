@@ -36,6 +36,7 @@ from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_pad
 
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
+from rllm.trainer.verl.advantage import compute_workflow_grpo_advantage
 from rllm.trainer.verl.metrics import calculate_debug_metrics_compat
 from rllm.utils.episode_logger import EpisodeLogger
 from rllm.workflows.workflow import TerminationReason
@@ -103,6 +104,9 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         assert self.use_rm is False, "Reward models are not supported. Rewards should be assigned using a reward function in the workflow or environment."
         if self.config.rllm.rejection_sample.multiplier != 1:
             assert self.config.rllm.rejection_sample.enable is True, "rejection sampling is disabled, but rejection_sample.multiplier is not 1"
+
+        if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode != "broadcast":
+            raise ValueError("AgentWorkflowPPOTrainer only supports stepwise_advantage.mode=broadcast with the merged trajectory transform; per_step is unsupported.")
 
         # TODO: revisit whether this is now supported by Verl
         if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
@@ -286,7 +290,8 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                             selected_mask = np.isin(uids, selected_uids)
                             batch = batch[selected_mask]
 
-                    if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "broadcast":
+                    # GRPO statistics run on the driver and need no world-size truncation.
+                    if self.config.algorithm.adv_estimator != AdvantageEstimator.GRPO and self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "broadcast":
                         # need to make sure both number of last steps (number of uids) and number of total steps in the batch
                         # (batch size after processing) are both multiples of world size
 
@@ -387,9 +392,8 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                             batch = batch.union(values)
 
                     with marked_timer("adv", timing_raw, color="brown"):
-                        # step_ids is safe to always use for advantage computation
-                        # if we're not using computing advantages stepwise (i.e., for cumulative agents or single turn workflows)
-                        # then step_ids == trajectory_ids
+                        # The GRPO path below uses explicit task/role comparison
+                        # groups. Keep the other estimators' existing identifiers.
                         batch.non_tensor_batch["uid"] = batch.non_tensor_batch["step_ids"]
 
                         if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "per_step":
@@ -411,31 +415,38 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                             else:
                                 batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
-                            if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "broadcast":
-                                is_last_step = batch.non_tensor_batch["is_last_step"]
-                                last_step_indices = np.where(is_last_step == True)[0]
-                                not_last_step_indices = np.where(is_last_step == False)[0]
-                                non_last_step_batch = batch.select_idxs(not_last_step_indices)
-                                batch = batch.select_idxs(last_step_indices)  # This batch only has last steps
-                                # last_step_batch contains no padded steps as it was rounded down (not padded) to a multiple of world size
+                            if self.config.algorithm.adv_estimator == AdvantageEstimator.GRPO:
+                                batch = compute_workflow_grpo_advantage(
+                                    batch,
+                                    norm_adv_by_std_in_grpo=self.config.algorithm.norm_adv_by_std_in_grpo,
+                                    normalize_by_steps=self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.normalize_by_steps,
+                                )
                             else:
-                                batch = self._remove_padding(batch)  # compute advantages over non-padded steps only
+                                if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "broadcast":
+                                    is_last_step = batch.non_tensor_batch["is_last_step"]
+                                    last_step_indices = np.where(is_last_step == True)[0]
+                                    not_last_step_indices = np.where(is_last_step == False)[0]
+                                    non_last_step_batch = batch.select_idxs(not_last_step_indices)
+                                    batch = batch.select_idxs(last_step_indices)  # This batch only has last steps
+                                    # last_step_batch contains no padded steps as it was rounded down (not padded) to a multiple of world size
+                                else:
+                                    batch = self._remove_padding(batch)  # compute advantages over non-padded steps only
 
-                            # compute advantages, executed on the driver process
-                            batch = compute_advantage(
-                                batch,
-                                adv_estimator=self.config.algorithm.adv_estimator,
-                                gamma=self.config.algorithm.gamma,
-                                lam=self.config.algorithm.lam,
-                                num_repeat=self.config.actor_rollout_ref.rollout.n,
-                                norm_adv_by_std_in_grpo=self.config.algorithm.norm_adv_by_std_in_grpo,
-                                config=self.config.algorithm,
-                            )
+                                # compute advantages, executed on the driver process
+                                batch = compute_advantage(
+                                    batch,
+                                    adv_estimator=self.config.algorithm.adv_estimator,
+                                    gamma=self.config.algorithm.gamma,
+                                    lam=self.config.algorithm.lam,
+                                    num_repeat=self.config.actor_rollout_ref.rollout.n,
+                                    norm_adv_by_std_in_grpo=self.config.algorithm.norm_adv_by_std_in_grpo,
+                                    config=self.config.algorithm,
+                                )
 
-                            if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "broadcast":
-                                # Merging the separated out steps using the advantage from last steps
-                                self._stepwise_advantage_broadcast(batch, non_last_step_batch)
-                                batch = DataProto.concat([batch, non_last_step_batch])
+                                if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "broadcast":
+                                    # Merging the separated out steps using the advantage from last steps
+                                    self._stepwise_advantage_broadcast(batch, non_last_step_batch)
+                                    batch = DataProto.concat([batch, non_last_step_batch])
 
                     # remove invalid items filtered out due to compact filtering
                     is_valid = batch.non_tensor_batch["is_valid"]
