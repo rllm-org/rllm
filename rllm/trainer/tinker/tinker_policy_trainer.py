@@ -226,6 +226,14 @@ class TinkerPolicyTrainer:
             algorithm_config=algorithm_config,
         )
 
+        has_training_datums = (
+            any(training_datums.values())
+            if isinstance(training_datums, dict)
+            else bool(training_datums)
+        )
+        if not has_training_datums:
+            return training_datums, [], adv_metrics
+
         # Forward-backward pass
         fwd_bwd_futures = await self._get_forward_backward_futures(
             training_datums=training_datums,
@@ -269,12 +277,20 @@ class TinkerPolicyTrainer:
             total_steps=total_steps,
         )
 
-        adam_params = AdamParams(
+        adam_kwargs = dict(
             learning_rate=scheduled_learning_rate,
             beta1=beta1,
             beta2=beta2,
             eps=eps,
         )
+        emit_grad_norm_metrics = OmegaConf.select(
+            self.config,
+            "training.emit_grad_norm_metrics",
+            default=None,
+        )
+        if emit_grad_norm_metrics is not None:
+            adam_kwargs["emit_grad_norm_metrics"] = emit_grad_norm_metrics
+        adam_params = AdamParams(**adam_kwargs)
         optim_step_future = await self.training_client.optim_step_async(adam_params)  # type: ignore[attr-defined]
         return optim_step_future, scheduled_learning_rate
 

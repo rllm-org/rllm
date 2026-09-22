@@ -1,0 +1,70 @@
+# @package _global_
+
+# Fireworks pooled serverless training. Unlike the managed Fireworks backend,
+# this provisions neither a trainer job nor an inference deployment.
+fireworks_base_url: "https://api.fireworks.ai"
+tinker_base_url: "${fireworks_base_url}/training/v1/serverless"
+fuse_forward_backward_and_optim_step: false
+
+model:
+  name: accounts/fireworks/models/qwen3p5-9b
+  tokenizer_model: Qwen/Qwen3.5-9B
+  lora_rank: 32
+  train_unembed: false
+  train_attn: true
+  train_mlp: true
+
+training:
+  group_size: ???
+  learning_rate: 2e-5
+  lr_schedule: "constant"
+  warmup_steps_ratio: 0.0
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1e-8
+  emit_grad_norm_metrics: basic
+  max_length: 16384
+  num_minibatches: 1
+  default_local_dir: 'checkpoints/${rllm.trainer.project_name}/${rllm.trainer.experiment_name}'
+  resume_mode: auto
+  resume_from_path: null
+
+validation:
+  group_size: ???
+
+workflow:
+  n_parallel_tasks: 256
+  retry_limit: 3
+
+agent:
+  max_steps: 1
+  agent_args: {}
+
+rollout_engine:
+  reasoning_effort: "medium"
+  accumulate_reasoning: false
+  disable_thinking: false
+  bypass_render_with_parser: false
+  renderer_name: qwen3_5
+
+data:
+  train_files: null
+  val_files: null
+  max_prompt_length: 8192
+  max_response_length: 4096
+  train_batch_size: 32
+  val_batch_size: 32
+
+rllm:
+  backend: fireworks_serverless
+  rollout:
+    n: ${oc.select:training.group_size, 8}
+    n_val: ${oc.select:validation.group_size, 1}
+    train:
+      top_k: 0
+    val:
+      top_k: 0
+  algorithm:
+    loss_fn: importance_sampling
+    rollout_correction:
+      bypass_mode: true
