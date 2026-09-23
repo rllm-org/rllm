@@ -17,6 +17,7 @@ import atexit
 import io
 import logging
 import os
+import shlex
 import tarfile
 import threading
 import weakref
@@ -185,7 +186,7 @@ class ModalSandbox:
         """
         remote_dir = os.path.dirname(remote_path)
         if remote_dir:
-            self._exec_unchecked(f"mkdir -p {remote_dir}")
+            self._exec_unchecked(f"mkdir -p {shlex.quote(remote_dir)}")
 
         with open(local_path, "rb") as f:
             content = f.read()
@@ -194,7 +195,7 @@ class ModalSandbox:
         import base64
 
         b64 = base64.b64encode(content).decode("ascii")
-        self._push_b64(b64, f"base64 -d > {remote_path}")
+        self._push_b64(b64, f"base64 -d > {shlex.quote(remote_path)}")
         logger.debug("Uploaded %s -> %s in sandbox %s", local_path, remote_path, self.name)
 
     def upload_dir(self, local_path: str, remote_path: str) -> None:
@@ -207,7 +208,7 @@ class ModalSandbox:
         remote_name = os.path.basename(remote_path.rstrip("/"))
 
         if remote_parent:
-            self._exec_unchecked(f"mkdir -p {remote_parent}")
+            self._exec_unchecked(f"mkdir -p {shlex.quote(remote_parent)}")
 
         # Create tar in memory
         tar_buf = io.BytesIO()
@@ -222,7 +223,7 @@ class ModalSandbox:
         # Write tar to sandbox and extract. --no-same-owner: don't restore the
         # host's uid/gid (root extraction would otherwise chown to nonexistent
         # ids and error); permissions are kept so executables stay +x.
-        self._push_b64(b64, f"base64 -d | tar xzf - --no-same-owner -C {remote_parent}")
+        self._push_b64(b64, f"base64 -d | tar xzf - --no-same-owner -C {shlex.quote(remote_parent)}")
         logger.debug("Uploaded dir %s -> %s in sandbox %s", local_path, remote_path, self.name)
 
     def is_alive(self) -> bool:
