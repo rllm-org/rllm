@@ -169,6 +169,57 @@ class TestMathReward:
         assert not output.is_correct
         assert output.reward == 0.0
 
+    @pytest.mark.parametrize(
+        "model_response, ground_truth",
+        [
+            pytest.param("<think>...</think>\nThe answer is \\boxed{}.", "", id="empty-answer-empty-string"),
+            pytest.param("<think>...</think>\nThe answer is \\boxed{}.", [""], id="empty-answer-empty-list-item"),
+            pytest.param("<think>...</think>\nThe answer is \\boxed{}.", "\\boxed{}", id="empty-answer-empty-boxed"),
+            pytest.param("<think>...</think>\nThe answer is \\boxed{}.", ["\\boxed{}", ""], id="empty-answer-empty-boxed-and-string"),
+            pytest.param("<think>...</think>\nThe answer is \\boxed{ }.", [" "], id="blank-answer-blank-string"),
+            pytest.param("<think>...</think>\n<|begin_of_box|><|end_of_box|>", [""], id="empty-box-token-empty-string"),
+            pytest.param("<think>...</think>\nThe answer is \\boxed{42}.", ["\\boxed{}", ""], id="real-answer-empty-boxed-and-string"),
+            pytest.param("<think>...</think>\nThe answer is \\boxed{42}.", ["\\boxed"], id="real-answer-unterminated-boxed"),
+        ],
+    )
+    def test_empty_ground_truths_are_filtered_out(self, model_response, ground_truth):
+        """Empty ground truths are dropped, so an empty answer cannot match them."""
+        config = RewardConfig()
+        config.incorrect_reward = -1.0
+        config.unk_error_reward = -2.0
+
+        reward = RewardMathFn(config)
+        task_info = {"problem": "What is the answer?", "problem_type": RewardType.MATH, "data_source": "test", "ground_truth": ground_truth}
+        output = reward(task_info, model_response)
+
+        assert not output.is_correct
+        assert output.reward == -2.0  # unk_error_reward
+
+    @pytest.mark.parametrize(
+        "model_response, ground_truth, expected_correct, expected_reward",
+        [
+            pytest.param("<think>...</think>\nThe answer is \\boxed{}.", ["", "42"], False, -1.0, id="empty-answer-mixed-ground-truths"),
+            pytest.param("<think>...</think>\nThe answer is \\boxed{42}.", ["", "42"], True, 1.0, id="real-answer-mixed-ground-truths"),
+            pytest.param("<think>...</think>\nThe answer is \\boxed{}.", ["7"], False, -1.0, id="empty-answer-valid-ground-truth"),
+            pytest.param("<think>...</think>\nThe answer is \\boxed{42}.", ["7"], False, -1.0, id="wrong-answer"),
+            pytest.param("<think>...</think>\nThe answer is \\boxed{0}.", 0, True, 1.0, id="zero-int-ground-truth"),
+            pytest.param("<think>...</think>\nThe answer is \\boxed{0}.", [0], True, 1.0, id="zero-int-in-list"),
+            pytest.param("<think>...</think>\nThe answer is \\boxed{0}.", "\\boxed{0}", True, 1.0, id="zero-boxed-ground-truth"),
+        ],
+    )
+    def test_empty_ground_truths_do_not_affect_valid_ones(self, model_response, ground_truth, expected_correct, expected_reward):
+        """Valid ground truths, including a falsy 0, are still graded normally."""
+        config = RewardConfig()
+        config.incorrect_reward = -1.0
+        config.unk_error_reward = -2.0
+
+        reward = RewardMathFn(config)
+        task_info = {"problem": "What is the answer?", "problem_type": RewardType.MATH, "data_source": "test", "ground_truth": ground_truth}
+        output = reward(task_info, model_response)
+
+        assert output.is_correct is expected_correct
+        assert output.reward == expected_reward
+
     def test_custom_config_values(self):
         """Test math reward with custom configuration values."""
         config = RewardConfig()
