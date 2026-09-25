@@ -171,3 +171,13 @@ class TestR1ToolParser:
         """
         result = parser.parse(response)
         assert len(result) == 0
+
+    def test_special_tokens_match_deepseek_chat_template(self, parser):
+        """Test delimiters match the tokens in DeepSeek-R1's chat_template."""
+        assert parser.tool_calls_begin == "<｜tool▁calls▁begin｜>"
+        assert parser.tool_calls_end == "<｜tool▁calls▁end｜>"
+        assert parser.tool_call_begin == "<｜tool▁call▁begin｜>"
+        assert parser.tool_call_end == "<｜tool▁call▁end｜>"
+        assert parser.tool_sep == "<｜tool▁sep｜>"
+        assert parser.tool_output_begin == "<｜tool▁output▁begin｜>"
+        assert parser.tool_output_end == "<｜tool▁output▁end｜>"
