@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 
 import openai
 from finqa_constants import CORRECTNESS_PROMPT_PATH, MULTI_TABLE_CORRECTNESS_PROMPT_PATH
@@ -34,8 +35,8 @@ with open(MULTI_TABLE_CORRECTNESS_PROMPT_PATH, encoding="utf-8") as f:
     MULTI_TABLE_CORRECTNESS_PROMPT = f.read()
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-JUDGE_MODEL = "gpt-5-nano"
-MULTI_TABLE_JUDGE_MODEL = "gpt-5-mini"
+JUDGE_MODEL = os.environ.get("FINQA_JUDGE_MODEL", "gpt-5.4-nano")
+MULTI_TABLE_JUDGE_MODEL = os.environ.get("FINQA_MULTI_TABLE_JUDGE_MODEL", "gpt-5.4-mini")
 
 CORRECTNESS_WEIGHTS = {
     "primary_data_score": 0.30,
@@ -62,6 +63,44 @@ def _make_judge_client():
 
 
 _JUDGE_CLIENT = _make_judge_client()
+
+# ---------------------------------------------------------------------------
+# Judge call reliability
+# ---------------------------------------------------------------------------
+# A response that stops for any reason other than a clean completion is not a
+# verdict. Measured on Qwen3.8-27B: 12% of calls came back with
+# incomplete_details.reason == "max_output_tokens", and in that state the
+# Responses API returns an EMPTY output_text -- which this module's
+# `("true" in text) and ("false" not in text)` check turns deterministically
+# into False, i.e. reward 0. That is a one-directional bias: it can only mark a
+# correct answer wrong, never the reverse. So retry instead of scoring it.
+JUDGE_MAX_ATTEMPTS = int(os.environ.get("FINQA_JUDGE_MAX_ATTEMPTS", "10"))
+JUDGE_FINISH_LOG = os.environ.get("FINQA_JUDGE_FINISH_LOG", "")
+
+
+def _finish_reason(response) -> str:
+    """chat-completions `finish_reason` equivalent for the Responses API."""
+    inc = getattr(response, "incomplete_details", None)
+    reason = getattr(inc, "reason", None) if inc else None
+    status = getattr(response, "status", None)
+    if reason:
+        return reason          # max_output_tokens | content_filter | ...
+    if status == "completed":
+        return "stop"
+    return status or "unknown"
+
+
+def _log_finish(finish: str, attempt: int, ok: bool) -> None:
+    """Record the finish reason of every judge call."""
+    if JUDGE_FINISH_LOG:
+        try:
+            with open(JUDGE_FINISH_LOG, "a", encoding="utf-8") as fh:
+                fh.write(f"{time.time():.3f}\t{finish}\tattempt={attempt}\tok={int(ok)}\n")
+        except OSError:
+            pass
+    if not ok:
+        print(f"[finqa-judge] finish_reason={finish} on attempt {attempt}/{JUDGE_MAX_ATTEMPTS}; retrying", flush=True)
+
 
 
 def _extract_final_answer(action: str, *, prefer_tail: bool = False) -> str:
@@ -133,10 +172,28 @@ def _call_judge(system_prompt: str, user_prompt: str, *, multi_table: bool) -> t
         request["reasoning"] = {"effort": "low"}
         request["text"] = {"verbosity": "low"}
 
-    try:
-        response = _JUDGE_CLIENT.responses.create(**request)
-        out = getattr(response, "output_text", "") or ""
+    out = ""
+    for attempt in range(1, JUDGE_MAX_ATTEMPTS + 1):
+        try:
+            response = _JUDGE_CLIENT.responses.create(**request)
+            finish = _finish_reason(response)
+            out = getattr(response, "output_text", "") or ""
+            ok = finish == "stop" and bool(out.strip())
+        except Exception as e:  # noqa: BLE001 - any transport/API error is retryable
+            finish, out, ok = f"exception:{type(e).__name__}", "", False
+        _log_finish(finish, attempt, ok)
+        if ok:
+            break
+    else:
+        print(
+            f"[finqa-judge] ALARM: {JUDGE_MAX_ATTEMPTS} consecutive abnormal finish_reasons "
+            f"(last={finish}); scoring this sample as incorrect. model={request['model']} "
+            f"max_output_tokens={request['max_output_tokens']}",
+            flush=True,
+        )
+        return (0.0 if multi_table else False), {}
 
+    try:
         if multi_table:
             try:
                 parsed = json.loads(out)
