@@ -131,6 +131,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv*/
 env/
 venv/
 ENV/
@@ -223,6 +224,48 @@ gcp-key.json
 # litellm proxy auto-generated config (may contain API keys)
 **/litellm_proxy_config_autogen.yaml
 **/.litellm_proxy/
+
+# Local experiment artifacts: keep scripts/configs, not datasets or model state.
+/cookbooks/finqa/data/
+/exp_scripts/**/data/
+/exp_scripts/**/datasets/
+/exp_scripts/**/company_tables/
+/exp_scripts/**/runtime*/
+/exp_scripts/**/.rllm*/
+/exp_scripts/**/.derived_templates/
+/exp_scripts/**/checkpoints/
+/exp_scripts/**/checkpoints
+/exp_scripts/**/merged/
+/exp_scripts/**/merged
+/exp_scripts/**/merged*/
+/exp_scripts/**/merged-*
+/exp_scripts/**/outputs*/
+/exp_scripts/**/results/
+/exp_scripts/**/eval/
+/exp_scripts/**/eval_*/
+/exp_scripts/**/episodes/
+/exp_scripts/**/smoke/
+/exp_scripts/**/logs/
+/exp_scripts/**/wandb/
+/exp_scripts/**/*.parquet
+/exp_scripts/**/*.arrow
+/exp_scripts/**/*.safetensors
+/exp_scripts/**/*.pt
+/exp_scripts/**/*.pth
+/exp_scripts/**/*.bin
+/exp_scripts/**/*.ckpt
+/exp_scripts/**/*.jsonl
+/exp_scripts/**/*.log
+/exp_scripts/**/*.pid
+/exp_scripts/**/*.bak*
+/exp_scripts/**/*.v1-*
+/exp_scripts/**/.judge_creds
+/exp_scripts/**/.azure_creds
+/exp_scripts/**/.env*
+/exp_scripts/**/*credentials*
+/exp_scripts/**/log_*.txt
+/exp_scripts/**/history*.txt
+/exp_scripts/**/grader_ab/result*.json
 
 # IDE
 .vscode/

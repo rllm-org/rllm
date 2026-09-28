@@ -1,0 +1,3 @@
+=== 2026-09-16T12:50:06-04:00  .16 PRPO-safe since launch 12:12 (watch since 2026-09-16T12:19:57-04:00) ===
+trainer pid: start=3660269 now=3674976 (CHANGED / DEAD)
+  steps=1 (max 1)  rollouts=64  reward mean=0.3438  eval p50=1s p90=2s p95=3s max=7s  eval>=12s=0 (0.00%)  alarms=0 (0.00%)  tracebacks=0

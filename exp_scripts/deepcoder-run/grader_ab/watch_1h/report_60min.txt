@@ -1,0 +1,4 @@
+=== 2026-09-16T13:11:20-04:00  window since 2026-09-16T12:11:13-04:00 ===
+prpo trainer pid: start=1411195 now=1411195 (same process, no restart)
+  prpo: steps completed in window=15 (293-307)  rollouts=960  eval p90=13s p95=16s  eval>=12s=114 (11.88%)  alarms=28 (2.92%)
+  grpo: steps completed in window=0   rollouts=0  eval p90=-1s p95=-1s  eval>=12s=0 (0.00%)  alarms=0 (0.00%)
