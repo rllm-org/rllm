@@ -105,3 +105,14 @@ class TestEvalProxyManager:
         assert entry["litellm_params"]["model"] == "openai/openai/gpt-5.5"
         assert entry["litellm_params"]["api_key"] == "ok-orca-key"
         assert entry["litellm_params"]["api_base"] == "https://api.orcarouter.ai/v1"
+
+    def test_build_proxy_config_cheaperinference(self):
+        """Cheaper Inference should route through the OpenAI adapter pinned to its api_base."""
+        pm = EvalProxyManager(provider="cheaperinference", model_name="gpt-5.4-mini", api_key="ci-test-key")
+        config = pm.build_proxy_config()
+
+        entry = config["model_list"][0]
+        assert entry["model_name"] == "gpt-5.4-mini"
+        assert entry["litellm_params"]["model"] == "openai/gpt-5.4-mini"
+        assert entry["litellm_params"]["api_key"] == "ci-test-key"
+        assert entry["litellm_params"]["api_base"] == "https://api.cheaperinference.com/v1"

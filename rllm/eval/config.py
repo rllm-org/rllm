@@ -304,6 +304,27 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         ],
         base_url="https://api.orcarouter.ai/v1",
     ),
+    # --- Cheaper Inference — OpenAI-compatible LLM gateway ---
+    ProviderInfo(
+        id="cheaperinference",
+        label="Cheaper Inference",
+        # Route through LiteLLM's OpenAI-compatible adapter pinned to
+        # Cheaper Inference's api_base (same pattern as Tinker). Model ids
+        # are bare (gpt-5.4-mini, claude-sonnet-5, ...); ``litellm_prefix="openai"``
+        # sends the id verbatim to the gateway.
+        litellm_prefix="openai",
+        env_key="CHEAPER_INFERENCE_API_KEY",
+        default_model="gpt-5.4-mini",
+        models=[
+            "gpt-5.4-mini",
+            "gpt-5.4",
+            "claude-sonnet-5",
+            "gemini-3.1-pro",
+            "deepseek-v4-flash",
+            "glm-5.3",
+        ],
+        base_url="https://api.cheaperinference.com/v1",
+    ),
     # --- Custom endpoint (last) ---
     ProviderInfo(
         id="custom",
