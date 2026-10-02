@@ -118,6 +118,7 @@ class SessionRouter:
         policy: RoutingPolicy | None = None,
         health_check_interval: float = 10.0,
         failure_threshold: int = 3,
+        health_check_timeout: float = 5.0,
     ) -> None:
         self.workers: list[WorkerInfo] = []
         self.dead_workers: set[str] = set()
@@ -126,6 +127,7 @@ class SessionRouter:
         self.policy: RoutingPolicy = policy or StickyLeastLoadedPolicy()
         self._health_interval = health_check_interval
         self._failure_threshold = failure_threshold
+        self._health_timeout = health_check_timeout
         self._health_task: asyncio.Task[None] | None = None
         self._http: httpx.AsyncClient | None = None
 
@@ -181,7 +183,7 @@ class SessionRouter:
     async def start_health_checks(self) -> None:
         if self._health_task is not None:
             return
-        self._http = httpx.AsyncClient(timeout=httpx.Timeout(5.0))
+        self._http = httpx.AsyncClient(timeout=httpx.Timeout(self._health_timeout))
         self._health_task = asyncio.create_task(self._health_loop())
 
     async def stop_health_checks(self) -> None:

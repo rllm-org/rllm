@@ -101,6 +101,9 @@ rllm-model-gateway \
 host: "0.0.0.0"
 port: 9090
 db_path: "~/.rllm/gateway.db"
+health_check_interval: 10.0
+health_check_timeout: 5.0
+health_failure_threshold: 3
 
 workers:
   - url: "http://vllm-0:8000/v1"
@@ -112,6 +115,23 @@ workers:
 ### Environment Variables
 
 `RLLM_GATEWAY_HOST`, `RLLM_GATEWAY_PORT`, `RLLM_GATEWAY_DB_PATH`, `RLLM_GATEWAY_LOG_LEVEL`, `RLLM_GATEWAY_STORE`
+
+Health checks also accept `RLLM_GATEWAY_HEALTH_CHECK_TIMEOUT` and
+`RLLM_GATEWAY_HEALTH_FAILURE_THRESHOLD`. Environment variables override YAML values.
+
+### Worker health checks
+
+`health_check_timeout` is the positive, finite timeout in seconds for each HTTPX
+connect, read, write, and pool operation (default: `5.0`).
+`health_failure_threshold` is the positive integer number of consecutive failed
+probes before a worker is marked unhealthy (default: `3`). A successful probe
+resets the failure count and makes an unhealthy worker available again.
+
+For workers that temporarily stop responding during compilation or weight loading,
+increase these settings in YAML, environment variables, or `GatewayConfig`.
+For example, `health_check_timeout: 30.0` and `health_failure_threshold: 6`
+allow more time for workers to recover, at the cost of slower detection of real
+failures. These settings only affect health probes, not inference request timeouts.
 
 ## Embedded Usage
 
