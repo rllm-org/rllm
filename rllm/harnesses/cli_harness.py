@@ -379,7 +379,13 @@ class BaseCliHarness(SandboxedAgentFlow):
 
         start = time.monotonic()
         try:
-            self._exec_agent(sandbox, cmd, timeout=exec_timeout, env=env_vars)
+            from contextlib import nullcontext
+
+            network_scope = getattr(sandbox, "agent_network", None)
+            if os.environ.get("RLLM_AGENT_NETWORK_DOMAINS") is not None and network_scope is None:
+                raise RuntimeError("Agent network restrictions require the Modal backend")
+            with network_scope(config.base_url) if network_scope is not None else nullcontext():
+                self._exec_agent(sandbox, cmd, timeout=exec_timeout, env=env_vars)
         except SandboxCommandTimeout as e:
             # The exec ended at the wall — either the agent really spent its
             # budget, or the backend lost the command's completion (e.g. a

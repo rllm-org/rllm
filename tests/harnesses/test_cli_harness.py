@@ -82,6 +82,29 @@ def _make_config(base_url: str = "http://gw:8000/sessions/eval-0/v1", model: str
     return AgentConfig(base_url=base_url, model=model, session_uid="eval-0")
 
 
+def test_network_policy_wraps_agent_execution(monkeypatch):
+    from contextlib import contextmanager
+
+    events = []
+
+    class RestrictedSandbox(FakeSandbox):
+        @contextmanager
+        def agent_network(self, base_url):
+            assert base_url == "https://gateway.example/v1"
+            events.append("restrict")
+            try:
+                yield
+            finally:
+                events.append("restore")
+
+    h = OpenCodeHarness()
+    monkeypatch.setenv("RLLM_AGENT_NETWORK_DOMAINS", "[]")
+    monkeypatch.setattr(h, "write_configs", lambda *args: events.append("configure"))
+    monkeypatch.setattr(h, "_exec_agent", lambda *args, **kwargs: events.append("agent"))
+    h.run(_make_task(), _make_config(base_url="https://gateway.example/v1"), env=RestrictedSandbox())
+    assert events == ["configure", "restrict", "agent", "restore"]
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle: install on sandbox-ready, run() execs the CLI and returns an
 # outcome Episode whose termination_reason reflects what the run observed.

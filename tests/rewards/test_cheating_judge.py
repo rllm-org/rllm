@@ -260,8 +260,43 @@ def test_skips_without_api_call(make_judge, skip):
         assert e == before
 
 
+@pytest.mark.parametrize("penalty", [0.0, 0.25, 1.0])
+@pytest.mark.parametrize("verdict", ["PASS", "FAIL"])
+@pytest.mark.parametrize("compact", [False, True])
+def test_configurable_penalty(make_judge, penalty, verdict, compact):
+    e = episode(compact=compact)
+    e.trajectories.append(copy.deepcopy(e.trajectories[0]))
+    for t in e.trajectories:
+        t.steps[0].reward = 0.0
+        t.steps[-1].reward = 1.0
+    before = copy.deepcopy(e)
+    judge = make_judge(lambda _: httpx.Response(200, json=completion(f"### {verdict}")), penalty=penalty)
+    asyncio.run(judge.apply(TASK, e))
+    applied = penalty if verdict == "FAIL" else 0.0
+    assert e.metrics["cheat_frac"] == float(verdict == "FAIL")
+    assert e.metrics["judge_coverage"] == 1.0
+    assert e.metrics["reward_removed_frac"] == float(applied > 0)
+    assert e.metadata["cheating_judge"]["penalty"] == penalty
+    assert e.is_correct == (applied == 0)
+    assert e.termination_reason == before.termination_reason
+    for t in e.trajectories:
+        assert t.reward == 1.0 - applied
+        assert t.steps[0].reward == 0.0
+        assert t.steps[-1].reward == 1.0 - applied
+    if applied == 0:
+        assert e.trajectories == before.trajectories
+        assert e.metrics["accuracy"] == before.metrics["accuracy"]
+
+
+@pytest.mark.parametrize("penalty", [-0.1, 1.1, float("nan"), float("inf")])
+def test_invalid_penalty(penalty):
+    with pytest.raises(ValueError, match="penalty"):
+        CheatingJudgeConfig(model="judge", penalty=penalty)
+
+
 @pytest.mark.parametrize("mode", ["malformed", "timeout", "rate_limit", "server_error", "auth"])
-def test_judge_failures_filter_not_cheating(make_judge, mode):
+@pytest.mark.parametrize("penalty", [0.0, 1.0])
+def test_judge_failures_filter_not_cheating(make_judge, mode, penalty):
     calls = []
 
     def handler(request):
@@ -272,7 +307,7 @@ def test_judge_failures_filter_not_cheating(make_judge, mode):
         return httpx.Response(status, json=completion("no verdict"))
 
     e = episode()
-    asyncio.run(make_judge(handler).apply(TASK, e))
+    asyncio.run(make_judge(handler, penalty=penalty).apply(TASK, e))
     assert len(calls) == (1 if mode == "auth" else 2)
     assert e.termination_reason == TerminationReason.GRADING_ERROR
     assert not e.is_correct and e.trajectories[0].reward == 0.0

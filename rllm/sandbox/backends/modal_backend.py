@@ -14,6 +14,7 @@ and ``MODAL_TOKEN_SECRET`` environment variables.
 from __future__ import annotations
 
 import atexit
+from contextlib import contextmanager
 import io
 import logging
 import os
@@ -248,6 +249,10 @@ class ModalSandbox:
                 modal_image = image  # already a modal.Image
 
             create_kwargs: dict = {"app": self._app, "image": modal_image, "timeout": self._timeout}
+            self._agent_network_enabled = os.environ.get("RLLM_AGENT_NETWORK_DOMAINS") is not None
+            if self._agent_network_enabled:
+                # Enable both mutable policy types; trusted setup stays online.
+                create_kwargs.update(outbound_domain_allowlist=["*"], outbound_cidr_allowlist=["0.0.0.0/0"])
             # name = per-task label (visible in `modal sandbox list`); tags carry
             # the run id so you can filter/terminate a run's sandboxes:
             #   modal.Sandbox.list(tags={"rllm_run_id": "<id>"})  -> .terminate()
@@ -260,8 +265,10 @@ class ModalSandbox:
                 create_kwargs["tags"] = run_tags
             else:
                 post_create_tags = run_tags
-            for key in ("secrets", "volumes", "workdir", "gpu", "cpu", "memory"):
+            for key in ("secrets", "volumes", "workdir", "gpu", "cpu", "memory", "block_network", "outbound_domain_allowlist", "outbound_cidr_allowlist"):
                 if key in kwargs:
+                    if self._agent_network_enabled and key in ("block_network", "outbound_domain_allowlist", "outbound_cidr_allowlist"):
+                        raise ValueError("Cannot combine static networking rules with RLLM_AGENT_NETWORK_DOMAINS")
                     create_kwargs[key] = kwargs.pop(key)
 
             # Keep the sandbox alive for exec-based use regardless of the image's
@@ -299,6 +306,25 @@ class ModalSandbox:
         """
         for k, v in (env or {}).items():
             self._persistent_env[str(k)] = str(v)
+
+    @contextmanager
+    def agent_network(self, base_url: str):
+        """Host-only policy switch: restrict the solver, restore for verification."""
+        from rllm.sandbox.network_policy import agent_network_policy
+
+        policy = agent_network_policy(base_url)
+        if policy is None:
+            yield
+            return
+        if not self._agent_network_enabled:
+            raise RuntimeError("Sandbox was not created with mutable networking enabled")
+        update = self._sandbox._experimental_set_outbound_network_policy
+        update(**policy)  # Fail closed: never run the solver if this fails.
+        logger.info("Agent network restricted: %s", policy)
+        try:
+            yield
+        finally:
+            update(outbound_domain_allowlist=["*"], outbound_cidr_allowlist=["0.0.0.0/0"])
 
     def exec(self, command: str, timeout: float | None = None, user: str | int | None = None) -> str:
         """Execute a command inside the Modal sandbox.

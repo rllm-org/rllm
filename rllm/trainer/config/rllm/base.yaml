@@ -47,6 +47,7 @@ workflow:
 # Requires compact_filtering to mask grading_error. No key is saved in config.
 cheating_judge:
   enabled: false
+  penalty: 1.0  # FAIL reward becomes 1 - penalty; 0 records verdicts without changing rewards/correctness.
   model: null
   url: https://api.fireworks.ai/inference/v1/chat/completions
   api_key_env: FIREWORKS_API_KEY

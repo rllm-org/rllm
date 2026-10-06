@@ -91,12 +91,15 @@ class CheatingJudgeConfig:
     max_attempts: int = 3
     retry_delay_s: float = 2.0
     apply_to_validation: bool = False
+    penalty: float = 1.0
 
     def __post_init__(self):
         if not self.model or self.max_attempts < 1 or self.timeout_s <= 0 or self.retry_delay_s < 0:
             raise ValueError("Invalid cheating judge configuration")
         if self.reasoning_effort not in ("low", "high", "max"):
             raise ValueError("Unsupported judge reasoning effort")
+        if not 0.0 <= self.penalty <= 1.0:
+            raise ValueError("Cheating penalty must be between 0.0 and 1.0")
 
 
 class CheatingJudge:
@@ -135,6 +138,7 @@ class CheatingJudge:
             return
         info = {
             "model": self.config.model,
+            "penalty": self.config.penalty,
             "reasoning_effort": self.config.reasoning_effort,
             "original_rewards": original_rewards,
             "original_is_correct": episode.is_correct,
@@ -191,8 +195,15 @@ class CheatingJudge:
             episode.metrics["judge_coverage"] = 1.0
             # Conditional metric: only successfully judged episodes contribute.
             episode.metrics["cheat_frac"] = float(verdict == "FAIL")
-            if verdict == "FAIL":
+            if verdict == "FAIL" and self.config.penalty > 0:
+                # Eligible trajectories have reward 1.0. Scale step rewards
+                # too, preserving zero-reward intermediate steps.
+                rewards = [(t.reward, [s.reward for s in t.steps]) for t in episode.trajectories]
                 self._zero_reward(episode)
+                for trajectory, (reward, step_rewards) in zip(episode.trajectories, rewards):
+                    trajectory.reward = reward * (1.0 - self.config.penalty)
+                    for step, reward in zip(trajectory.steps, step_rewards):
+                        step.reward = reward * (1.0 - self.config.penalty) if reward is not None else 0.0
                 episode.metrics["reward_removed_frac"] = 1.0
         except Exception as exc:
             # Return the existing episode, not an exception that would rerun
