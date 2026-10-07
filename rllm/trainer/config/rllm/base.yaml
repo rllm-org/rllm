@@ -38,13 +38,18 @@ workflow:
   raise_on_error: true
   # Skip grading unless the agent explicitly completed its environment protocol.
   verify_only_on_env_done: false
+  # AgentFlow: convert verifier rewards to 1 only for exactly 1.0, else 0,
+  # before judging/logging/filtering. Applies to training and validation.
+  binary_rewards: false
   # Sandbox warm-pool prefetch for training (mirrors eval): 0 disables,
   # negative matches the sandbox-creation frontier, positive = literal cap.
   warm_queue_size: -1
 
 # Optional host-side terminal attempted-cheating judge, after the task verifier.
 # Exactly one request per correct episode (plus bounded retries on failures).
-# Requires compact_filtering to mask grading_error. No key is saved in config.
+# Positive penalties require compact_filtering to mask grading_error.
+# With penalty 0, judge failures keep their termination reason and receive 0
+# reward; the exception is still logged. No key is saved in config.
 cheating_judge:
   enabled: false
   penalty: 1.0  # FAIL reward becomes 1 - penalty; 0 records verdicts without changing rewards/correctness.

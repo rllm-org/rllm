@@ -295,8 +295,8 @@ def test_invalid_penalty(penalty):
 
 
 @pytest.mark.parametrize("mode", ["malformed", "timeout", "rate_limit", "server_error", "auth"])
-@pytest.mark.parametrize("penalty", [0.0, 1.0])
-def test_judge_failures_filter_not_cheating(make_judge, mode, penalty):
+@pytest.mark.parametrize("penalty", [0.0, 0.25, 1.0])
+def test_judge_failures_filter_only_with_positive_penalty(make_judge, mode, penalty):
     calls = []
 
     def handler(request):
@@ -309,13 +309,16 @@ def test_judge_failures_filter_not_cheating(make_judge, mode, penalty):
     e = episode()
     asyncio.run(make_judge(handler, penalty=penalty).apply(TASK, e))
     assert len(calls) == (1 if mode == "auth" else 2)
-    assert e.termination_reason == TerminationReason.GRADING_ERROR
+    assert e.termination_reason == (TerminationReason.GRADING_ERROR if penalty > 0 else TerminationReason.ENV_DONE)
     assert not e.is_correct and e.trajectories[0].reward == 0.0
+    assert all(step.reward == 0.0 for step in e.trajectories[0].steps)
     assert e.metrics["judge_error_frac"] == 1.0 and e.metrics["judge_coverage"] == 0.0
     assert e.metrics["reward_removed_frac"] == 0.0 and "cheat_frac" not in e.metrics
     assert e.metadata["error"]["error_type"] == "CheatingJudgeError"
+    assert e.metadata["cheating_judge"]["status"] == "error"
+    assert e.metadata["cheating_judge"]["error"]
     assert "test-secret-not-for-output" not in json.dumps(e.to_dict())
-    assert CompactFilteringConfig(enable=True, mask_termination_reasons=["grading_error"]).should_mask(e.termination_reason)
+    assert CompactFilteringConfig(enable=True, mask_termination_reasons=["grading_error"]).should_mask(e.termination_reason) == (penalty > 0)
 
 
 def test_retry_recovers_and_counts_usage(make_judge):
@@ -332,12 +335,15 @@ def test_retry_recovers_and_counts_usage(make_judge):
     assert e.metrics["cheat_frac"] == 1.0 and e.metrics["judge_error_frac"] == 0.0
 
 
-def test_invalid_correct_episode_is_grading_error(make_judge):
+@pytest.mark.parametrize("penalty", [0.0, 1.0])
+def test_invalid_correct_episode_retains_judge_exception(make_judge, penalty):
     e = episode()
     e.trajectories.append(copy.deepcopy(e.trajectories[0]))
     e.trajectories[-1].reward = 0.0
-    asyncio.run(make_judge(lambda _: pytest.fail("No request for invalid input")).apply(TASK, e))
-    assert e.termination_reason == TerminationReason.GRADING_ERROR
+    asyncio.run(make_judge(lambda _: pytest.fail("No request for invalid input"), penalty=penalty).apply(TASK, e))
+    assert e.termination_reason == (TerminationReason.GRADING_ERROR if penalty > 0 else TerminationReason.ENV_DONE)
+    assert not e.is_correct and all(t.reward == 0.0 for t in e.trajectories)
+    assert e.metadata["error"]["error_type"] == "CheatingJudgeError"
     assert e.metrics["judge_requests"] == 0 and "cheat_frac" not in e.metrics
 
 
@@ -390,3 +396,10 @@ def test_config_requires_error_filter_and_key(monkeypatch):
     with pytest.raises(ValueError, match="TEST_JUDGE_KEY"):
         build_cheating_judge(config, filtering)
     assert build_cheating_judge({"enabled": False}, CompactFilteringConfig()) is None
+
+
+def test_zero_penalty_does_not_require_grading_error_filter(monkeypatch):
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test-key")
+    config = {"enabled": True, "model": "judge", "api_key_env": "TEST_JUDGE_KEY", "penalty": 0.0}
+    judge = build_cheating_judge(config, CompactFilteringConfig())
+    assert judge.config.penalty == 0.0

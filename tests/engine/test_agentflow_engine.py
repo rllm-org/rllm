@@ -28,7 +28,8 @@ class _Evaluator:
 
 
 @pytest.mark.parametrize("answer,is_validation", [("### PASS", False), ("### FAIL", False), ("malformed", False), ("unused", True)])
-def test_judge_after_teardown_before_logging_without_solver_retry(monkeypatch, answer, is_validation):
+@pytest.mark.parametrize("penalty", [0.0, 1.0])
+def test_judge_after_teardown_before_logging_without_solver_retry(monkeypatch, answer, is_validation, penalty):
     import httpx
 
     from rllm.engine.agentflow_engine import TaskContext
@@ -46,7 +47,7 @@ def test_judge_after_teardown_before_logging_without_solver_retry(monkeypatch, a
         events.append("judge")
         return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": answer}}]})
 
-    judge = CheatingJudge(CheatingJudgeConfig(model="judge", api_key_env="TEST_JUDGE_KEY", max_attempts=2, retry_delay_s=0), transport=httpx.MockTransport(handler))
+    judge = CheatingJudge(CheatingJudgeConfig(model="judge", api_key_env="TEST_JUDGE_KEY", max_attempts=2, retry_delay_s=0, penalty=penalty), transport=httpx.MockTransport(handler))
     scored = Episode(is_correct=True, termination_reason=TerminationReason.ENV_DONE,
                      trajectories=[Trajectory(name="solver", reward=1.0, steps=[Step(chat_completions=[{"role": "assistant", "content": "Done"}])])])
 
@@ -75,17 +76,20 @@ def test_judge_after_teardown_before_logging_without_solver_retry(monkeypatch, a
     assert events[:3] == ["solver", "verifier", "teardown"]
     assert events[-1] == "logged" and events.count("solver") == 1
     assert events.count("judge") == (0 if is_validation else 2 if answer == "malformed" else 1)
-    expected_correct = is_validation or answer == "### PASS"
+    expected_correct = is_validation or answer == "### PASS" or (answer == "### FAIL" and penalty == 0)
     assert result.is_correct == saved[0]["is_correct"] == expected_correct
     assert result.trajectories[0].reward == float(expected_correct)
     filtering = CompactFilteringConfig(enable=True, mask_termination_reasons=["grading_error"])
     groups = _default_traj_grouping_hook([result], TransformConfig(), filtering)
-    if answer == "malformed":
+    if answer == "malformed" and penalty > 0:
         assert result.termination_reason == TerminationReason.GRADING_ERROR
         assert groups == [] and "cheat_frac" not in result.metrics
     else:
-        assert len(groups) == 1  # A detected cheat remains a real negative sample.
+        assert len(groups) == 1
         assert groups[0].trajectories[0].reward == float(expected_correct)
+        if answer == "malformed":
+            assert result.termination_reason == TerminationReason.ENV_DONE
+            assert saved[0]["info"]["error"]["error_type"] == "CheatingJudgeError"
 
 
 class _Gateway:
@@ -240,6 +244,97 @@ def _valid_token_trace(session_id: str):
         finish_reason="stop",
         metadata={},
     )
+
+
+@pytest.mark.parametrize("raw_reward", [0.0, 0.9, 0.975, 0.999999, 1.0, 1.1, -0.1])
+@pytest.mark.parametrize("binary_rewards", [False, True])
+@pytest.mark.parametrize("is_validation", [False, True])
+def test_binary_verifier_rewards_at_rollout_boundary(raw_reward, binary_rewards, is_validation):
+    class Evaluator:
+        def evaluate(self, task, episode):
+            return EvalOutput(reward=raw_reward, is_correct=raw_reward >= 1.0)
+
+    kwargs = {"binary_rewards": True} if binary_rewards else {}  # Exercise the default, too.
+    engine = AgentFlowEngine(
+        agent_flow=_Agent(), evaluator=Evaluator(), gateway=_Gateway([_valid_token_trace("task:0")]),
+        model="policy", n_parallel_tasks=1, **kwargs,
+    )
+    try:
+        result = asyncio.run(engine._run_single(task_from_row({"instruction": "Solve."}, "task"), "task:0", is_validation=is_validation))
+    finally:
+        engine.shutdown()
+
+    expected = float(raw_reward == 1.0) if binary_rewards else raw_reward
+    assert result.trajectories[0].reward == expected
+    assert result.is_correct == (expected == 1.0 if binary_rewards else raw_reward >= 1.0)
+    if binary_rewards:
+        assert result.metrics["raw_verifier_reward"] == raw_reward
+        assert result.metadata["raw_verifier_rewards"] == [raw_reward]
+        assert result.metadata["raw_verifier_is_correct"] == (raw_reward >= 1.0)
+    else:
+        assert "raw_verifier_reward" not in result.metrics
+        assert "raw_verifier_rewards" not in result.metadata
+
+
+def test_binary_rewards_preserve_trajectory_overrides_and_grading_errors():
+    class Evaluator:
+        def evaluate(self, task, episode):
+            episode.trajectories[0].reward = 0.975
+            episode.trajectories[1].reward = 1.0
+            return EvalOutput(reward=0.9, is_correct=True, error="RewardFileNotFoundError")
+
+    class Agent(_Agent):
+        async def arun(self, task, config):
+            return Episode(termination_reason=TerminationReason.ENV_DONE, trajectories=[Trajectory(name="solver"), Trajectory(name="other")])
+
+    engine = AgentFlowEngine(
+        agent_flow=Agent(), evaluator=Evaluator(), gateway=_Gateway([_valid_token_trace("task:0")]),
+        model="policy", n_parallel_tasks=1, binary_rewards=True,
+    )
+    try:
+        result = asyncio.run(engine._run_single(task_from_row({"instruction": "Solve."}, "task"), "task:0", is_validation=True))
+    finally:
+        engine.shutdown()
+    assert [traj.reward for traj in result.trajectories] == [0.0, 1.0]
+    assert result.metadata["raw_verifier_rewards"] == [0.975, 1.0]
+    assert result.metrics["raw_verifier_reward"] == 0.9
+    assert not result.is_correct
+    assert result.termination_reason == TerminationReason.GRADING_ERROR
+    assert result.metadata["error"]["error_type"] == "RewardFileNotFoundError"
+
+
+def test_binary_partial_reward_skips_cheating_judge_without_grading_error(monkeypatch):
+    import httpx
+
+    from rllm.rewards.cheating_judge import CheatingJudge, CheatingJudgeConfig
+
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test-key")
+
+    def handler(request):
+        pytest.fail("A binarized partial reward must not call the cheating judge")
+
+    class Evaluator:
+        def evaluate(self, task, episode):
+            return EvalOutput(reward=0.975, is_correct=False)
+
+    class Agent(_Agent):
+        async def arun(self, task, config):
+            return Episode(termination_reason=TerminationReason.ENV_DONE, trajectories=[Trajectory(name="solver")])
+
+    judge = CheatingJudge(CheatingJudgeConfig(model="judge", api_key_env="TEST_JUDGE_KEY"), transport=httpx.MockTransport(handler))
+    engine = AgentFlowEngine(
+        agent_flow=Agent(), evaluator=Evaluator(), gateway=_Gateway([_valid_token_trace("task:0")]),
+        model="policy", n_parallel_tasks=1, binary_rewards=True, cheating_judge=judge,
+    )
+    try:
+        result = asyncio.run(engine._run_single(task_from_row({"instruction": "Solve."}, "task"), "task:0"))
+    finally:
+        engine.shutdown()
+    assert result.termination_reason == TerminationReason.ENV_DONE
+    assert result.trajectories[0].reward == 0.0
+    assert not result.is_correct
+    assert result.metadata["raw_verifier_rewards"] == [0.975]
+    assert "error" not in result.metadata
 
 
 def test_empty_response_retries_are_filtered_before_strict_enrichment():

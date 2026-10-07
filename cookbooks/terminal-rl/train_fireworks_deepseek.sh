@@ -8,9 +8,6 @@ if [ -z "${FIREWORKS_API_KEY}" ]; then
 fi
 
 export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-modal}"
-# Package-registry-only agent networking; setup and verification stay unrestricted.
-# The gateway is allowed automatically; an IP tunnel permits every port on that IP.
-# Domain rules require HTTPS. HTTP apt sources and arbitrary GitHub downloads remain blocked.
 export RLLM_AGENT_NETWORK_DOMAINS="${RLLM_AGENT_NETWORK_DOMAINS:-[
     \"pypi.org\", \"files.pythonhosted.org\",
     \"registry.npmjs.org\",
@@ -32,13 +29,14 @@ export RLLM_MODAL_SANDBOX_CREATE_RPS="${RLLM_MODAL_SANDBOX_CREATE_RPS:-2}"
 export RLLM_HARNESS_SETUP_TIMEOUT_S="${RLLM_HARNESS_SETUP_TIMEOUT_S:-1200}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-7200}"
 export RLLM_HARNESS_VERIFIER_TIMEOUT_S="${RLLM_HARNESS_VERIFIER_TIMEOUT_S:-1200}"
+export RLLM_SANDBOX_CONTROL_TIMEOUT_S="${RLLM_SANDBOX_CONTROL_TIMEOUT_S:-120}"
 export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-10000}"
 python -u train_debug.py \
     rllm/backend=fireworks \
-    model.name=accounts/fireworks/models/deepseek-v4-flash-0731 \
-    model.tokenizer_model=deepseek-ai/DeepSeek-V4-Flash-0731 \
+    model.name=accounts/fireworks/models/deepseek-v4p1-flash \
+    model.tokenizer_model=deepseek-ai/DeepSeek-V4.1-Flash \
     model.lora_rank=128 \
-    fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/deepseek-v4-flash-0731-524k-b300-lora/versions/b5zp72tk \
+    fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/deepseek-v4p1-flash-262k-b300-lora/versions/ekbb59vm \
     fireworks_config.policy_trainer_replica_count=1 \
     fireworks_config.rollout_deployment_replica_count=4  \
     fireworks_infra.trainers.policy.timeout_s=7200 \
@@ -48,16 +46,17 @@ python -u train_debug.py \
     training.grad_clip_norm=0.0 \
     training.beta2=0.999 \
     training.eps=1e-10 \
-    training.max_length=524288 \
+    training.max_length=262144 \
     rllm.rollout.train.temperature=1.0 \
     rllm.rollout.train.top_p=1.0 \
     rllm.rollout.val.temperature=1.0 \
     rllm.rollout.val.top_p=0.95 \
     rllm.rollout.n_val=4 \
-    rllm.data.max_prompt_length=524288 \
+    rllm.data.max_prompt_length=262144 \
     rllm.data.max_response_length=32768 \
     rllm.data.train_batch_size=1 \
     rllm.data.val_batch_size=-1 \
+    rllm.workflow.binary_rewards=true \
     rllm.cheating_judge.enabled=true \
     rllm.cheating_judge.penalty=0.0 \
     rllm.cheating_judge.model=accounts/fireworks/models/deepseek-v4p1-flash \
@@ -92,7 +91,7 @@ python -u train_debug.py \
     rllm.episode_logging.log_episodes=true \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='terminal-rl' \
-    rllm.trainer.experiment_name='dsv4-flash-0731-512k-lora-tb4-1005' \
+    rllm.trainer.experiment_name='dsv4p1-flash-262k-lora-tb4-1006' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=0 \
     rllm.trainer.save_freq=10 \

@@ -461,6 +461,7 @@ class AgentFlowEngine:
         val_sampling_params: dict | None = None,
         compact_episodes: bool = False,
         cheating_judge: CheatingJudge | None = None,
+        binary_rewards: bool = False,
     ) -> None:
         if evaluator is None and hooks is None:
             raise ValueError("AgentFlowEngine requires either an `evaluator` (single evaluator for every task) or `hooks` (per-task evaluator + setup/teardown). Both cannot be None.")
@@ -486,6 +487,7 @@ class AgentFlowEngine:
         self.val_sampling_params = val_sampling_params
         self.compact_episodes = compact_episodes
         self.cheating_judge = cheating_judge
+        self.binary_rewards = binary_rewards
 
         self.n_parallel_tasks = n_parallel_tasks
         self.executor = ThreadPoolExecutor(max_workers=n_parallel_tasks)
@@ -787,8 +789,9 @@ class AgentFlowEngine:
 
         # Verification is complete and the sandbox has been released. Judge
         # only the recorded episode, before logging/filtering/advantage math.
-        # The judge handles its own failures as GRADING_ERROR, never by rerunning
-        # the solver or treating a missing judgment as a policy failure.
+        # The judge records its own failures without rerunning the solver;
+        # positive penalties classify these as GRADING_ERROR, while penalty 0
+        # retains the termination reason with zero reward and the exception.
         judge = getattr(self, "cheating_judge", None)
         if judge is not None:
             await judge.apply(task_obj, enriched, is_validation=is_validation)
@@ -952,6 +955,19 @@ class AgentFlowEngine:
                 evaluation_episode,
             )
             eval_output.metadata.setdefault("verifier_skipped", 0.0)
+        if self.binary_rewards:
+            # Normalize at the evaluator boundary, before these scores enter
+            # the rollout (and before judging, logging, filtering or training).
+            # Multi-trajectory evaluators may override the shared reward.
+            raw_rewards = [traj.reward if traj.reward is not None else eval_output.reward for traj in evaluation_episode.trajectories]
+            enriched.metadata["raw_verifier_rewards"] = raw_rewards
+            enriched.metadata["raw_verifier_is_correct"] = eval_output.is_correct
+            eval_output.metadata["raw_verifier_reward"] = eval_output.reward
+            eval_output.reward = float(eval_output.reward == 1.0)
+            for traj in evaluation_episode.trajectories:
+                if traj.reward is not None:
+                    traj.reward = float(traj.reward == 1.0)
+            eval_output.is_correct = all(reward == 1.0 for reward in raw_rewards) if raw_rewards else eval_output.reward == 1.0
         if _timings is not None:
             _timings["time/evaluator_s"] = time.perf_counter() - t
             _agentflow_s = _timings.get("time/agentflow_s", 0.0)

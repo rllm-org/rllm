@@ -200,18 +200,21 @@ class CheatingJudge:
                 # too, preserving zero-reward intermediate steps.
                 rewards = [(t.reward, [s.reward for s in t.steps]) for t in episode.trajectories]
                 self._zero_reward(episode)
-                for trajectory, (reward, step_rewards) in zip(episode.trajectories, rewards):
+                for trajectory, (reward, step_rewards) in zip(episode.trajectories, rewards, strict=True):
                     trajectory.reward = reward * (1.0 - self.config.penalty)
-                    for step, reward in zip(trajectory.steps, step_rewards):
+                    for step, reward in zip(trajectory.steps, step_rewards, strict=True):
                         step.reward = reward * (1.0 - self.config.penalty) if reward is not None else 0.0
                 episode.metrics["reward_removed_frac"] = 1.0
         except Exception as exc:
             # Return the existing episode, not an exception that would rerun
-            # the expensive solver. This isn't a policy failure/negative label.
+            # the expensive solver. With penalties disabled, retain the original
+            # termination reason so this zero-reward episode isn't filtered as
+            # a grading error; the exception is still recorded below.
             error = f"{type(exc).__name__}: {exc}".replace(self._api_key, "[REDACTED]")
             info.update(status="error", error=error)
             self._zero_reward(episode)
-            episode.termination_reason = TerminationReason.GRADING_ERROR
+            if self.config.penalty > 0.0:
+                episode.termination_reason = TerminationReason.GRADING_ERROR
             episode.metadata["error"] = {"error_type": "CheatingJudgeError", "message": error}
             episode.metrics["judge_error_frac"] = 1.0
             logger.warning("Cheating judge failed for task %s: %s", task.id, error)
@@ -223,6 +226,7 @@ def build_cheating_judge(config, compact_filtering) -> CheatingJudge | None:
     """Wire only when enabled, and never let unjudged positives enter the loss."""
     if not config or not config.get("enabled", False):
         return None
-    if not compact_filtering.should_mask(TerminationReason.GRADING_ERROR):
+    judge_config = CheatingJudgeConfig(**{key: value for key, value in config.items() if key != "enabled"})
+    if judge_config.penalty > 0.0 and not compact_filtering.should_mask(TerminationReason.GRADING_ERROR):
         raise ValueError("Cheating judge requires compact filtering of grading_error")
-    return CheatingJudge(CheatingJudgeConfig(**{key: value for key, value in config.items() if key != "enabled"}))
+    return CheatingJudge(judge_config)

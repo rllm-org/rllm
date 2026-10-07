@@ -34,6 +34,7 @@ from rllm.eval.module_evaluator import PythonModuleEvaluator, _coerce_eval_resul
 from rllm.eval.script_evaluator import ShellScriptEvaluator
 from rllm.eval.types import EvalOutput
 from rllm.sandbox.protocol import Sandbox
+from rllm.sandbox.timeouts import sandbox_control_timeout_s
 from rllm.types import Episode, Evaluator, Task
 
 logger = logging.getLogger(__name__)
@@ -700,6 +701,7 @@ def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:
     # ``cd``-into-cwd or ``git checkout``. The ``mkdir`` / ``chown``
     # / ``upload_dir(files)`` steps below only fire when a workdir is
     # explicitly declared.
+    control_timeout = sandbox_control_timeout_s()
     workdir = task.metadata.get("workdir")
     env_root = task.task_dir / "environment"
     if not env_root.is_dir():
@@ -730,9 +732,9 @@ def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:
         # a distinct verifier_user — so the verifier (now actually switched to
         # that user via the backend's su emulation) can still write reward files.
         verifier_owner = task.metadata.get("verifier_user") or "root"
-        _safe_exec(sandbox, "mkdir -p /logs/verifier /tmp/rllm /tests", timeout=10)
-        _safe_exec(sandbox, "chmod 700 /logs/verifier /tmp/rllm /tests", timeout=10)
-        _safe_exec(sandbox, f"chown {verifier_owner} /logs/verifier /tmp/rllm /tests", timeout=10)
+        _safe_exec(sandbox, "mkdir -p /logs/verifier /tmp/rllm /tests", timeout=control_timeout)
+        _safe_exec(sandbox, "chmod 700 /logs/verifier /tmp/rllm /tests", timeout=control_timeout)
+        _safe_exec(sandbox, f"chown {verifier_owner} /logs/verifier /tmp/rllm /tests", timeout=control_timeout)
         if workdir:
             _safe_exec(sandbox, f"chown -R {agent_user} {workdir}", timeout=30)
 
@@ -747,7 +749,7 @@ def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:
             set_env(env_vars)
         else:
             exports = " && ".join(f"export {k}='{v}'" for k, v in env_vars.items())
-            _safe_exec(sandbox, exports, timeout=10)
+            _safe_exec(sandbox, exports, timeout=control_timeout)
 
 
 def _safe_exec(sandbox: Sandbox, command: str, timeout: float | None = None, user: str | None = None) -> str:

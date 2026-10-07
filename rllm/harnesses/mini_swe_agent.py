@@ -17,6 +17,7 @@ import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
 from rllm.sandbox.protocol import Sandbox
+from rllm.sandbox.timeouts import sandbox_control_timeout_s
 from rllm.types import AgentConfig, Episode, Task, TerminationReason, termination_reason_from_error
 
 logger = logging.getLogger(__name__)
@@ -187,10 +188,11 @@ class MiniSweAgentHarness(BaseCliHarness):
     def _read_exit_outcome(
         self, sandbox: Sandbox
     ) -> tuple[str | None, str | None, dict[str, str] | None]:
+        control_timeout = sandbox_control_timeout_s()
         try:
             raw = sandbox.exec(
                 f"cat {shlex.quote(self.trajectory_output_path)}",
-                timeout=10,
+                timeout=control_timeout,
                 user=self.agent_user,
             )
             data = json.loads(raw)

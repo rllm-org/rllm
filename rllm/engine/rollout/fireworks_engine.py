@@ -510,6 +510,13 @@ class FireworksEngine(TinkerEngine):
             sampling_params,
             session_headers=session_headers,
         )
+        if max_tokens < requested_max_tokens:
+            server_metrics = {
+                **(server_metrics or {}),
+                "max_tokens_clamped": True,
+                "requested_max_tokens": requested_max_tokens,
+                "effective_max_tokens": max_tokens,
+            }
 
         choice = raw["choices"][0]
         completion_ids: list[int] = list((choice.get("raw_output") or {}).get("completion_token_ids") or [])

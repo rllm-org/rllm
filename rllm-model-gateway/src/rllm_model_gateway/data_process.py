@@ -149,6 +149,7 @@ _VLLM_ROOT_FIELDS = frozenset(
         "prompt_logprobs",
         "kv_transfer_params",
         "weight_version",
+        "_rllm_context_limit",
     }
 )
 
@@ -231,7 +232,7 @@ def build_trace_record(
         latency_ms=latency_ms,
         token_counts=token_counts,
         timestamp=time.time(),
-        metadata=metadata or {},
+        metadata={**(metadata or {}), **(response_body.get("_rllm_context_limit") or {})},
         raw_request=request_body if capture_raw else None,
         raw_response=response_body if capture_raw else None,
     )

@@ -265,6 +265,7 @@ class UnifiedTrainer:
                 val_sampling_params=val_sampling_params,
                 hooks=hooks,
                 cheating_judge=cheating_judge,
+                binary_rewards=self.rllm_config.workflow.get("binary_rewards", False),
             )
 
         elif remote_runtime_cfg.get("enabled", False):

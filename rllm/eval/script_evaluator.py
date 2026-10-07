@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 
 from rllm.eval.types import EvalOutput, Signal
 from rllm.sandbox.protocol import Sandbox, SandboxCommandTimeout
+from rllm.sandbox.timeouts import sandbox_control_timeout_s
 from rllm.types import Episode, Task
 
 logger = logging.getLogger(__name__)
@@ -142,7 +143,7 @@ class ShellScriptEvaluator:
         """Upload the tests (and any collected artifacts), run the verifier, read the reward."""
         # Prepare reward directories
         try:
-            sandbox.exec("mkdir -p /tmp/rllm /logs/verifier", timeout=10, user=v_user)
+            sandbox.exec("mkdir -p /tmp/rllm /logs/verifier", timeout=sandbox_control_timeout_s(), user=v_user)
         except Exception:
             pass
 
@@ -328,13 +329,14 @@ def _read_reward_from_sandbox(sandbox: Sandbox, paths: list[str], user: str | No
     no file at all → ``RewardFileNotFoundError``. The engine promotes these to
     ``GRADING_ERROR`` so the untrustworthy reward is filtered from training.
     """
+    control_timeout = sandbox_control_timeout_s()
     saw_empty = False
     for path in paths:
         try:
-            check = sandbox.exec(f"test -f {path} && echo yes || echo no", timeout=10, user=user).strip()
+            check = sandbox.exec(f"test -f {path} && echo yes || echo no", timeout=control_timeout, user=user).strip()
             if check != "yes":
                 continue
-            raw = sandbox.exec(f"cat {path}", timeout=10, user=user).strip()
+            raw = sandbox.exec(f"cat {path}", timeout=control_timeout, user=user).strip()
         except Exception as e:
             logger.debug("Could not read reward from %s: %s", path, e)
             continue

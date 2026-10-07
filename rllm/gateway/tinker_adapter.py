@@ -23,6 +23,13 @@ from rllm.types import TerminationEvent, TerminationReason
 logger = logging.getLogger(__name__)
 
 
+def _context_limit_fields(metrics: dict | None) -> dict:
+    """Carry the engine's actual context clamp into gateway trace metadata."""
+    if not metrics or metrics.get("max_tokens_clamped") is not True:
+        return {}
+    return {key: metrics[key] for key in ("max_tokens_clamped", "requested_max_tokens", "effective_max_tokens")}
+
+
 def _to_openai_tool_calls(tool_calls: list[ToolCall]) -> list[dict[str, Any]]:
     """Convert canonical rLLM tool calls to the OpenAI wire format."""
     result = []
@@ -131,6 +138,7 @@ async def _token_prompt_completion(
         },
         "prompt_token_ids": out_prompt_ids,
         "weight_version": getattr(model_output, "weight_version", None),
+        "_rllm_context_limit": _context_limit_fields(getattr(token_output, "server_metrics", None)),
     }
 
 
@@ -232,6 +240,7 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
             },
             "prompt_token_ids": prompt_ids,
             "weight_version": getattr(model_output, "weight_version", None),
+            "_rllm_context_limit": _context_limit_fields(getattr(model_output, "metrics", None)),
         }
 
     return handler
