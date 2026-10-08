@@ -8,11 +8,11 @@ GRPO_DIR="$WORKSPACE_DIR/finqa-grpo-run"
 PRPO_DIR="$WORKSPACE_DIR/finqa-prpo-run"
 RLLM_DIR=/home/yanan/agents/rllm
 
-ARM="${1:?usage: $0 grpo|prpo|rpp GPU PORT base|global_step_N [...] }"
+ARM="${1:?usage: $0 grpo|prpo|rpp GPU PORT base|global_step_N [...]  |  lora GPU PORT base|ADAPTER_NAME [...] (FINQA_LORA_ROOT/ADAPTER_NAME) }"
 GPU="${2:?missing GPU}"
 PORT="${3:?missing port}"
 shift 3
-[[ "$ARM" == grpo || "$ARM" == prpo || "$ARM" == rpp ]] || { echo "invalid arm: $ARM" >&2; exit 2; }
+[[ "$ARM" == grpo || "$ARM" == prpo || "$ARM" == rpp || "$ARM" == lora ]] || { echo "invalid arm: $ARM" >&2; exit 2; }
 [[ "$#" -gt 0 ]] || { echo "no models supplied" >&2; exit 2; }
 
 source "$GRPO_DIR/env.sh"
@@ -45,9 +45,24 @@ prepare_home() {
 resolve_model() {
     local item="$1"
     MERGED_WAS_CREATED=0
+    SERVED_NAME=""
+    LORA_ARGS=()
     if [[ "$item" == base ]]; then
         MODEL="${FINQA_MULTITABLE_BASE_MODEL:-Qwen/Qwen3-4B-Instruct-2507}"
         TAG=base
+        return
+    fi
+    # arm=lora: serve the base with the adapter unmerged (vLLM --enable-lora). A bf16 merge of a
+    # lr-1e-6 adapter keeps ~18% of its delta and leaves ~95% of weights bit-identical to the base.
+    if [[ "$ARM" == lora ]]; then
+        local adapter="${FINQA_LORA_ROOT:?FINQA_LORA_ROOT is required for arm=lora}/$item"
+        [[ -f "$adapter/adapter_config.json" && -f "$adapter/adapter_model.safetensors" ]] || {
+            echo "expected a PEFT adapter at $adapter (adapter_config.json + adapter_model.safetensors)" >&2; exit 1; }
+        MODEL="${FINQA_MULTITABLE_BASE_MODEL:-Qwen/Qwen3-4B-Instruct-2507}"
+        TAG="$item"
+        SERVED_NAME="$item"
+        LORA_ARGS=(--enable-lora --max-lora-rank "$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["r"])' "$adapter/adapter_config.json")"
+                   --max-loras 1 --lora-modules "$item=$adapter")
         return
     fi
     [[ "$item" =~ ^global_step_[0-9]+$ ]] || { echo "invalid checkpoint name: $item" >&2; exit 2; }
@@ -95,6 +110,7 @@ def digest(p): return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
 manifest = {
     "protocol_version": "finqa-multitable-visible-complete-v2",
     "arm": arm, "checkpoint": item, "model": model, "gpu": int(gpu), "port": int(port),
+    "lora_adapter": f"{__import__('os').environ['FINQA_LORA_ROOT']}/{item}" if arm == "lora" and item != "base" else None,
     "max_turns": 50, "max_tool_turns": 45, "reserved_final_attempts": 5,
     "serving_context_tokens": 49152, "discovery_max_completion_tokens": 2048,
     "final_max_completion_tokens": 8192, "tool_output_chars": 8000,
@@ -136,6 +152,7 @@ for ITEM in "$@"; do
         --gpu-memory-utilization 0.88 --tensor-parallel-size 1 \
         --generation-config vllm \
         --enable-auto-tool-choice --tool-call-parser hermes \
+        "${LORA_ARGS[@]}" \
         >"$OUT/vllm_serve.log" 2>&1 &
     SERVER_PID=$!
     ready=0
@@ -145,6 +162,23 @@ for ITEM in "$@"; do
         sleep 5
     done
     [[ "$ready" -eq 1 ]] || { echo "vLLM readiness timeout" >&2; exit 1; }
+    if [[ -n "$SERVED_NAME" ]]; then
+        # The adapter must change the policy: its prompt log-probs have to differ from the base's.
+        python - "$PORT" "$MODEL" "$SERVED_NAME" >"$OUT/lora_logprob_check.log" 2>&1 <<'PY' || { echo "[$ARM/$TAG] adapter log-prob check failed: $OUT/lora_logprob_check.log" >&2; exit 1; }
+import json, sys, urllib.request
+port, base, lora = sys.argv[1:]
+prompt = "Total revenue in 2019 was $4,210 million and in 2018 was $3,870 million, so the growth rate was"
+def logprobs(model):
+    body = json.dumps({"model": model, "prompt": prompt, "max_tokens": 1, "echo": True, "logprobs": 0, "temperature": 0}).encode()
+    req = urllib.request.Request(f"http://localhost:{port}/v1/completions", body, {"Content-Type": "application/json"})
+    return [x for x in json.load(urllib.request.urlopen(req))["choices"][0]["logprobs"]["token_logprobs"] if x is not None]
+a, b = logprobs(base), logprobs(lora)
+diff = max(abs(x - y) for x, y in zip(a, b))
+print(f"tokens={len(a)} max_abs_logprob_diff={diff:.6f} (expected > 1e-3: adapter {lora} vs base {base})")
+sys.exit(0 if len(a) == len(b) and diff > 1e-3 else 1)
+PY
+        cat "$OUT/lora_logprob_check.log"
+    fi
 
     for SPLIT in multi_val multi_test; do
         [[ "$SPLIT" == multi_val ]] && EXPECTED=126 || EXPECTED=131
@@ -160,7 +194,7 @@ for ITEM in "$@"; do
         RLLM_HOME="$RUNTIME_ROOT/$SPLIT" \
         rllm eval finqa \
             --agent multitable_v2_flow:finqa_multitable_v2 --evaluator finqa \
-            --model "$MODEL" --base-url "http://localhost:$PORT/v1" \
+            --model "${SERVED_NAME:-$MODEL}" --base-url "http://localhost:$PORT/v1" \
             --split "$SPLIT" --concurrency 8 --attempts 1 \
             --sampling-params "temperature=0,top_p=1.0,seed=1234" \
             --episodes-dir "$EPISODES" --output "$RESULT" \

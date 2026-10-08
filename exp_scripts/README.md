@@ -5,7 +5,7 @@ Canonical root: `/home/yanan/agents/rllm/exp_scripts`. All personal experiment c
 ## Paths and storage
 
 - Active Python/Bash entry points now use the canonical root instead of the former `gitlab/tail/rllm` and `agents/finqa-grpo-run` roots.
-- `/home/yanan/agents/gitlab/tail/rllm` is a compatibility symlink to this directory, not a second code checkout. It preserves old external callers and running jobs. Historical reports retain their original paths.
+- The former compatibility symlink `/home/yanan/agents/gitlab/tail/rllm` was removed on 2026-09-28, after its last external callers (reef `exp_scripts/deepcoder/{eval_sao_checkpoints,eval_sao_merged,run_formal}.sh`) were switched to this root and no running job used it. Historical reports and logs retain their original paths as text only.
 - `finqa-prpo-run/checkpoints` points to `/mnt/disk1t/finqa-prpo-run-checkpoints` on the local host. The old nested destination was absent; the replacement directory is empty. This repair does **not** recover historical checkpoints. Do not resume until the selected checkpoint actually exists.
 - `/mnt/disk1t` and other local checkpoint roots are machine-local. A symlink shared through NFS does not transfer checkpoint contents to another host.
 - New training output should remain on the training host's local disk. Models, datasets, checkpoints, merged weights, logs, trajectories, environments and credentials are excluded from Git. Scripts and small configuration files remain eligible.
