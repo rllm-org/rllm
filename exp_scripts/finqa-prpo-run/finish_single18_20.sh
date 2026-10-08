@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Bounded evaluation plan: finish single-table epochs 18-20, then evaluate
-# multi-table epochs 10-20 on two local GPUs. Existing epoch-18/19 children may
+# Bounded evaluation plan: finish single-table epochs 18-20. Existing epoch-18/19 children may
 # already be running when this coordinator starts, so it waits rather than
 # launching duplicates.
 set -euo pipefail
@@ -42,16 +41,4 @@ complete_output "$EVAL_ROOT/prpo_global_step_1240/val.json" 522
 complete_output "$EVAL_ROOT/prpo_global_step_1240/test.json" 558
 find /mnt/disk1t/finqa-prpo-run-checkpoints/single-eval-cache/global_step_1240 -depth -delete 2>/dev/null || true
 
-# Even and odd epochs use independent GPUs, ports, runtime homes and outputs.
-bash "$RUN_DIR/eval_multitable_lane.sh" 0 8510 \
-  global_step_620 global_step_744 global_step_868 \
-  global_step_992 global_step_1116 global_step_1240 &
-lane0=$!
-bash "$RUN_DIR/eval_multitable_lane.sh" 1 8511 \
-  global_step_682 global_step_806 global_step_930 \
-  global_step_1054 global_step_1178 &
-lane1=$!
-
-wait "$lane0"
-wait "$lane1"
-echo "PRPO_EVAL_COMPLETE single-through-20 multi-10-through-20"
+echo "PRPO_EVAL_COMPLETE single-through-20"

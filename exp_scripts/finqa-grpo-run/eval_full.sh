@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Evaluate one model on all three FinQA eval sets.
+# Evaluate one model on the single-table FinQA eval sets.
 #
 #   ./eval_full.sh base
 #   SPLITS="val test" ./eval_full.sh <ckpt> tag
@@ -8,9 +8,8 @@
 # Splits:
 #   val        522  single-table  (same set the training loop validates on)
 #   test       558  single-table
-#   multi_test 131  multi-table, NEVER trained on -> generalization probe
-#                   (finqa.md reports base 13.9% -> trained 26.6% on the
-#                    equivalent FinQA-Reasoning set)
+# The 12288-token context here is sized for single-table episodes only. Multi-table
+# evaluation uses finqa-multitable-v2/eval_lane.sh (49152-token context).
 set -euo pipefail
 
 # Tool-call/reasoning parser flags are derived from the model's chat template;
