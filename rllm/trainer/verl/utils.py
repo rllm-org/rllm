@@ -253,7 +253,13 @@ def save_checkpoint(
     elif hasattr(ckpt_cfg, "async_save"):
         async_save = ckpt_cfg.async_save
 
-    if not async_save:
+    strategy = config.actor_rollout_ref.actor.get("strategy", "fsdp")
+    async_manager_owns_tracker = async_save and strategy == "megatron"
+
+    # Megatron publishes the tracker from its async finalize callback. FSDP
+    # saves are synchronous in verl, even when async_save is configured, so
+    # the checkpoint is complete and safe to publish once the worker returns.
+    if not async_manager_owns_tracker:
         latest_path = os.path.join(config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
         with open(latest_path, "w") as f:
             f.write(str(global_steps))
