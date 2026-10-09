@@ -390,7 +390,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
         # Save final checkpoint if we didn't just save it in the last batch
-        if trainer_state.global_step % self.full_config.rllm.trainer.save_freq != 0:
+        save_freq = self.full_config.rllm.trainer.save_freq
+        if save_freq <= 0 or trainer_state.global_step % save_freq != 0:
             logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
             dataloader_state = trainer_state.train_dataloader.state_dict() if trainer_state.train_dataloader is not None else None
             await self.policy_trainer.save_checkpoint_and_get_sampling_client(trainer_state.global_step, do_save=True, dataloader_state=dataloader_state)
@@ -417,11 +418,16 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         """
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
-        # If on_policy_updated() wasn't called (sync mode), do checkpoint here
         if not self._policy_updated_this_step:
-            with simple_timer("save_checkpoint", trainer_state.timing_dict):
-                logger.info(f"Saving state checkpoint and sampler at step {trainer_state.global_step}")
-                await self.on_policy_updated(trainer_state)
+            if not self.full_config.rllm.get("async_training", {}).get("enable", False):
+                with simple_timer("save_checkpoint", trainer_state.timing_dict):
+                    await self.on_policy_updated(trainer_state)
+            else:
+                save_freq = self.full_config.rllm.trainer.save_freq
+                if save_freq > 0 and trainer_state.global_step % save_freq == 0:
+                    dataloader_state = trainer_state.train_dataloader.state_dict() if trainer_state.train_dataloader is not None else None
+                    with simple_timer("save_checkpoint", trainer_state.timing_dict):
+                        await self.policy_trainer.save_checkpoint_and_get_sampling_client(trainer_state.global_step, do_save=True, dataloader_state=dataloader_state)
         self._policy_updated_this_step = False
 
         # Update metrics

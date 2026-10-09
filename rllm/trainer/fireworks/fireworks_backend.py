@@ -348,12 +348,7 @@ class FireworksBackend(TinkerBackend):
         """
         global_step = trainer_state.global_step
 
-        if should_save and not should_sync:
-            logger.warning(
-                "save_freq triggered at step %d but no sync; skipping save/promote (save_freq must be a multiple of sync interval)",
-                global_step,
-            )
-
+        snapshot_name = None
         if should_sync:
             checkpoint_type = "base" if should_save else None
             snapshot_name = await self.policy_trainer.sync_weights(
@@ -361,24 +356,24 @@ class FireworksBackend(TinkerBackend):
                 checkpoint_type=checkpoint_type,
             )
 
-            if should_save:
-                with simple_timer("save_checkpoint", trainer_state.timing_dict):
-                    await self.policy_trainer.save_dcp_checkpoint(global_step)
-                if snapshot_name:
-                    experiment = self.full_config.rllm.trainer.get("experiment_name", "default")
-                    output_model_id = f"{experiment}-step-{global_step}"
-                    try:
-                        await self.policy_trainer.promote_checkpoint(
-                            snapshot_name,
-                            output_model_id,
-                        )
-                    except Exception as exc:
-                        logger.exception(
-                            "Checkpoint promotion failed for '%s' -> '%s'; continuing because the DCP checkpoint was saved. Error: %s",
-                            snapshot_name,
-                            output_model_id,
-                            exc,
-                        )
+        if should_save:
+            with simple_timer("save_checkpoint", trainer_state.timing_dict):
+                await self.policy_trainer.save_dcp_checkpoint(global_step)
+            if snapshot_name:
+                experiment = self.full_config.rllm.trainer.get("experiment_name", "default")
+                output_model_id = f"{experiment}-step-{global_step}"
+                try:
+                    await self.policy_trainer.promote_checkpoint(
+                        snapshot_name,
+                        output_model_id,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "Checkpoint promotion failed for '%s' -> '%s'; continuing because the DCP checkpoint was saved. Error: %s",
+                        snapshot_name,
+                        output_model_id,
+                        exc,
+                    )
 
     async def on_train_end(self, trainer_state: TrainerState) -> None:
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
@@ -400,14 +395,13 @@ class FireworksBackend(TinkerBackend):
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
-        # In async mode, on_policy_updated already handled save/sync
         if not self._policy_updated_this_step:
             step = trainer_state.global_step
             save_freq = self.full_config.rllm.trainer.save_freq
             await self._save_and_sync(
                 trainer_state,
                 should_save=save_freq > 0 and step % save_freq == 0,
-                should_sync=True,
+                should_sync=not self.full_config.rllm.get("async_training", {}).get("enable", False),
             )
         self._policy_updated_this_step = False
 

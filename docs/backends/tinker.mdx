@@ -331,6 +331,8 @@ trainer:
   default_local_dir: /tmp/rllm-tinker-checkpoints
 ```
 
+Set `save_freq` to `-1` to disable periodic checkpoint saves. Tinker still saves a final checkpoint when training ends, in both synchronous and async training.
+
 ### Resume from Checkpoint
 
 Resume from a tinker checkpoint:

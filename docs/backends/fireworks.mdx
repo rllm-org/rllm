@@ -518,6 +518,8 @@ rllm:
 
 Fireworks checkpoints are stored as **DCP** (Distributed Checkpoint) on the trainer job. After each sync step, weights are hot-loaded to the inference deployment. When saving, checkpoints can be **promoted** to a Fireworks model ID.
 
+If a save falls between syncs after you resume, rLLM still writes a DCP checkpoint you can resume from. That save does not hot-load rollout weights or promote a model. Promotion requires a sampler snapshot from the same save-and-sync step.
+
 ### Automatic Checkpointing
 
 ```yaml
