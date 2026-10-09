@@ -101,7 +101,13 @@ def calculate_reinforce_plus_plus_baseline_advantages(rewards: list[np.ndarray],
 
     centered_rewards_by_group: list[np.ndarray] = []
     for group_rewards in rewards:
-        centered_rewards_by_group.append(group_rewards - np.mean(group_rewards))
+        if len(group_rewards) > 1:
+            centered_rewards_by_group.append(group_rewards - np.mean(group_rewards))
+        else:
+            # A single rollout is its own mean: subtracting it would zero the
+            # advantage (and the policy-gradient signal) for every group when
+            # rollout.n == 1, so the baseline is 0 as documented.
+            centered_rewards_by_group.append(np.asarray(group_rewards, dtype=float))
 
     all_centered_rewards = np.concatenate(centered_rewards_by_group)
     batch_std = np.std(all_centered_rewards)
