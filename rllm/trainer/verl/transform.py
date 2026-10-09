@@ -1,17 +1,22 @@
+from __future__ import annotations
+
 import base64
 import json
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 from verl.protocol import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
-from rllm.engine.rollout import VerlEngine
 from rllm.trainer.verl.dataclass import AccumulatedData, ProcessedStepData
 from rllm.types import Episode, Trajectory, TrajectoryGroup
 from rllm.workflows.workflow import TerminationReason
+
+if TYPE_CHECKING:
+    from rllm.engine.rollout import VerlEngine
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +137,7 @@ def _handle_multimodal_position_ids(processor, input_ids: torch.Tensor, attentio
     return position_ids
 
 
-def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_id: int, max_prompt_length: int, max_response_length: int, processor=None) -> "DataProto":
+def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_id: int, max_prompt_length: int, max_response_length: int, processor=None) -> DataProto:
     """Batches the tensors from an AccumulatedData.
 
     Args:
@@ -174,6 +179,7 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         "episode_ids": np.array(accumulated.episode_ids),  # unique identifier for each rollout
         "trajectory_ids": np.array(accumulated.trajectory_ids),
         "step_ids": np.array(accumulated.step_ids),
+        "advantage_group_ids": np.array(accumulated.advantage_group_ids),
         "batch_ids": np.array([str(uuid.uuid4())] * len(accumulated.trajectory_ids)),
         "step_nums": np.array(accumulated.step_nums),
         "is_correct": np.array(accumulated.is_correct),
@@ -363,9 +369,12 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             step_data=step_data,
             trajectory_id=trajectory_id,
             traj_reward=traj_reward,
-            step_num=1,
+            step_num=len(valid_steps),
             is_last=True,
             group_role=name,
+            # Comparison identity excludes the rollout UUID. JSON preserves
+            # task/role boundaries even when components contain separators.
+            advantage_group_id=json.dumps([task_id, name]),
         )
 
     seg = _new_segment(valid_steps[0])

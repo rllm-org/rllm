@@ -313,8 +313,21 @@ python train_agent.py \
 <Info>
   Step-wise advantage mode:
   - **broadcast**: Propagate final advantage to all steps (recommended for GRPO)
-  - **per_step**: Compute advantages independently per step
+  - **per_step**: Unsupported by the merged trajectory transform. The legacy workflow trainer rejects this mode when stepwise advantage is enabled.
 </Info>
+
+For GRPO on `AgentWorkflowPPOTrainer`, both non-stepwise and `broadcast` mode
+compare rollouts by `(task_id, trajectory.name)`. Different tasks and agent roles
+have separate comparison groups. A trajectory UUID identifies one rollout; it
+does not identify its GRPO comparison group.
+
+Context resets can split a rollout into multiple batch rows. GRPO counts its
+outcome reward once, sums any KL reward penalties across its segments, and
+broadcasts the resulting advantage to all of its action tokens. Observation
+tokens and padding receive zero advantage. Batch padding does not contribute to
+group statistics. With `normalize_by_steps=true` and stepwise advantage enabled,
+the scalar advantage is divided by the number of valid model steps in the
+trajectory, including steps merged into a single row.
 
 ### Rejection Sampling
 
