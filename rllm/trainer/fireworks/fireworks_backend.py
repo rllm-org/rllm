@@ -226,7 +226,6 @@ class FireworksBackend(TinkerBackend):
                 disable_thinking=rollout_extra.pop("disable_thinking", False),
                 accumulate_reasoning=rollout_extra.pop("accumulate_reasoning", False),
                 reasoning_effort=rollout_extra.pop("reasoning_effort", "medium"),
-                router_replay=cfg.rllm.algorithm.get("router_replay", "disabled") == "R3",
                 **rollout_extra,
             )
             return self.rollout_engine

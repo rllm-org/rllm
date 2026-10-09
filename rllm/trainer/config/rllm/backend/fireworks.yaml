@@ -75,6 +75,7 @@ rllm:
     val:
       top_k: 0 # -1 is not accepted
   algorithm:
+    router_replay: R3  # rollout-side routing matrices; set disabled to turn off
     rollout_correction:
       bypass_mode: false
 

@@ -99,7 +99,6 @@ class FireworksEngine(TinkerEngine):
         reasoning_effort: str = "medium",
         sample_timeout: int = 600,
         processor=None,
-        router_replay: bool = False,
         **kwargs,
     ):
         """
@@ -117,8 +116,6 @@ class FireworksEngine(TinkerEngine):
                 completions API (e.g. ``low``, ``medium``, ``high``, ``none``).
             sample_timeout: HTTP timeout (seconds) for sampling calls.
             processor: Optional ``ProcessorMixin`` for multimodal models.
-            router_replay: If True, request and propagate routing matrices
-                for Router Replay (R3) training.
         """
         from rllm.engine.rollout.rollout_engine import RolloutEngine
         from rllm.parser import ChatTemplateParser
@@ -146,7 +143,6 @@ class FireworksEngine(TinkerEngine):
         )
 
         self.sample_timeout = sample_timeout
-        self.router_replay = router_replay
         self.sampling_client = sampler
 
     # ------------------------------------------------------------------
@@ -244,9 +240,6 @@ class FireworksEngine(TinkerEngine):
         if "reasoning_effort" not in sampling_params and self.reasoning_effort is not None:
             sampling_params["reasoning_effort"] = self.reasoning_effort
 
-        if self.router_replay:
-            sampling_params["include_routing_matrix"] = True
-
         raw, server_metrics = await self._completions_with_retry(
             prompt_ids,
             max_tokens,
@@ -267,12 +260,10 @@ class FireworksEngine(TinkerEngine):
         finish_reason = choice.get("finish_reason", "stop")
 
         routing_matrices = None
-        if self.router_replay and content:
+        if content:
             matrices = [tok.get("routing_matrix", "") for tok in content]
             if any(matrices):
                 routing_matrices = matrices
-            else:
-                logger.debug("router_replay enabled but API returned no routing matrices")
 
         if logprobs is not None and len(logprobs) != len(completion_ids):
             raise RuntimeError(f"Fireworks response length mismatch: {len(logprobs)} logprobs vs {len(completion_ids)} completion tokens")
