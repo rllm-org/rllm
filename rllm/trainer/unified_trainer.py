@@ -86,7 +86,7 @@ def _enforce_async_train_batch_size(config: DictConfig, async_enabled: bool) -> 
 
 @dataclass
 class TrainerState:
-    """Common trainer state that's backend-agnostic. Reset at each training step."""
+    """Common backend-agnostic trainer state, including pending sampling data."""
 
     rs_state: RejectionSamplingState = field(default_factory=RejectionSamplingState)
     global_step: int = 0
@@ -105,8 +105,7 @@ class TrainerState:
     backend_batch: Any | None = None
 
     def reset_batch(self) -> None:
-        """Reset the trainer state for a new batch."""
-        self.rs_state.reset()
+        """Reset per-batch fields while preserving pending rejection-sampling data."""
         self.episodes = None
         self.trajectory_groups = None
         self.backend_batch = None
