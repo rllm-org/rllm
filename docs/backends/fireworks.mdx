@@ -483,8 +483,8 @@ Fireworks uses **server-side builtin loss kernels**. Configure via `rllm.algorit
   Loss aggregation: `null` (backend default), `"token-mean"`, `"seq-mean-token-sum"`, or `"seq-mean-token-mean"`
 </ParamField>
 
-<ParamField path="rllm.algorithm.router_replay" type="string" default="disabled">
-  Router replay mode: `"disabled"` or `"R3"` (`"R2"` is not supported)
+<ParamField path="rllm.algorithm.router_replay" type="string" default="R3">
+  Router replay mode. `"R3"` records routing matrices at rollout and is the Fireworks default. `"disabled"` turns it off.
 </ParamField>
 
 <ParamField path="rllm.algorithm.rollout_correction.bypass_mode" type="boolean" default="true">
@@ -562,8 +562,7 @@ Promoted models are named `{experiment_name}-step-{global_step}`.
 | Feature | Fireworks support |
 |---------|-------------------|
 | `fuse_forward_backward_and_optim_step` | ❌ Not supported |
-| `router_replay: R2` | ❌ Use `R3` or `disabled` |
-| `router_replay: R3` | ✅ Supported |
+| `router_replay: R3` | ✅ Default |
 | Distillation (`adv_estimator: distill`) | ❌ Not documented / tested |
 | Full-parameter + KL | ✅ Requires reference trainer |
 | LoRA + KL | ✅ Policy reused as reference |
@@ -714,14 +713,6 @@ concurrency:
     If training exits abnormally before `shutdown()`, trainer jobs and deployments may keep running on Fireworks. Reattach with `job_id` / `deployment_id` or delete them from the Fireworks console.
   </Accordion>
 
-  <Accordion title="router_replay R2 not supported">
-    Use `R3` or `disabled`:
-    ```yaml
-    rllm:
-      algorithm:
-        router_replay: disabled  # or R3
-    ```
-  </Accordion>
 </AccordionGroup>
 
 ## Comparison with tinker
