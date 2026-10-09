@@ -119,6 +119,8 @@ class GatewayConfig(BaseModel):
     strip_vllm_fields: bool = True
     routing_policy: str | None = None
     health_check_interval: float = 10.0
+    health_check_timeout: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    health_failure_threshold: int = Field(default=3, ge=1)
     log_level: str = "INFO"
     sync_traces: bool = False
     model: str | None = None  # When set, overrides ``body.model``

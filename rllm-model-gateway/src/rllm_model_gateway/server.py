@@ -134,6 +134,8 @@ def create_app(
     router = SessionRouter(
         policy=policy,
         health_check_interval=config.health_check_interval,
+        failure_threshold=config.health_failure_threshold,
+        health_check_timeout=config.health_check_timeout,
     )
 
     # Register initial workers
@@ -477,6 +479,8 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         "RLLM_GATEWAY_DB_PATH": "db_path",
         "RLLM_GATEWAY_LOG_LEVEL": "log_level",
         "RLLM_GATEWAY_STORE": "store_worker",
+        "RLLM_GATEWAY_HEALTH_CHECK_TIMEOUT": "health_check_timeout",
+        "RLLM_GATEWAY_HEALTH_FAILURE_THRESHOLD": "health_failure_threshold",
     }
     for env_key, config_key in env_map.items():
         val = os.environ.get(env_key)
