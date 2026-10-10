@@ -105,3 +105,14 @@ class TestEvalProxyManager:
         assert entry["litellm_params"]["model"] == "openai/openai/gpt-5.5"
         assert entry["litellm_params"]["api_key"] == "ok-orca-key"
         assert entry["litellm_params"]["api_base"] == "https://api.orcarouter.ai/v1"
+
+    def test_build_proxy_config_atlascloud(self):
+        """Atlas Cloud should route through the OpenAI adapter pinned to its api_base."""
+        pm = EvalProxyManager(provider="atlascloud", model_name="deepseek-ai/deepseek-v4-flash", api_key="ak-test")
+        config = pm.build_proxy_config()
+
+        entry = config["model_list"][0]
+        assert entry["model_name"] == "deepseek-ai/deepseek-v4-flash"
+        assert entry["litellm_params"]["model"] == "openai/deepseek-ai/deepseek-v4-flash"
+        assert entry["litellm_params"]["api_key"] == "ak-test"
+        assert entry["litellm_params"]["api_base"] == "https://api.atlascloud.ai/v1"

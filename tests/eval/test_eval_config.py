@@ -283,3 +283,47 @@ class TestConstants:
         """OrcaRouter should have an entry in DEFAULT_MODELS."""
         assert "orcarouter" in DEFAULT_MODELS
         assert DEFAULT_MODELS["orcarouter"] == "openai/gpt-5.5"
+
+    def test_atlascloud_provider_info(self):
+        """Atlas Cloud provider should have correct metadata."""
+        info = get_provider_info("atlascloud")
+        assert info is not None
+        assert info.label == "Atlas Cloud"
+        assert info.litellm_prefix == "openai"
+        assert info.env_key == "ATLASCLOUD_API_KEY"
+
+    def test_atlascloud_base_url(self):
+        """Atlas Cloud routes through the OpenAI adapter pinned to its api_base."""
+        info = get_provider_info("atlascloud")
+        assert info is not None
+        assert info.base_url == "https://api.atlascloud.ai/v1"
+
+    def test_atlascloud_default_model(self):
+        """Atlas Cloud default model should be listed and vendor-prefixed."""
+        info = get_provider_info("atlascloud")
+        assert info is not None
+        assert info.default_model == "deepseek-ai/deepseek-v4-flash"
+        assert info.default_model in info.models
+
+    def test_atlascloud_models_are_vendor_prefixed(self):
+        """Atlas Cloud model ids carry the vendor namespace (e.g. deepseek-ai/...)."""
+        info = get_provider_info("atlascloud")
+        assert info is not None
+        assert len(info.models) >= 5
+        for mid in info.models:
+            assert "/" in mid, f"{mid} must be vendor-prefixed"
+
+    def test_atlascloud_config_validates(self):
+        """A complete Atlas Cloud config should pass validation."""
+        config = RllmConfig(
+            provider="atlascloud",
+            api_keys={"atlascloud": "apikey-test"},
+            model="deepseek-ai/deepseek-v4-flash",
+        )
+        assert config.is_configured()
+        assert config.validate() == []
+
+    def test_atlascloud_in_default_models(self):
+        """Atlas Cloud should have an entry in DEFAULT_MODELS."""
+        assert "atlascloud" in DEFAULT_MODELS
+        assert DEFAULT_MODELS["atlascloud"] == "deepseek-ai/deepseek-v4-flash"
