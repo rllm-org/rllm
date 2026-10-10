@@ -154,16 +154,26 @@ def create_app(
     # served model path (``config.model``), which we assume is a complete,
     # unmodified HuggingFace checkpoint.
     renderer = None
-    if config.cumulative_token_mode:
+    tokenizer = None
+    # use_sglang needs the model tokenizer (to decode /generate completion token
+    # ids for tool-call parsing). cumulative_token_mode additionally needs the
+    # renderer (the cross-turn bridge that keeps prior sampled tokens verbatim).
+    # Non-cumulative use_sglang does NOT need the renderer: input tokenization is
+    # done server-side via /tokenize and output parsing via SGLang's parser.
+    if config.cumulative_token_mode or config.use_sglang:
         if not config.model:
-            raise ValueError("cumulative_token_mode=True requires 'model' to be set in GatewayConfig (path to the served HuggingFace checkpoint).")
+            raise ValueError("cumulative_token_mode/use_sglang require 'model' to be set in GatewayConfig (path to the served HuggingFace checkpoint).")
         try:
-            from renderers import create_renderer
             from transformers import AutoTokenizer
         except ImportError as err:
-            raise ImportError("cumulative_token_mode requires the 'renderers' and 'transformers' packages. Install them with: pip install renderers transformers") from err
-
+            raise ImportError("cumulative_token_mode/use_sglang require the 'transformers' package. Install it with: pip install transformers") from err
         tokenizer = AutoTokenizer.from_pretrained(config.model)
+
+    if config.cumulative_token_mode:
+        try:
+            from renderers import create_renderer
+        except ImportError as err:
+            raise ImportError("cumulative_token_mode requires the 'renderers' package. Install it with: pip install renderers") from err
 
         # renderer_family="auto" lets renderers resolve the family by matching the
         # tokenizer's name_or_path against its MODEL_RENDERER_MAP. This succeeds
@@ -175,10 +185,12 @@ def create_app(
         #   https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py
         renderer = create_renderer(tokenizer, renderer=config.renderer_family)
         logger.info(
-            "Built %s (family=%r) from %s for cumulative token mode",
+            "Built %s (family=%r) from %s for cumulative_token_mode=%s use_sglang=%s",
             type(renderer).__name__,
             config.renderer_family,
             config.model,
+            config.cumulative_token_mode,
+            config.use_sglang,
         )
         if type(renderer).__name__ == "DefaultRenderer":
             raise ValueError(
@@ -201,7 +213,12 @@ def create_app(
         sync_traces=config.sync_traces,
         local_handler=local_handler,
         cumulative_token_mode=config.cumulative_token_mode,
+        use_sglang=config.use_sglang,
         renderer=renderer,
+        tokenizer=tokenizer,
+        model=config.model,
+        sglang_tool_call_parser=config.sglang_tool_call_parser,
+        sglang_reasoning_parser=config.sglang_reasoning_parser,
     )
     sessions = SessionManager(store)
 
@@ -501,8 +518,14 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         data["model"] = args.model
     if getattr(args, "cumulative_token_mode", False):
         data["cumulative_token_mode"] = True
+    if getattr(args, "use_sglang", False):
+        data["use_sglang"] = True
     if getattr(args, "renderer_family", None) is not None:
         data["renderer_family"] = args.renderer_family
+    if getattr(args, "sglang_tool_call_parser", None) is not None:
+        data["sglang_tool_call_parser"] = args.sglang_tool_call_parser
+    if getattr(args, "sglang_reasoning_parser", None) is not None:
+        data["sglang_reasoning_parser"] = args.sglang_reasoning_parser
 
     # Workers from CLI --worker flags (WorkerConfig validator auto-splits URLs)
     worker_urls = getattr(args, "worker", None) or []
@@ -542,6 +565,30 @@ def main() -> None:
         action="store_true",
         default=False,
         help="Enable cumulative token mode for drift-free multi-turn RL training. Loads the tokenizer from --model (the served HuggingFace checkpoint).",
+    )
+    parser.add_argument(
+        "--use-sglang",
+        action="store_true",
+        default=False,
+        help="Route generation through SGLang's native /generate API (token ids + "
+        "logprobs in meta_info, works through sgl-router) instead of the OpenAI "
+        "/v1/{chat/,}completions endpoints. Requires --model and a renderer; the "
+        "gateway renders each turn's prompt to token ids itself. Required for RL "
+        "with SGLang server or sgl-router as inference endpoint.",
+    )
+    parser.add_argument(
+        "--sglang-tool-call-parser",
+        type=str,
+        default=None,
+        help="SGLang function-call parser name (e.g. 'qwen', 'llama3', 'deepseekv3') used "
+        "in use_sglang mode to parse tool calls from /generate output text, required for"
+        "tool-using agents in use_sglang mode.",
+    )
+    parser.add_argument(
+        "--sglang-reasoning-parser",
+        type=str,
+        default=None,
+        help="SGLang reasoning parser name (e.g. 'qwen3', 'deepseek-r1') to split <think>...</think> reasoning from output text in use_sglang mode. Optional.",
     )
     parser.add_argument(
         "--renderer-family",
