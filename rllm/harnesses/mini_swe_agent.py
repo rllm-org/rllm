@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import shlex
+from contextlib import nullcontext
 
 from rllm.harnesses.cli_harness import BaseCliHarness
 from rllm.sandbox.protocol import Sandbox
@@ -43,25 +44,33 @@ def _provider_key_var(model: str) -> str:
     return "OPENAI_API_KEY"
 
 
-_INSTALL_SCRIPT = r"""
+# System packages: always installed as root.
+_SYSTEM_DEPS_SCRIPT = r"""
 set -e
 # DEBIAN_FRONTEND=noninteractive is mandatory: ``apt-get install python3``
 # pulls in ``tzdata``, which triggers a debconf timezone prompt and
 # hangs forever on Modal sandboxes (Docker exec falls back to
 # Noninteractive automatically when there's no TTY; Modal does not).
 export DEBIAN_FRONTEND=noninteractive
-if ! command -v mini-swe-agent >/dev/null 2>&1; then
-    # Only fall back to apt when curl is missing — swebench testbeds
-    # have expired Ubuntu jammy repo signatures, so unconditional
-    # ``apt-get update`` fails with GPG errors and stops the script
-    # before uv even gets a chance.
-    if ! command -v curl >/dev/null 2>&1; then
-        if command -v apt-get >/dev/null 2>&1; then
-            apt-get update -qq && apt-get install -y -qq curl ca-certificates git
-        elif command -v apk >/dev/null 2>&1; then
-            apk add --no-cache curl bash ca-certificates git
-        fi
+# Only fall back to apt when curl is missing — swebench testbeds
+# have expired Ubuntu jammy repo signatures, so unconditional
+# ``apt-get update`` fails with GPG errors and stops the script
+# before uv even gets a chance.
+if ! command -v curl >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq && apt-get install -y -qq curl ca-certificates git
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache curl bash ca-certificates git
     fi
+fi
+"""
+
+# uv + mini-swe-agent: installed into ``$HOME/.local`` of whichever user the
+# agent runs as (the task's ``[agent].user`` when scoped, as harbor does).
+_AGENT_INSTALL_SCRIPT = r"""
+set -e
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v mini-swe-agent >/dev/null 2>&1; then
     if ! command -v uv >/dev/null 2>&1; then
         # Sandbox->GitHub egress (astral.sh redirects to
         # release-assets.githubusercontent.com) intermittently resets the
@@ -96,6 +105,14 @@ if ! command -v mini-swe-agent >/dev/null 2>&1; then
 fi
 """
 
+_INSTALL_SCRIPT = _SYSTEM_DEPS_SCRIPT + _AGENT_INSTALL_SCRIPT
+
+
+def _scoped_agent_user(task: Task, sandbox: Sandbox) -> str | None:
+    """The task's ``[agent].user`` when the sandbox can scope a default user (Modal)."""
+    agent_user = task.metadata.get("agent_user")
+    return agent_user if agent_user and callable(getattr(sandbox, "with_default_user", None)) else None
+
 
 class MiniSweAgentHarness(BaseCliHarness):
     """Run mini-swe-agent inside the sandbox."""
@@ -120,6 +137,19 @@ class MiniSweAgentHarness(BaseCliHarness):
 
     def install_script(self) -> str:
         return _INSTALL_SCRIPT
+
+    def install_in_sandbox(self, sandbox: Sandbox, task: Task, *, timeout: float) -> None:
+        """Install like harbor: system packages as root, the CLI as the agent user.
+
+        Called by ``SandboxTaskHooks`` on a cold sandbox. Without a scoped agent
+        user, the whole script runs as root (the agent runs as root too).
+        """
+        agent_user = _scoped_agent_user(task, sandbox)
+        if agent_user is None:
+            sandbox.exec(_INSTALL_SCRIPT, timeout=timeout, user="root")
+            return
+        sandbox.exec(_SYSTEM_DEPS_SCRIPT, timeout=timeout, user="root")
+        sandbox.exec(_AGENT_INSTALL_SCRIPT, timeout=timeout, user=agent_user)
 
     def build_env(self, task: Task, config: AgentConfig) -> dict[str, str]:
         gateway_url = config.base_url
@@ -264,11 +294,16 @@ class MiniSweAgentHarness(BaseCliHarness):
         return termination_reason_from_error(status, default=TerminationReason.ERROR)
 
     def run(self, task: Task, config: AgentConfig, *, env: Sandbox) -> Episode:
-        episode = super().run(task, config, env=env)
-        if not self.capture_exit_status:
-            return episode
-
-        status, finish_reason, error = self._read_exit_outcome(env)
+        # Run the CLI — and so every command it spawns — as the task's
+        # declared ``[agent].user``, as harbor does; otherwise the agent runs as
+        # root and can read verifier-only files the task locked to root.
+        # Only sandboxes with a scoped default user (Modal) support this.
+        agent_user = _scoped_agent_user(task, env)
+        with env.with_default_user(agent_user) if agent_user is not None else nullcontext():
+            episode = super().run(task, config, env=env)
+            if not self.capture_exit_status:
+                return episode
+            status, finish_reason, error = self._read_exit_outcome(env)
         episode.metadata["miniswe_exit_status"] = status or "missing"
         if error is not None:
             episode.metadata["error"] = error

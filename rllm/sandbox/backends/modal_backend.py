@@ -217,6 +217,11 @@ class ModalSandbox:
     - ``memory``: Memory in MB (int).
     """
 
+    # User an ``exec`` without an explicit ``user`` runs as (``None`` = the
+    # container default, root). Scoped via :meth:`with_default_user`, mirroring
+    # harbor's ``BaseEnvironment.default_user``.
+    default_user: str | int | None = None
+
     def __init__(self, name: str, image: str = "python:3.11-slim", **kwargs):
         import modal
 
@@ -326,6 +331,22 @@ class ModalSandbox:
         finally:
             update(outbound_domain_allowlist=["*"], outbound_cidr_allowlist=["0.0.0.0/0"])
 
+    @contextmanager
+    def with_default_user(self, user: str | int | None):
+        """Run every ``exec`` that passes no ``user`` as *user* within the block.
+
+        Mirrors harbor's ``with_default_user``: the caller scopes the agent phase
+        to the task's ``[agent].user`` so the agent CLI — and every command it
+        spawns — runs as that user, while setup and the verifier (which pass
+        their user explicitly) are unaffected.
+        """
+        previous = self.default_user
+        self.default_user = user
+        try:
+            yield
+        finally:
+            self.default_user = previous
+
     def exec(self, command: str, timeout: float | None = None, user: str | int | None = None) -> str:
         """Execute a command inside the Modal sandbox.
 
@@ -334,7 +355,8 @@ class ModalSandbox:
 
         ``user`` switches the command to another OS user via ``su`` — Modal's
         SDK has no ``user=`` on exec — mirroring how harbor's Modal environment
-        applies the agent/verifier user. Env registered via :meth:`set_env` is
+        applies the agent/verifier user. When ``user`` is ``None`` the
+        :attr:`default_user` applies. Env registered via :meth:`set_env` is
         exported into every command so the agent and verifier observe the task's
         declared environment. See :func:`_build_exec_command`.
         """
@@ -342,7 +364,7 @@ class ModalSandbox:
         if timeout is not None:
             exec_kwargs["timeout"] = int(timeout)
 
-        run = _build_exec_command(command, self._persistent_env, user)
+        run = _build_exec_command(command, self._persistent_env, user if user is not None else self.default_user)
         start = time.monotonic()
         # Decode raw terminal output lossily because it may not be valid UTF-8.
         process = self._sandbox.exec("bash", "-c", run, text=False, **exec_kwargs)

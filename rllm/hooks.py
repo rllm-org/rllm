@@ -269,7 +269,14 @@ class SandboxTaskHooks:
                 # script (baked_install, recorded at snapshot boot).
                 if install and getattr(sandbox, "baked_install", "") != install:
                     try:
-                        sandbox.exec(install, timeout=getattr(agent_flow, "install_timeout", env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600)), user="root")
+                        install_timeout = getattr(agent_flow, "install_timeout", env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600))
+                        # Flows that split the install by user (system packages
+                        # as root, the CLI as the task's agent user) own it.
+                        install_in_sandbox = getattr(agent_flow, "install_in_sandbox", None)
+                        if callable(install_in_sandbox):
+                            install_in_sandbox(sandbox, task, timeout=install_timeout)
+                        else:
+                            sandbox.exec(install, timeout=install_timeout, user="root")
                     except SandboxCommandTimeout as e:
                         raise AgentSetupTimeoutError(
                             f"Failed to install {getattr(agent_flow, 'name', type(agent_flow).__name__)} within the configured timeout"

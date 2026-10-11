@@ -8,14 +8,7 @@ if [ -z "${FIREWORKS_API_KEY}" ]; then
 fi
 
 export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-modal}"
-export RLLM_AGENT_NETWORK_DOMAINS="${RLLM_AGENT_NETWORK_DOMAINS:-[
-    \"pypi.org\", \"files.pythonhosted.org\",
-    \"registry.npmjs.org\",
-    \"index.crates.io\", \"static.crates.io\",
-    \"repo.maven.apache.org\",
-    \"proxy.golang.org\", \"sum.golang.org\",
-    \"archive.ubuntu.com\", \"security.ubuntu.com\"
-]}"
+export RLLM_AGENT_NETWORK_DOMAINS="${RLLM_AGENT_NETWORK_DOMAINS:-[]}"
 export RLLM_AGENT_NETWORK_CIDRS="${RLLM_AGENT_NETWORK_CIDRS:-[]}"
 export TB_TRAIN_DATASET="${TB_TRAIN_DATASET:-tb_tasks_1003}"
 export TB_TEST_DATASET="${TB_TEST_DATASET:-tb_tasks_1003}"
