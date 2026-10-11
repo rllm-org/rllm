@@ -67,15 +67,15 @@ class RewardMathFn:
         if isinstance(ground_truths, str | float | int):
             ground_truths = [ground_truths]
 
-        # Process each ground truth
+        # Process each ground truth, skipping empty ones (e.g. "" or "\boxed{}")
         processed_ground_truths = []
         for truth in ground_truths:
             truth = str(truth)
             if "\\boxed" in truth:
                 processed_truth = extract_answer(truth)
-                if processed_truth is not None:
+                if processed_truth is not None and processed_truth.strip():
                     processed_ground_truths.append(processed_truth)
-            else:
+            elif truth.strip():
                 processed_ground_truths.append(truth)
 
         if not processed_ground_truths:

@@ -500,6 +500,11 @@ def grade_answer_sympy(given_answer: str, ground_truth: str) -> bool:
     if ground_truth_normalized is None:
         return False
 
+    # An empty (or whitespace-only) normalized answer carries no information,
+    # so it must never be treated as a match for another empty answer.
+    if not ground_truth_normalized.strip() or not (given_normalized or "").strip():
+        return False
+
     if ground_truth_normalized == given_normalized:
         return True
 
@@ -533,6 +538,11 @@ def grade_answer_sympy(given_answer: str, ground_truth: str) -> bool:
 def grade_answer_mathd(given_answer: str, ground_truth: str) -> bool:
     ground_truth_normalized_mathd = mathd_normalize_answer(ground_truth)
     given_answer_normalized_mathd = mathd_normalize_answer(given_answer)
+
+    # An empty (or whitespace-only) normalized answer carries no information,
+    # so it must never be treated as a match for another empty answer.
+    if not (ground_truth_normalized_mathd or "").strip() or not (given_answer_normalized_mathd or "").strip():
+        return False
 
     # be at least as lenient as mathd
     if ground_truth_normalized_mathd == given_answer_normalized_mathd:
