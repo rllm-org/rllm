@@ -224,9 +224,11 @@ async def compute_step_distill_advantage(
                 content_str=content_str,
             )
 
-    # Pad aligned_teacher_logprobs if needed
+    # A truncated teacher query provides no signal for the remaining tokens.
+    # Match the student's logprobs there so their reverse-KL advantage is zero,
+    # as in the cross-tokenizer alignment fallback.
     if len(aligned_teacher_logprobs) < len(student_logprobs):
-        aligned_teacher_logprobs = list(aligned_teacher_logprobs) + [0.0] * (len(student_logprobs) - len(aligned_teacher_logprobs))
+        aligned_teacher_logprobs = list(aligned_teacher_logprobs) + student_logprobs[len(aligned_teacher_logprobs) :]
 
     # Compute advantages using the pure algo function
     # Use -inf/inf as defaults if clip bounds not specified
