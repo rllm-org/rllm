@@ -145,7 +145,7 @@ Choose one of the following installation methods based on your needs.
           --shm-size="10g" --cap-add=SYS_ADMIN \
           -v .:/workspace/rllm -v /tmp:/tmp \
           --name rllm-container rllm sleep infinity
-        
+
         docker start rllm-container
         ```
       </Step>
@@ -192,7 +192,7 @@ rLLM provides additional optional dependencies for specific agent domains and fr
 
   <Accordion title="Domain-specific tools">
     - **web**: Web agents (BrowserGym, Selenium, Firecrawl)
-    - **code-tools**: Sandboxed code execution (E2B, Together)
+    - **code-tools**: Sandboxed code execution (Daytona, E2B, Together)
     - **swe**: Software engineering tools (Docker, Kubernetes, SWEBench)
     - **verifiers**: Verifiers integration for validation
   </Accordion>
@@ -238,7 +238,7 @@ You should see the version number printed (e.g., `0.2.1`).
   <Card title="Quick start" icon="rocket" href="/quickstart-cli">
     Build your first math reasoning agent in 10 minutes
   </Card>
-  
+
   <Card title="Core concepts" icon="book" href="/core-concepts/episodes-trajectories-steps">
     Learn about the key components of rLLM
   </Card>
