@@ -59,8 +59,8 @@ class R1ToolParser(ToolParser):
         self.tool_call_begin = "<｜tool▁call▁begin｜>"
         self.tool_call_end = "<｜tool▁call▁end｜>"
         self.tool_sep = "<｜tool▁sep｜>"
-        self.tool_output_begin = "<｜tool▁response▁begin｜>"
-        self.tool_output_end = "<｜tool_response_end｜>"
+        self.tool_output_begin = "<｜tool▁output▁begin｜>"
+        self.tool_output_end = "<｜tool▁output▁end｜>"
 
     def parse(self, model_response: str) -> list[ToolCall]:
         """Parse tool calls from model output.
