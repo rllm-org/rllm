@@ -15,6 +15,7 @@ import json
 import logging
 import shlex
 from contextlib import nullcontext
+from urllib.parse import urlparse
 
 from rllm.harnesses.cli_harness import BaseCliHarness
 from rllm.sandbox.protocol import Sandbox
@@ -44,9 +45,21 @@ def _provider_key_var(model: str) -> str:
     return "OPENAI_API_KEY"
 
 
+# Shared by both install steps. Installing the agent needs the network even when
+# the task image blocks it for the agent: some images point ``http(s)_proxy`` at a
+# closed port, and some set ``SSL_CERT_DIR``/``SSL_CERT_FILE`` to paths that don't
+# exist, which makes uv trust no certificates at all. Neither applies to the agent's
+# own run — only to these install commands.
+_INSTALL_ENV_PREAMBLE = r"""
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+if [ -n "${SSL_CERT_DIR:-}" ] && [ ! -d "$SSL_CERT_DIR" ]; then unset SSL_CERT_DIR; fi
+if [ -n "${SSL_CERT_FILE:-}" ] && [ ! -f "$SSL_CERT_FILE" ]; then unset SSL_CERT_FILE; fi
+"""
+
 # System packages: always installed as root.
 _SYSTEM_DEPS_SCRIPT = r"""
 set -e
+""" + _INSTALL_ENV_PREAMBLE + r"""
 # DEBIAN_FRONTEND=noninteractive is mandatory: ``apt-get install python3``
 # pulls in ``tzdata``, which triggers a debconf timezone prompt and
 # hangs forever on Modal sandboxes (Docker exec falls back to
@@ -55,12 +68,15 @@ export DEBIAN_FRONTEND=noninteractive
 # Only fall back to apt when curl is missing — swebench testbeds
 # have expired Ubuntu jammy repo signatures, so unconditional
 # ``apt-get update`` fails with GPG errors and stops the script
-# before uv even gets a chance.
+# before uv even gets a chance. Not fatal: an image whose package mirror
+# is gone can still get uv through python3 (see the agent install).
 if ! command -v curl >/dev/null 2>&1; then
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq curl ca-certificates git
+        { apt-get update -qq && apt-get install -y -qq curl ca-certificates git; } \
+            || echo "could not install curl with apt; uv will be fetched with python3" >&2
     elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache curl bash ca-certificates git
+        apk add --no-cache curl bash ca-certificates git \
+            || echo "could not install curl with apk; uv will be fetched with python3" >&2
     fi
 fi
 """
@@ -69,6 +85,7 @@ fi
 # agent runs as (the task's ``[agent].user`` when scoped, as harbor does).
 _AGENT_INSTALL_SCRIPT = r"""
 set -e
+""" + _INSTALL_ENV_PREAMBLE + r"""
 export PATH="$HOME/.local/bin:$PATH"
 if ! command -v mini-swe-agent >/dev/null 2>&1; then
     if ! command -v uv >/dev/null 2>&1; then
@@ -77,12 +94,43 @@ if ! command -v mini-swe-agent >/dev/null 2>&1; then
         # connection on cloud backends (Modal/Daytona). Without a retry a
         # single ``curl: (35/56) Connection reset by peer`` aborts the whole
         # install under ``set -e`` and the rollout scores 0. Retry a few times
-        # with backoff before giving up.
+        # with backoff before giving up. Download to a file rather than
+        # ``curl | sh``: a pipeline's status is ``sh``'s, and ``sh`` on empty
+        # input exits 0, so a failed download would count as a success.
+        # Without curl (and the installer needs curl or wget itself), fetch the
+        # static uv build straight from its release with python3.
         uv_installed=0
         for attempt in 1 2 3 4 5; do
-            if curl -LsSf https://astral.sh/uv/install.sh | sh; then
-                uv_installed=1
-                break
+            if command -v curl >/dev/null 2>&1; then
+                uv_script=$(mktemp)
+                if curl -LsSf --retry 3 -o "$uv_script" https://astral.sh/uv/install.sh && sh "$uv_script"; then
+                    uv_installed=1
+                    break
+                fi
+            elif command -v python3 >/dev/null 2>&1; then
+                if python3 - <<'PY'
+import io, os, platform, tarfile, urllib.request
+arch = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}[platform.machine().lower()]
+url = "https://github.com/astral-sh/uv/releases/latest/download/uv-%s-unknown-linux-musl.tar.gz" % arch
+data = urllib.request.urlopen(url, timeout=300).read()
+dest = os.path.expanduser("~/.local/bin")
+os.makedirs(dest, exist_ok=True)
+with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+    for member in archive.getmembers():
+        name = os.path.basename(member.name)
+        if member.isfile() and name in ("uv", "uvx"):
+            path = os.path.join(dest, name)
+            with open(path, "wb") as out:
+                out.write(archive.extractfile(member).read())
+            os.chmod(path, 0o755)
+PY
+                then
+                    uv_installed=1
+                    break
+                fi
+            else
+                echo "neither curl nor python3 is available to fetch uv" >&2
+                exit 1
             fi
             echo "uv install attempt ${attempt} failed; retrying in $((attempt * 3))s" >&2
             sleep $((attempt * 3))
@@ -101,7 +149,23 @@ if ! command -v mini-swe-agent >/dev/null 2>&1; then
     # ``TypeError: unsupported operand type(s) for |`` and exits before any
     # LLM call (zero traces, score 0). uv fetches a managed CPython 3.12 if
     # one isn't present; this venv is independent of the task's own python.
-    uv tool install --python 3.12 mini-swe-agent
+    #
+    # Pinned: unpinned installs pick up whatever litellm is newest (1.105.1
+    # crashed at launch with a circular import in ``litellm.rust_bridge``) and
+    # drift mid-training. litellm and its extras match harbor's install.
+    # Retried: this step downloads Python 3.12 and every wheel from the network.
+    for attempt in 1 2 3; do
+        if uv tool install --python 3.12 'mini-swe-agent==2.4.6' \
+            --with 'litellm==1.93.2' --with orjson --with fastapi; then
+            break
+        fi
+        if [ "$attempt" -eq 3 ]; then
+            echo "mini-swe-agent install failed after 3 attempts" >&2
+            exit 1
+        fi
+        echo "mini-swe-agent install attempt ${attempt} failed; retrying in $((attempt * 5))s" >&2
+        sleep $((attempt * 5))
+    done
 fi
 """
 
@@ -370,9 +434,27 @@ class MiniSweAgentHarness(BaseCliHarness):
             output_path = shlex.quote(self.trajectory_output_path)
             outcome_prefix = f"rm -f {output_path}; "
             outcome_arg = f"--output={output_path} "
+        # Some task images set ``http(s)_proxy`` to a closed port so anything the
+        # agent downloads fails fast. Add the gateway to the image's own
+        # ``NO_PROXY`` (kept, not replaced) so model calls still go through while
+        # every other request stays blocked.
+        no_proxy_prefix = ""
+        gateway_host = urlparse(config.base_url).hostname
+        if gateway_host:
+            host = shlex.quote(gateway_host)
+            no_proxy_prefix = f'export NO_PROXY={host}"${{NO_PROXY:+,$NO_PROXY}}" no_proxy={host}"${{no_proxy:+,$no_proxy}}"; '
+        # A cert path that doesn't exist (some images set SSL_CERT_DIR to a
+        # missing /etc/ssl/certs) makes httpx trust nothing, so every HTTPS model
+        # call fails. Drop only paths that don't exist; valid ones are kept.
+        cert_prefix = (
+            'if [ -n "${SSL_CERT_DIR:-}" ] && [ ! -d "$SSL_CERT_DIR" ]; then unset SSL_CERT_DIR; fi; '
+            'if [ -n "${SSL_CERT_FILE:-}" ] && [ ! -f "$SSL_CERT_FILE" ]; then unset SSL_CERT_FILE; fi; '
+        )
         return (
             f"{self._cd_prefix(task)}"
             f'export PATH="$HOME/.local/bin:$PATH"; '
+            f"{no_proxy_prefix}"
+            f"{cert_prefix}"
             f"{outcome_prefix}"
             f"mini-swe-agent --yolo "
             f"{config_args}"

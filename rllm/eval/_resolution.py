@@ -17,6 +17,7 @@ Module is private (``_resolution``) — external callers should go through
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib
 import inspect
 import logging
@@ -274,8 +275,7 @@ def _create_base_sandbox(
 
     image = image if image is not None else _resolve_image(task, backend)
     if name is None:
-        safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
-        name = f"rllm-{safe_id}-{uuid.uuid4().hex[:6]}"
+        name = _sandbox_name(task.id)
     # Explicit caller kwargs override the per-task resource defaults — both may
     # carry Modal's ``timeout`` (e.g. the snapshot builder's build_timeout).
     kwargs = {**_sandbox_resource_kwargs(task, backend, env_override), **backend_kwargs}
@@ -391,6 +391,16 @@ def _dockerfile_context_fingerprint(dockerfile: Path) -> str:
     return h.hexdigest()[:16]
 
 
+def _sandbox_name(key: str) -> str:
+    """Fixed-length sandbox name: a hash of *key* plus a per-sandbox random suffix.
+
+    Task ids run long and backends cap name length (Modal: 64), so the id never
+    goes into the name verbatim — truncating it would drop the random suffix and
+    make concurrent rollouts of one task collide.
+    """
+    return f"rllm-{hashlib.sha256(key.encode()).hexdigest()[:12]}-{uuid.uuid4().hex[:12]}"
+
+
 def _create_sandbox_for_task(
     task: Task,
     sandbox_backend: str | None,
@@ -449,17 +459,28 @@ def _verifier_env_section(task: Task) -> dict:
 def _create_verifier_sandbox(task: Task, sandbox_backend: str | None) -> Sandbox:
     """A fresh container to grade a separate-mode task in.
 
-    Harbor builds this image from ``tests/`` as the build context — deepswe's
-    ``tests/Dockerfile`` is "the pinned task image with the hidden tests baked
-    in". Creating from the task's own image reproduces it, because
+    Harbor builds this image from ``tests/Dockerfile`` with ``tests/`` as the
+    build context, and those images often carry more than ``/tests`` — grader
+    data under ``/opt/verifier``, a different base image, pip deps — so on
+    backends that build images we build that Dockerfile too. Without one, the
+    task's own image stands in, since
     :class:`~rllm.eval.script_evaluator.ShellScriptEvaluator` uploads ``tests/``
     to ``/tests`` regardless. Resources come from the verifier's own section.
     """
-    safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
+    backend = _resolve_backend(task, sandbox_backend)
+    tests_dockerfile = task.task_dir / "tests" / "Dockerfile"
+    if backend in _FROM_DOCKERFILE_BACKENDS and tests_dockerfile.exists():
+        return _create_base_sandbox(
+            task,
+            backend,
+            image=_dockerfile_image(backend, tests_dockerfile),
+            name=_sandbox_name(f"verify:{task.id}"),
+            env_override=_verifier_env_section(task),
+        )
     return _create_sandbox_for_task(
         task,
         sandbox_backend,
-        name=f"rllm-verify-{safe_id}-{uuid.uuid4().hex[:6]}",
+        name=_sandbox_name(f"verify:{task.id}"),
         env_override=_verifier_env_section(task),
     )
 
@@ -698,9 +719,8 @@ def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:
     # ``workdir`` is unset for tasks (e.g. swesmith) whose Dockerfile
     # already declares a meaningful WORKDIR (``/testbed``) — forcing
     # ``/workspace`` would override it and break verifiers that
-    # ``cd``-into-cwd or ``git checkout``. The ``mkdir`` / ``chown``
-    # / ``upload_dir(files)`` steps below only fire when a workdir is
-    # explicitly declared.
+    # ``cd``-into-cwd or ``git checkout``. The ``mkdir`` / ``upload_dir(files)``
+    # steps below only fire when a workdir is explicitly declared.
     control_timeout = sandbox_control_timeout_s()
     workdir = task.metadata.get("workdir")
     env_root = task.task_dir / "environment"
@@ -731,12 +751,17 @@ def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:
         # keep them owned by whoever runs the verifier — root unless the task set
         # a distinct verifier_user — so the verifier (now actually switched to
         # that user via the backend's su emulation) can still write reward files.
+        # The workdir is left as the image built it: the task's Dockerfile decides
+        # what the agent may write (Harbor never chowns it), and verifiers check
+        # that shipped inputs are still root-owned.
         verifier_owner = task.metadata.get("verifier_user") or "root"
-        _safe_exec(sandbox, "mkdir -p /logs/verifier /tmp/rllm /tests", timeout=control_timeout)
-        _safe_exec(sandbox, "chmod 700 /logs/verifier /tmp/rllm /tests", timeout=control_timeout)
-        _safe_exec(sandbox, f"chown {verifier_owner} /logs/verifier /tmp/rllm /tests", timeout=control_timeout)
-        if workdir:
-            _safe_exec(sandbox, f"chown -R {agent_user} {workdir}", timeout=30)
+        _safe_exec(sandbox, "mkdir -p /tmp/rllm /tests", timeout=control_timeout)
+        _safe_exec(sandbox, "chmod 700 /tmp/rllm /tests", timeout=control_timeout)
+        _safe_exec(sandbox, f"chown {verifier_owner} /tmp/rllm /tests", timeout=control_timeout)
+    # /logs/verifier is world-writable as in Harbor (verifiers stage fixtures there
+    # and read them back as the agent user); ShellScriptEvaluator empties it right
+    # before grading, so nothing the agent leaves there can pose as a reward.
+    _safe_exec(sandbox, "mkdir -p /logs/verifier && chmod 777 /logs/verifier", timeout=control_timeout)
 
     env_vars = task.metadata.get("env_vars", {}) or task.metadata.get("environment", {}).get("env", {})
     if env_vars:

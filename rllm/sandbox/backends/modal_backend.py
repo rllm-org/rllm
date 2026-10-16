@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 # Headroom the sandbox lifetime keeps *beyond* the agent run timeout + install,
 # to cover the post-run verifier, teardown, and scheduling slack.
 _SANDBOX_LIFETIME_HEADROOM_S = 10 * 60
+# Modal rejects longer sandbox names.
+_MAX_SANDBOX_NAME_LEN = 64
 
 
 def _default_sandbox_timeout() -> int:
@@ -225,6 +227,10 @@ class ModalSandbox:
     def __init__(self, name: str, image: str = "python:3.11-slim", **kwargs):
         import modal
 
+        # Modal names must be unique per app; never truncate one (that drops the
+        # random suffix and collides), refuse it instead.
+        if len(name) > _MAX_SANDBOX_NAME_LEN:
+            raise ValueError(f"Modal sandbox name exceeds {_MAX_SANDBOX_NAME_LEN} chars: {name!r}")
         self.name = name
         self._image_spec = image
         self._timeout = kwargs.pop("timeout", None) or _default_sandbox_timeout()
@@ -251,7 +257,14 @@ class ModalSandbox:
             elif isinstance(image, str):
                 modal_image = modal.Image.from_registry(image)
             else:
-                modal_image = image  # already a modal.Image
+                # already a modal.Image — e.g. ``Image.from_dockerfile`` for a task's
+                # real Dockerfile. Modal's builder only accepts a URL as an ``ADD``
+                # source, so ``ADD <local tar> <dest>`` (which Docker auto-extracts)
+                # fails the build; Harbor-on-Modal fails the same way. For now such
+                # tasks get their Dockerfile fixed to ``COPY`` + ``RUN tar -x``. If
+                # more turn up, the Dockerfile could be rewritten that way before
+                # building instead.
+                modal_image = image
 
             create_kwargs: dict = {"app": self._app, "image": modal_image, "timeout": self._timeout}
             self._agent_network_enabled = os.environ.get("RLLM_AGENT_NETWORK_DOMAINS") is not None
@@ -263,7 +276,7 @@ class ModalSandbox:
             #   modal.Sandbox.list(tags={"rllm_run_id": "<id>"})  -> .terminate()
             # Older modal SDKs (< 1.5) have no ``tags`` create kwarg — attach
             # them post-create via set_tags() instead.
-            create_kwargs["name"] = self.name[:64]
+            create_kwargs["name"] = self.name
             run_tags = {"rllm_run_id": rllm_run_id()}
             post_create_tags: dict[str, str] | None = None
             if _supports_create_tags(modal.Sandbox):
@@ -378,9 +391,12 @@ class ModalSandbox:
         elapsed = time.monotonic() - start
 
         if exit_code != 0:
-            # A timeout SIGKILL surfaces as a negative returncode; flag it so an
+            # A timeout SIGKILL surfaces as a negative returncode, or as 137
+            # (128 + SIGKILL) when a shell in between reports it; flag it so an
             # agent that simply spent its time budget isn't reported as a failure.
-            timed_out = timeout is not None and exit_code < 0 and elapsed >= timeout * 0.95
+            # Elapsed is timed from before the request, so a kill at Modal's limit
+            # (the truncated int we passed) always lands at or past it.
+            timed_out = timeout is not None and (exit_code < 0 or exit_code == 137) and elapsed >= int(timeout)
             if timed_out:
                 logger.warning(
                     "Command hit its %ds timeout in sandbox %s (killed after %.0fs): %s",

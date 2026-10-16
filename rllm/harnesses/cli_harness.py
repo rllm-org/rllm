@@ -468,7 +468,9 @@ class BaseCliHarness(SandboxedAgentFlow):
         # No sentinel (opaque CLI, or the driver was killed before writing one):
         # an exec that ran essentially to the wall is a wall-clock timeout whose
         # exit code got masked — the failure mode this backstop exists to catch.
-        if budget > 0 and elapsed >= budget * 0.95:
+        # The only kill lands at ``exec_timeout`` (past ``budget``); an exec that
+        # returned before ``budget`` ended on its own.
+        if budget > 0 and elapsed >= budget:
             logger.info("%s ran to its wall-clock budget (%.0fs/%.0fs) with no clean exit; marking TIMEOUT", type(self).__name__, elapsed, budget)
             return self._outcome_episode(task, termination_reason=TerminationReason.TIMEOUT)
 

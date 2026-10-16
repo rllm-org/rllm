@@ -7,6 +7,34 @@ from typing import Any
 
 from rllm.types import Episode, TrajectoryDelta
 
+# Token-level ``model_output`` fields dropped from saved episodes: router replay, token
+# ids and logprobs. Together they were ~80% of an episode file and only matter to the
+# trainer, which doesn't read these files. Text, reasoning, tool calls and token counts stay.
+_DROPPED_MODEL_OUTPUT_FIELDS = ("routing_matrices", "prompt_ids", "completion_ids", "logprobs", "prompt_logprobs")
+
+
+def strip_episode_for_log(episode_data: dict) -> dict:
+    """Cut an episode record down to what's worth keeping on disk (mutates and returns it).
+
+    * Drops the token-level ``model_output`` fields in ``_DROPPED_MODEL_OUTPUT_FIELDS``.
+    * Drops a step's ``chat_completions`` when the next step's starts with it. Each step
+      carries the whole conversation so far, so those copies are exact duplicates; the
+      last step of each trajectory keeps the full conversation. A step whose conversation
+      isn't a prefix of the next one (e.g. after context compaction) keeps its copy.
+    """
+    for traj in episode_data.get("trajectories", []):
+        steps = traj.get("steps", [])
+        for step in steps:
+            model_output = step.get("model_output")
+            if isinstance(model_output, dict):
+                for key in _DROPPED_MODEL_OUTPUT_FIELDS:
+                    model_output.pop(key, None)
+        for step, nxt in zip(steps, steps[1:]):
+            cur, after = step.get("chat_completions"), nxt.get("chat_completions")
+            if isinstance(cur, list) and isinstance(after, list) and after[: len(cur)] == cur:
+                step["chat_completions"] = None
+    return episode_data
+
 
 class EpisodeLogger:
     """Logger to save episodes to individual JSON files with step and data hash."""
@@ -128,6 +156,7 @@ class EpisodeLogger:
                 ],
             }
             episode_data["trajectories"].append(traj_data)
+        strip_episode_for_log(episode_data)
 
         # Write to individual file in step-specific directory
         step_dir = self.get_step_dir(step, mode, epoch)
@@ -136,7 +165,7 @@ class EpisodeLogger:
 
         try:
             with open(filepath, "w") as f:
-                json_str = json.dumps(episode_data, indent=2, default=str)
+                json_str = json.dumps(episode_data, separators=(",", ":"), default=str)
                 f.write(json_str + "\n")
                 f.flush()  # Ensure data is written to disk
         except Exception as e:

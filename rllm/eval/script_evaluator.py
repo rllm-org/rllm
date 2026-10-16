@@ -15,6 +15,7 @@ import json
 import logging
 import shlex
 import tempfile
+import uuid
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
@@ -109,7 +110,7 @@ class ShellScriptEvaluator:
         # produced reaches it as collected artifacts. Own it for the duration so
         # the box can't outlive the grade.
         grading_sandbox = self.sandbox
-        collected: dict[str, bytes] = {}
+        collected: dict[str, tuple[bool, bytes]] = {}
         if self.separate_env:
             collected = self._run_collect(task, v_user)
             try:
@@ -138,14 +139,30 @@ class ShellScriptEvaluator:
         tests_dir: Path,
         script_name: str,
         v_user: str | None,
-        collected: dict[str, bytes],
+        collected: dict[str, tuple[bool, bytes]],
     ) -> EvalOutput:
         """Upload the tests (and any collected artifacts), run the verifier, read the reward."""
-        # Prepare reward directories
+        # Prepare reward directories. /logs/verifier is world-writable during the
+        # agent's run, so empty it first (as root, like Harbor's empty_dirs before
+        # every verify) — a reward file the agent planted there must not count.
         try:
-            sandbox.exec("mkdir -p /tmp/rllm /logs/verifier", timeout=sandbox_control_timeout_s(), user=v_user)
+            sandbox.exec("mkdir -p /tmp/rllm", timeout=sandbox_control_timeout_s(), user=v_user)
         except Exception:
             pass
+        try:
+            sandbox.exec(
+                "mkdir -p /logs/verifier && find /logs/verifier -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && chmod 777 /logs/verifier",
+                timeout=sandbox_control_timeout_s(),
+                user="root",
+            )
+        except Exception as e:
+            logger.warning("Failed to reset /logs/verifier for %s: %s", task.id, e)
+            return EvalOutput(
+                reward=0.0,
+                is_correct=False,
+                error="VerifierEnvironmentError",
+                metadata={"error": f"failed to reset /logs/verifier: {e}"},
+            )
 
         # Upload to /tests/ (Harbor convention — scripts may reference /tests/*.py).
         # A failed upload means the verifier can't run — a grading-infra failure,
@@ -163,9 +180,12 @@ class ShellScriptEvaluator:
 
         # Re-materialise what the collect step snapshotted, at the same paths it
         # wrote them to — the verifier image doesn't pre-create those dirs.
-        for path, blob in collected.items():
+        for path, (is_dir, blob) in collected.items():
             try:
-                _write_remote_file(sandbox, path, blob, user=v_user)
+                if is_dir:
+                    _write_remote_dir(sandbox, path, blob)
+                else:
+                    _write_remote_file(sandbox, path, blob, user=v_user)
             except Exception as e:
                 logger.warning("Could not upload artifact %s for %s: %s", path, task.id, e)
 
@@ -174,8 +194,11 @@ class ShellScriptEvaluator:
         # and similar harbor task families whose verifier scripts run
         # ``git`` and ``pytest`` against ``/testbed`` (the image WORKDIR)
         # and silently collect zero tests when forced into ``/workspace``.
+        # A separate verifier box runs from its own image's WORKDIR, as in Harbor
+        # (which never ``cd``s) — its tests/Dockerfile image may not have the
+        # agent's workdir at all.
         workdir = task.metadata.get("workdir")
-        cd_prefix = f"cd {workdir} && " if workdir else ""
+        cd_prefix = f"cd {workdir} && " if workdir and sandbox is self.sandbox else ""
 
         # Only meaningful in the agent's own container; a fresh verifier box is
         # already at the image's commit.
@@ -224,7 +247,7 @@ class ShellScriptEvaluator:
             out.metadata["verifier_stdout_tail"] = verifier_stdout[-_VERIFIER_STDOUT_TAIL_CHARS:]
         return out
 
-    def _run_collect(self, task: Task, user: str | None) -> dict[str, bytes]:
+    def _run_collect(self, task: Task, user: str | None) -> dict[str, tuple[bool, bytes]]:
         """Run ``[[verifier.collect]]`` in the agent's box and pull the artifacts out.
 
         Harbor's separate-mode contract: the agent's container is the only place
@@ -233,6 +256,9 @@ class ShellScriptEvaluator:
         re-materialised in the verifier container. Best-effort per command — a
         collect step that fails leaves that artifact missing, which the verifier
         reports as an unsubmitted patch rather than a grading crash.
+
+        Returns ``{path: (is_dir, blob)}``; a directory artifact (e.g. the whole
+        workdir) travels as a gzipped tar of its contents.
         """
         for entry in self.collect_commands:
             command = entry.get("command") if isinstance(entry, dict) else str(entry)
@@ -243,15 +269,22 @@ class ShellScriptEvaluator:
             except Exception as e:
                 logger.warning("collect step failed for %s (%s): %s", task.id, command[:80], e)
 
-        collected: dict[str, bytes] = {}
-        for path in self.artifacts:
+        collected: dict[str, tuple[bool, bytes]] = {}
+        for artifact in self.artifacts:
+            # Harbor's ``artifacts`` entries are a path or an ArtifactConfig table
+            # (``{source, exclude}``); either way it lands at ``source`` in the verifier box.
+            path = str(artifact["source"]) if isinstance(artifact, dict) else str(artifact)
+            exclude = (artifact.get("exclude") or []) if isinstance(artifact, dict) else []
             try:
-                blob = _read_remote_file(self.sandbox, str(path))
+                if _is_remote_dir(self.sandbox, path):
+                    collected[path] = (True, _read_remote_dir(self.sandbox, path, exclude))
+                    continue
+                blob = _read_remote_file(self.sandbox, path)
             except Exception as e:
                 logger.warning("Could not collect artifact %s for %s: %s", path, task.id, e)
                 continue
             if blob is not None:
-                collected[str(path)] = blob
+                collected[path] = (False, blob)
         return collected
 
     def _restore_git_heads(self, user: str | None) -> None:
@@ -313,6 +346,45 @@ def _write_remote_file(sandbox: Sandbox, path: str, blob: bytes, user: str | Non
         tmp.write(blob)
         tmp.flush()
         sandbox.upload_file(tmp.name, path)
+
+
+def _is_remote_dir(sandbox: Sandbox, path: str) -> bool:
+    q = shlex.quote(path)
+    return sandbox.exec(f"test -d {q} && echo dir || true", timeout=sandbox_control_timeout_s(), user="root").strip() == "dir"
+
+
+def _read_remote_dir(sandbox: Sandbox, path: str, exclude: list[str]) -> bytes:
+    """Pull a directory out of a sandbox as a gzipped tar of its contents (``exclude``: tar patterns)."""
+    staged = f"/tmp/.rllm-artifact-{uuid.uuid4().hex[:8]}.tgz"
+    exclude_flags = "".join(f" --exclude={shlex.quote(pattern)}" for pattern in exclude)
+    sandbox.exec(f"tar czf {staged}{exclude_flags} -C {shlex.quote(path)} .", timeout=600, user="root")
+    try:
+        return sandbox.download_file(staged)
+    finally:
+        try:
+            sandbox.exec(f"rm -f {staged}", timeout=sandbox_control_timeout_s(), user="root")
+        except Exception:
+            pass
+
+
+def _write_remote_dir(sandbox: Sandbox, path: str, blob: bytes) -> None:
+    """Re-materialise a directory artifact at *path*, replacing what the image had there.
+
+    Matches Harbor's ``upload_artifacts`` for directories: empty the target
+    (world-writable, as ``empty_dirs(chmod=True)`` leaves it), then unpack.
+    """
+    q = shlex.quote(path)
+    staged = f"/tmp/.rllm-artifact-{uuid.uuid4().hex[:8]}.tgz"
+    sandbox.exec(
+        f"mkdir -p {q} && find {q} -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} + && chmod 777 {q}",
+        timeout=sandbox_control_timeout_s(),
+        user="root",
+    )
+    with tempfile.NamedTemporaryFile() as tmp:
+        tmp.write(blob)
+        tmp.flush()
+        sandbox.upload_file(tmp.name, staged)
+    sandbox.exec(f"tar xzf {staged} --no-same-owner -C {q} && rm -f {staged}", timeout=600, user="root")
 
 
 # ---------------------------------------------------------------------------
