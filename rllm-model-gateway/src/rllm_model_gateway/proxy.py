@@ -32,6 +32,17 @@ from rllm_model_gateway.token_accumulator import (
 
 logger = logging.getLogger(__name__)
 
+
+class ClientDisconnected(Exception):
+    """The client closed its connection before the worker answered."""
+
+
+async def _disconnected(request: Request) -> None:
+    """Return once the client disconnects, after its request body has been read."""
+    while (await request.receive())["type"] != "http.disconnect":
+        pass
+
+
 # Headers that should not be forwarded verbatim
 _HOP_BY_HOP = frozenset(
     {
@@ -207,7 +218,8 @@ class ReverseProxy:
             url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
             headers = self._forward_headers(request)
             try:
-                resp = await self._send_with_retry(
+                resp = await self._send_until_disconnected(
+                    request,
                     method=request.method,
                     url=url,
                     content=raw_body,
@@ -215,6 +227,8 @@ class ReverseProxy:
                 )
                 content = resp.content
                 status_code = resp.status_code
+            except ClientDisconnected:
+                return Response(status_code=499)
             finally:
                 self.router.release(worker.url)
 
@@ -317,7 +331,8 @@ class ReverseProxy:
         headers = self._forward_headers(request)
         raw_body = json.dumps(completions_body).encode()
         try:
-            resp = await self._send_with_retry(
+            resp = await self._send_until_disconnected(
+                request,
                 method="POST",
                 url=url,
                 content=raw_body,
@@ -325,6 +340,8 @@ class ReverseProxy:
             )
             content = resp.content
             status_code = resp.status_code
+        except ClientDisconnected:
+            return Response(status_code=499)
         finally:
             self.router.release(worker.url)
 
@@ -743,6 +760,27 @@ class ReverseProxy:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    async def _send_until_disconnected(self, request: Request, **kwargs: Any) -> httpx.Response:
+        """Send a non-streaming request to the worker, cancelling it if the client disconnects first.
+
+        Cancelling the upstream call closes its connection, which vLLM and SGLang
+        treat as an abort of the request, so a client that goes away stops its
+        generation instead of leaving it to run to its token budget.
+        """
+        sending = asyncio.ensure_future(self._send_with_retry(**kwargs))
+        gone = asyncio.ensure_future(_disconnected(request))
+        try:
+            done, _ = await asyncio.wait((sending, gone), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            # Cancel whichever is still running and wait for it to finish, so its connection is
+            # closed before the response is chosen.
+            for task in (sending, gone):
+                task.cancel()
+            await asyncio.gather(sending, gone, return_exceptions=True)
+        if sending not in done:
+            raise ClientDisconnected
+        return sending.result()
 
     async def _send_with_retry(
         self,
