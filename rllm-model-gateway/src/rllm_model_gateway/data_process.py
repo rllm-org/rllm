@@ -245,7 +245,7 @@ def build_trace_record_from_chunks(
     logprobs: list[float] = []
     role = ""
     content_parts: list[str] = []
-    tool_calls_parts: list[dict[str, Any]] = []
+    tool_calls: dict[int, dict[str, Any]] = {}
     finish_reason: str | None = None
     model = request_body.get("model", "")
     usage: dict[str, Any] = {}
@@ -269,8 +269,14 @@ def build_trace_record_from_chunks(
                 role = delta["role"]
             if delta.get("content"):
                 content_parts.append(delta["content"])
-            if delta.get("tool_calls"):
-                tool_calls_parts.extend(delta["tool_calls"])
+            for part in delta.get("tool_calls") or []:
+                tool_call = tool_calls.setdefault(part["index"], {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                if part.get("id"):
+                    tool_call["id"] = part["id"]
+                if part.get("type"):
+                    tool_call["type"] = part["type"]
+                for field in ("name", "arguments"):
+                    tool_call["function"][field] += (part.get("function") or {}).get(field) or ""
             if c.get("finish_reason"):
                 finish_reason = c["finish_reason"]
 
@@ -281,8 +287,8 @@ def build_trace_record_from_chunks(
     content = "".join(content_parts)
     if content:
         response_message["content"] = content
-    if tool_calls_parts:
-        response_message["tool_calls"] = tool_calls_parts
+    if tool_calls:
+        response_message["tool_calls"] = [tool_calls[index] for index in sorted(tool_calls)]
 
     token_counts: dict[str, int] = {}
     if "prompt_tokens" in usage:
