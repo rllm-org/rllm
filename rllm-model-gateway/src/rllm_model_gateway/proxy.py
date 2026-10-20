@@ -771,12 +771,14 @@ class ReverseProxy:
         sending = asyncio.ensure_future(self._send_with_retry(**kwargs))
         gone = asyncio.ensure_future(_disconnected(request))
         try:
-            await asyncio.wait((sending, gone), return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait((sending, gone), return_when=asyncio.FIRST_COMPLETED)
         finally:
-            gone.cancel()
-            if not sending.done():
-                sending.cancel()
-        if sending.cancelled():
+            # Cancel whichever is still running and wait for it to finish, so its connection is
+            # closed before the response is chosen.
+            for task in (sending, gone):
+                task.cancel()
+            await asyncio.gather(sending, gone, return_exceptions=True)
+        if sending not in done:
             raise ClientDisconnected
         return sending.result()
 
