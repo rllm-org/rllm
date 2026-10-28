@@ -1,7 +1,9 @@
+import asyncio
 import base64
 import json
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import cast
 
 import torch
@@ -53,6 +55,13 @@ class VerlEngine(RolloutEngine):
         logger.info(f"train_sampling_params: {self.train_sampling_params}")
         logger.info(f"val_sampling_params: {self.val_sampling_params}")
 
+        processor_workers = config.get("rllm", {}).get("workflow", {}).get("n_processor_workers", 8)
+        self.processor_executor = ThreadPoolExecutor(max_workers=processor_workers, thread_name_prefix="verl-preprocess")
+
+    def shutdown(self):
+        """Wait for active preprocessing and cancel queued requests."""
+        self.processor_executor.shutdown(wait=True, cancel_futures=True)
+
     @property
     def supports_token_in_token_out(self) -> bool:
         return True
@@ -94,13 +103,8 @@ class VerlEngine(RolloutEngine):
 
         return token_output
 
-    @override
-    async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
-        # these go to the parser
-        tools = kwargs.pop("tools", [])
-        accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
-        reasoning_effort = kwargs.pop("reasoning_effort", "medium")
-
+    def _prepare_request_inputs(self, messages: list[dict], tools: list, accumulate_reasoning: bool, reasoning_effort: str):
+        """Build text and image inputs without blocking the event loop."""
         prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, tools=tools, accumulate_reasoning=accumulate_reasoning, reasoning_effort=reasoning_effort)
         request_prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)  # list[int]
 
@@ -121,6 +125,17 @@ class VerlEngine(RolloutEngine):
             multi_modal_inputs = None
             prompt_ids = request_prompt_ids
 
+        return request_prompt_ids, image_data, prompt_ids, multi_modal_inputs
+
+    @override
+    async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+        tools = kwargs.pop("tools", [])
+        accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
+        reasoning_effort = kwargs.pop("reasoning_effort", "medium")
+
+        request_prompt_ids, image_data, prompt_ids, multi_modal_inputs = await asyncio.get_running_loop().run_in_executor(
+            self.processor_executor, self._prepare_request_inputs, messages, tools, accumulate_reasoning, reasoning_effort
+        )
         token_output: TokenOutput = await self.get_token_output_from_token_input(token_input=request_prompt_ids, image_data=image_data, **kwargs)
         extra_kwargs = dict(prompt_ids=prompt_ids, multi_modal_inputs=multi_modal_inputs)
         return self.assemble_model_output(token_input=request_prompt_ids, token_output=token_output, **extra_kwargs)
