@@ -1,4 +1,6 @@
+import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
 import tinker
@@ -164,6 +166,7 @@ class TinkerEngine(RolloutEngine):
         accumulate_reasoning: bool = False,
         reasoning_effort: str = "medium",
         renderer_name: str | None = None,
+        n_processor_workers: int = 8,
         **kwargs,
     ):
         """
@@ -185,6 +188,7 @@ class TinkerEngine(RolloutEngine):
             accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
             reasoning_effort: The effort level for reasoning (used when bypass_render_with_parser=True)
             renderer_name: The name of the renderer to use (used when bypass_render_with_parser=True)
+            n_processor_workers: Maximum concurrent CPU preprocessing tasks; must be positive.
         """
         super().__init__()
         self.base_url = base_url
@@ -229,6 +233,14 @@ class TinkerEngine(RolloutEngine):
 
         # Sampling client will be set via set_sampling_client()
         self.sampling_client = None
+        self.processor_executor = ThreadPoolExecutor(max_workers=n_processor_workers, thread_name_prefix="tinker-preprocess")
+
+    def shutdown(self):
+        """Wait for active preprocessing and cancel queued requests."""
+        # FireworksEngine skips this class's constructor and owns no pool.
+        executor = getattr(self, "processor_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
 
     def set_sampling_client(self, sampling_client):
         """
@@ -374,30 +386,8 @@ class TinkerEngine(RolloutEngine):
             finish_reason=finish_reason,
         )
 
-    @override
-    async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
-        """
-        Generate model response for a given set of messages.
-
-        Args:
-            messages: List of message dictionaries (OpenAI format)
-            **kwargs: Additional parameters including:
-                - application_id: Session/application ID for tracing
-                - enforce_max_prompt_length: Whether to enforce max prompt length
-                - tools: List of tools (used when bypass_render_with_parser=True)
-                - accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
-
-        Returns:
-            ModelOutput with generated text and metadata
-        """
-        # Extract unused kwargs
-        kwargs.pop("application_id", None)
-
-        # Extract parser-specific kwargs
-        tools = kwargs.pop("tools", [])
-        accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
-        reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
-
+    def _prepare_request_inputs(self, messages: list[dict], tools: list, accumulate_reasoning: bool, reasoning_effort: str) -> TinkerTokenInput:
+        """Render text and image inputs without blocking the event loop."""
         if self.bypass_render_with_parser:
             # Use ChatTemplateParser
             prompt = self.chat_parser.parse(  # type: ignore
@@ -420,6 +410,17 @@ class TinkerEngine(RolloutEngine):
             # Build prompt using renderer
             token_input: TinkerTokenInput = self.renderer.build_generation_prompt(tinker_messages).chunks  # type: ignore
 
+        return token_input
+
+    @override
+    async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+        """Prepare inputs in CPU workers, then sample asynchronously."""
+        kwargs.pop("application_id", None)
+        tools = kwargs.pop("tools", [])
+        accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
+        reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
+
+        token_input = await asyncio.get_running_loop().run_in_executor(self.processor_executor, self._prepare_request_inputs, messages, tools, accumulate_reasoning, reasoning_effort)
         sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs)
         return self.assemble_model_output(token_input=token_input, token_output=sampled_sequence)
 
