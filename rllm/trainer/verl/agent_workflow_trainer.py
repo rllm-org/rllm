@@ -387,10 +387,12 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                             batch = batch.union(values)
 
                     with marked_timer("adv", timing_raw, color="brown"):
-                        # step_ids is safe to always use for advantage computation
-                        # if we're not using computing advantages stepwise (i.e., for cumulative agents or single turn workflows)
-                        # then step_ids == trajectory_ids
-                        batch.non_tensor_batch["uid"] = batch.non_tensor_batch["step_ids"]
+                        # Group-relative estimators (GRPO, RLOO, ...) normalise rewards within rows that
+                        # share "uid", so the n rollouts of one task must share it. trajectory_ids is
+                        # f"{task_id}_{trajectory_name}" and does; step_ids is keyed on trajectory.uid,
+                        # a fresh uuid per rollout, which would make every group a singleton and turn
+                        # the advantage into the raw reward.
+                        batch.non_tensor_batch["uid"] = batch.non_tensor_batch["trajectory_ids"]
 
                         if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "per_step":
                             batch.batch["token_level_scores"] = batch.batch["step_rewards"]
