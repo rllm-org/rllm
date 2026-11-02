@@ -5,6 +5,8 @@ from rllm.tools.registry import ToolRegistry
 from rllm.tools.web_tools import (
     FirecrawlTool,
     GoogleSearchTool,
+    OutcrawlScrapeTool,
+    OutcrawlSearchTool,
     TavilyExtractTool,
     TavilySearchTool,
 )
@@ -16,10 +18,12 @@ DEFAULT_TOOLS = {
     "firecrawl": FirecrawlTool,
     "tavily-extract": TavilyExtractTool,
     "tavily-search": TavilySearchTool,
+    "outcrawl-scrape": OutcrawlScrapeTool,
+    "outcrawl-search": OutcrawlSearchTool,
 }
 
 # Create the singleton registry instance and register all default tools
 tool_registry = ToolRegistry()
 tool_registry.register_all(DEFAULT_TOOLS)
 
-__all__ = ["PythonInterpreter", "GoogleSearchTool", "FirecrawlTool", "TavilyExtractTool", "TavilySearchTool", "ToolRegistry", "tool_registry"]
+__all__ = ["PythonInterpreter", "GoogleSearchTool", "FirecrawlTool", "OutcrawlScrapeTool", "OutcrawlSearchTool", "TavilyExtractTool", "TavilySearchTool", "ToolRegistry", "tool_registry"]
