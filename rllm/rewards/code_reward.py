@@ -369,7 +369,11 @@ def taco_to_lcb_format(tests):
         # Use the first element as a fallback if the list is shorter than n.
         inp = inputs[i] if i < len(inputs) else (inputs[0] if inputs else "")
         out = outputs[i] if i < len(outputs) else (outputs[0] if outputs else "")
-        out = out[0] if isinstance(out, list) else out
+        if "fn_name" in tests:
+            # grade_call_based json-decodes str outputs, so encode the return value to decode it exactly once.
+            out = json.dumps(out[0] if isinstance(out, list) else out)
+        elif isinstance(out, list):
+            out = "\n".join(map(str, out))
         test_case: dict[str, Any] = {"input": inp, "output": out, "metadata": {}}
         if "fn_name" in tests:
             test_case["testtype"] = "functional"
