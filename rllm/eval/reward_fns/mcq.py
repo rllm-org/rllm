@@ -34,7 +34,8 @@ def _extract_choice_letter(text: str) -> str:
         return ""
     if len(text) == 1 and text.upper() in "ABCDEFGHIJ":
         return text.upper()
-    m = re.search(r"(?:answer\s*(?:is|:)\s*\(?([A-Ja-j])\)?)", text, re.IGNORECASE)
+    # The letter must not be the start of a word: "the answer is clearly B" must not read "C".
+    m = re.search(r"answer\s*(?:is|:)\s*\(?([A-Ja-j])(?![A-Za-z])", text, re.IGNORECASE)
     if m:
         return m.group(1).upper()
     m = re.search(r"(?:\*\*([A-J])\*\*|\(([A-J])\))", text)

@@ -8,6 +8,8 @@ legacy dict-call form.
 
 from __future__ import annotations
 
+import pytest
+
 from rllm.eval.evaluator_loader import load_evaluator
 from rllm.eval.reward_fns.mcq import _extract_choice_letter
 from rllm.types import Episode, Evaluator
@@ -131,3 +133,16 @@ class TestExtractChoiceLetter:
 
     def test_answer_with_parentheses(self):
         assert _extract_choice_letter("The answer is (D)") == "D"
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("The answer is clearly B.", "B"),
+            ("The answer is definitely C", "C"),
+            ("The answer is either A or B, but the answer is B", "B"),
+            ("Answer: (d)", "D"),
+        ],
+    )
+    def test_answer_is_followed_by_a_word(self, text, expected):
+        # The first letter of the word after "answer is" is not the choice.
+        assert _extract_choice_letter(text) == expected
