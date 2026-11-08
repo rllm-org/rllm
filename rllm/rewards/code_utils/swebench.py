@@ -54,6 +54,7 @@ from swebench.harness.utils import (
     run_threadpool,
 )
 
+from rllm.rewards.code_utils.patch_utils import GIT_APPLY_CMDS
 from rllm.globals import (
     CACHE_LEVEL,
     CLEAN,
@@ -69,12 +70,6 @@ from rllm.globals import (
     SWEBENCH_DATASET_NAME,
     TIMEOUT,
 )
-
-GIT_APPLY_CMDS = [
-    "git apply --verbose",
-    "git apply --verbose --reject",
-    "patch --batch --fuzz=5 -p1 -i",
-]
 
 
 def run_instance(
