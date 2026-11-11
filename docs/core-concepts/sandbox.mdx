@@ -1,6 +1,6 @@
 ---
 title: Sandboxes
-description: Run agent harnesses inside Docker, Daytona, Modal, or local environments — with snapshot acceleration and warm-pool scheduling
+description: Run agent harnesses inside Docker, Daytona, Modal, Runta, or local environments — with snapshot acceleration and warm-pool scheduling
 ---
 
 A *sandbox* is the isolated environment a harness runs inside. Every sandboxed task (SWE-bench, Terminal-Bench, rllm-swesmith, …) is graded by spawning an agent in a fresh sandbox, running the verifier inside it, and tearing it down. rLLM abstracts the backend so the same `--agent` runs on Docker locally and on Modal at training-scale.
@@ -13,6 +13,7 @@ A *sandbox* is the isolated environment a harness runs inside. Every sandboxed t
 | `local` | host process (no isolation) | smoke tests; environments that don't need isolation |
 | `daytona` | Daytona cloud | hosted execution without managing a Docker host |
 | `modal` | Modal cloud | training-scale eval and rollouts (best concurrency, snapshot support, pay-per-use) |
+| `runta` | Runta cloud | hosted full-machine runtimes; the task image runs as a container inside the runtime (snapshot support via checkpoints) |
 
 Pick one with `--sandbox-backend`, or let the dataset declare its preferred backend in `dataset.toml`:
 
@@ -41,7 +42,7 @@ rllm snapshot create terminal-bench-2 --backend modal
 rllm eval terminal-bench-2 --sandbox-backend modal
 ```
 
-Snapshots are backend-specific (Modal and Daytona support them; Docker and local always take the cold path). They're built and destroyed only by `rllm snapshot`, never by an eval or training run. Concurrency is `RLLM_SNAPSHOT_BUILD_WORKERS` (default 4) — bump to 10+ for benchmarks with many environments.
+Snapshots are backend-specific (Modal, Daytona, and Runta support them; Docker and local always take the cold path). They're built and destroyed only by `rllm snapshot`, never by an eval or training run. Concurrency is `RLLM_SNAPSHOT_BUILD_WORKERS` (default 4) — bump to 10+ for benchmarks with many environments.
 
 ## Warm queue (training-time)
 
@@ -62,6 +63,9 @@ Remote sandboxes get killed by their provider after an idle timeout (Daytona's a
 # Modal: raise per-sandbox lifetime (default 30 min)
 export RLLM_MODAL_SANDBOX_TIMEOUT_S=3600
 
+# Runta: raise per-runtime lifetime (default 30 min)
+export RLLM_RUNTA_SANDBOX_TIMEOUT_S=3600
+
 # Bigger build sandboxes for snapshot builds with slow RUN steps
 export RLLM_SNAPSHOT_BUILD_WORKERS=10
 ```
@@ -70,7 +74,7 @@ Per-task overrides go in `task.toml`:
 
 ```toml
 [environment]
-build_timeout_sec = 1800   # Daytona create_timeout floors at this value
+build_timeout_sec = 1800   # Daytona / Runta create_timeout floors at this value
 ```
 
 See [Environment variables](/guides/environment-variables) for the full list.

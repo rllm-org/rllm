@@ -20,6 +20,7 @@ import base64
 import importlib
 import inspect
 import logging
+import math
 import re
 import uuid
 from collections.abc import Callable
@@ -224,7 +225,8 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
     Harbor task.toml declares ``cpus`` / ``memory_mb`` / ``storage_mb``; without
     these a remote sandbox runs at the backend default (Daytona: 1 GiB), which
     OOM-kills compile-heavy graders (e.g. ``go test ./...``). Modal takes memory
-    in MB; Daytona takes memory/disk in GB. Docker/local ignore the values.
+    in MB; Daytona takes memory/disk in GB; Runta takes whole vCPUs and memory
+    in MiB. Docker/local ignore the values.
     """
     env = task.metadata.get("environment", {}) or {}
     cpus, mem_mb, disk_mb = env.get("cpus"), env.get("memory_mb"), env.get("storage_mb")
@@ -244,6 +246,14 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
         # First boot of a from-image sandbox includes the registry pull, which
         # for multi-GB SWE images routinely exceeds the SDK's 120s default.
         # Honor the task's declared build timeout, with a pull-friendly floor.
+        kw["create_timeout"] = float(env.get("build_timeout_sec") or 600.0)
+    elif backend == "runta":
+        if cpus:
+            kw["vcpus"] = max(1, math.ceil(float(cpus)))
+        if mem_mb:
+            kw["memory_mib"] = int(mem_mb)
+        # The task image is pulled inside the runtime at create time; honor the
+        # task's declared build timeout, with the same pull-friendly floor.
         kw["create_timeout"] = float(env.get("build_timeout_sec") or 600.0)
     return kw
 
