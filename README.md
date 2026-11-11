@@ -22,7 +22,7 @@ rLLM is an open-source framework for training language agents with reinforcement
 ## Core features
 
 - **Any harness.** 10+ CLI harnesses (Claude Code, Codex, Terminus-2, mini-swe-agent, opencode, ...) plus Harbor-compatible task dirs. Or wrap your own agent — LangGraph, OpenAI Agents SDK, `openai.OpenAI` — with `@rllm.rollout`.
-- **Any sandbox.** Docker, Daytona, Modal, or local — with snapshot + warm-pool acceleration to keep rollouts cheap at training-scale.
+- **Any sandbox.** Docker, Daytona, Modal, Runta, or local — with snapshot + warm-pool acceleration to keep rollouts cheap at training-scale.
 - **Multiple training backends, one API.** `verl` (distributed multi-GPU), `tinker` (single-machine), `fireworks` (Fireworks platform). Switch with one flag.
 - **60+ integrated benchmarks.** Math, code, MCQ, QA, search, VLM, translation, agentic — Terminal-Bench 2.0, SWE-bench, SkillsBench, AIME, MATH-500, GPQA, and more. `rllm eval <name>` auto-pulls and runs.
 - **Multiple training methods.** GRPO, REINFORCE, RLOO, SFT, on-policy distillation, and more.

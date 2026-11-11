@@ -8,8 +8,12 @@ skipped unless ``RUNTA_TOKEN`` is set.
 from __future__ import annotations
 
 import builtins
+import logging
 import os
+import shutil
+import subprocess
 import sys
+import time
 import types
 
 import pytest
@@ -28,10 +32,12 @@ class FakeApiError(Exception):
 
 
 class FakeResult:
-    def __init__(self, exit_code: int = 0, stdout: str = "", stderr: str = ""):
+    def __init__(self, exit_code: int = 0, stdout: str = "", stderr: str = "", stdout_truncated: bool = False):
         self.exit_code = exit_code
+        self.stdout = stdout.encode()
         self.stdout_text = stdout
         self.stderr_text = stderr
+        self.stdout_truncated = stdout_truncated
 
 
 class FakeRuntime:
@@ -43,13 +49,23 @@ class FakeRuntime:
         self.uploads: list[tuple[str, str]] = []
         self.deleted = 0
         self.status = "running"
+        self.ready_timeouts: list[float] = []
         self._client = client
         self.files = types.SimpleNamespace(upload=lambda src, dst: self.uploads.append((src, dst)))
         self.checkpoints = types.SimpleNamespace(create=self._checkpoint)
 
-    def _checkpoint(self, name=None, timeout=None):
+    def wait_until_ready(self, timeout=240.0):
+        self.ready_timeouts.append(timeout)
+        if self._client.ready_error is not None:
+            raise self._client.ready_error
+
+    def _checkpoint(self, name=None, wait=True, timeout=240.0):
+        # Like the SDK: the checkpoint exists server-side before the wait, and
+        # a failed wait raises without handing back its id.
         self._client.checkpoint_names.append(name)
-        return types.SimpleNamespace(id="ckpt-1", state="ready")
+        if wait:
+            self._client._wait_checkpoint("ckpt-1", timeout=timeout)
+        return types.SimpleNamespace(id="ckpt-1", state="creating")
 
     def exec(self, command, timeout=None):
         self.execs.append((command, timeout))
@@ -71,21 +87,34 @@ class FakeClient:
         self.runtimes_created: list[FakeRuntime] = []
         self.exec_results: list[FakeResult] = []
         self.create_error: Exception | None = None
+        self.ready_error: Exception | None = None
         self.checkpoint_names: list[str | None] = []
         self.checkpoint_state: object = "ready"
         self.checkpoint_error: Exception | None = None
+        self.checkpoint_wait_error: Exception | None = None
+        self.checkpoint_waits: list[tuple[str, float]] = []
         self.deleted_checkpoints: list[str] = []
         self.closed = 0
         self.endpoints: list[str | None] = []
         self.runtimes = types.SimpleNamespace(create=self._create)
-        self.checkpoints = types.SimpleNamespace(get=self._get_checkpoint, delete=self._delete_checkpoint)
+        self.checkpoints = types.SimpleNamespace(get=self._get_checkpoint, delete=self._delete_checkpoint, wait_until_ready=self._wait_checkpoint)
 
-    def _create(self, name, **kwargs):
+    def _create(self, name, wait=True, timeout=240.0, **kwargs):
         if self.create_error is not None:
             raise self.create_error
+        # Like the SDK: the runtime exists server-side before the wait, and a
+        # failed wait raises without handing back the handle.
         runtime = FakeRuntime(self, name, kwargs)
         self.runtimes_created.append(runtime)
+        if wait:
+            runtime.wait_until_ready(timeout=timeout)
         return runtime
+
+    def _wait_checkpoint(self, checkpoint_id, timeout=240.0):
+        self.checkpoint_waits.append((checkpoint_id, timeout))
+        if self.checkpoint_wait_error is not None:
+            raise self.checkpoint_wait_error
+        return types.SimpleNamespace(id=checkpoint_id, state="ready")
 
     def _get_checkpoint(self, checkpoint_id):
         if self.checkpoint_error is not None:
@@ -166,10 +195,10 @@ def test_image_runs_as_container_inside_runtime_with_lifetime_backstop(fake_runt
     assert runtime.create_kwargs == {
         "auto_shutdown_after_secs": 3600,
         "auto_delete_after_secs": 600,
-        "timeout": 900.0,
         "vcpus": 4,
         "memory_mib": 8192,
     }
+    assert runtime.ready_timeouts == [900.0]
     command, timeout = runtime.execs[0]
     assert command == "docker run -d --name rllm-sandbox --network host ghcr.io/acme/task:1 sleep infinity"
     assert timeout == 900.0
@@ -183,6 +212,16 @@ def test_failed_image_start_deletes_runtime(fake_runta):
         _sandbox(image="nope:latest")
 
     assert fake_runta.runtimes_created[0].deleted == 1
+    assert fake_runta.closed == 1
+
+
+def test_runtime_that_never_becomes_ready_is_deleted(fake_runta):
+    fake_runta.ready_error = TimeoutError("runtime rt-123 did not become ready within 600.0s")
+
+    with pytest.raises(TimeoutError):
+        _sandbox()
+
+    assert fake_runta.runtimes_created[0].deleted == 1  # not left running until auto-shutdown
     assert fake_runta.closed == 1
 
 
@@ -205,10 +244,70 @@ def test_exec_routes_through_docker_exec_with_user_and_timeout(fake_runta):
 
     argv, timeout = runtime.execs[-1]
     assert argv[:2] == ["docker", "exec"]
-    assert argv[-5:] == ["agent", "rllm-sandbox", "bash", "-c", "echo hi && ls"]
-    assert argv[-6] == "-u"
+    assert argv[-9:-4] == ["-u", "agent", "rllm-sandbox", "bash", "-c"]  # then the tracking wrapper
+    assert argv[-2].startswith("/tmp/rllm-exec-") and argv[-1] == "echo hi && ls"
     assert "SSL_CERT_FILE=/run/runta/ca-bundle.pem" in argv
     assert timeout == 30
+
+    sb.exec("pwd")  # no timeout: nothing to kill later, so no wrapper
+    assert runtime.execs[-1][0][-4:] == ["rllm-sandbox", "bash", "-c", "pwd"]
+    sb.close()
+
+
+def test_exec_timeout_kills_the_command_inside_the_container(fake_runta):
+    sb = _sandbox()
+    runtime = fake_runta.runtimes_created[0]
+    fake_runta.exec_results = [FakeResult(124, stderr="Command timed out after 5 seconds.")]
+
+    with pytest.raises(RuntimeError, match="exit 124"):
+        sb.exec("sleep 600", timeout=5, user="agent")
+
+    (timed_out, _), (kill, _) = runtime.execs[-2:]
+    assert kill[:5] == ["docker", "exec", "-u", "0", "rllm-sandbox"]
+    assert kill[-1] == timed_out[-2]  # the timed-out command's PID file
+
+    # A command that finishes in time, or exits 124 on its own, triggers no kill.
+    fake_runta.exec_results = [FakeResult(0), FakeResult(124)]
+    count = len(runtime.execs)
+    sb.exec("true", timeout=5)
+    with pytest.raises(RuntimeError):
+        sb.exec("exit 124")
+    assert len(runtime.execs) == count + 2
+    sb.close()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_tracking_wrapper_and_kill_script_stop_the_process_group(tmp_path):
+    from rllm.sandbox.backends.runta import _KILL, _TRACK
+
+    pidfile = tmp_path / "exec.pid"
+    # start_new_session: a ``docker exec`` process leads its own session too.
+    done = subprocess.run(["bash", "-c", _TRACK, "rllm-exec", str(pidfile), "echo out; exit 7"], capture_output=True, text=True, start_new_session=True)
+    assert (done.returncode, done.stdout) == (7, "out\n")
+    assert not pidfile.exists()  # in time: same result, nothing left behind
+
+    proc = subprocess.Popen(["bash", "-c", _TRACK, "rllm-exec", str(pidfile), "sleep 300 & wait"], stdout=subprocess.PIPE, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        while not (pidfile.exists() and pidfile.read_text().strip()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        subprocess.run(["bash", "-c", _KILL, "rllm-kill", str(pidfile)], check=True)
+        proc.communicate(timeout=10)  # EOF only once every process holding stdout is dead
+    finally:
+        proc.kill()
+    assert not pidfile.exists()
+
+
+def test_truncated_stdout_is_reported(fake_runta, caplog):
+    sb = _sandbox()
+    fake_runta.exec_results = [FakeResult(0, stdout="head", stdout_truncated=True), FakeResult(0, stdout="all")]
+
+    with caplog.at_level(logging.WARNING, logger="rllm.sandbox.backends.runta"):
+        assert sb.exec("cat big.log") == "head"
+        assert sb.exec("cat small.log") == "all"
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "truncated" in warnings[0] and "cat big.log" in warnings[0]
     sb.close()
 
 
@@ -340,6 +439,15 @@ def test_missing_checkpoint_raises_snapshot_not_found(fake_runta):
     assert fake_runta.closed == 1
 
 
+def test_not_found_while_waiting_for_restore_is_not_a_missing_snapshot(fake_runta):
+    fake_runta.ready_error = FakeApiError("runtime not found", status_code=404)
+
+    with pytest.raises(FakeApiError):  # the checkpoint existed; get_sandbox must not fall back to cold
+        _sandbox(image="runta-checkpoint:ckpt-9")
+
+    assert fake_runta.runtimes_created[0].deleted == 1
+
+
 def test_other_create_errors_propagate(fake_runta):
     fake_runta.create_error = FakeApiError("quota", status_code=429)
     with pytest.raises(FakeApiError):
@@ -354,6 +462,23 @@ def test_checkpoint_returns_prefixed_ref(fake_runta):
     sb = _sandbox()
     assert sb.checkpoint("rllm-env-abc") == "runta-checkpoint:ckpt-1"
     assert fake_runta.checkpoint_names == ["rllm-env-abc"]
+    assert fake_runta.checkpoint_waits == [("ckpt-1", 600.0)]
+    assert fake_runta.deleted_checkpoints == []
+    sb.close()
+
+
+@pytest.mark.parametrize("error", [TimeoutError("checkpoint ckpt-1 did not become ready"), RuntimeError("checkpoint ckpt-1 entered failed state")])
+def test_checkpoint_that_does_not_become_ready_is_deleted(fake_runta, error):
+    sb = _sandbox()
+    fake_runta.checkpoint_wait_error = error
+
+    with pytest.raises(type(error)):
+        sb.checkpoint("rllm-env-abc")
+    assert fake_runta.deleted_checkpoints == ["ckpt-1"]  # no untracked leftover per retry
+
+    fake_runta.checkpoint_error = FakeApiError("conflict", status_code=409)  # delete fails too
+    with pytest.raises(type(error)):  # still the original failure
+        sb.checkpoint("rllm-env-abc")
     sb.close()
 
 

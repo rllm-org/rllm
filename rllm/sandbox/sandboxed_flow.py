@@ -22,7 +22,7 @@ class SandboxedAgentFlow(ABC):
     """Base class for agents that run against a sandboxed execution environment.
 
     The sandbox backend is pluggable via ``sandbox_backend``:
-    ``"docker"`` | ``"local"`` | ``"modal"`` | ``"daytona"``.
+    ``"docker"`` | ``"local"`` | ``"modal"`` | ``"daytona"`` | ``"runta"``.
 
     Subclasses implement :meth:`run` and may override :meth:`get_image`
     for per-task images.

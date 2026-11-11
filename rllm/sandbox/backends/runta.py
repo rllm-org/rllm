@@ -52,6 +52,16 @@ _CONTAINER = "rllm-sandbox"
 _CA_BUNDLE = "/run/runta/ca-bundle.pem"
 _CA_ENV_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PIP_CERT", "GIT_SSL_CAINFO")
 
+# Runta's exec timeout kills only the ``docker exec`` client on the runtime; the
+# process inside the task container keeps running. A command with a timeout
+# therefore runs under ``_TRACK``, which records its process group in a PID
+# file (removed again when the command ends in time), and ``_KILL`` stops a
+# timed-out command through that file. ``setsid -w`` gives the command a group
+# of its own where the exec'd shell does not already lead one.
+_TRACKED = '{ echo $$ > "$1"; } 2>/dev/null; bash -c "$2"; rc=$?; rm -f "$1"; exit $rc'
+_TRACK = f'if setsid -w true >/dev/null 2>&1; then exec setsid -w bash -c {shlex.quote(_TRACKED)} rllm-exec "$@"; fi; {_TRACKED}'
+_KILL = 'pid=$(cat "$1" 2>/dev/null) || exit 0; rm -f "$1"; kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null; exit 0'
+
 # atexit-tracked sandboxes; deleted on process exit to avoid leaks.
 _LIVE_SANDBOXES: weakref.WeakSet = weakref.WeakSet()
 _LIVE_LOCK = threading.Lock()
@@ -120,7 +130,6 @@ class RuntaSandbox:
         create_kwargs: dict = {
             "auto_shutdown_after_secs": lifetime,
             "auto_delete_after_secs": _DELETE_AFTER_SHUTDOWN_S,
-            "timeout": self._create_timeout,
         }
         for key in ("vcpus", "memory_mib", "memory_max_mib"):
             if key in kwargs:
@@ -132,7 +141,9 @@ class RuntaSandbox:
 
         self._client = runta.Runta(endpoint=endpoint) if endpoint else runta.Runta()
         try:
-            self._runtime = self._client.runtimes.create(name, **create_kwargs)
+            # wait=False: take the handle before waiting, so a runtime that
+            # never becomes ready is deleted below rather than left running.
+            self._runtime = self._client.runtimes.create(name, wait=False, **create_kwargs)
         except runta.ApiError as e:
             self._client.close()
             # A deleted checkpoint surfaces as 404; translate it so get_sandbox
@@ -149,6 +160,7 @@ class RuntaSandbox:
             _LIVE_SANDBOXES.add(self)
 
         try:
+            self._runtime.wait_until_ready(timeout=self._create_timeout)
             if from_snapshot:
                 # A checkpoint restores the whole machine, container included;
                 # ``docker start`` is a no-op when it is already running and
@@ -180,22 +192,33 @@ class RuntaSandbox:
         Runs ``bash -c <command>`` in the task container (``docker exec``,
         honoring ``user``) and returns stdout. Raises ``RuntimeError`` on
         non-zero exit, matching DockerSandbox; a command that exceeds
-        ``timeout`` exits 124. In direct mode (no image) the command runs on
-        the runtime itself and ``user`` is ignored.
+        ``timeout`` exits 124 and is killed. In direct mode (no image) the
+        command runs on the runtime itself and ``user`` is ignored.
         """
+        pidfile = None
         if self._in_container:
             argv = ["docker", "exec"]
             for var in _CA_ENV_VARS:
                 argv += ["-e", f"{var}={_CA_BUNDLE}"]
             if user is not None:
                 argv += ["-u", str(user)]
-            argv += [_CONTAINER, "bash", "-c", command]
+            if timeout is None:
+                argv += [_CONTAINER, "bash", "-c", command]
+            else:
+                pidfile = f"/tmp/rllm-exec-{uuid.uuid4().hex[:12]}.pid"
+                argv += [_CONTAINER, "bash", "-c", _TRACK, "rllm-exec", pidfile, command]
         else:
             argv = ["bash", "-c", command]
 
         result = self._runtime.exec(argv, timeout=timeout)
+        if pidfile and result.exit_code == 124:
+            self._kill_in_container(pidfile)
 
         stdout = result.stdout_text
+        if result.stdout_truncated:
+            # Runta keeps only the head of an oversized stream; the other
+            # backends return everything, so never pass this off as complete.
+            logger.warning("stdout of a command in sandbox %s exceeded Runta's capture limit and was truncated to its first %d bytes: %s", self.name, len(result.stdout), command[:200])
         if result.exit_code != 0:
             stderr = result.stderr_text
             # Short tail in the raised message (callers print it at WARNING for
@@ -210,6 +233,13 @@ class RuntaSandbox:
             )
             raise RuntimeError(f"Command failed (exit {result.exit_code}) in sandbox {self.name}: {command}\nstderr (tail):\n{stderr[-600:]}")
         return stdout
+
+    def _kill_in_container(self, pidfile: str) -> None:
+        """Kill the process group a timed-out command left running in the task container."""
+        try:
+            self._runtime.exec(["docker", "exec", "-u", "0", _CONTAINER, "bash", "-c", _KILL, "rllm-kill", pidfile], timeout=30)
+        except Exception:
+            logger.warning("Could not stop the timed-out command in sandbox %s — it may still be running", self.name, exc_info=True)
 
     def upload_file(self, local_path: str, remote_path: str) -> None:
         """Upload a single file into the sandbox."""
@@ -291,7 +321,18 @@ class RuntaSandbox:
 
     def checkpoint(self, name: str) -> str:
         """Checkpoint the running sandbox; return a snapshot ref for ``image=``."""
-        info = self._runtime.checkpoints.create(name=name, timeout=self._create_timeout)
+        # wait=False: take the id before waiting, so a checkpoint that never
+        # becomes ready is deleted rather than left behind untracked.
+        info = self._runtime.checkpoints.create(name=name, wait=False)
+        try:
+            self._client.checkpoints.wait_until_ready(info.id, timeout=self._create_timeout)
+        except BaseException:
+            try:
+                self._client.checkpoints.delete(info.id)
+            except Exception as e:
+                if not _is_not_found(e):
+                    logger.warning("Runta checkpoint %s (%s) did not become ready and could not be deleted — delete it manually", info.id, name, exc_info=True)
+            raise
         return f"{_CHECKPOINT_PREFIX}{info.id}"
 
     def _exec_unchecked(self, command: str) -> str:
