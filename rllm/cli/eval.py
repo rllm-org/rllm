@@ -551,8 +551,8 @@ def _run_eval(
     "--sandbox-backend",
     "sandbox_backend",
     default=None,
-    type=click.Choice(["docker", "local", "modal", "daytona", "e2b", "runloop", "gke", "apple-container"], case_sensitive=False),
-    help="Sandbox/environment backend. For Harbor agents: docker, daytona, modal, e2b, etc. For sandboxed agents: docker, local, modal.",
+    type=click.Choice(["docker", "local", "modal", "daytona", "boxd", "e2b", "runloop", "gke", "apple-container"], case_sensitive=False),
+    help="Sandbox/environment backend. For Harbor agents: docker, daytona, modal, e2b, etc. For sandboxed agents: docker, local, modal, daytona, boxd.",
 )
 @click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent).")
 @click.option(
