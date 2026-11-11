@@ -599,7 +599,7 @@ def _load_or_pull_dataset(name: str, split: str, catalog: dict, catalog_entry_ov
     "--sandbox-backend",
     "sandbox_backend",
     default=None,
-    type=click.Choice(["docker", "local", "modal", "daytona", "e2b", "runloop", "gke", "apple-container"], case_sensitive=False),
+    type=click.Choice(["docker", "local", "modal", "daytona", "boxd", "e2b", "runloop", "gke", "apple-container"], case_sensitive=False),
     help="Sandbox backend for SandboxedAgentFlow harnesses (default: per-task or docker). Remote backends auto-spawn a cloudflared tunnel for the gateway.",
 )
 @click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent — usually 64).")
