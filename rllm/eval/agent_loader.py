@@ -55,8 +55,14 @@ def register_agent(name: str, agent_or_path: AgentFlow | type | str) -> None:
         import_path = f"{agent_or_path.__module__}:{agent_or_path.__qualname__}"
     else:
         _validate_agent(agent_or_path, name)
-        cls = type(agent_or_path)
-        import_path = f"{cls.__module__}:{cls.__qualname__}"
+        # A ``@rollout`` wrapper copies the decorated function's
+        # ``__module__``/``__qualname__`` onto the instance (via
+        # ``functools.update_wrapper``) — resolve those so the path points at
+        # the decorated name rather than at ``AgentFlowFn``, which cannot be
+        # imported and instantiated without its ``fn``. Plain instances carry
+        # neither name, so fall back to their class.
+        source = agent_or_path if "__qualname__" in getattr(agent_or_path, "__dict__", {}) else type(agent_or_path)
+        import_path = f"{source.__module__}:{source.__qualname__}"
 
     registry = _load_user_agents()
     registry[name] = {"import_path": import_path}

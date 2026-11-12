@@ -57,8 +57,14 @@ def register_evaluator(name: str, evaluator_or_path: Evaluator | type | str) -> 
         import_path = f"{evaluator_or_path.__module__}:{evaluator_or_path.__qualname__}"
     else:
         _validate_evaluator(evaluator_or_path, name)
-        cls = type(evaluator_or_path)
-        import_path = f"{cls.__module__}:{cls.__qualname__}"
+        # An ``@evaluator`` wrapper copies the decorated function's
+        # ``__module__``/``__qualname__`` onto the instance (via
+        # ``functools.update_wrapper``) — resolve those so the path points at
+        # the decorated name rather than at ``EvaluatorFn``, which cannot be
+        # imported and instantiated without its ``fn``. Plain instances carry
+        # neither name, so fall back to their class.
+        source = evaluator_or_path if "__qualname__" in getattr(evaluator_or_path, "__dict__", {}) else type(evaluator_or_path)
+        import_path = f"{source.__module__}:{source.__qualname__}"
 
     registry = _load_user_evaluators()
     registry[name] = {"import_path": import_path}
