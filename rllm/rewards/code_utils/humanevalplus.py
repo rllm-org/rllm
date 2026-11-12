@@ -28,15 +28,13 @@ def get_num_test_cases(test_code):
                     if target.id == "inputs":
                         inputs_node = node.value
 
-    if inputs_node is None:
-        return "Could not find inputs or results in the code"
+    # Not an EvalPlus-style `inputs = [...]` test file (e.g. HumanEval's
+    # `def check(candidate)` form): fall back to counting assertions. The
+    # return value is multiplied by a per-test timeout, so it must be an int.
+    if not isinstance(inputs_node, ast.List):
+        return max(1, test_code.count("assert"))
 
-    # Count number of test cases
-    if isinstance(inputs_node, ast.List):
-        input_count = len(inputs_node.elts)
-    else:
-        input_count = "Unknown (not a direct list)"
-    return input_count
+    return len(inputs_node.elts)
 
 
 def run_test(code, test: str = None, timeout=_DEFAULT_TIMEOUT_SECONDS):
