@@ -68,8 +68,11 @@ def _build_step_and_trajectory_rewards(step_rewards: list[float], trajectory_rew
     step_rewards_batch = torch.zeros(responses_batch.shape, dtype=torch.float32)  # shape: [bs, max_response_length]
     trajectory_rewards_batch = torch.zeros(responses_batch.shape, dtype=torch.float32)  # shape: [bs, max_response_length]
     for i, (step_reward, trajectory_reward, response) in enumerate(zip(step_rewards, trajectory_rewards, responses, strict=False)):
-        resp_len = len(response)
-        if resp_len > 0 and resp_len <= responses_batch.shape[1]:
+        # Responses longer than max_response_length are truncated by
+        # `_pad_sequence_batch`, so clamp the reward position to the last kept
+        # token instead of dropping the reward entirely.
+        resp_len = min(len(response), responses_batch.shape[1])
+        if resp_len > 0:
             step_rewards_batch[i, resp_len - 1] = step_reward
             trajectory_rewards_batch[i, resp_len - 1] = trajectory_reward
 
