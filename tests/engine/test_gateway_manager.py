@@ -1,5 +1,8 @@
 """Unit tests for GatewayManager store-backend selection and validation."""
 
+import sys
+import types
+
 import pytest
 from omegaconf import OmegaConf
 
@@ -59,3 +62,52 @@ class TestContainerReachableUrl:
     )
     def test_loopback_rewrite_only_for_docker_backend(self, url, backend, expected):
         assert container_reachable_url(url, backend) == expected
+
+
+class _StubEngine:
+    """Stand-in rollout engine; ``start()`` dispatches on the class name."""
+
+    def __init__(self):
+        self.train_sampling_params = {}
+        self.val_sampling_params = {}
+
+
+class TinkerEngine(_StubEngine):
+    pass
+
+
+class FireworksEngine(TinkerEngine):
+    pass
+
+
+class TestStartEngineDispatch:
+    """SDK-backed engines must get the in-process handler, not fall through."""
+
+    @pytest.fixture
+    def started(self, monkeypatch):
+        fake_adapter = types.ModuleType("rllm.gateway.tinker_adapter")
+        fake_adapter.create_tinker_handler = lambda engine: f"handler:{type(engine).__name__}"
+        monkeypatch.setitem(sys.modules, "rllm.gateway.tinker_adapter", fake_adapter)
+
+        calls: dict = {}
+        monkeypatch.setattr(
+            GatewayManager,
+            "_start_thread",
+            lambda self, local_handler=None: calls.update(started=True, local_handler=local_handler),
+        )
+        monkeypatch.setattr(
+            GatewayManager,
+            "_start_process",
+            lambda self: calls.update(started=True, local_handler=None),
+        )
+        return calls
+
+    def test_tinker_engine_gets_local_handler(self, started):
+        GatewayManager(_make_config(), mode="thread").start(TinkerEngine())
+        assert started.get("started") is True
+        assert started["local_handler"] == "handler:TinkerEngine"
+
+    def test_fireworks_engine_gets_local_handler(self, started):
+        GatewayManager(_make_config(), mode="thread").start(FireworksEngine())
+        assert started.get("started") is True, "gateway was never started for FireworksEngine"
+        assert started["local_handler"] == "handler:FireworksEngine"
