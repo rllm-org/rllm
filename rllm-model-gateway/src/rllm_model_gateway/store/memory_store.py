@@ -117,15 +117,19 @@ class MemoryTraceStore:
             if not tids:
                 continue
             timestamps = [self._timestamps[t] for t in tids if t in self._timestamps]
+            # ``since`` filters traces, not sessions: a session that started
+            # before the cutoff but is still producing traces must be listed,
+            # with only its recent traces counted. SqliteTraceStore filters the
+            # junction rows before aggregating, so it already behaves this way.
+            if since is not None:
+                timestamps = [ts for ts in timestamps if ts >= since]
             if not timestamps:
                 continue
             first_at = min(timestamps)
-            if since is not None and first_at < since:
-                continue
             results.append(
                 {
                     "session_id": sid,
-                    "trace_count": len(tids),
+                    "trace_count": len(timestamps),
                     "first_trace_at": first_at,
                     "last_trace_at": max(timestamps),
                 }

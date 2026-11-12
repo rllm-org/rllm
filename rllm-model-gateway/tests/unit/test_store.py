@@ -1,8 +1,10 @@
 """Tests for MemoryTraceStore and SqliteTraceStore."""
 
 import array
+import asyncio
 import os
 import tempfile
+import time
 
 import pytest
 from rllm_model_gateway.store.memory_store import MemoryTraceStore
@@ -110,6 +112,30 @@ class TestListSessions:
     async def test_list_empty(self, store):
         sessions = await store.list_sessions()
         assert sessions == []
+
+    @pytest.mark.asyncio
+    async def test_list_since_keeps_sessions_with_recent_traces(self, store):
+        """``since`` selects traces, so a long-running session stays listed.
+
+        A session that started before the cutoff but is still producing traces
+        must be reported, counting only the traces at or after the cutoff.
+        """
+        await store.store_trace("t-old", "s1", {"v": 1})
+        await asyncio.sleep(0.02)
+        cutoff = time.time()
+        await asyncio.sleep(0.02)
+        await store.store_trace("t-new", "s1", {"v": 2})
+
+        sessions = await store.list_sessions(since=cutoff)
+        assert [s["session_id"] for s in sessions] == ["s1"]
+        assert sessions[0]["trace_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_list_since_drops_sessions_with_no_recent_traces(self, store):
+        await store.store_trace("t-old", "s1", {"v": 1})
+        await asyncio.sleep(0.02)
+
+        assert await store.list_sessions(since=time.time()) == []
 
 
 class TestFlush:
