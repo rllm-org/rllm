@@ -245,6 +245,7 @@ def build_trace_record_from_chunks(
     logprobs: list[float] = []
     role = ""
     content_parts: list[str] = []
+    reasoning_parts: dict[str, list[str]] = {}
     tool_calls_parts: list[dict[str, Any]] = []
     finish_reason: str | None = None
     model = request_body.get("model", "")
@@ -269,6 +270,11 @@ def build_trace_record_from_chunks(
                 role = delta["role"]
             if delta.get("content"):
                 content_parts.append(delta["content"])
+            # Providers disagree on the key ("reasoning" vs "reasoning_content");
+            # keep whichever they used so trace_record_to_step finds it.
+            for key in ("reasoning", "reasoning_content"):
+                if delta.get(key):
+                    reasoning_parts.setdefault(key, []).append(delta[key])
             if delta.get("tool_calls"):
                 tool_calls_parts.extend(delta["tool_calls"])
             if c.get("finish_reason"):
@@ -281,6 +287,8 @@ def build_trace_record_from_chunks(
     content = "".join(content_parts)
     if content:
         response_message["content"] = content
+    for key, parts in reasoning_parts.items():
+        response_message[key] = "".join(parts)
     if tool_calls_parts:
         response_message["tool_calls"] = tool_calls_parts
 
