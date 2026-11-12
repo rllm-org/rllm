@@ -208,3 +208,43 @@ class TestRolloutLogProbsPropagation:
         # All standard fields should still be present
         for key in ["input_ids", "attention_mask", "position_ids", "prompts", "responses", "response_mask", "traj_rewards", "step_rewards"]:
             assert key in batch.batch, f"Standard field '{key}' should be present"
+
+
+class TestTruncatedResponseRewards:
+    """A reward must survive truncation of the merged response.
+
+    `_pad_sequence_batch` truncates a response longer than
+    `max_response_length`, so a reward placed at `len(response) - 1` falls
+    outside the tensor and is dropped. verl's GRPO scores a row by
+    `token_level_rewards.sum(-1)`, so the trajectory is scored as a failure.
+    """
+
+    def test_reward_survives_response_truncation(self):
+        max_prompt_length, max_response_length = 8, 4
+        # 9 response tokens > max_response_length, so the row gets truncated.
+        episodes = [_make_episode(prompt_ids=[1, 2, 3], completion_ids=list(range(11, 20)), reward=1.0)]
+
+        batch = transform_episodes_to_dataproto(
+            episodes,
+            _make_mock_rollout_engine(),
+            max_prompt_length,
+            max_response_length,
+        )
+
+        traj_rewards = batch.batch["traj_rewards"]
+        step_rewards = batch.batch["step_rewards"]
+        assert traj_rewards.shape == (1, max_response_length)
+        assert traj_rewards.sum().item() == 1.0, f"traj_rewards lost the reward: {traj_rewards}"
+        assert step_rewards.sum().item() == 1.0, f"step_rewards lost the reward: {step_rewards}"
+        # The reward belongs on the last token that survived truncation.
+        assert traj_rewards[0, max_response_length - 1].item() == 1.0
+
+    def test_reward_placed_for_untruncated_response(self):
+        """Control: a short response keeps its existing placement."""
+        episodes = [_make_episode(prompt_ids=[1, 2, 3], completion_ids=[11, 12, 13], reward=1.0)]
+
+        batch = transform_episodes_to_dataproto(episodes, _make_mock_rollout_engine(), 8, 4)
+
+        traj_rewards = batch.batch["traj_rewards"]
+        assert traj_rewards.sum().item() == 1.0
+        assert traj_rewards[0, 2].item() == 1.0
