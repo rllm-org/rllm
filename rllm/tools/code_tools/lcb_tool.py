@@ -152,8 +152,11 @@ def lcb_sandbox(code, timeout):
         p.join(timeout=(timeout + 1) + 5)
 
         try:
-            # Get the result from the queue
-            res = result_queue.get()
+            # Bounded get: ``join`` above has already returned, so either the
+            # child posted its result or it never will — it out-lived the join
+            # window, or it died without posting (os._exit, a crash, an OOM
+            # kill). An unbounded get would block the caller forever.
+            res = result_queue.get(timeout=1)
             return res
         except queue.Empty:
             # Return timeout message if no result is available
