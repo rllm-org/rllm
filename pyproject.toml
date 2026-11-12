@@ -59,7 +59,7 @@ tools = [
 ]
 
 all = [
-    "rllm[train,rewards,tools]",
+    "rllm[rewards,tools]",
 ]
 
 ui = [
