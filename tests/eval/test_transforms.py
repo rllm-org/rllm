@@ -274,3 +274,48 @@ class TestLiveCodeBenchTransform:
         }
         result = livecodebench_transform(row)
         assert isinstance(result["ground_truth"], list)
+
+
+class TestMMLUReduxRealSchema:
+    """``edinburgh-dawg/mmlu-redux`` ships a single list column ``choices``.
+
+    Per the dataset card: ``choices (List[str])`` and ``answer (int)`` "in the
+    form of an array index between 0 and 3". There are no A/B/C/D columns.
+    """
+
+    def test_choices_list_column(self):
+        row = {
+            "question": "Which of the following is a disorder characterized by uncontrollable episodes of falling asleep during the day?",
+            "choices": ["Dyslexia", "Epilepsy", "Hydrocephalus", "Narcolepsy"],
+            "answer": 3,
+            "error_type": "ok",
+            "source": "https://example.org",
+            "correct_answer": None,
+            "potential_reason": None,
+        }
+        result = mmlu_redux_transform(row)
+        assert result["choices"] == ["Dyslexia", "Epilepsy", "Hydrocephalus", "Narcolepsy"]
+        assert result["ground_truth"] == "D"
+
+
+class TestMMMLURealSchema:
+    """``openai/MMMLU`` capitalises the question/answer columns.
+
+    Columns are ``Unnamed: 0``, ``Question``, ``A``-``D``, ``Answer``, ``Subject``.
+    """
+
+    def test_capitalised_columns(self):
+        row = {
+            "Unnamed: 0": 0,
+            "Question": "Encuentra el grado de la extensión de campo dada Q(sqrt(2))",
+            "A": "0",
+            "B": "4",
+            "C": "2",
+            "D": "6",
+            "Answer": "B",
+            "Subject": "abstract_algebra",
+        }
+        result = mmmlu_transform(row)
+        assert result["question"] == "Encuentra el grado de la extensión de campo dada Q(sqrt(2))"
+        assert result["choices"] == ["0", "4", "2", "6"]
+        assert result["ground_truth"] == "B"
