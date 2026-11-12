@@ -1,8 +1,6 @@
 import os
 from collections import defaultdict
 
-import torch
-
 
 def compute_pass_at_k(results):
     import hashlib
@@ -39,6 +37,8 @@ def compute_pass_at_k(results):
 
 
 def save_trajectories(results, save_dir="./trajectories", filename="trajectories.pt"):
+    import torch
+
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, filename)
     torch.save(results, save_path)
