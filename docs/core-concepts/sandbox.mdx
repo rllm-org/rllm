@@ -24,6 +24,15 @@ default_sandbox = "modal"
 
 The flag wins over the dataset declaration; the dataset declaration wins over the harness class default. If neither is set, you'll be prompted.
 
+### Runta: reaching the model gateway
+
+A Runta runtime is a remote machine, so the agent inside it cannot reach the model gateway on your host directly. As with the other cloud backends (`modal`, `daytona`), the gateway is published through a tunnel:
+
+- **`rllm eval --sandbox-backend runta`** always starts a Cloudflare quick tunnel (`cloudflared tunnel --url <gateway>`). The `cloudflared` binary must be on `PATH` (macOS: `brew install cloudflared`); without it the run stops with `TunnelStartError: cloudflared binary not found on PATH` before any sandbox is created.
+- **Training** reads `rllm.gateway.tunnel`. Left unset, it is set to `cloudflared` for remote sandboxes, with the same requirement. Set it to an `http(s)://` URL that the runtime can reach (your own reverse proxy, a tailscale address, …) and that URL is used as-is, with no `cloudflared` needed.
+
+`RLLM_TUNNEL_READY_TIMEOUT_S` bounds the wait for the tunnel's public URL.
+
 ## When you need a sandbox
 
 A task needs a sandbox when its environment ships a Dockerfile, its verifier is a shell script (`tests/test.sh`), or its agent needs to execute commands (bash, file edits, network). One-shot LLM benchmarks (gsm8k, MATH-500, MCQ) skip the sandbox entirely.
@@ -66,9 +75,14 @@ export RLLM_MODAL_SANDBOX_TIMEOUT_S=3600
 # Runta: raise per-runtime lifetime (default 30 min)
 export RLLM_RUNTA_SANDBOX_TIMEOUT_S=3600
 
+# Runta: how long a runtime outlives a killed rLLM process (default 10 min)
+export RLLM_RUNTA_SANDBOX_LEASE_S=600
+
 # Bigger build sandboxes for snapshot builds with slow RUN steps
 export RLLM_SNAPSHOT_BUILD_WORKERS=10
 ```
+
+Runta runtimes are leased: each is created with a shutdown clock of `RLLM_RUNTA_SANDBOX_LEASE_S`, and a background thread in the rLLM process restarts that clock about every third of the lease for as long as the sandbox is open, up to the lifetime above. If the process is killed, the renewals stop and Runta shuts its runtimes down within one lease instead of leaving them running for the whole lifetime. Snapshot builds are renewed the same way, so a long build keeps its runtime.
 
 Per-task overrides go in `task.toml`:
 
@@ -88,6 +102,8 @@ Remote backends OOM on multi-GB image pulls or memory-hungry verifiers (e.g. SWE
 memory = "4 GiB"
 cpu = 2
 ```
+
+On Runta, a task's `storage_mb` sets the runtime's disk: rounded up to whole GiB, at least 32 GiB, and an error above 256 GiB. A sandbox restored from a snapshot keeps the disk of the runtime the snapshot was built on.
 
 Builders for catalog datasets (rllm-swesmith, SkillsBench) patch in sensible defaults; ad-hoc directories without resource limits use the backend's default and may fail on heavy environments.
 

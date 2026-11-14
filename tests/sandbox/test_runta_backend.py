@@ -32,20 +32,24 @@ class FakeApiError(Exception):
 
 
 class FakeResult:
-    def __init__(self, exit_code: int = 0, stdout: str = "", stderr: str = "", stdout_truncated: bool = False):
+    def __init__(self, exit_code: int = 0, stdout: str = "", stderr: str = "", stdout_truncated: bool = False, stderr_truncated: bool = False):
         self.exit_code = exit_code
         self.stdout = stdout.encode()
         self.stdout_text = stdout
+        self.stderr = stderr.encode()
         self.stderr_text = stderr
         self.stdout_truncated = stdout_truncated
+        self.stderr_truncated = stderr_truncated
 
 
 class FakeRuntime:
     def __init__(self, client, name, kwargs):
-        self.id = "rt-123"
+        self.id = f"rt-{123 + len(client.runtimes_created)}"
         self.name = name
         self.create_kwargs = kwargs
         self.execs: list[tuple[object, float | None]] = []
+        self.output_caps: list[int | None] = []
+        self.renewals: list[int | None] = []
         self.uploads: list[tuple[str, str]] = []
         self.deleted = 0
         self.status = "running"
@@ -67,9 +71,21 @@ class FakeRuntime:
             self._client._wait_checkpoint("ckpt-1", timeout=timeout)
         return types.SimpleNamespace(id="ckpt-1", state="creating")
 
-    def exec(self, command, timeout=None):
+    def exec(self, command, timeout=None, max_output_bytes=None):
         self.execs.append((command, timeout))
+        self.output_caps.append(max_output_bytes)
+        if self._client.on_exec is not None:
+            self._client.on_exec(command)
         return self._client.exec_results.pop(0) if self._client.exec_results else FakeResult()
+
+    def _update_timeout_policies(self, *, auto_shutdown_after_secs=None, auto_delete_after_secs=None):
+        # Reached only through a handle from ``runtimes.get``: the handle
+        # ``runtimes.create`` returned belongs to the thread running the sandbox.
+        if self._client.on_renew is not None:
+            self._client.on_renew(self)
+        if self._client.renew_error is not None:
+            raise self._client.renew_error
+        self.renewals.append(auto_shutdown_after_secs)
 
     def refresh_info(self):
         if isinstance(self.status, Exception):
@@ -77,6 +93,8 @@ class FakeRuntime:
         return types.SimpleNamespace(status=self.status)
 
     def delete(self):
+        if self._client.on_delete is not None:
+            self._client.on_delete(self)
         self.deleted += 1
 
 
@@ -96,7 +114,15 @@ class FakeClient:
         self.deleted_checkpoints: list[str] = []
         self.closed = 0
         self.endpoints: list[str | None] = []
-        self.runtimes = types.SimpleNamespace(create=self._create)
+        self.client_options: list[dict] = []
+        self.now = 1000.0  # the backend's monotonic clock
+        self.lease_thread_starts = 0
+        self.gets: list[str] = []
+        self.renew_error: Exception | None = None
+        self.on_renew = None
+        self.on_exec = None
+        self.on_delete = None
+        self.runtimes = types.SimpleNamespace(create=self._create, get=self._get)
         self.checkpoints = types.SimpleNamespace(get=self._get_checkpoint, delete=self._delete_checkpoint, wait_until_ready=self._wait_checkpoint)
 
     def _create(self, name, wait=True, timeout=240.0, **kwargs):
@@ -109,6 +135,13 @@ class FakeClient:
         if wait:
             runtime.wait_until_ready(timeout=timeout)
         return runtime
+
+    def _get(self, runtime_id):
+        self.gets.append(runtime_id)
+        for runtime in self.runtimes_created:
+            if runtime.id == runtime_id:
+                return types.SimpleNamespace(id=runtime_id, update_timeout_policies=runtime._update_timeout_policies)
+        raise FakeApiError("runtime not found", status_code=404)
 
     def _wait_checkpoint(self, checkpoint_id, timeout=240.0):
         self.checkpoint_waits.append((checkpoint_id, timeout))
@@ -138,16 +171,28 @@ class FakeClient:
 
 @pytest.fixture
 def fake_runta(monkeypatch):
+    from rllm.sandbox.backends import runta as backend
+
     client = FakeClient()
 
-    def _factory(endpoint=None):
+    def _factory(endpoint=None, **options):
         client.endpoints.append(endpoint)
+        client.client_options.append(options)
         return client
 
     module = types.ModuleType("runta")
     module.Runta = _factory
     module.ApiError = FakeApiError
     monkeypatch.setitem(sys.modules, "runta", module)
+
+    # Lease tests drive ``_lease_beat`` themselves on a fake clock, so the real
+    # heartbeat thread stays out of the way and no test waits for an interval.
+    client.start_lease_thread = backend._start_lease_thread
+    monkeypatch.setattr(backend, "_start_lease_thread", lambda: setattr(client, "lease_thread_starts", client.lease_thread_starts + 1))
+    monkeypatch.setattr(backend, "_monotonic", lambda: client.now)
+    monkeypatch.setattr(backend, "_LEASE_CLIENTS", {})
+    with backend._LIVE_LOCK:
+        backend._LIVE_SANDBOXES.clear()
     return client
 
 
@@ -187,13 +232,13 @@ def test_create_sandbox_factory_routes_runta_and_satisfies_protocol(fake_runta):
         sb.close()
 
 
-def test_image_runs_as_container_inside_runtime_with_lifetime_backstop(fake_runta):
+def test_image_runs_as_container_inside_runtime_with_lease_backstop(fake_runta):
     sb = _sandbox(image="ghcr.io/acme/task:1", vcpus=4, memory_mib=8192, timeout=3600, create_timeout=900)
     runtime = fake_runta.runtimes_created[0]
 
     assert runtime.name == "t1"
     assert runtime.create_kwargs == {
-        "auto_shutdown_after_secs": 3600,
+        "auto_shutdown_after_secs": 600,  # one lease, not the 3600s lifetime
         "auto_delete_after_secs": 600,
         "vcpus": 4,
         "memory_mib": 8192,
@@ -298,16 +343,30 @@ def test_tracking_wrapper_and_kill_script_stop_the_process_group(tmp_path):
     assert not pidfile.exists()
 
 
-def test_truncated_stdout_is_reported(fake_runta, caplog):
+def test_exec_asks_for_a_64_mib_capture(fake_runta):
     sb = _sandbox()
-    fake_runta.exec_results = [FakeResult(0, stdout="head", stdout_truncated=True), FakeResult(0, stdout="all")]
+    runtime = fake_runta.runtimes_created[0]
+
+    sb.exec("cat big.log", timeout=30)
+    sb.exec("cat big.log")
+
+    assert runtime.output_caps[-2:] == [64 * 1024 * 1024] * 2  # the SDK default is 4 MiB
+    sb.close()
+
+
+def test_output_truncated_despite_the_larger_capture_is_reported(fake_runta, caplog):
+    sb = _sandbox()
+    fake_runta.exec_results = [FakeResult(0, stdout="head", stdout_truncated=True), FakeResult(0, stdout="all"), FakeResult(0, stdout="out", stderr="errhead", stderr_truncated=True)]
 
     with caplog.at_level(logging.WARNING, logger="rllm.sandbox.backends.runta"):
         assert sb.exec("cat big.log") == "head"
         assert sb.exec("cat small.log") == "all"
+        assert sb.exec("make -j 2>&1 >/dev/null") == "out"
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1 and "truncated" in warnings[0] and "cat big.log" in warnings[0]
+    assert len(warnings) == 2
+    assert warnings[0].startswith("stdout") and "truncated" in warnings[0] and "cat big.log" in warnings[0]
+    assert warnings[1].startswith("stderr") and "truncated to its first 7 bytes" in warnings[1] and "make -j" in warnings[1]
     sb.close()
 
 
@@ -416,6 +475,157 @@ def test_close_is_idempotent_and_survives_delete_failure(fake_runta):
 
 
 # ---------------------------------------------------------------------------
+# lease
+# ---------------------------------------------------------------------------
+
+
+def _beat():
+    from rllm.sandbox.backends.runta import _lease_beat
+
+    return _lease_beat()
+
+
+def test_lease_is_renewed_every_third_of_it_up_to_the_lifetime(fake_runta):
+    sb = _sandbox(timeout=1500)  # default lease: 600s
+    runtime = fake_runta.runtimes_created[0]
+    assert runtime.create_kwargs["auto_shutdown_after_secs"] == 600
+    assert fake_runta.lease_thread_starts == 1
+
+    fake_runta.now += 100
+    assert _beat() == 100 and runtime.renewals == []  # not due before lease / 3
+
+    fake_runta.now += 100
+    for _ in range(4):  # t = 200, 400, 600, 800
+        assert _beat() == 200
+        fake_runta.now += 200
+    assert runtime.renewals == [600] * 4
+
+    assert _beat() is None  # t = 1000: 500s of lifetime left
+    assert runtime.renewals[-1] == 500  # the clock now ends with the lifetime
+
+    fake_runta.now += 5000
+    assert _beat() is None and len(runtime.renewals) == 5  # never past the cap
+    sb.close()
+
+
+def test_lease_and_lifetime_bound_the_create_time_clock(fake_runta):
+    sb = _sandbox(timeout=3600, lease=120)
+    short = _sandbox(timeout=300)  # lifetime within one lease: the clock already ends there
+    by_kwarg, by_lifetime = fake_runta.runtimes_created
+
+    assert by_kwarg.create_kwargs["auto_shutdown_after_secs"] == 120
+    assert by_lifetime.create_kwargs["auto_shutdown_after_secs"] == 300
+    assert fake_runta.lease_thread_starts == 1  # nothing to renew for the short one
+
+    fake_runta.now += 40
+    assert _beat() == 40
+    assert (by_kwarg.renewals, by_lifetime.renewals) == ([120], [])
+
+    with pytest.raises(ValueError, match="lease"):
+        _sandbox(lease=0)  # 0 would switch Runta's shutdown clock off
+    sb.close()
+    short.close()
+
+
+def test_failed_renewal_is_logged_and_retried_without_reaching_the_caller(fake_runta, caplog):
+    sb = _sandbox(timeout=1500)
+    runtime = fake_runta.runtimes_created[0]
+    fake_runta.renew_error = FakeApiError("runtime revision conflict: expected 3", status_code=409)
+
+    fake_runta.now += 200
+    with caplog.at_level(logging.WARNING, logger="rllm.sandbox.backends.runta"):
+        assert _beat() == 200  # no exception; due again on the next beat
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "renew" in warnings[0] and "revision conflict" in warnings[0]
+    assert runtime.renewals == []
+
+    fake_runta.exec_results = [FakeResult(0, stdout="ok")]
+    assert sb.exec("true") == "ok"  # the sandbox is unaffected
+
+    fake_runta.renew_error = None
+    fake_runta.now += 200
+    _beat()
+    assert runtime.renewals == [600]
+
+    fake_runta.renew_error = RuntimeError("connection reset")
+    fake_runta.now += 200
+    _beat()
+    sb.close()  # must not raise
+    assert runtime.deleted == 1
+
+
+def test_renewal_stops_once_the_lifetime_is_used_up(fake_runta):
+    sb = _sandbox(timeout=900)
+    runtime = fake_runta.runtimes_created[0]
+
+    fake_runta.renew_error = TimeoutError("api down")
+    for _ in range(4):  # t = 200 .. 800: every renewal fails, each is retried
+        fake_runta.now += 200
+        assert _beat() == 200
+    fake_runta.renew_error = None
+    fake_runta.now += 200  # t = 1000: past the 900s lifetime
+    assert _beat() is None and runtime.renewals == []
+    sb.close()
+
+
+def test_closed_sandbox_is_not_renewed(fake_runta):
+    sb = _sandbox(timeout=3600)
+    other = _sandbox(timeout=3600)
+    closed, live = fake_runta.runtimes_created
+
+    sb.close()
+    fake_runta.now += 200
+    assert _beat() == 200
+    assert (closed.renewals, live.renewals) == ([], [600])
+
+    other.close()
+    fake_runta.now += 200
+    assert _beat() is None and live.renewals == [600]
+
+
+def test_heartbeat_has_its_own_client_and_holds_no_registry_lock_during_a_renewal(fake_runta):
+    from rllm.sandbox.backends import runta as backend
+
+    sb = _sandbox(timeout=3600, endpoint="https://api.example.test")
+    seen = []
+
+    def _on_renew(runtime):
+        free = backend._LIVE_LOCK.acquire(blocking=False)
+        if free:
+            backend._LIVE_LOCK.release()
+        seen.append((free, sb._lease_lock.locked()))
+
+    fake_runta.on_renew = _on_renew
+    fake_runta.on_delete = lambda runtime: seen.append(("delete", sb._lease_lock.locked()))
+    fake_runta.now += 200
+    _beat()
+    fake_runta.now += 200
+    _beat()
+
+    # A second client for the same endpoint, built once and used for every beat;
+    # the runtime handle comes from it, not from the sandbox.
+    assert fake_runta.endpoints == ["https://api.example.test"] * 2
+    assert fake_runta.client_options == [{}, {"retry_max_attempts": 1}]
+    assert fake_runta.gets == ["rt-123"]
+    sb.close()
+    # Registry lock free during the call; a renewal and delete() exclude each
+    # other, because a renewal changes the revision delete() relies on.
+    assert seen == [(True, True), (True, True), ("delete", True)]
+
+
+def test_heartbeat_thread_is_one_daemon_for_the_module(fake_runta, monkeypatch):
+    from rllm.sandbox.backends import runta as backend
+
+    monkeypatch.setattr(backend, "_lease_beat", lambda: None)  # nothing due: the thread just waits
+    fake_runta.start_lease_thread()
+    thread = backend._LEASE_THREAD
+    fake_runta.start_lease_thread()
+
+    assert backend._LEASE_THREAD is thread
+    assert thread.is_alive() and thread.daemon  # never keeps the interpreter alive
+
+
+# ---------------------------------------------------------------------------
 # snapshots (checkpoints)
 # ---------------------------------------------------------------------------
 
@@ -513,11 +723,87 @@ def test_build_snapshot_reuses_live_prior_ref(fake_runta):
     assert fake_runta.runtimes_created == []  # no build runtime
 
 
+def test_long_snapshot_build_keeps_its_runtime_through_the_lease(fake_runta, tmp_path):
+    from rllm.sandbox.sandboxed_flow import build_snapshot
+
+    (tmp_path / "environment").mkdir()
+    (tmp_path / "environment" / "Dockerfile").write_text("FROM python:3.11-slim\nRUN make deps\nRUN make build\nRUN make install\n")
+    task = types.SimpleNamespace(id="t", task_dir=tmp_path, dataset_dir=tmp_path, metadata={})
+
+    def _slow_step(command):
+        # Each build step blocks the building thread for 800s, longer than a
+        # lease; meanwhile the heartbeat thread beats on its own schedule.
+        for _ in range(4):
+            fake_runta.now += 200
+            _beat()
+
+    fake_runta.on_exec = _slow_step
+    assert build_snapshot("runta", task=task, key="k") == "runta-checkpoint:ckpt-1"
+
+    runtime = fake_runta.runtimes_created[0]
+    assert runtime.create_kwargs["auto_shutdown_after_secs"] == 600  # not the 3300s build lifetime
+    # Four steps (image start + three RUNs) took 3200s; the clock was restarted
+    # every 200s and never ran out, then capped at the build lifetime.
+    assert runtime.renewals == [600] * 13 + [500]
+    assert fake_runta.checkpoint_names == ["k"]
+    assert runtime.deleted == 1
+
+
 def test_resource_kwargs_map_task_environment():
     from rllm.eval._resolution import _sandbox_resource_kwargs
 
     task = types.SimpleNamespace(metadata={"environment": {"cpus": 1.5, "memory_mb": 4096, "build_timeout_sec": 1800}})
     assert _sandbox_resource_kwargs(task, "runta") == {"vcpus": 2, "memory_mib": 4096, "create_timeout": 1800.0}
+
+
+@pytest.mark.parametrize(("storage_mb", "disk_gib"), [(30720, 32), (10240, 32), (51200, 50), (40961, 41), (262144, 256)])
+def test_resource_kwargs_map_storage_to_runta_disk(storage_mb, disk_gib):
+    from rllm.eval._resolution import _sandbox_resource_kwargs
+
+    task = types.SimpleNamespace(id="t", metadata={"environment": {"storage_mb": storage_mb}})
+    assert _sandbox_resource_kwargs(task, "runta")["disk_gib"] == disk_gib  # whole GiB, rounded up, 32 at least
+
+
+def test_resource_kwargs_reject_storage_above_runta_maximum():
+    from rllm.eval._resolution import _sandbox_resource_kwargs
+
+    task = types.SimpleNamespace(id="big-task", metadata={"environment": {"storage_mb": 262145}})
+    with pytest.raises(ValueError, match=r"big-task.*storage_mb=262145.*256 GiB"):
+        _sandbox_resource_kwargs(task, "runta")
+
+
+# The only shape in which the SDK sends a disk size: ``resources`` as a mapping,
+# which replaces the flat ``vcpus`` / ``memory_mib`` arguments.
+_DISK_RESOURCES = {"requests": {"vcpus": 4, "memory_mib": 8192, "disk_gib": 40}, "limits": {"memory_mib": 8192}}
+
+
+def test_disk_request_travels_in_resources_with_vcpus_and_memory(fake_runta):
+    _sandbox(vcpus=4, memory_mib=8192, disk_gib=40).close()
+    _sandbox(memory_mib=2048, memory_max_mib=4096, disk_gib=32).close()
+    full, defaults = (runtime.create_kwargs for runtime in fake_runta.runtimes_created)
+
+    assert full["resources"] == _DISK_RESOURCES
+    assert defaults["resources"] == {"requests": {"vcpus": 1, "memory_mib": 2048, "disk_gib": 32}, "limits": {"memory_mib": 4096}}
+    for kwargs in (full, defaults):  # the SDK ignores these once ``resources`` is given
+        assert not {"vcpus", "memory_mib", "memory_max_mib", "disk_gib"} & kwargs.keys()
+
+
+def test_snapshot_restore_sends_no_disk_request(fake_runta):
+    _sandbox(image="runta-checkpoint:ckpt-9", vcpus=4, memory_mib=8192, disk_gib=40).close()
+
+    # A checkpoint fixes the disk size, and a live checkpoint rejects ``resources``.
+    kwargs = fake_runta.runtimes_created[0].create_kwargs
+    assert kwargs["checkpoint_id"] == "ckpt-9"
+    assert "resources" not in kwargs and "disk_gib" not in kwargs
+
+
+def test_real_sdk_sends_the_disk_request_with_vcpus_and_memory():
+    transport = pytest.importorskip("runta._internal.transport")
+
+    body = transport.create_runtime_request(
+        "t1", checkpoint_id=None, vcpus=1, memory_mib=1024, memory_max_mib=None, resources=_DISK_RESOURCES, ingress_specs=None, egress_policy=None, idle_suspend_after_secs=None
+    )
+    assert body.to_dict()["resources"] == _DISK_RESOURCES
 
 
 # ---------------------------------------------------------------------------

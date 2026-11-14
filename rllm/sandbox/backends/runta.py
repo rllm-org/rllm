@@ -24,6 +24,7 @@ import logging
 import os
 import shlex
 import threading
+import time
 import uuid
 import weakref
 
@@ -32,12 +33,20 @@ from rllm.sandbox.protocol import SnapshotNotFound
 
 logger = logging.getLogger(__name__)
 
-# Server-side lifetime backstop: Runta shuts the runtime down after this many
-# seconds even if this process dies without reaching ``close()`` (SIGKILL, OOM),
-# then deletes the stopped remains. Raise via the env var for workloads whose
-# single rollout can exceed it.
+# Hard cap on a runtime's life, counted from its creation. Raise via the env var
+# for workloads whose single rollout can exceed it.
 _DEFAULT_TIMEOUT = env_int("RLLM_RUNTA_SANDBOX_TIMEOUT_S", 30 * 60)
+# Server-side leak backstop: the runtime is created with a shutdown clock of one
+# lease, and a heartbeat thread in this process keeps pushing that clock out
+# (up to the lifetime above). A process that dies without reaching ``close()``
+# (SIGKILL, OOM) stops renewing, so Runta shuts its runtimes down within one
+# lease instead of the whole lifetime, then deletes the stopped remains.
+_DEFAULT_LEASE = env_int("RLLM_RUNTA_SANDBOX_LEASE_S", 10 * 60)
 _DELETE_AFTER_SHUTDOWN_S = 10 * 60
+
+# The SDK buffers 4 MiB per output stream unless told otherwise and drops the
+# rest; the other backends return everything a command prints.
+_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 
 # A stored snapshot ref is a Runta checkpoint id behind this prefix, so it can
 # never be mistaken for a Docker image reference.
@@ -62,9 +71,19 @@ _TRACKED = '{ echo $$ > "$1"; } 2>/dev/null; bash -c "$2"; rc=$?; rm -f "$1"; ex
 _TRACK = f'if setsid -w true >/dev/null 2>&1; then exec setsid -w bash -c {shlex.quote(_TRACKED)} rllm-exec "$@"; fi; {_TRACKED}'
 _KILL = 'pid=$(cat "$1" 2>/dev/null) || exit 0; rm -f "$1"; kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null; exit 0'
 
-# atexit-tracked sandboxes; deleted on process exit to avoid leaks.
+# Live sandboxes: deleted by the atexit hook, kept alive by the lease heartbeat.
 _LIVE_SANDBOXES: weakref.WeakSet = weakref.WeakSet()
 _LIVE_LOCK = threading.Lock()
+
+# Lease heartbeat: one daemon thread for the module. It talks to Runta through
+# clients of its own (one per endpoint, touched by no other thread), because a
+# sandbox's client and runtime handle belong to the thread running the sandbox:
+# the SDK documents no thread safety for them, ``update_timeout_policies``
+# rewrites the handle's cached info, and ``close()`` shuts that client down.
+_LEASE_CLIENTS: dict = {}
+_LEASE_THREAD: threading.Thread | None = None
+_LEASE_WAKE = threading.Event()
+_monotonic = time.monotonic
 
 
 def _terminate_all_live() -> None:
@@ -82,6 +101,58 @@ def _terminate_all_live() -> None:
 
 
 atexit.register(_terminate_all_live)
+
+
+def _lease_client(endpoint: str | None):
+    """The heartbeat's client for ``endpoint`` (heartbeat thread only)."""
+    client = _LEASE_CLIENTS.get(endpoint)
+    if client is None:
+        runta = _import_runta()
+        # One attempt per call: a failed renewal is retried on the next beat,
+        # and the SDK's own minutes-long retries would hold up every other
+        # sandbox's renewal.
+        client = runta.Runta(endpoint=endpoint, retry_max_attempts=1) if endpoint else runta.Runta(retry_max_attempts=1)
+        _LEASE_CLIENTS[endpoint] = client
+    return client
+
+
+def _lease_beat() -> float | None:
+    """Renew the lease of every live sandbox that is due.
+
+    Returns the seconds until the next renewal is due, or ``None`` when no live
+    sandbox needs one.
+    """
+    with _LIVE_LOCK:
+        sandboxes = list(_LIVE_SANDBOXES)
+    # The registry lock is released here: renewals are network calls.
+    next_due = None
+    for sb in sandboxes:
+        due = sb._renew_lease()
+        if due is not None and (next_due is None or due < next_due):
+            next_due = due
+    return None if next_due is None else max(0.0, next_due - _monotonic())
+
+
+def _lease_loop() -> None:
+    while True:
+        try:
+            wait = _lease_beat()
+        except Exception:
+            logger.warning("Runta lease heartbeat failed; retrying in 30s", exc_info=True)
+            wait = 30.0
+        _LEASE_WAKE.wait(wait)  # woken early when a sandbox is created
+        _LEASE_WAKE.clear()
+
+
+def _start_lease_thread() -> None:
+    """Start the heartbeat thread if it is not running (again after a fork) and wake it."""
+    global _LEASE_THREAD
+    with _LIVE_LOCK:
+        if _LEASE_THREAD is None or not _LEASE_THREAD.is_alive():
+            # daemon: never keeps the interpreter alive.
+            _LEASE_THREAD = threading.Thread(target=_lease_loop, name="rllm-runta-lease", daemon=True)
+            _LEASE_THREAD.start()
+    _LEASE_WAKE.set()
 
 
 def _import_runta():
@@ -110,8 +181,14 @@ class RuntaSandbox:
 
     Optional kwargs:
     - ``vcpus`` / ``memory_mib`` / ``memory_max_mib``: runtime resources.
+    - ``disk_gib``: runtime disk size in GiB (Runta accepts 32-256). Ignored
+      when restoring a snapshot: a checkpoint fixes its runtime's disk size.
     - ``timeout``: runtime lifetime in seconds (default: 1800,
-      ``RLLM_RUNTA_SANDBOX_TIMEOUT_S``); the server-side leak backstop.
+      ``RLLM_RUNTA_SANDBOX_TIMEOUT_S``); a hard cap counted from creation.
+    - ``lease``: seconds Runta keeps the runtime running without a renewal
+      from this process (default: 600, ``RLLM_RUNTA_SANDBOX_LEASE_S``); the
+      server-side leak backstop. A heartbeat thread renews it about every
+      ``lease / 3`` until ``close()`` or until the lifetime is used up.
     - ``create_timeout``: seconds to wait for the runtime and the image pull
       (default: 600).
     - ``endpoint``: API endpoint override (default: ``RUNTA_ENDPOINT`` / config).
@@ -125,10 +202,14 @@ class RuntaSandbox:
         self._closed = False
         self._create_timeout = float(kwargs.pop("create_timeout", 600.0))
         lifetime = int(kwargs.pop("timeout", _DEFAULT_TIMEOUT))
+        lease = int(kwargs.pop("lease", _DEFAULT_LEASE))
+        if lease < 1:
+            raise ValueError(f"RuntaSandbox lease must be at least 1 second, got {lease}")
         endpoint = kwargs.pop("endpoint", None)
+        disk_gib = kwargs.pop("disk_gib", None)
 
         create_kwargs: dict = {
-            "auto_shutdown_after_secs": lifetime,
+            "auto_shutdown_after_secs": min(lease, lifetime),
             "auto_delete_after_secs": _DELETE_AFTER_SHUTDOWN_S,
         }
         for key in ("vcpus", "memory_mib", "memory_max_mib"):
@@ -138,6 +219,25 @@ class RuntaSandbox:
         from_snapshot = isinstance(image, str) and image.startswith(_CHECKPOINT_PREFIX)
         if from_snapshot:
             create_kwargs["checkpoint_id"] = image[len(_CHECKPOINT_PREFIX) :]
+        elif disk_gib is not None:
+            # The SDK has no flat disk argument: a disk size travels only in
+            # ``resources``, and ``resources`` replaces the flat vCPU/memory
+            # arguments, so those move into it (with the SDK's own defaults).
+            memory_mib = create_kwargs.pop("memory_mib", 1024)
+            memory_max_mib = create_kwargs.pop("memory_max_mib", None)
+            create_kwargs["resources"] = {
+                "requests": {"vcpus": create_kwargs.pop("vcpus", 1), "memory_mib": memory_mib, "disk_gib": int(disk_gib)},
+                "limits": {"memory_mib": memory_mib if memory_max_mib is None else memory_max_mib},
+            }
+
+        # Lease state, read by the heartbeat thread once the sandbox is registered.
+        self._endpoint = endpoint
+        self._lease = lease
+        self._lease_done = lifetime <= lease  # the create-time clock already ends at the lifetime
+        self._lease_runtime = None  # the heartbeat's own handle on the runtime
+        # Held across a renewal and across delete(): a renewal changes the
+        # runtime's revision, which fails a concurrent delete.
+        self._lease_lock = threading.Lock()
 
         self._client = runta.Runta(endpoint=endpoint) if endpoint else runta.Runta()
         try:
@@ -155,9 +255,13 @@ class RuntaSandbox:
             self._client.close()
             raise
         self._sandbox_id = self._runtime.id
+        self._lifetime_deadline = _monotonic() + lifetime
+        self._renew_at = _monotonic() + lease / 3
 
         with _LIVE_LOCK:
             _LIVE_SANDBOXES.add(self)
+        if not self._lease_done:
+            _start_lease_thread()
 
         try:
             self._runtime.wait_until_ready(timeout=self._create_timeout)
@@ -176,6 +280,51 @@ class RuntaSandbox:
             raise
 
         logger.info("RuntaSandbox %s created (id: %s, image: %s)", name, self._sandbox_id, image or "<none>")
+
+    def _renew_lease(self) -> float | None:
+        """Heartbeat thread only: restart the shutdown clock if a renewal is due.
+
+        Returns the monotonic time of the next renewal, or ``None`` when this
+        sandbox needs no more. Never raises: a failed renewal is logged and
+        retried on the next beat.
+        """
+        if self._closed or self._lease_done:
+            return None
+        now = _monotonic()
+        if now < self._renew_at:
+            return self._renew_at
+        remaining = int(self._lifetime_deadline - now)
+        if remaining < 1:
+            self._lease_done = True  # lifetime used up: the current lease runs out
+            return None
+        seconds = min(self._lease, remaining)
+        # Only close() holds this lock otherwise, and it holds it for as long as
+        # its delete takes: skip, rather than hold up every other renewal.
+        if not self._lease_lock.acquire(blocking=False):
+            return None
+        try:
+            if self._closed:
+                return None
+            if self._lease_runtime is None:
+                self._lease_runtime = _lease_client(self._endpoint).runtimes.get(self._sandbox_id)
+            # Saving the policy restarts its clock, even with unchanged seconds.
+            self._lease_runtime.update_timeout_policies(auto_shutdown_after_secs=seconds)
+            # A renewal cut short by the lifetime is the last one: the clock
+            # now ends exactly when the lifetime does.
+            self._lease_done = seconds < self._lease
+        except Exception as e:
+            # Includes the ApiError the SDK raises on a revision conflict.
+            logger.warning(
+                "Could not renew the lease of Runta sandbox %s (id: %s); retrying on the next beat, and Runta shuts it down if none succeeds before the lease expires: %s: %s",
+                self.name,
+                self._sandbox_id,
+                type(e).__name__,
+                e,
+            )
+        finally:
+            self._lease_lock.release()
+        self._renew_at = now + self._lease / 3
+        return None if self._lease_done else self._renew_at
 
     def _start_container(self, image: str) -> None:
         """Pull ``image`` and run it as the long-lived task container."""
@@ -210,15 +359,23 @@ class RuntaSandbox:
         else:
             argv = ["bash", "-c", command]
 
-        result = self._runtime.exec(argv, timeout=timeout)
+        result = self._runtime.exec(argv, timeout=timeout, max_output_bytes=_MAX_OUTPUT_BYTES)
         if pidfile and result.exit_code == 124:
             self._kill_in_container(pidfile)
 
         stdout = result.stdout_text
-        if result.stdout_truncated:
-            # Runta keeps only the head of an oversized stream; the other
-            # backends return everything, so never pass this off as complete.
-            logger.warning("stdout of a command in sandbox %s exceeded Runta's capture limit and was truncated to its first %d bytes: %s", self.name, len(result.stdout), command[:200])
+        for stream, truncated, captured in (("stdout", result.stdout_truncated, result.stdout), ("stderr", result.stderr_truncated, result.stderr)):
+            if truncated:
+                # Runta keeps only the head of an oversized stream; the other
+                # backends return everything, so never pass this off as complete.
+                logger.warning(
+                    "%s of a command in sandbox %s exceeded the %d MiB capture limit and was truncated to its first %d bytes: %s",
+                    stream,
+                    self.name,
+                    _MAX_OUTPUT_BYTES >> 20,
+                    len(captured),
+                    command[:200],
+                )
         if result.exit_code != 0:
             stderr = result.stderr_text
             # Short tail in the raised message (callers print it at WARNING for
@@ -305,12 +462,15 @@ class RuntaSandbox:
         """Delete the Runta runtime and release resources."""
         if self._closed:
             return
-        self._closed = True
-        try:
-            self._runtime.delete()
-        except Exception:
-            # The server-side lifetime still reclaims it; surface the leak window.
-            logger.warning("Sandbox %s delete failed — Runta reclaims it when its lifetime expires", self.name, exc_info=True)
+        self._closed = True  # from here on the heartbeat starts no renewal
+        # Wait out a renewal already in flight: it changes the runtime's
+        # revision, and the SDK's delete fails on a revision it did not read.
+        with self._lease_lock:
+            try:
+                self._runtime.delete()
+            except Exception:
+                # The lease is no longer renewed, so Runta still reclaims it; surface the leak window.
+                logger.warning("Sandbox %s delete failed — Runta reclaims it when its lease expires", self.name, exc_info=True)
         try:
             self._client.close()
         except Exception:
@@ -398,7 +558,9 @@ def build_runta_snapshot(task, key: str, prior_ref: str | None = None, *, force:
         return prior_ref
 
     # Size the build runtime's lifetime to the worst-case replay (each RUN is
-    # bounded at 900s), plus the install bound and pull/checkpoint slack.
+    # bounded at 900s), plus the install bound and pull/checkpoint slack. The
+    # lease is renewed by the heartbeat thread while a step blocks this one, so
+    # a long build keeps its runtime for as long as this process lives.
     install_budget = env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 900) if install_script else 0
     build_timeout = max(_DEFAULT_TIMEOUT, 900 * len(_dockerfile_run_commands(task)) + install_budget + 600)
     sb = _create_base_sandbox(task, "runta", name=f"{key}-build", timeout=build_timeout)
