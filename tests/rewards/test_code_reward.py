@@ -441,3 +441,25 @@ def test_longest_subsequence_empty_list():
         task_info = {"problem": "", "problem_type": RewardType.CODE, "data_source": "kodcode", "ground_truth": tests}
         output = reward(task_info, model_response)
         assert output.is_correct
+
+    def test_reward_primeintellect_function_call(self):
+        """
+        Test the reward function on PrimeIntellect function_call problems.
+        """
+        model_response = """
+```python
+from itertools import chain, zip_longest
+
+def interleave(*args):
+    return list(chain.from_iterable(zip_longest(*args)))
+```
+"""
+        metadata = [
+            {"type": "function_call", "fn_name": "interleave", "input": [[1, 2, 3], ["c", "d", "e"]], "output": [[1, "c", 2, "d", 3, "e"]]},
+            {"type": "function_call", "fn_name": "interleave", "input": [[1, 2, 3], [4, 5]], "output": [[1, 4, 2, 5, 3, None]]},
+        ]
+        reward = RewardCodeFn(RewardConfig())
+        task_info = {"problem": "", "problem_type": RewardType.CODE, "data_source": "primeintellect", "ground_truth": metadata}
+        output = reward(task_info, model_response)
+        assert output.is_correct
+
