@@ -175,7 +175,12 @@ def build_harbor_trial_config(
     if environment_type:
         from harbor.models.environment_type import EnvironmentType
 
-        env_type = EnvironmentType(environment_type)
+        try:
+            env_type = EnvironmentType(environment_type)
+        except ValueError:
+            # e.g. ``runta``: an rLLM sandbox backend that Harbor has no environment for.
+            supported = ", ".join(t.value for t in EnvironmentType)
+            raise ValueError(f"Sandbox backend {environment_type!r} is not available for Harbor agents; the installed Harbor supports: {supported}.") from None
 
     return TrialConfig(
         task=TaskConfig(path=Path(task_path)),
