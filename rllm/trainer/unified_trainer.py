@@ -183,6 +183,13 @@ class UnifiedTrainer:
 
         self.backend = backend_cls(config=config, **(backend_args or {}))
 
+        sc_enabled = config.rllm.algorithm.get("score_centering", {}).get("enabled", False)
+        if sc_enabled:
+            if self.backend.__class__.__name__ != "VerlBackend":
+                raise ValueError("Score centering requires the verl backend")
+            if kwargs.get("agent_flow") is not None or config.rllm.get("remote_runtime", {}).get("enabled", False):
+                raise ValueError("Score centering requires a direct single-turn Workflow; gateway/AgentFlow is unsupported")
+
         self._validate_and_setup_configs()
         self._setup_logging()
 
@@ -350,6 +357,8 @@ class UnifiedTrainer:
             stepwise_advantage_mode=self.rllm_config.stepwise_advantage.mode,
             estimator_map=self.traj_group_adv_estimator_map,
         )
+        if self.algorithm_config.score_centering.enabled and self.algorithm_config.loss_fn_map:
+            raise ValueError("Score centering does not support per-role loss overrides")
 
     def _setup_logging(self):
         """Setup up both the tracking and episode logging."""

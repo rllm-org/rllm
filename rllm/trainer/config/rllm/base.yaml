@@ -86,6 +86,10 @@ algorithm:
   eps_clip: 0.2           # PPO clip epsilon
   eps_clip_high: null     # Asymmetric upper clip bound (null = symmetric)
   router_replay: disabled # Router Replay: "disabled" | "R2" (training-side record) | "R3" (rollout-side record)
+  score_centering:
+    enabled: false
+    record_topk: 32  # recording budget; does not change sampling top_k
+    chunk_size: 128 # fp32 vocabulary-normalization workspace in token rows
   rollout_correction:
     bypass_mode: null     # true = pi_old = pi_rollout, false = pi_old is computed (null = backend default)
     tis_mode: null        # null = disabled, "token" or "sequence" = TIS importance sampling level

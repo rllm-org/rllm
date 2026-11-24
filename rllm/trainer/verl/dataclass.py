@@ -20,6 +20,8 @@ class ProcessedStepData:
     multi_modal_inputs: dict = field(default_factory=dict)  # Optional multimodal inputs (e.g., image_grid_thw for Qwen-VL)
     advantage: float | list[float] | None = None
     logprobs: list[float] | None = None  # Per-token rollout log probs for importance sampling
+    rollout_topk_ids: list[list[int]] | None = None
+    rollout_topk_log_probs: list[list[float]] | None = None
     routing_matrices: torch.Tensor | None = None  # (response_len, num_layers, topk) int tensor for R3 router replay
 
 
@@ -66,6 +68,9 @@ class AccumulatedData:
     # Rollout log probs (parallel to tensor lists, only populated when available)
     rollout_logprobs: list[torch.Tensor] = field(default_factory=list)
 
+    # Score-centering sampler heads (ids, log_probs) per row, or None.
+    rollout_heads: list[tuple | None] = field(default_factory=list)
+
     # Routing matrices for R3 router replay (parallel to tensor lists, only populated when available).
     # Each entry is shape (response_len, num_layers, topk).
     routing_matrices: list[torch.Tensor] = field(default_factory=list)
@@ -83,6 +88,10 @@ class AccumulatedData:
 
         This helper ensures all lists stay in sync and reduces boilerplate.
         """
+        head = None
+        if step_data.rollout_topk_ids is not None:
+            head = (step_data.rollout_topk_ids, step_data.rollout_topk_log_probs)
+        self.rollout_heads.append(head)
         self.prompts.append(step_data.prompt)
         self.responses.append(step_data.response)
         self.traj_mask.append(step_data.mask)

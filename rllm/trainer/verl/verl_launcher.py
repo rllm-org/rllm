@@ -32,6 +32,10 @@ class VerlTaskRunner(TaskRunner):
 
         print(f"VerlTaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         sync_config(config, hydra_overrides=hydra_overrides)
+        if config.rllm.algorithm.get("score_centering", {}).get("enabled", False):
+            from rllm.trainer.verl.sc_config import validate_score_centering_config
+
+            validate_score_centering_config(config)
         OmegaConf.resolve(config)
         pprint(OmegaConf.to_container(config))
 

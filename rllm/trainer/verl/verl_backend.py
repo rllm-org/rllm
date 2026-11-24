@@ -39,6 +39,7 @@ from rllm.trainer.algorithms import (
 from rllm.trainer.backend_protocol import BackendProtocol
 from rllm.trainer.verl import transform_episodes_to_dataproto, transform_trajectory_groups_to_dataproto, update_dataproto_with_advantages
 from rllm.trainer.verl.metrics import calculate_debug_metrics_compat
+from rllm.trainer.verl.score_centering import SC_FIELDS, heads_to_no_padding
 from rllm.trainer.verl.utils import (
     balance_batch,
     build_wg_kwargs,
@@ -317,6 +318,11 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             except Exception as e:
                 logger.warning(f"Could not set total_training_steps on actor.optim: {e}")
 
+        if self.config.rllm.algorithm.get("score_centering", {}).get("enabled", False):
+            from rllm.trainer.verl.sc_rollout_adapter import install_rollout_adapter
+
+            install_rollout_adapter()
+
         if self.is_separated:
             self._init_separated_workers()
         else:
@@ -324,7 +330,16 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         assert self.async_rollout_manager is not None
 
-        if hasattr(self.actor_rollout_wg, "set_loss_fn"):
+        sc = self.config.rllm.algorithm.get("score_centering", {})
+        if sc.get("enabled", False):
+            if not hasattr(self.actor_rollout_wg, "set_loss_fn"):
+                raise RuntimeError("Score centering requires worker set_loss_fn support")
+            from rllm.trainer.verl.sc_fsdp_adapter import ScoreCenteringLoss
+
+            rc = self.config.rllm.algorithm.get("rollout_correction", {})
+            cap = rc.get("tis_cap", 2.0) if rc.get("tis_mode") == "token" else None
+            self.actor_rollout_wg.set_loss_fn(ScoreCenteringLoss(self.config.actor_rollout_ref.actor, sc, cap))
+        elif hasattr(self.actor_rollout_wg, "set_loss_fn"):
             self.actor_rollout_wg.set_loss_fn(CustomPPOLoss(self.config.actor_rollout_ref.actor))
         else:
             logger.warning("RayWorkerGroup.set_loss_fn not available — skipping custom loss injection")
@@ -379,8 +394,12 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             # automatically set the stepwise_advantage_mode to "broadcast", the warning is already shown in AlgorithmConfig.from_config
             self.config.rllm.stepwise_advantage.mode = "broadcast"
 
+        from rllm.trainer.verl.sc_config import validate_score_centering_config
+
+        validate_score_centering_config(self.config)
+        sc_enabled = self.config.rllm.algorithm.get("score_centering", {}).get("enabled", False)
         rc = self.config.rllm.algorithm.get("rollout_correction", {})
-        if rc.get("bypass_mode", False) and rc.get("tis_mode") is not None:
+        if not sc_enabled and rc.get("bypass_mode", False) and rc.get("tis_mode") is not None:
             raise ValueError("bypass_mode=True and tis_mode!=None is invalid: IS correction is meaningless when π_old = π_rollout")
 
         assert not self.config.algorithm.get("use_kl_in_reward", False), "only KL-in-loss is supported"
@@ -622,11 +641,15 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         # to_tensordict() does NOT mutate the original DataProto.
         # left_right_2_no_padding mutates batch_td in-place.
         batch_td = batch.to_tensordict()
+        heads_to_no_padding(batch_td)
         batch_td = left_right_2_no_padding(batch_td)
 
         # --- Compute old_log_probs ---
         rc = self.algorithm_config.rollout_correction if self.algorithm_config is not None else None
-        bypass_mode = rc is not None and rc.bypass_mode
+        sc_enabled = self.config.rllm.algorithm.get("score_centering", {}).get("enabled", False)
+        if sc_enabled and (not all(key in batch.batch for key in SC_FIELDS) or "rollout_log_probs" not in batch.batch):
+            raise ValueError("Score centering batch is missing sampler distributions or sampled logprobs")
+        bypass_mode = sc_enabled or (rc is not None and rc.bypass_mode)
         has_rollout_log_probs = "rollout_log_probs" in batch.batch
 
         if bypass_mode:
@@ -773,6 +796,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         ) -> None:
             """Convert DataProto to TensorDict, inject metadata, send to worker."""
             batch_td = sub_batch.to_tensordict()
+            heads_to_no_padding(batch_td)
             batch_td = left_right_2_no_padding(batch_td)
             metadata: dict[str, Any] = dict(
                 calculate_entropy=(actor_cfg.entropy_coeff != 0.0),
@@ -782,6 +806,12 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
                 seed=actor_cfg.data_loader_seed,
                 dataloader_kwargs={"shuffle": actor_cfg.shuffle},
             )
+            if self.config.rllm.algorithm.get("score_centering", {}).get("enabled", False):
+                if loss_fn_map:
+                    raise ValueError("Score centering does not support per-role loss overrides")
+                if not all(key in batch_td for key in SC_FIELDS) or "rollout_is_weights" in batch_td:
+                    raise ValueError("Invalid score centering update batch")
+                metadata["score_centering"] = True
             if loss_override is not None:
                 metadata["policy_loss_mode_override"] = loss_override
             tu.assign_non_tensor(batch_td, **metadata)

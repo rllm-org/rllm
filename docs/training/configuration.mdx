@@ -103,6 +103,7 @@ RL algorithm and advantage estimation settings.
 | `adv_estimator` | `str` | `grpo` | Advantage estimator (options: `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, `rloo`) |
 | `norm_adv_by_std_in_grpo` | `bool` | `True` | Whether to normalize advantages by standard deviation in GRPO |
 | `loss_fn` | `str \| null` | `null` | Loss function for Tinker backend (options: `importance_sampling`, `ppo`, `cispo`, `dro`, `cross_entropy`) |
+| `score_centering.enabled` | `bool` | `False` | Verl backend only: center the policy-gradient score under the sampler distribution. See [Score centering](/training/score-centering). |
 
 ### Stepwise advantage configuration
 

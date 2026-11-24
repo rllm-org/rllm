@@ -1,17 +1,22 @@
+from __future__ import annotations
+
 import base64
 import json
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 from verl.protocol import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
-from rllm.engine.rollout import VerlEngine
 from rllm.trainer.verl.dataclass import AccumulatedData, ProcessedStepData
 from rllm.types import Episode, Trajectory, TrajectoryGroup
 from rllm.workflows.workflow import TerminationReason
+
+if TYPE_CHECKING:
+    from rllm.engine.rollout import VerlEngine
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +44,20 @@ def _pad_sequence_batch(sequences: list[torch.Tensor], pad_token_id: int, max_le
     return batch
 
 
-def _retrieve_batch_attention_masks(batch: torch.Tensor, pad_token_id: int, max_length: int) -> torch.Tensor:
-    """Retrieves the attention masks for a batch of prompts/responses.
+def _retrieve_batch_attention_masks(sequences: list[torch.Tensor], max_length: int, left_pad: bool) -> torch.Tensor:
+    """Attention masks for sequences padded/truncated by ``_pad_sequence_batch``.
 
-    Note that in original implementation, this operation is padding-aware, i.e. it has DIFFERENT behavior for left-pad (prompts)
-    and right-pad (responses) sequences. This is to ensure compatibility with the `input_ids` constructed with results from function `_pad_sequence_batch`.
-
-    The current version simply uses the constructed `promits_batch` (`responses_batch`) instead of the original `prompts` (`responses`) lengths.
+    Built from sequence lengths rather than ``batch != pad_token_id``: models whose
+    EOS token equals the pad token (e.g. many base models) would otherwise have every
+    genuine EOS masked out, so the policy never receives gradient on stopping.
+    Left-padded sequences keep their last ``max_length`` tokens; right-padded ones
+    keep their first ``max_length``, matching ``_pad_sequence_batch``.
     """
-    assert len(batch.shape) == 2, f"batch must be a 2D tensor, but got {batch.shape}"
-    assert batch.shape[1] == max_length, f"input batch must have been padded to {max_length}, but got {batch.shape[1]}"
-    return batch != pad_token_id
+    lengths = torch.tensor([min(len(seq), max_length) for seq in sequences], dtype=torch.long)
+    positions = torch.arange(max_length)[None, :]
+    if left_pad:
+        return positions >= (max_length - lengths[:, None])
+    return positions < lengths[:, None]
 
 
 def _build_step_and_trajectory_rewards(step_rewards: list[float], trajectory_rewards: list[float], responses_batch: torch.Tensor, responses: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -132,7 +140,7 @@ def _handle_multimodal_position_ids(processor, input_ids: torch.Tensor, attentio
     return position_ids
 
 
-def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_id: int, max_prompt_length: int, max_response_length: int, processor=None) -> "DataProto":
+def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_id: int, max_prompt_length: int, max_response_length: int, processor=None) -> DataProto:
     """Batches the tensors from an AccumulatedData.
 
     Args:
@@ -149,8 +157,8 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
     responses_batch = _pad_sequence_batch(accumulated.responses, pad_token_id, max_response_length, left_pad=False)  # shape: [bs, max_response_length]
     input_ids = torch.concat([prompts_batch, responses_batch], dim=1)  # shape: [bs, max_prompt_length + max_response_length]
 
-    prompts_mask = _retrieve_batch_attention_masks(prompts_batch, pad_token_id, max_prompt_length)
-    responses_mask = _retrieve_batch_attention_masks(responses_batch, pad_token_id, max_response_length)
+    prompts_mask = _retrieve_batch_attention_masks(accumulated.prompts, max_prompt_length, left_pad=True)
+    responses_mask = _retrieve_batch_attention_masks(accumulated.responses, max_response_length, left_pad=False)
     attention_mask = torch.concat([prompts_mask, responses_mask], dim=1)  # shape: [bs, max_prompt_length + max_response_length]
 
     # Handle position_ids: use multimodal handler if processor is available
@@ -206,6 +214,11 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
     if accumulated.rollout_logprobs and len(accumulated.rollout_logprobs) == len(accumulated.responses):
         rollout_logprobs_batch = _pad_sequence_batch(accumulated.rollout_logprobs, 0, max_response_length, left_pad=False)
         tensors["rollout_log_probs"] = rollout_logprobs_batch
+
+    if any(head is not None for head in accumulated.rollout_heads):
+        from rllm.trainer.verl.score_centering import batch_rollout_heads
+
+        tensors.update(batch_rollout_heads(accumulated.rollout_heads, accumulated.responses, max_response_length))
 
     # Routed experts for R3 router replay. Each routing tensor covers
     # (prompt + response) tokens for its row (last step's routing in the
@@ -298,6 +311,10 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
     if not valid_steps:
         return 0
 
+    has_sc = any(getattr(step.model_output, "rollout_topk_ids", None) is not None for step in valid_steps)
+    if has_sc and len(trajectory.steps) != 1:
+        raise ValueError("Score centering currently supports single-turn trajectories only")
+
     # ------------------------------------------------------------------
     # Walk steps and merge prefix-extending steps into segments.
     # ------------------------------------------------------------------
@@ -323,6 +340,7 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
         if action_lp and len(action_lp) != len(action):
             action_lp = list(action_lp) + [0.0] * (len(action) - len(action_lp))
         return {
+            "sc_output": step.model_output,
             "prompt": prompt,
             "response": list(action),
             "mask": [1] * len(action),
@@ -358,6 +376,8 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             advantage=None,
             logprobs=seg["logprobs"] if seg["logprobs"] else None,
             routing_matrices=routing_t,
+            rollout_topk_ids=getattr(seg["sc_output"], "rollout_topk_ids", None),
+            rollout_topk_log_probs=getattr(seg["sc_output"], "rollout_topk_log_probs", None),
         )
         accumulated.add_step(
             step_data=step_data,

@@ -219,6 +219,19 @@ class RejectionSamplingConfig:
 
 
 @dataclass
+class ScoreCenteringConfig:
+    """Opt-in, single-turn text FSDP score centering with a recorded sampler head."""
+
+    enabled: bool = False
+    record_topk: int = 32
+    chunk_size: int = 128
+
+    def __post_init__(self):
+        if type(self.record_topk) is not int or type(self.chunk_size) is not int or self.record_topk < 1 or self.chunk_size < 1:
+            raise ValueError("score_centering record_topk and chunk_size must be positive")
+
+
+@dataclass
 class RolloutCorrectionConfig:
     """Configuration for rollout correction (TIS, proximal forward passes).
 
@@ -295,6 +308,7 @@ class AlgorithmConfig:
     eps_clip_high: float | None = None
     loss_agg_mode: Literal["token-mean", "seq-mean-token-sum", "seq-mean-token-mean", None] = None
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
+    score_centering: ScoreCenteringConfig = field(default_factory=ScoreCenteringConfig)
     router_replay: Literal["disabled", "R2", "R3"] = "disabled"
 
     @classmethod
@@ -336,6 +350,7 @@ class AlgorithmConfig:
             eps_clip_high=algorithm_config.get("eps_clip_high", None),
             loss_agg_mode=algorithm_config.get("loss_agg_mode", None),
             rollout_correction=rollout_correction,
+            score_centering=ScoreCenteringConfig(**dict(algorithm_config.get("score_centering", {}))),
             router_replay=algorithm_config.get("router_replay", "disabled"),
         )
 

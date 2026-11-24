@@ -34,6 +34,7 @@ class VerlEngine(RolloutEngine):
         self.max_prompt_length = config.data.max_prompt_length
         self.max_response_length = config.data.max_response_length
         self.accumulate_reasoning = config.get("rllm", {}).get("accumulate_reasoning", False)
+        self.sc_config = config.get("rllm", {}).get("algorithm", {}).get("score_centering", {})
         self.router_replay_mode = config.get("rllm", {}).get("algorithm", {}).get("router_replay", "disabled")
 
         self.train_sampling_params = dict(
@@ -79,6 +80,13 @@ class VerlEngine(RolloutEngine):
         max_tokens = sampling_params.pop("max_tokens", sampling_params.pop("max_new_tokens", self.max_response_length))
         # starting from verl 0.7.0, we can pass in per-turn max_tokens into the sampling_params
         sampling_params["max_tokens"] = max_tokens
+        if self.sc_config.get("enabled", False) and not self.is_validation:
+            from rllm.trainer.verl.sc_rollout_adapter import validate_sampling_params
+
+            validate_sampling_params(sampling_params)
+            if image_data is not None or video_data is not None:
+                raise ValueError("Score centering supports text rollouts only")
+            sampling_params["rllm_sc_topk"] = self.sc_config.get("record_topk", 32)
 
         token_output = await self.server_manager.generate(
             request_id=application_id,
@@ -128,6 +136,8 @@ class VerlEngine(RolloutEngine):
     @override
     def assemble_model_output(self, token_input: TokenInput, token_output: TokenOutput, **kwargs) -> ModelOutput:
         prompt_ids = kwargs.pop("prompt_ids", None)
+        if prompt_ids is None and self.sc_config.get("enabled", False):
+            prompt_ids = list(token_input)
         multi_modal_inputs = kwargs.pop("multi_modal_inputs", None)
         prompt_length = len(prompt_ids) if prompt_ids is not None else 0
 
@@ -147,7 +157,14 @@ class VerlEngine(RolloutEngine):
             header = json.dumps({"shape": list(arr.shape[1:]), "dtype": str(arr.dtype)})
             routing_matrices = [header, base64.b64encode(arr.tobytes()).decode("ascii")]
 
+        sc_fields = {}
+        if self.sc_config.get("enabled", False) and not self.is_validation:
+            from rllm.trainer.verl.sc_rollout_adapter import extract_sc_fields
+
+            sc_fields = extract_sc_fields(token_output)
+
         return ModelOutput(
+            **sc_fields,
             text=completion_text,
             content=parsed_output["content"],
             reasoning=parsed_output["reasoning"],
