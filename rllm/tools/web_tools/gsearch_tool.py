@@ -72,15 +72,15 @@ class GoogleSearchTool(Tool):
             "key": secret_key,
             "cx": engine_id,
             "q": query,
-            "num": REFERENCE_COUNT,
+            "num": self.reference_count,
         }
 
-        response = self.client.get(url=GOOGLE_SEARCH_ENDPOINT, params=params, timeout=DEFAULT_SEARCH_ENGINE_TIMEOUT)
+        response = self.client.get(url=GOOGLE_SEARCH_ENDPOINT, params=params, timeout=self.timeout)
         if not response.is_success:
             print(f"{response.status_code} {response.text}")
         json_content = response.json()
         try:
-            contexts = json_content["items"][:REFERENCE_COUNT]
+            contexts = json_content["items"][: self.reference_count]
         except KeyError:
             print(f"Error encountered: {json_content}")
             return []
