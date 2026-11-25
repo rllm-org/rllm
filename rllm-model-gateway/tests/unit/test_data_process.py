@@ -232,3 +232,26 @@ class TestBuildTraceRecord:
         assert trace.response_message["content"] == "Hi there"
         assert trace.finish_reason == "stop"
         assert trace.token_counts == {"prompt": 3, "completion": 2}
+
+    def test_streaming_chunks_preserve_reasoning_content(self):
+        """Reasoning deltas must be accumulated into the trace's response message.
+
+        ``trace_record_to_step`` reads ``reasoning``/``reasoning_content`` off
+        ``response_message``; the non-streaming path passes the provider's
+        message through verbatim, so the streaming path must too.
+        """
+        request_body = {"model": "test-model", "messages": [{"role": "user", "content": "2+2?"}]}
+        chunks = [
+            {
+                "model": "test-model",
+                "prompt_token_ids": [1],
+                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            },
+            {"choices": [{"index": 0, "delta": {"reasoning_content": "two plus "}, "token_ids": [9], "finish_reason": None}]},
+            {"choices": [{"index": 0, "delta": {"reasoning_content": "two is four"}, "token_ids": [8], "finish_reason": None}]},
+            {"choices": [{"index": 0, "delta": {"content": "4"}, "token_ids": [7], "finish_reason": "stop"}]},
+        ]
+        trace = build_trace_record_from_chunks("session-5", request_body, chunks, 10.0)
+
+        assert trace.response_message["reasoning_content"] == "two plus two is four"
+        assert trace.response_message["content"] == "4"
