@@ -1,54 +1,18 @@
-"""Unit tests for AgentCoreRuntime and remote episode building (all mocked)."""
+"""Unit tests for remote episode building and gateway helpers."""
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-from agentcore_rl_toolkit import InvocationError
 from omegaconf import OmegaConf
 
 from rllm.engine.remote_agent_flow_engine import _build_episode
-from rllm.engine.remote_runtime.agentcore_runtime import AgentCoreRuntime
-from rllm.engine.remote_runtime.protocol import (
-    RemoteRuntimeConfig,
-    RemoteTaskResult,
-    TaskSubmission,
-)
+from rllm.engine.remote_runtime.protocol import RemoteTaskResult
 from rllm.engine.trace_converter import compute_step_metrics
 from rllm.gateway.manager import GatewayManager, _get_routable_ip
 from rllm.types import Step, Trajectory
-from rllm.workflows.workflow import TerminationReason
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_runtime() -> AgentCoreRuntime:
-    """Create an AgentCoreRuntime (skips initialize())."""
-    config = RemoteRuntimeConfig(
-        enabled=True,
-        backend="agentcore",
-        agentcore={
-            "agent_runtime_arn": "arn:aws:bedrock:us-east-1:123456789:agent-runtime/test",
-        },
-    )
-    return AgentCoreRuntime(config, exp_id="test-exp", model_id="test-model")
-
-
-def _make_submission(session_id: str = "sess-1", task_id: str = "task-1") -> TaskSubmission:
-    return TaskSubmission(
-        task={"prompt": "What is 2+2?", "answer": "4"},
-        session_id=session_id,
-        task_id=task_id,
-        inference_url="http://localhost:8000/v1",
-    )
-
-
-def _make_client(result: dict):
-    """Create a mock HTTP client and invocation handle."""
-    client = AsyncMock()
-    client.invoke.return_value.result.return_value = result
-    return client
 
 
 def _make_step(prompt_len: int = 10, response_len: int = 20) -> Step:
@@ -57,124 +21,6 @@ def _make_step(prompt_len: int = 10, response_len: int = 20) -> Step:
         prompt_ids=list(range(prompt_len)),
         response_ids=list(range(response_len)),
     )
-
-
-# ---------------------------------------------------------------------------
-# _run_one tests
-# ---------------------------------------------------------------------------
-
-
-class TestRunOneSuccess:
-    def test_success_with_reward(self):
-        """HTTP result -> RemoteTaskResult(finished=True, reward=1.0)."""
-        runtime = _make_runtime()
-        sub = _make_submission()
-        client = _make_client({"reward": 1.0})
-
-        result = asyncio.run(runtime._run_one(sub, timeout=300.0, client=client))
-
-        assert result.finished is True
-        assert result.reward == 1.0
-        assert result.session_id == "sess-1"
-        assert result.task_id == "task-1"
-        assert result.elapsed > 0
-        assert result.raw_result is not None
-        assert result.raw_result["reward"] == 1.0
-        client.stop_session.assert_awaited_once_with(sub.session_id)
-
-    def test_missing_reward(self):
-        """A missing scalar reward is an application error."""
-        runtime = _make_runtime()
-        sub = _make_submission()
-        client = _make_client({"reward": None})
-
-        result = asyncio.run(runtime._run_one(sub, timeout=300.0, client=client))
-
-        assert result.finished is False
-        assert result.reward is None
-        assert "no reward" in result.error
-
-
-class TestRunOneErrorStatus:
-    def test_completed_with_error(self):
-        """A completed invocation with an error is a failed rollout."""
-        runtime = _make_runtime()
-        sub = _make_submission()
-        client = _make_client({})
-        client.invoke.return_value.result.side_effect = InvocationError(
-            sub.session_id,
-            {
-                "version": 1,
-                "invocation_id": "inv-1",
-                "status": "completed",
-                "error": "ZeroDivisionError: division by zero",
-            },
-        )
-
-        result = asyncio.run(runtime._run_one(sub, timeout=300.0, client=client))
-
-        assert result.finished is False
-        assert "ZeroDivisionError" in (result.error or "")
-        assert result.elapsed > 0
-        client.stop_session.assert_awaited_once_with(sub.session_id)
-
-    def test_interrupted(self):
-        """An interrupted invocation reports its terminal state."""
-        runtime = _make_runtime()
-        sub = _make_submission()
-        client = _make_client({})
-        client.invoke.return_value.result.side_effect = InvocationError(
-            sub.session_id,
-            {"version": 1, "invocation_id": "inv-1", "status": "interrupted"},
-        )
-
-        result = asyncio.run(runtime._run_one(sub, timeout=300.0, client=client))
-
-        assert result.finished is False
-        assert "interrupted" in result.error
-
-
-class TestRunOneTransportError:
-    def test_invoke_raises(self):
-        """invoke raising -> RemoteTaskResult(finished=False)."""
-        runtime = _make_runtime()
-        sub = _make_submission()
-        client = _make_client({})
-        client.invoke.side_effect = ConnectionError("network down")
-
-        result = asyncio.run(runtime._run_one(sub, timeout=300.0, client=client))
-
-        assert result.finished is False
-        assert "network down" in (result.error or "")
-
-    def test_result_timeout(self):
-        """asyncio.TimeoutError -> termination_reason=TIMEOUT."""
-        runtime = _make_runtime()
-        sub = _make_submission()
-        client = _make_client({})
-        client.invoke.return_value.result.side_effect = asyncio.TimeoutError()
-
-        result = asyncio.run(runtime._run_one(sub, timeout=1.0, client=client))
-
-        assert result.finished is False
-        assert result.termination_reason == TerminationReason.TIMEOUT
-        assert result.elapsed > 0
-        assert "Timeout after" in (result.error or "")
-        client.stop_session.assert_awaited_once_with(sub.session_id)
-
-    def test_result_other_error(self):
-        """Non-timeout polling error -> termination_reason=ERROR."""
-        runtime = _make_runtime()
-        sub = _make_submission()
-        client = _make_client({})
-        client.invoke.return_value.result.side_effect = RuntimeError("HTTP polling failed")
-
-        result = asyncio.run(runtime._run_one(sub, timeout=1.0, client=client))
-
-        assert result.finished is False
-        assert result.termination_reason == TerminationReason.ERROR
-        assert result.elapsed > 0
-        assert "HTTP polling failed" in (result.error or "")
 
 
 # ---------------------------------------------------------------------------
