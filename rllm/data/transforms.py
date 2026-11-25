@@ -104,14 +104,20 @@ def mmlu_pro_transform(row: dict) -> dict:
 def mmlu_redux_transform(row: dict) -> dict:
     """Transform MMLU-Redux row to standard MCQ format.
 
-    MMLU-Redux has choices in columns A, B, C, D and 'answer' as an index (0-3).
+    MMLU-Redux stores the four options in a single list column ``choices``
+    and 'answer' as an index (0-3). Older mirrors split the options across
+    columns A, B, C, D — fall back to those when ``choices`` is absent.
     """
-    choices = [
-        row.get("A", ""),
-        row.get("B", ""),
-        row.get("C", ""),
-        row.get("D", ""),
-    ]
+    raw_choices = row.get("choices")
+    if isinstance(raw_choices, list | tuple):
+        choices = [str(c) for c in raw_choices]
+    else:
+        choices = [
+            row.get("A", ""),
+            row.get("B", ""),
+            row.get("C", ""),
+            row.get("D", ""),
+        ]
     answer_idx = row.get("answer")
     if isinstance(answer_idx, int):
         ground_truth = chr(ord("A") + answer_idx)
@@ -129,7 +135,9 @@ def mmlu_redux_transform(row: dict) -> dict:
 def mmmlu_transform(row: dict) -> dict:
     """Transform MMMLU (Multilingual MMLU) row to standard MCQ format.
 
-    MMMLU has choices in columns A, B, C, D and 'answer' as a letter.
+    MMMLU has choices in columns A, B, C, D and the answer as a letter.
+    ``openai/MMMLU`` capitalises the question/answer columns (``Question`` /
+    ``Answer``), so accept either spelling.
     """
     choices = [
         row.get("A", ""),
@@ -138,9 +146,9 @@ def mmmlu_transform(row: dict) -> dict:
         row.get("D", ""),
     ]
     return {
-        "question": row.get("question", ""),
+        "question": row.get("question") or row.get("Question", ""),
         "choices": choices,
-        "ground_truth": row.get("answer", ""),
+        "ground_truth": row.get("answer") or row.get("Answer", ""),
         "data_source": "mmmlu",
     }
 
