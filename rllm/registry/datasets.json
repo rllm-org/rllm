@@ -690,7 +690,7 @@
       "splits": [
         "test"
       ],
-      "default_agent": "search",
+      "default_agent": "react",
       "reward_fn": "llm_equality_reward_fn",
       "eval_split": "test",
       "transform": "rllm.data.transforms:browsecomp_transform",
@@ -703,7 +703,7 @@
       "splits": [
         "test"
       ],
-      "default_agent": "search",
+      "default_agent": "react",
       "reward_fn": "llm_equality_reward_fn",
       "eval_split": "test",
       "hf_config": "seal_0",
@@ -717,7 +717,7 @@
       "splits": [
         "test"
       ],
-      "default_agent": "search",
+      "default_agent": "react",
       "reward_fn": "widesearch_reward_fn",
       "eval_split": "test",
       "hf_split": "full",
@@ -731,7 +731,7 @@
       "splits": [
         "test"
       ],
-      "default_agent": "search",
+      "default_agent": "react",
       "reward_fn": "llm_equality_reward_fn",
       "eval_split": "test",
       "gated": true,
@@ -745,7 +745,7 @@
       "splits": [
         "test"
       ],
-      "default_agent": "swe",
+      "default_agent": "mini-swe-agent",
       "reward_fn": "swebench_reward_fn",
       "eval_split": "test",
       "transform": "rllm.data.transforms:swebench_transform",

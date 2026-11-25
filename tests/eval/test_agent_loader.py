@@ -171,3 +171,25 @@ class TestRegisterAgent:
     def test_register_bad_class_raises(self):
         with pytest.raises(TypeError, match="must be an AgentFlow"):
             register_agent("test_agent", dict)
+
+
+class TestCatalogDefaultAgents:
+    def test_catalog_default_agents_exist_in_agent_registry(self):
+        """Every ``default_agent`` in datasets.json must still name a built-in agent.
+
+        ``rllm eval <benchmark>`` without ``--agent`` resolves the catalog's
+        ``default_agent`` and hands it straight to :func:`load_agent`, so a stale
+        name fails the run before the first rollout.
+        """
+        from rllm.cli._pull import load_agent_catalog, load_dataset_catalog
+
+        builtin = set(load_agent_catalog().get("agents", {}))
+        datasets = load_dataset_catalog().get("datasets", {})
+        assert builtin and datasets, "catalogs are empty — update this test"
+
+        unresolvable = {}
+        for name, entry in datasets.items():
+            default_agent = entry.get("default_agent")
+            if default_agent and not default_agent.startswith("harbor:") and default_agent not in builtin:
+                unresolvable[name] = default_agent
+        assert not unresolvable, f"datasets.json default_agent names absent from agents.json: {unresolvable}"
