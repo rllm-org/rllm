@@ -207,11 +207,13 @@ class GatewayManager:
         """Start the gateway and register inference workers.
 
         For VerlEngine: registers the existing vLLM server addresses.
-        For TinkerEngine: creates an in-process handler (no sidecar needed).
+        For TinkerEngine / FireworksEngine: creates an in-process handler (no sidecar needed).
         """
         engine_cls = type(rollout_engine).__name__
 
-        if engine_cls == "TinkerEngine":
+        # FireworksEngine subclasses TinkerEngine and samples through its own
+        # SDK client rather than an HTTP worker, so it takes the same path.
+        if engine_cls in ("TinkerEngine", "FireworksEngine"):
             # In-process handler — no HTTP backend, no worker registration
             from rllm.gateway.tinker_adapter import create_tinker_handler
 
