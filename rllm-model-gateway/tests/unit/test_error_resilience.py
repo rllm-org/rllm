@@ -88,6 +88,28 @@ class TestWorkerFailure:
         assert resp.status_code in (200, 500, 502)
 
     @pytest.mark.asyncio
+    async def test_non_json_body_relayed_verbatim(
+        self,
+        client: httpx.AsyncClient,
+        controllable_vllm: ControllableMockVLLMServer,
+    ):
+        """A non-JSON upstream body must reach the client, not be replaced by {}.
+
+        Upstream failures often carry a plain-text or HTML body (uvicorn's
+        "Internal Server Error", a load balancer's 502 page). Swallowing it
+        leaves the caller with an empty object and no way to tell what failed.
+        """
+        controllable_vllm.set_malform(True)
+        resp = await client.post(
+            "/sessions/malformed-relay/v1/chat/completions",
+            json={
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert resp.text == "this is not valid json{{{"
+
+    @pytest.mark.asyncio
     async def test_partial_rollout_recovery(
         self,
         client: httpx.AsyncClient,

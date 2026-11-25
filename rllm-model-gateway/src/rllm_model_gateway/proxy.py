@@ -222,7 +222,18 @@ class ReverseProxy:
             try:
                 response_body = json.loads(content)
             except (json.JSONDecodeError, UnicodeDecodeError):
-                response_body = {}
+                response_body = None
+            if not isinstance(response_body, dict):
+                # Not an OpenAI-shaped body: nothing to trace or sanitise.
+                # Typically an upstream failure whose body is plain text or
+                # HTML (uvicorn's "Internal Server Error", a load balancer's
+                # 502 page). Relay it verbatim so the client keeps the
+                # provider's error detail instead of an empty object.
+                return Response(
+                    content=content,
+                    status_code=status_code,
+                    media_type=resp.headers.get("content-type"),
+                )
 
         latency_ms = (time.perf_counter() - t0) * 1000
 
