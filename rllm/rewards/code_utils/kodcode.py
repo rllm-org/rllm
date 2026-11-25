@@ -19,8 +19,7 @@ def code_exec(code, test: str = None, timeout=_DEFAULT_TIMEOUT_SECONDS):
     def preexec_fn():
         reliability_guard()
 
-    if "pytest" not in code:
-        code_to_run = f"""
+    code_to_run = f"""
 {BASE_IMPORTS}
 import pytest
 
@@ -31,8 +30,6 @@ import pytest
 if __name__ == "__main__":
     pytest.main([__file__])
 """
-    else:
-        code_to_run = code
 
     # solution is in {tmpdir}/solution.py
     with TemporaryDirectory() as tmpdir:

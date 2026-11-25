@@ -441,3 +441,36 @@ def test_longest_subsequence_empty_list():
         task_info = {"problem": "", "problem_type": RewardType.CODE, "data_source": "kodcode", "ground_truth": tests}
         output = reward(task_info, model_response)
         assert output.is_correct
+
+    def test_reward_kodcode_runs_dataset_tests_when_response_mentions_pytest(self):
+        """
+        Test that the kodcode reward grades against the dataset's tests even when the
+        model response mentions pytest and ships its own (passing) tests.
+        """
+        model_response = """
+```python
+import pytest
+
+
+def longest_subsequence(nums):
+    return 0
+
+
+def test_model_supplied():
+    assert longest_subsequence([1, 2, 3]) == 0
+```
+"""
+        tests = """
+def test_longest_subsequence_all_one_diff():
+    assert longest_subsequence([1, 2, 3, 4, 5]) == 5
+
+def test_longest_subsequence_single_element():
+    assert longest_subsequence([1]) == 1
+
+def test_longest_subsequence_empty_list():
+    assert longest_subsequence([]) == 0
+"""
+        reward = RewardCodeFn(RewardConfig())
+        task_info = {"problem": "", "problem_type": RewardType.CODE, "data_source": "kodcode", "ground_truth": tests}
+        output = reward(task_info, model_response)
+        assert not output.is_correct
