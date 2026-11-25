@@ -16,7 +16,7 @@ def _import_torch():
 
         return torch
     except ImportError as err:
-        raise ImportError("ChatTemplateParser.tokenize_and_mask requires PyTorch. Install with: pip install rllm[train]") from err
+        raise ImportError("ChatTemplateParser.tokenize_and_mask requires PyTorch. Install with: pip install rllm[verl]") from err
 
 
 class ChatTemplateParser:

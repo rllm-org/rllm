@@ -192,7 +192,7 @@ def _run_train(
         from rllm.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
         from rllm.trainer import AgentTrainer
     except ImportError as e:
-        fail(f"Missing training dependencies: {e}\n  Install with: pip install 'rllm[train]'")
+        fail(f"Missing training dependencies: {e}\n  Install with: pip install 'rllm[tinker]'")
 
     # ------------------------------------------------------------------
     # Local benchmark path: directory with dataset.toml / task.toml

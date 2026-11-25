@@ -177,4 +177,4 @@ def sft_cmd(
     except SFTConfigError as e:
         fail(str(e))
     except ImportError as e:
-        fail(f"Missing training dependencies for backend '{backend}': {e}\n  Install with: pip install rllm[train]")
+        fail(f"Missing training dependencies for backend '{backend}': {e}\n  Install with: pip install rllm[{backend}]")
