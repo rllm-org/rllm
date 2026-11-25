@@ -955,9 +955,12 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         original_batch_size = batch.batch["prompts"].shape[0]
         batch, pad_size = pad_dataproto_to_divisor(batch, world_size)
 
-        # for the padded dataproto, make the traj mask to 0. is_last_step also False
+        # `pad_dataproto_to_divisor` pads by duplicating the leading rows, so the
+        # padded rows carry real advantages and a real response mask. Zero their
+        # response mask (verl's loss mask) so they cannot contribute gradient.
         for i in range(pad_size):
             idx = original_batch_size + i
+            batch.batch["response_mask"][idx] = 0
             batch.non_tensor_batch["is_last_step"][idx] = False
             batch.non_tensor_batch["is_pad_step"][idx] = True
             batch.non_tensor_batch["is_valid"][idx] = False
