@@ -18,8 +18,6 @@ This guide uses a GSM8K math agent as a running example. Training any other agen
 
 ## Architecture
 
-<img src="/images/aws-bedrock-agentcore.png" alt="Architecture diagram showing the training data flow between rLLM, AWS Bedrock AgentCore Runtime, and S3" />
-
 **Components:**
 - **[AWS Bedrock AgentCore Runtime (ACR)](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agents-tools-runtime.html)** — Serverless runtime for deploying agents with auto-scaling and session isolation. Hosted agents call the standard OpenAI chat completions API.
 - **[rllm-model-gateway](https://github.com/rllm-org/rllm/tree/main/rllm-model-gateway)** — HTTP proxy that requests and intercepts training-related data such as token IDs and logprobs from inference servers, and groups them under corresponding sessions. 
@@ -27,9 +25,9 @@ This guide uses a GSM8K math agent as a running example. Training any other agen
 
 ## Prerequisites
 
-- rLLM installed with a training backend
-- AWS account with ACR access, an ECR repository, and an S3 bucket
-- AWS credentials configured (`aws configure` with permissions for Bedrock AgentCore, ECR, and S3)
+- Python 3.11+ and rLLM installed with a training backend
+- AWS account with ACR access and an ECR repository
+- AWS credentials configured (`aws configure` with permissions for Bedrock AgentCore and ECR)
 
 ## Setup
 
@@ -53,9 +51,9 @@ This guide uses a GSM8K math agent as a running example. Training any other agen
     from strands.models.openai import OpenAIModel
     from strands_tools import calculator
 
-    from agentcore_rl_toolkit import AgentCoreRLApp
+    from agentcore_rl_toolkit import AgentCoreRuntimeApp
 
-    app = AgentCoreRLApp()
+    app = AgentCoreRuntimeApp()
 
     system_prompt = (
         "Your task is to solve the math problem. "
@@ -65,14 +63,15 @@ This guide uses a GSM8K math agent as a running example. Training any other agen
 
     reward_fn = GSM8KReward()
 
-    @app.rollout_entrypoint
+    @app.entrypoint
     def invoke_agent(payload: dict):
-        base_url = payload["_rollout"]["base_url"]
-        model_id = payload["_rollout"]["model_id"]
-        params = payload["_rollout"].get("sampling_params", {})
+        config = payload["_config"]
+        base_url = config["base_url"]
+        model_id = config["model_id"]
+        params = config.get("sampling_params", {})
 
         model = OpenAIModel(
-            client_args={"api_key": "EMPTY", "base_url": base_url},
+            client_args={"api_key": config["api_key"], "base_url": base_url},
             model_id=model_id,
             params=params,
         )
@@ -93,7 +92,7 @@ This guide uses a GSM8K math agent as a running example. Training any other agen
             ground_truth=answer,
         )
 
-        return {"rewards": rewards}
+        return {"reward": rewards}
 
     if __name__ == "__main__":
         app.run()
@@ -111,10 +110,9 @@ This guide uses a GSM8K math agent as a running example. Training any other agen
     2. Build and push the container image to ECR
     3. Create an ACR runtime
 
-    After deployment, note two values you'll need for training:
+    After deployment, note the value you'll need for training:
 
     - **`AGENTCORE_AGENT_ARN`** — the ARN of your deployed agent runtime (e.g., `arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/my-agent`)
-    - **`AGENTCORE_S3_BUCKET`** — the S3 bucket for storing rollout results
   </Step>
 
   <Step title="Prepare data and configure">
@@ -130,7 +128,6 @@ This guide uses a GSM8K math agent as a running example. Training any other agen
 
     ```bash
     AGENTCORE_AGENT_ARN=arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/your-agent
-    AGENTCORE_S3_BUCKET=your-s3-bucket
     ```
   </Step>
 
@@ -163,8 +160,8 @@ This guide uses a GSM8K math agent as a running example. Training any other agen
 1. rLLM loads a batch of prompts from the dataset and submits them to ACR, each as a separate agent session
 2. ACR auto-scales containers. Each agent runs `rl_app.py`, calling the model via `base_url` (routed through `rllm-model-gateway`)
 3. The gateway captures token IDs, logprobs, routing replays, etc. from inference server responses
-4. Each agent computes a reward and returns `{"rewards": ...}`. The `@rollout_entrypoint` decorator saves results to S3
-5. rLLM collects rewards from S3 and combines them with token data from the gateway to compute advantages and update the policy
+4. Each agent computes a reward and returns `{"reward": ...}`
+5. rLLM collects rewards through HTTP and combines them with token data from the gateway to compute advantages and update the policy
 
 ## Troubleshooting
 
@@ -173,4 +170,3 @@ This guide uses a GSM8K math agent as a running example. Training any other agen
 | ACR sessions timing out | Increase `rllm.remote_runtime.session_timeout` (default 300s) |
 | Rate limiting / throttling errors | ACR has a default 25 TPS limit. Ensure `tps_limit=25` is set. Reduce `tps_limit` if needed |
 | Model not found errors in agent | Ensure the model path in your training config matches what the inference server is serving |
-| S3 permission errors | The ACR execution role needs `s3:PutObject` and `s3:GetObject` on the configured bucket |

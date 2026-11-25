@@ -3,7 +3,7 @@
 Tests the full flow: GatewayManager (auto-detected IP, dynamic port) ->
 RemoteAgentFlowEngine -> AgentCoreRuntime -> live ACR container -> gateway traces.
 
-Skipped unless all env vars are set: AGENTCORE_AGENT_ARN, AGENTCORE_S3_BUCKET,
+Skipped unless all env vars are set: AGENTCORE_AGENT_ARN,
 AGENTCORE_BASE_URL, and AGENTCORE_MODEL_ID.
 """
 
@@ -18,7 +18,7 @@ from rllm.engine.remote_runtime.protocol import RemoteRuntimeConfig
 from rllm.gateway.manager import GatewayManager
 from rllm.workflows.workflow import TerminationReason
 
-from .conftest import AGENT_ARN, BASE_URL, MODEL_ID, S3_BUCKET, requires_agentcore
+from .conftest import AGENT_ARN, BASE_URL, MODEL_ID, requires_agentcore
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -51,7 +51,6 @@ def engine(gateway):
         backend="agentcore",
         agentcore={
             "agent_runtime_arn": AGENT_ARN,
-            "s3_bucket": S3_BUCKET,
         },
     )
     assert MODEL_ID is not None, "AGENTCORE_MODEL_ID must be set"
@@ -128,7 +127,7 @@ class TestBatchTasksSessionCorrelation:
 class TestTimeoutProducesErrorEpisode:
     @pytest.mark.asyncio
     async def test_timeout_produces_error_episode(self, engine):
-        """Tiny timeout -> Episode with is_correct=False, termination_reason=ERROR."""
+        """Tiny timeout -> Episode with is_correct=False, termination_reason=TIMEOUT."""
         tasks = [{"prompt": "What is 1 + 1?", "answer": "2"}]
 
         # Override timeout to be impossibly small
@@ -142,7 +141,7 @@ class TestTimeoutProducesErrorEpisode:
         assert len(episodes) == 1
         ep = episodes[0]
         assert ep.is_correct is False
-        assert ep.termination_reason == TerminationReason.ERROR
+        assert ep.termination_reason == TerminationReason.TIMEOUT
 
 
 @requires_agentcore

@@ -4,7 +4,7 @@
 # This script is tested on a single B200 machine with 8 GPUs with veRL 0.8.0
 set -eux
 
-# Load environment variables (AGENTCORE_AGENT_ARN, AGENTCORE_S3_BUCKET)
+# Load environment variables (AGENTCORE_AGENT_ARN)
 set -a && source .env && set +a
 
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
@@ -119,7 +119,6 @@ python train_agentcore_migrationbench_verl.py \
     rllm.remote_runtime.enabled=true \
     rllm.remote_runtime.backend=agentcore \
     rllm.remote_runtime.agentcore.agent_runtime_arn=$AGENTCORE_AGENT_ARN \
-    rllm.remote_runtime.agentcore.s3_bucket=$AGENTCORE_S3_BUCKET \
     rllm.remote_runtime.agentcore.tps_limit=10 \
     rllm.remote_runtime.session_timeout=1800 \
     rllm.workflow.n_parallel_tasks=512 \
