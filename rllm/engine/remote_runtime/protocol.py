@@ -27,7 +27,7 @@ class TaskSubmission:
 
     task: dict
     session_id: str
-    task_id: str  # GRPO grouping key (maps to ART input_id)
+    task_id: str  # GRPO grouping key
     inference_url: str  # Per-session gateway URL
 
 
@@ -72,7 +72,6 @@ class AgentCoreRuntimeConfig:
     """Config specific to AWS Bedrock AgentCore Runtime."""
 
     agent_runtime_arn: str = ""
-    s3_bucket: str = ""
     tps_limit: int = 25
 
 

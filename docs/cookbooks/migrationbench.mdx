@@ -15,16 +15,15 @@ Because the agent lives in an external container, there is no `pip install -e co
 | Dataset | `migration_bench` — MigrationBench Java repos, registered from S3 metadata |
 | Runtime | AWS Bedrock AgentCore Runtime (remote, auto-scaling microVMs) |
 | Backend | verl only (distributed multi-GPU) |
-| Reward shape | Agent runs `mvn` build/tests in-container, writes the reward to S3; rLLM polls it |
+| Reward shape | Agent runs `mvn` build/tests in-container; rLLM retrieves the reward through HTTP |
 | Model (reference) | Qwen3-Coder-30B-A3B-Instruct (LoRA), tested on a single 8×B200 node with verl 0.8.0 |
 
 ## Prerequisites
 
-The agent code, container build, and dataset upload all live in the toolkit. Build and deploy the agent by following the [strands_migration_agent example](https://github.com/awslabs/agentcore-rl-toolkit/tree/main/examples/strands_migration_agent). That produces the three inputs this cookbook needs:
+The agent code, container build, and dataset upload all live in the toolkit. Build and deploy the agent by following the [strands_migration_agent example](https://github.com/awslabs/agentcore-rl-toolkit/tree/main/examples/strands_migration_agent). That produces the two inputs this cookbook needs:
 
 - **An AgentCore agent runtime ARN** — the deployed container that performs the migrations.
 - **A data S3 bucket** — holds the prepared MigrationBench repo tarballs and their `metadata.json`, written by the toolkit's `preprocess.py`. The container downloads repos from here at runtime, and `prepare_migrationbench_data.py` reads its metadata to register the dataset.
-- **An output S3 bucket** — where the agent writes rollout results (rewards, etc.); rLLM polls it each rollout. May differ from the data bucket.
 
 <Steps>
   <Step title="Install rLLM with the verl and agentcore extras">
@@ -56,7 +55,6 @@ The agent code, container build, and dataset upload all live in the toolkit. Bui
     cp .env.example .env
     # edit .env:
     #   AGENTCORE_AGENT_ARN=arn:aws:bedrock-agentcore:<region>:<account>:runtime/<name>
-    #   AGENTCORE_S3_BUCKET=<output-bucket>
     ```
   </Step>
 
@@ -76,8 +74,8 @@ The agent code, container build, and dataset upload all live in the toolkit. Bui
     bash train_agentcore_migrationbench_verl.sh
     ```
 
-    The script sources `.env` for the agent ARN and output bucket, then runs verl with `rllm.remote_runtime.backend=agentcore` so rollouts execute in the deployed container. Tune `MODEL_PATH`, parallelism (`TP`/`EP`/`CP`), batch sizes, and `trainer.n_gpus_per_node`/`nnodes` in the script to match your hardware.
+    The script sources `.env` for the agent ARN, then runs verl with `rllm.remote_runtime.backend=agentcore` so rollouts execute in the deployed container. Tune `MODEL_PATH`, parallelism (`TP`/`EP`/`CP`), batch sizes, and `trainer.n_gpus_per_node`/`nnodes` in the script to match your hardware.
   </Step>
 </Steps>
 
-See the [AWS Bedrock AgentCore](/agent-runtimes/agentcore) page for how the remote runtime, the model gateway, and S3 fit together during training.
+See the [AWS Bedrock AgentCore](/agent-runtimes/agentcore) page for how the remote runtime and model gateway fit together during training.
