@@ -442,3 +442,54 @@ class TestTopLevelImport:
         import rllm
 
         assert rllm.evaluator is evaluator
+
+
+# ---------------------------------------------------------------------------
+# register= round-trip (the `rllm eval --agent <name>` path)
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterRoundTrip:
+    """``register=`` must record the decorated function's own import path.
+
+    ``@rollout``/``@evaluator`` hand ``register_agent``/``register_evaluator``
+    the *wrapper instance*, whose class lives in this module — recording
+    ``type(obj)`` makes ``load_agent`` import ``AgentFlowFn`` itself and try to
+    instantiate it with no ``fn``.
+    """
+
+    def test_registered_rollout_loads_back(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("rllm.eval.agent_loader._USER_AGENTS_FILE", str(tmp_path / "agents.json"))
+        (tmp_path / "_rllm_rollout_mod.py").write_text(
+            "from rllm.eval.rollout_decorator import rollout\n"
+            "\n"
+            "\n"
+            "@rollout(register='decorated-agent')\n"
+            "def decorated_solver(task, config):\n"
+            "    return None\n"
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        import importlib
+
+        from rllm.eval.agent_loader import load_agent
+
+        mod = importlib.import_module("_rllm_rollout_mod")
+        assert load_agent("decorated-agent") is mod.decorated_solver
+
+    def test_registered_evaluator_loads_back(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("rllm.eval.evaluator_loader._USER_EVALUATORS_FILE", str(tmp_path / "evaluators.json"))
+        (tmp_path / "_rllm_evaluator_mod.py").write_text(
+            "from rllm.eval.rollout_decorator import evaluator\n"
+            "\n"
+            "\n"
+            "@evaluator(register='decorated-eval')\n"
+            "def decorated_eval(task, episode):\n"
+            "    return 1.0\n"
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        import importlib
+
+        from rllm.eval.evaluator_loader import load_evaluator
+
+        mod = importlib.import_module("_rllm_evaluator_mod")
+        assert load_evaluator("decorated-eval") is mod.decorated_eval
