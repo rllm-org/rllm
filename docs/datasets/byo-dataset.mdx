@@ -105,7 +105,7 @@ For sandbox datasets, declaring `default_sandbox` in the registry row (or in the
 
 ### When the builder should *not* fill in resource limits
 
-Remote backends (Modal, Daytona) OOM on heavy environments with the default ~1 GiB allocation. If your tasks need more, patch in defaults at build time:
+Remote backends (Modal, Daytona, boxd) OOM on heavy environments with the default ~1 GiB allocation. If your tasks need more, patch in defaults at build time:
 
 ```python
 # In your builder, before writing task.toml

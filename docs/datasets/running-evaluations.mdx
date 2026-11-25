@@ -189,7 +189,7 @@ Coding agents and Harbor tasks run inside an isolated **sandbox** — a containe
 |---------|---------------|-------|
 | `docker` | Your local Docker daemon | Default; requires Docker installed |
 | `local` | The host machine directly | No isolation; fastest |
-| `modal`, `daytona`, `e2b`, `runloop`, `gke` | Cloud | No local Docker needed; scales out |
+| `modal`, `daytona`, `e2b`, `runloop`, `gke`, `boxd` | Cloud | No local Docker needed; scales out |
 
 ```bash
 rllm eval harbor:swebench-verified \
@@ -251,7 +251,7 @@ Snapshots are managed like datasets — you create them once, they persist, and 
 | Reused across runs | — | Yes, by eval **and** training |
 | Created by | — | `rllm snapshot create` (never by a run) |
 
-Snapshots are available only on cloud backends with a snapshot mechanism (`modal`, `daytona`); `docker` / `local` always take the cold path (their local image cache already amortizes it). To force the cold path on a backend that has snapshots — for A/B timing, say — pass `--no-snapshot`:
+Snapshots are available only on cloud backends with a snapshot mechanism (`modal`, `daytona`, `boxd`); `docker` / `local` always take the cold path (their local image cache already amortizes it). To force the cold path on a backend that has snapshots — for A/B timing, say — pass `--no-snapshot`:
 
 ```bash
 rllm eval harbor:swebench-verified --sandbox-backend modal --no-snapshot

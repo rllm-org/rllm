@@ -145,8 +145,8 @@ def snapshot():
     "--sandbox-backend",
     "sandbox_backend",
     required=True,
-    type=click.Choice(["modal", "daytona"], case_sensitive=False),
-    help="Backend to build snapshots on (only modal/daytona have snapshots).",
+    type=click.Choice(["modal", "daytona", "boxd"], case_sensitive=False),
+    help="Backend to build snapshots on (only modal/daytona/boxd have snapshots).",
 )
 @click.option("--agent", "agent_name", default=None, help="Agent scaffold; its CLI install (if any) is baked into the snapshots.")
 @click.option("--split", default=None, help="Dataset split (default: from catalog eval_split).")
@@ -218,7 +218,7 @@ def create_snapshots(benchmark: str, sandbox_backend: str, agent_name: str | Non
 
 
 @snapshot.command("list")
-@click.option("--sandbox-backend", "sandbox_backend", default=None, type=click.Choice(["modal", "daytona"], case_sensitive=False), help="Filter to one backend.")
+@click.option("--sandbox-backend", "sandbox_backend", default=None, type=click.Choice(["modal", "daytona", "boxd"], case_sensitive=False), help="Filter to one backend.")
 @click.option("--verbose", is_flag=True, help="Also expand each group to one row per env_key.")
 def list_snapshots(sandbox_backend: str | None, verbose: bool):
     """List snapshot groups (one row per create invocation)."""
@@ -372,7 +372,7 @@ def renew_snapshot(group_id: str, ttl_hours: float):
     "--sandbox-backend",
     "sandbox_backend",
     required=True,
-    type=click.Choice(["modal", "daytona"], case_sensitive=False),
+    type=click.Choice(["modal", "daytona", "boxd"], case_sensitive=False),
     help="Backend to reconcile local records against.",
 )
 def sync_snapshots(sandbox_backend: str):

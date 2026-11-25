@@ -1,6 +1,6 @@
 ---
 title: Sandboxes
-description: Run agent harnesses inside Docker, Daytona, Modal, or local environments — with snapshot acceleration and warm-pool scheduling
+description: Run agent harnesses inside Docker, Daytona, Modal, boxd, or local environments — with snapshot acceleration and warm-pool scheduling
 ---
 
 A *sandbox* is the isolated environment a harness runs inside. Every sandboxed task (SWE-bench, Terminal-Bench, rllm-swesmith, …) is graded by spawning an agent in a fresh sandbox, running the verifier inside it, and tearing it down. rLLM abstracts the backend so the same `--agent` runs on Docker locally and on Modal at training-scale.
@@ -13,6 +13,7 @@ A *sandbox* is the isolated environment a harness runs inside. Every sandboxed t
 | `local` | host process (no isolation) | smoke tests; environments that don't need isolation |
 | `daytona` | Daytona cloud | hosted execution without managing a Docker host |
 | `modal` | Modal cloud | training-scale eval and rollouts (best concurrency, snapshot support, pay-per-use) |
+| `boxd` | boxd cloud microVMs | hosted execution in a full VM per task, booted from the task's image, with snapshot support |
 
 Pick one with `--sandbox-backend`, or let the dataset declare its preferred backend in `dataset.toml`:
 
@@ -41,7 +42,23 @@ rllm snapshot create terminal-bench-2 --backend modal
 rllm eval terminal-bench-2 --sandbox-backend modal
 ```
 
-Snapshots are backend-specific (Modal and Daytona support them; Docker and local always take the cold path). They're built and destroyed only by `rllm snapshot`, never by an eval or training run. Concurrency is `RLLM_SNAPSHOT_BUILD_WORKERS` (default 4) — bump to 10+ for benchmarks with many environments.
+Snapshots are backend-specific (Modal, Daytona and boxd support them; Docker and local always take the cold path). They're built and destroyed only by `rllm snapshot`, never by an eval or training run. Concurrency is `RLLM_SNAPSHOT_BUILD_WORKERS` (default 4) — bump to 10+ for benchmarks with many environments.
+
+### boxd
+
+The `boxd` backend runs each sandbox in its own [boxd](https://boxd.sh/?ref=rllm) machine, a microVM that boots straight from the task's Docker image. Install the SDK and set an API key:
+
+```bash
+pip install boxd
+export BOXD_API_KEY=bxd_...      # your boxd API key
+export BOXD_ORG=my-org           # optional: the organization the machines belong to
+export BOXD_REGION=fra           # optional: fra or nyc
+
+rllm eval ./my-benchmark/ --agent oracle --sandbox-backend boxd
+rllm snapshot create ./my-benchmark/ --sandbox-backend boxd
+```
+
+Machines are created with `isolated=True`: they join no private network and hold no boxd credentials, so code the agent writes cannot reach your other machines. Task resources (`cpus`, `memory_mb`) round up to the next boxd size (1 vCPU / 4 GiB, 2 / 8, 4 / 16, 8 / 32). `rllm snapshot create --sandbox-backend boxd` captures each environment as a boxd snapshot; a sandbox then restores it instead of replaying the Dockerfile. Each sandbox deletes its machine on close. Set `RLLM_BOXD_NAME_PREFIX` and `RLLM_BOXD_LABELS` to tell a run's machines apart.
 
 ## Warm queue (training-time)
 
@@ -56,7 +73,7 @@ The warm queue is enabled automatically when `rllm train` uses a sandboxed harne
 
 ## Lifetimes and timeouts
 
-Remote sandboxes get killed by their provider after an idle timeout (Daytona's auto-stop is 30 min) or a lifetime cap. For long-running rollouts:
+Remote sandboxes get killed by their provider after an idle timeout (Daytona's auto-stop is 30 min) or a lifetime cap. boxd machines have neither by default: idle standby is off for sandboxes, and a machine is deleted when its sandbox closes. For long-running rollouts:
 
 ```bash
 # Modal: raise per-sandbox lifetime (default 30 min)
