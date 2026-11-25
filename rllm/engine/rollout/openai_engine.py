@@ -201,10 +201,13 @@ class OpenAIEngine(RolloutEngine):
                 except Exception:
                     logprobs = []
 
+                # vLLM only accepts ``prompt_logprobs`` as an extension, so
+                # callers pass it through ``extra_body`` rather than top-level.
+                extra_body = sampling_params.get("extra_body") or {}
                 if sampling_params.get("echo", False) and logprobs:
                     prompt_logprobs = logprobs[:prompt_length]
                     logprobs = logprobs[prompt_length:]
-                elif sampling_params.get("prompt_logprobs", False):
+                elif sampling_params.get("prompt_logprobs", False) or extra_body.get("prompt_logprobs", False):
                     try:
                         assert response.choices[0].prompt_logprobs is not None
                         prompt_logprobs: list[float] = [None]
