@@ -441,3 +441,63 @@ def test_longest_subsequence_empty_list():
         task_info = {"problem": "", "problem_type": RewardType.CODE, "data_source": "kodcode", "ground_truth": tests}
         output = reward(task_info, model_response)
         assert output.is_correct
+
+    def test_reward_humanevalplus_correct(self):
+        """
+        Test the reward function on a HumanEval-style `def check(candidate)` test file.
+        """
+        model_response = """
+```python
+def has_close_elements(numbers, threshold):
+    for i in range(len(numbers)):
+        for j in range(i + 1, len(numbers)):
+            if abs(numbers[i] - numbers[j]) < threshold:
+                return True
+    return False
+```
+"""
+        tests = """
+def check(candidate):
+    assert candidate([1.0, 2.0, 3.0], 0.5) == False
+    assert candidate([1.0, 1.2], 0.5) == True
+    assert candidate([], 1.0) == False
+    assert candidate([5.0, 5.0], 0.1) == True
+    assert candidate([1.0], 1.0) == False
+    assert candidate([1.0, 2.0, 3.9], 0.3) == False
+    assert candidate([1.0, 2.0, 3.9], 1.05) == True
+    assert candidate([1.1, 2.2, 3.1, 4.1, 5.1], 1.0) == True
+    assert candidate([1.1, 2.2, 3.1, 4.1, 5.1], 0.5) == False
+    assert candidate([2.0, 2.0, 2.0], 0.5) == True
+"""
+        reward = RewardCodeFn(RewardConfig())
+        task_info = {"problem": "", "problem_type": RewardType.CODE, "data_source": "humanevalplus", "ground_truth": tests, "entry_point": "has_close_elements"}
+        output = reward(task_info, model_response)
+        assert output.is_correct
+
+    def test_reward_humanevalplus_incorrect(self):
+        """
+        Test that a wrong solution fails a HumanEval-style `def check(candidate)` test file.
+        """
+        model_response = """
+```python
+def has_close_elements(numbers, threshold):
+    return True
+```
+"""
+        tests = """
+def check(candidate):
+    assert candidate([1.0, 2.0, 3.0], 0.5) == False
+    assert candidate([1.0, 1.2], 0.5) == True
+    assert candidate([], 1.0) == False
+    assert candidate([5.0, 5.0], 0.1) == True
+    assert candidate([1.0], 1.0) == False
+    assert candidate([1.0, 2.0, 3.9], 0.3) == False
+    assert candidate([1.0, 2.0, 3.9], 1.05) == True
+    assert candidate([1.1, 2.2, 3.1, 4.1, 5.1], 1.0) == True
+    assert candidate([1.1, 2.2, 3.1, 4.1, 5.1], 0.5) == False
+    assert candidate([2.0, 2.0, 2.0], 0.5) == True
+"""
+        reward = RewardCodeFn(RewardConfig())
+        task_info = {"problem": "", "problem_type": RewardType.CODE, "data_source": "humanevalplus", "ground_truth": tests, "entry_point": "has_close_elements"}
+        output = reward(task_info, model_response)
+        assert not output.is_correct

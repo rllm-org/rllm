@@ -319,7 +319,13 @@ def kodcode_check_correctness(test: str, code: str, timeout_per_test: int = 5) -
     return succ, detailed_results
 
 
-def humanevalplus_check_correctness(test: str, code: str, timeout_per_test: int = 1) -> tuple[bool, dict[str, Any]]:
+# Fixed allowance for interpreter startup and BASE_IMPORTS, on top of the
+# per-test budget. Importing numpy and pandas alone takes over ten seconds on
+# a loaded machine.
+_STARTUP_ALLOWANCE_SECONDS = 30
+
+
+def humanevalplus_check_correctness(test: str, code: str, timeout_per_test: int = 1, entry_point: str | None = None) -> tuple[bool, dict[str, Any]]:
     """
     Check if generated code passes all HumanEvalPlus test cases.
 
@@ -328,6 +334,7 @@ def humanevalplus_check_correctness(test: str, code: str, timeout_per_test: int 
         code: Generated code to test
         timeout: Maximum execution time in seconds before killing process
         runtime_debug: Whether to print debug info during test execution
+        entry_point: Name of the function under test, passed to `check(candidate)`
 
     Returns:
         tuple: (bool, dict) where:
@@ -336,8 +343,18 @@ def humanevalplus_check_correctness(test: str, code: str, timeout_per_test: int 
     """
     code = clean_code_main_block(code)
 
+    # HumanEval/MBPP tests only *define* `check(candidate)`; without an explicit
+    # call the test program exits cleanly and every solution looks correct.
+    if re.search(r"^def check\b", test, re.MULTILINE) and not re.search(r"^check\(", test, re.MULTILINE):
+        test = f"{test}\n\ncheck({entry_point or 'None'})\n"
+
     num_test_cases = get_num_test_cases(test)
-    succ, output = humanevalplus_run_test(code, test, timeout_per_test * num_test_cases)
+    # The harness prepends BASE_IMPORTS (numpy, pandas) to every program, and
+    # that import cost is paid once per run no matter how many assertions the
+    # test file has. A budget of purely timeout_per_test * n can be shorter
+    # than interpreter startup alone, which fails correct solutions.
+    timeout = _STARTUP_ALLOWANCE_SECONDS + timeout_per_test * num_test_cases
+    succ, output = humanevalplus_run_test(code, test, timeout)
 
     detailed_results = {"all_passed": succ, "output": output, "total_tests": num_test_cases, "test_results": [{"passed": succ, "output": output}]}
 
@@ -474,7 +491,7 @@ class RewardCodeFn:
         elif dataset_name == "kodcode":
             is_correct, test_details = kodcode_check_correctness(tests, model_code)
         elif dataset_name == "humanevalplus":
-            is_correct, test_details = humanevalplus_check_correctness(tests, model_code)
+            is_correct, test_details = humanevalplus_check_correctness(tests, model_code, entry_point=task_info.get("entry_point"))
         else:
             raise NotImplementedError(f"Dataset {dataset_name} not implemented")
 
