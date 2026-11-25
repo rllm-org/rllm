@@ -14,6 +14,8 @@ from rllm.parser import ChatTemplateParser
 from rllm.tools.tool_base import Tool
 from rllm.workflows import TerminationEvent, TerminationReason
 
+logger = logging.getLogger(__name__)
+
 _REQUEST_TIMEOUT_S = env_int("RLLM_OPENAI_REQUEST_TIMEOUT_S", 3600)  # set env var: export RLLM_OPENAI_REQUEST_TIMEOUT_S=xxx
 
 
@@ -183,11 +185,13 @@ class OpenAIEngine(RolloutEngine):
             try:
                 response = await self.client.completions.create(model=self.model, prompt=prompt, **sampling_params)
                 text = response.choices[0].text
+                retokenized = False
                 try:
                     completion_ids = response.choices[0].token_ids
                     assert completion_ids is not None
                 except Exception:
                     completion_ids = self.tokenizer.encode(text, add_special_tokens=False)
+                    retokenized = True
 
                 parsed_output = self.chat_parser.parse_completion(completion_ids)
 
@@ -214,6 +218,13 @@ class OpenAIEngine(RolloutEngine):
                         prompt_logprobs = []
                 else:
                     prompt_logprobs = []
+
+                if retokenized and logprobs:
+                    # The server's logprobs are aligned to the tokens it sampled, but encode(decode(ids))
+                    # is not guaranteed to reproduce those ids, so they no longer line up with the
+                    # retokenized completion_ids. Drop them rather than pair mismatched tokens/logprobs.
+                    logger.warning("Server response has no token_ids; completion_ids were retokenized from text, so dropping logprobs that may not align with them.")
+                    logprobs = []
 
                 return ModelOutput(
                     text=text,
