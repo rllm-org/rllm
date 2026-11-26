@@ -278,6 +278,11 @@ class AgentWorkflowEngine:
 
     def shutdown(self):
         """Shutdown the workflow engine and cleanup resources."""
-        if hasattr(self, "executor") and self.executor is not None:
-            self.executor.shutdown(wait=True)
-            self.executor = None
+        try:
+            if hasattr(self, "executor") and self.executor is not None:
+                self.executor.shutdown(wait=True)
+                self.executor = None
+        finally:
+            shutdown = getattr(self.rollout_engine, "shutdown", None)
+            if shutdown is not None:
+                shutdown()
