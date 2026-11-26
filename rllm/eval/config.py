@@ -304,6 +304,29 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         ],
         base_url="https://api.orcarouter.ai/v1",
     ),
+    # --- Atlas Cloud — OpenAI-compatible model aggregator ---
+    ProviderInfo(
+        id="atlascloud",
+        label="Atlas Cloud",
+        # Same pattern as OrcaRouter/Tinker: LiteLLM's OpenAI-compatible adapter
+        # pinned to Atlas Cloud's api_base. Model ids are vendor-prefixed
+        # (deepseek-ai/..., zai-org/..., moonshotai/...) and sent verbatim.
+        litellm_prefix="openai",
+        env_key="ATLASCLOUD_API_KEY",
+        default_model="deepseek-ai/deepseek-v4-flash",
+        models=[
+            "deepseek-ai/deepseek-v4-flash",
+            "deepseek-ai/deepseek-v4-pro",
+            "zai-org/glm-5.2",
+            "moonshotai/kimi-k3",
+            "qwen/qwen3.5-plus",
+            "minimaxai/minimax-m2.7",
+            "openai/gpt-5.5",
+            "anthropic/claude-sonnet-4.6",
+            "google/gemini-3.1-pro-preview",
+        ],
+        base_url="https://api.atlascloud.ai/v1",
+    ),
     # --- Custom endpoint (last) ---
     ProviderInfo(
         id="custom",
