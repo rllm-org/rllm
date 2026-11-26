@@ -74,7 +74,7 @@ These live in the backend-agnostic `AlgorithmConfig` / `base.yaml`, so they *loo
 </Warning>
 
 <Info>
-**Don't confuse "verl can do X" with "the unified trainer can do X".** Critic / value-function (GAE — generalized advantage estimation), KL-**in-reward**, true `per_step` stepwise advantage, and distillation are genuine verl capabilities — but they live on the **legacy** `AgentWorkflowPPOTrainer` (`rllm.trainer.agent_trainer.AgentTrainer` → `train_agent_ppo.py`), **not** on the `UnifiedTrainer` `VerlBackend` (which is the subject of this page; see the [two-`AgentTrainer`-classes warning](#dimension-2-launch-method) below). On the unified path `use_critic` is hardcoded `False`, KL-in-reward is rejected, and `per_step` is **silently coerced to `broadcast` with a `DeprecationWarning`** (it is never honored — a footgun in its own right).
+**Don't confuse "verl can do X" with "the unified trainer can do X".** Critic / value-function (GAE — generalized advantage estimation), KL-**in-reward** and distillation are genuine verl capabilities — but they live on the **legacy** `AgentWorkflowPPOTrainer` (`rllm.trainer.agent_trainer.AgentTrainer` → `train_agent_ppo.py`), **not** on the `UnifiedTrainer` `VerlBackend` (which is the subject of this page; see the [two-`AgentTrainer`-classes warning](#dimension-2-launch-method) below). On the unified path `use_critic` is hardcoded `False`, KL-in-reward is rejected, and `per_step` is **silently coerced to `broadcast` with a `DeprecationWarning`** (it is never honored — a footgun in its own right).
 </Info>
 
 ## Dimension 2 — Launch method
@@ -201,7 +201,7 @@ For rLLM-native rows run through a `SandboxedAgentFlow`, the warm pool still run
     `kl_beta`, `eps_clip`/`eps_clip_high`, `loss_agg_mode`, `rollout_correction`/TIS, and `mask_truncated_samples` are honored on verl and silently ignored on tinker. They live in backend-agnostic config, so they look settable everywhere.
   </Accordion>
   <Accordion title="per_step advantage is silently downgraded" icon="ghost">
-    Setting `stepwise_advantage.mode=per_step` on the unified path does **not** error — it is silently coerced to `broadcast` with a `DeprecationWarning` on both backends. True `per_step` advantage exists only on the legacy verl `AgentWorkflowPPOTrainer`.
+    Setting `stepwise_advantage.mode=per_step` on the unified path does **not** error — it is silently coerced to `broadcast` with a `DeprecationWarning` on both backends. The legacy verl `AgentWorkflowPPOTrainer` rejects enabled `per_step`: its current transform merges logical steps and cannot compute independent per-step advantages.
   </Accordion>
   <Accordion title="filter_token_mismatch does nothing" icon="ghost">
     `filter_token_mismatch` ships `True` in `base.yaml` but no rLLM-side Python reads it (it is a leftover verl-native knob, still present in `agent_ppo_trainer.yaml`). A dead knob on both unified backends.

@@ -42,6 +42,7 @@ class AccumulatedData:
     # ID tracking (parallel to tensor lists)
     trajectory_ids: list[str] = field(default_factory=list)
     step_ids: list[str] = field(default_factory=list)
+    advantage_group_ids: list[str] = field(default_factory=list)  # task/role comparison key, shared across rollouts
     episode_ids: list[str] = field(default_factory=list)  # unique identifier for each rollout
 
     # Metadata (parallel to tensor lists)
@@ -78,6 +79,7 @@ class AccumulatedData:
         step_num: int,
         is_last: bool,
         group_role: str = "",
+        advantage_group_id: str = "",
     ):
         """Add a single processed step to all accumulator lists.
 
@@ -89,6 +91,7 @@ class AccumulatedData:
         self.step_rewards.append(step_data.step_reward)
         self.traj_rewards.append(traj_reward)
         self.step_ids.append(step_data.step_id)
+        self.advantage_group_ids.append(advantage_group_id)
 
         if step_data.advantage is not None:  # make sure to not add None to the list
             self.advantages.append(step_data.advantage)
