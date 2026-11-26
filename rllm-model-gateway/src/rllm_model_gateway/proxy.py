@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -15,6 +16,7 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
+from rllm_model_gateway import sglang_helper
 from rllm_model_gateway.data_process import (
     build_trace_record,
     build_trace_record_from_chunks,
@@ -86,7 +88,12 @@ class ReverseProxy:
         max_retries: int = 2,
         local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
         cumulative_token_mode: bool = False,
+        use_sglang: bool = False,
         renderer: Any = None,
+        tokenizer: Any = None,
+        model: str | None = None,
+        sglang_tool_call_parser: str | None = None,
+        sglang_reasoning_parser: str | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -95,7 +102,26 @@ class ReverseProxy:
         self.max_retries = max_retries
         self.local_handler = local_handler
         self.cumulative_token_mode = cumulative_token_mode
+        self.use_sglang = use_sglang
         self.renderer = renderer
+        self.tokenizer = tokenizer
+        self.model = model
+        self.sglang_tool_call_parser = sglang_tool_call_parser
+        self.sglang_reasoning_parser = sglang_reasoning_parser
+        # Lazily-built SGLang FunctionCallParser (depends on the request's tools).
+        self._fc_parser_cache: dict[str, Any] = {}
+        # Probe whether the tokenizer auto-prepends special tokens (e.g. BOS) on
+        # encode(). SGLang's chat path splits apply_chat_template into render +
+        # encode and passes add_special_tokens=False when this is True, so the
+        # chat template's own role/special tokens aren't doubled (e.g. double BOS
+        # on Llama/Kimi-style tokenizers). We mirror that to tokenize a message
+        # list byte-identically to SGLang's /v1/chat/completions. Probed once.
+        self._tokenizer_auto_adds_specials = True
+        if self.tokenizer is not None:
+            try:
+                self._tokenizer_auto_adds_specials = len(self.tokenizer.encode("")) > 0
+            except Exception:
+                self._tokenizer_auto_adds_specials = True
         self.weight_version: int | None = None
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
@@ -147,6 +173,15 @@ class ReverseProxy:
 
         is_stream = request_body.get("stream", False)
 
+        # use_sglang: route every chat turn through SGLang's native /generate API.
+        # The gateway renders the prompt to token ids itself (full render on turn 0
+        # or after a prefix break; cross-turn bridge otherwise), so /generate
+        # returns token ids + logprobs in meta_info natively — no sglang patches for
+        # RL, and it works through sgl-router (which rejects token-id prompts on
+        # /v1/completions).
+        if self.use_sglang and session_id and request.url.path.endswith("/chat/completions"):
+            return await self._handle_sglang_generate(request, request_body, session_id, is_stream, originally_requested_logprobs)
+
         # Cumulative token mode interception: if enabled and past first turn,
         # rewrite to /v1/completions with pre-tokenized prompt to avoid drift.
         if self.cumulative_token_mode and session_id and request.url.path.endswith("/chat/completions"):
@@ -182,6 +217,257 @@ class ReverseProxy:
         if is_stream:
             return await self._handle_streaming(request, body, request_body, session_id, originally_requested_logprobs)
         return await self._handle_non_streaming(request, body, request_body, session_id, originally_requested_logprobs)
+
+    # ------------------------------------------------------------------
+    # SGLang native /generate path (use_sglang)
+    # ------------------------------------------------------------------
+
+    def _render_sglang_prompt(self, session_id: str, request_body: dict[str, Any]) -> list[int]:
+        """Render this chat turn's prompt to token ids for SGLang /generate.
+
+        The renderer is used for the cross-turn BRIDGE ONLY. The bridge is a
+        narrow interception — it applies just on turn>0 cumulative turns whose
+        history cumulatively extends the tracked prefix, where it extends
+        ``prev_prompt + prev_completion`` with only the new (non-assistant)
+        messages, keeping sampled tokens verbatim so adjacent turns share a
+        byte-exact prefix (mergeable). EVERYTHING ELSE — non-cumulative mode,
+        cumulative turn 0, a prefix break, or a declined bridge — falls through to
+        the common path: tokenize the full message list client-side with the
+        model's HF chat template (authoritative; mirrors slime's _render_token_ids
+        and works through sgl-router, which exposes no messages→token-ids endpoint).
+        """
+        messages = request_body.get("messages", []) or []
+        tools = request_body.get("tools")
+
+        # Cumulative bridge: the only path that uses the renderer.
+        if self.cumulative_token_mode:
+            acc = self._get_accumulator(session_id)
+            if acc.should_rewrite() and acc.is_cumulative(messages):
+                new_messages = extract_new_messages(messages, acc.message_count)
+                if new_messages:
+                    # Flatten block content before the renderer (it expects str).
+                    token_ids = acc.build_next_prompt([sglang_helper.flatten_message_content(m) for m in new_messages], tools=tools)
+                    if token_ids is not None:
+                        return token_ids
+            # Bridge did not apply (turn 0, divergent/declined): reset prefix
+            # bookkeeping and fall through to the common full-render path.
+            acc.reset()
+
+        # Common path (non-cumulative always; cumulative turn-0/reset): full render
+        # via the model's HF chat template (delegated to sglang_helper, which
+        # mirrors SGLang's ServingChat._apply_jinja_template exactly).
+        return sglang_helper.apply_chat_template(
+            messages,
+            tools,
+            tokenizer=self.tokenizer,
+            auto_adds_specials=self._tokenizer_auto_adds_specials,
+        )
+
+    def _parse_completion(self, completion_ids: list[int], tools: Any) -> dict[str, Any]:
+        """Parse /generate completion ids into ``{content, reasoning, tool_calls}``
+        with SGLang's parsers (thin wrapper over sglang_helper.parse_completion,
+        binding this proxy's tokenizer / parser names / parser cache)."""
+        return sglang_helper.parse_completion(
+            completion_ids,
+            tools,
+            tokenizer=self.tokenizer,
+            tool_call_parser=self.sglang_tool_call_parser,
+            reasoning_parser=self.sglang_reasoning_parser,
+            fc_cache=self._fc_parser_cache,
+        )
+
+    async def _handle_sglang_generate(
+        self,
+        request: Request,
+        request_body: dict[str, Any],
+        session_id: str,
+        is_stream: bool,
+        originally_requested_logprobs: bool = False,
+    ) -> Response:
+        """Run one chat turn via SGLang's native /generate (token-in, token-out).
+
+        Renders the prompt to token ids, posts to <worker>/generate with
+        return_logprob=True, captures token ids + logprobs from meta_info into a
+        TraceRecord, updates the accumulator, and returns an OpenAI-chat-shaped
+        response to the agent (so the client sees a normal chat completion).
+        """
+        t0 = time.perf_counter()
+
+        # Tokenize the prompt client-side (model chat template / cumulative bridge).
+        prompt_ids = self._render_sglang_prompt(session_id, request_body)
+
+        worker = self.router.route(session_id)
+        headers = self._forward_headers(request)
+        # Keep a session sticky to one engine (radix/prefix-cache affinity).
+        headers["X-SMG-Routing-Key"] = session_id
+
+        gen_body: dict[str, Any] = {
+            "rid": uuid.uuid4().hex,
+            "input_ids": prompt_ids,
+            "sampling_params": sglang_helper.sglang_sampling_params(request_body),
+            "return_logprob": True,
+            "stream": bool(is_stream),
+        }
+        # /generate lives at the worker root, not under the OpenAI /v1 prefix.
+        url = f"{worker.url.rstrip('/')}/generate"
+        raw_body = json.dumps(gen_body).encode()
+
+        assert self._http is not None
+        if is_stream:
+            # The streaming generator owns the worker release (after [DONE]); do
+            # not release here or we'd double-decrement the active count.
+            return await self._sglang_generate_streaming(request, request_body, session_id, prompt_ids, url, headers, raw_body, t0)
+        try:
+            resp = await self._http.post(url, content=raw_body, headers=headers)
+        finally:
+            self.router.release(worker.url)
+
+        content = resp.content
+        status_code = resp.status_code
+        if status_code >= 400:
+            logger.warning("sglang /generate %s: %.300s", status_code, content[:300])
+            return Response(content=content, status_code=status_code, media_type="application/json")
+
+        try:
+            gen = json.loads(content)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            gen = {}
+        if isinstance(gen, list):  # n>1 returns a list; we use n=1
+            gen = gen[0] if gen else {}
+
+        prompt_ids_out, completion_ids, logprobs, text, finish_reason = sglang_helper.parse_sglang_generate(gen, prompt_ids)
+        latency_ms = (time.perf_counter() - t0) * 1000
+
+        # Update accumulator bookkeeping so the next turn can bridge — only needed
+        # in cumulative mode (non-cumulative full-renders every turn statelessly).
+        if self.cumulative_token_mode:
+            acc = self._get_accumulator(session_id)
+            acc.ingest_turn(prompt_ids_out, completion_ids)
+            acc.update_prefix(request_body.get("messages", []))
+
+        trace = sglang_helper.build_generate_trace(
+            session_id,
+            request_body,
+            prompt_ids_out,
+            completion_ids,
+            logprobs,
+            text,
+            finish_reason,
+            latency_ms,
+            weight_version=request.state.weight_version,
+        )
+        await self._persist(trace)
+
+        # Parse the completion token ids back into structured tool_calls so the
+        # agent (which reads message.tool_calls, not raw text) can act on them —
+        # /generate returns only raw text, so we parse with SGLang's own parser
+        # (same as /v1/chat/completions).
+        parsed = self._parse_completion(completion_ids, request_body.get("tools"))
+        chat = sglang_helper.generate_to_chat_response(request_body, text, finish_reason, len(prompt_ids_out), len(completion_ids), parsed=parsed)
+        return Response(content=json.dumps(chat), status_code=200, media_type="application/json")
+
+    async def _sglang_generate_streaming(
+        self,
+        request: Request,
+        request_body: dict[str, Any],
+        session_id: str,
+        prompt_ids: list[int],
+        url: str,
+        headers: dict[str, str],
+        raw_body: bytes,
+        t0: float,
+    ) -> StreamingResponse:
+        """Stream SGLang /generate, translate to OpenAI chat SSE, capture trace.
+
+        SGLang /generate has no token-level tool-call parsing, so we cannot stream
+        raw text deltas as ``content`` (a ``<tool_call>`` would reach the agent as
+        text, not structured tool_calls). Following slime's adapter, we realise the
+        whole turn server-side (consume the full SGLang stream), parse it, then emit
+        the OpenAI chat SSE as single role/content/tool_calls/finish chunks.
+        """
+        worker_url_for_release = url.rsplit("/generate", 1)[0]
+        completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+        model = request_body.get("model", "")
+
+        def _chunk(delta: dict[str, Any], finish: str | None = None) -> bytes:
+            payload = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+            return f"data: {json.dumps(payload)}\n\n".encode()
+
+        async def event_generator():
+            last: dict[str, Any] = {}
+            assert self._http is not None
+            try:
+                async with self._http.stream("POST", url, content=raw_body, headers=headers) as resp:
+                    if resp.status_code >= 400:
+                        body = await resp.aread()
+                        logger.warning("sglang /generate stream %s: %.300s", resp.status_code, body[:300])
+                        yield b"data: [DONE]\n\n"
+                        return
+                    # Consume the full (cumulative) stream; keep the last payload.
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            last = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+            finally:
+                self.router.release(worker_url_for_release)
+
+            # Realise + parse the whole turn, then emit slime-style SSE.
+            p_ids, c_ids, lps, text, finish = sglang_helper.parse_sglang_generate(last, prompt_ids)
+            parsed = self._parse_completion(c_ids, request_body.get("tools"))
+            tool_calls = sglang_helper.to_openai_tool_calls(parsed.get("tool_calls") or [])
+            content = parsed.get("content")
+            reasoning = parsed.get("reasoning")
+
+            # Emit content + tool_calls + reasoning losslessly (mirrors SGLang
+            # native): the leftover text is always sent, never dropped because a
+            # tool call is present, so the agent can replay the full message next
+            # turn and we re-tokenize it identically.
+            wire_finish = finish or "stop"
+            yield _chunk({"role": "assistant"})
+            if reasoning:
+                yield _chunk({"reasoning_content": reasoning})
+            body_text = content if content is not None else text
+            if body_text:
+                yield _chunk({"content": body_text})
+            if tool_calls:
+                yield _chunk({"tool_calls": [{**tc, "index": i} for i, tc in enumerate(tool_calls)]})
+                wire_finish = "tool_calls"
+            yield _chunk({}, finish=wire_finish)
+            yield b"data: [DONE]\n\n"
+
+            if self.cumulative_token_mode:
+                acc = self._get_accumulator(session_id)
+                acc.ingest_turn(p_ids, c_ids)
+                acc.update_prefix(request_body.get("messages", []))
+            trace = sglang_helper.build_generate_trace(
+                session_id,
+                request_body,
+                p_ids,
+                c_ids,
+                lps,
+                text,
+                finish,
+                (time.perf_counter() - t0) * 1000,
+                weight_version=request.state.weight_version,
+            )
+            task = asyncio.create_task(self._safe_store(trace.trace_id, trace.session_id, trace.model_dump()))
+            self._pending_traces.add(task)
+            task.add_done_callback(self._pending_traces.discard)
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     # ------------------------------------------------------------------
     # Non-streaming
