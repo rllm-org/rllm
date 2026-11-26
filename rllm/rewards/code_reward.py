@@ -165,6 +165,11 @@ def postprocess_lcb_sample(sample):
         assert fn_name is not None, f"Function name is not found, check if your LCB data is preprocessed correctly: {metadata}\nSample: {sample}"
         # Fill in the blank
         sample_dict["fn_name"] = fn_name
+    elif sample[0].get("type") == "function_call":
+        fn_name = sample[0].get("fn_name", None)
+        assert fn_name is not None, f"Function name is not found in function_call sample: {sample[0]}"
+        sample_dict["fn_name"] = fn_name
+        sample_dict["outputs"] = [json.dumps(out[0]) if isinstance(out, list) and len(out) == 1 else json.dumps(out) for out in sample_outputs]
 
     sample = {
         "input_output": json.dumps(sample_dict),
