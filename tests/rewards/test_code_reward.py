@@ -441,3 +441,16 @@ def test_longest_subsequence_empty_list():
         task_info = {"problem": "", "problem_type": RewardType.CODE, "data_source": "kodcode", "ground_truth": tests}
         output = reward(task_info, model_response)
         assert output.is_correct
+
+    def test_taco_stripped_string_compare(self):
+        """
+        Test that mismatched non-numeric tokens do not pass stripped_string_compare.
+        """
+        from rllm.rewards.code_utils.taco import compare_std_results, stripped_string_compare
+
+        assert stripped_string_compare("YES\n", "  YES  ")
+        assert stripped_string_compare("1.00000001", "1.0")
+        assert not stripped_string_compare("NO", "YES")
+        assert not stripped_string_compare("foo bar\nbaz", "qux quux\ncorge")
+        assert not compare_std_results("NO", "YES")
+
