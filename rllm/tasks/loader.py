@@ -61,6 +61,10 @@ class BenchmarkResult:
     metadata: dict = field(default_factory=dict)
 
 
+class BenchmarkSplitError(ValueError):
+    """The benchmark directory cannot provide the requested split."""
+
+
 class BenchmarkLoader:
     """Detect and load local benchmark directories."""
 
@@ -83,16 +87,22 @@ class BenchmarkLoader:
         benchmark_path: str,
         sandbox_backend: str | None = None,
         harness_name: str | None = None,
+        *,
+        split: str | None = None,
     ) -> BenchmarkResult:
-        """Load a local benchmark directory."""
+        """Load a local benchmark, requiring the requested split if supplied."""
         path = Path(benchmark_path).resolve()
+        if split is not None and (split in ("", ".", "..") or "/" in split or "\\" in split):
+            raise BenchmarkSplitError(f"Invalid benchmark split {split!r}.")
 
         if (path / "dataset.toml").exists():
             config = load_dataset_config(path / "dataset.toml")
             if config.type == "simple" or _has_data_file(path, config):
-                return _load_data_dataset(path, config, sandbox_backend, harness_name)
+                return _load_data_dataset(path, config, sandbox_backend, harness_name, split=split)
+            _require_matching_split(path, split, config.split)
             return _load_sandbox_dataset(path, config, sandbox_backend, harness_name)
 
+        _require_matching_split(path, split, "test")
         if (path / "task.toml").exists():
             return _load_single_task(path, sandbox_backend, harness_name)
 
@@ -115,9 +125,11 @@ def _load_data_dataset(
     config: DatasetConfig,
     sandbox_backend: str | None,
     harness_name: str | None,
+    *,
+    split: str | None = None,
 ) -> BenchmarkResult:
     """Materialised-style dataset: jsonl rows + shared verifier."""
-    data_file = _resolve_data_file(path, config)
+    data_file = _resolve_data_file(path, config, split)
 
     instruction_field, metadata_fields = _read_dataset_meta(path)
     category = _read_dataset_category(path)
@@ -158,7 +170,7 @@ def _load_data_dataset(
     return BenchmarkResult(
         tasks=tasks,
         name=config.name,
-        split=config.split,
+        split=config.split if config.data else data_file.stem,
         harness_name=harness_name or config.default_agent or _default_harness_for(tasks),
         sandbox_backend=sandbox_backend,
         description=config.description,
@@ -236,9 +248,26 @@ def _merge_task_toml_metadata(task_dir: Path, base: dict) -> dict:
     return merged
 
 
-def _resolve_data_file(path: Path, config: DatasetConfig) -> Path:
+def _require_matching_split(path: Path, requested: str | None, available: str) -> None:
+    if requested is not None and requested != available:
+        raise BenchmarkSplitError(f"Benchmark at {path} only provides split {available!r}, but split {requested!r} was requested.")
+
+
+def _resolve_data_file(path: Path, config: DatasetConfig, split: str | None) -> Path:
     if config.data:
-        return path / config.data
+        _require_matching_split(path, split, config.split)
+        data_file = path / config.data
+    elif split is not None:
+        data_file = path / "data" / f"{split}.jsonl"
+    else:
+        return _resolve_default_data_file(path, config)
+
+    if split is not None and not data_file.is_file():
+        raise BenchmarkSplitError(f"Split {split!r} is missing its data file: {data_file}")
+    return data_file
+
+
+def _resolve_default_data_file(path: Path, config: DatasetConfig) -> Path:
     # Default: data/<split>.jsonl
     candidate = path / "data" / f"{config.split}.jsonl"
     if candidate.exists():

@@ -83,7 +83,7 @@ def _run_eval(
     evaluator_name: str | None,
     base_url: str,
     model: str,
-    split: str,
+    split: str | None,
     concurrency: int,
     max_examples: int | None,
     task_indices: list[int] | None,
@@ -120,6 +120,11 @@ def _run_eval(
         if os.path.isfile(os.path.join(_materialised, "dataset.toml")):
             _can_redirect = bool(agent_name) and not agent_name.startswith("harbor:")
             if _can_redirect and BenchmarkLoader.is_local_benchmark(_materialised):
+                # An explicit agent redirects here before the catalog branch.
+                if split is None:
+                    entry = load_dataset_catalog().get("datasets", {}).get(benchmark)
+                    if entry is not None:
+                        split = entry.get("eval_split", "test")
                 console.print(f"  [dim]Using materialised dataset at {_materialised}[/]")
                 _materialised_path_override = _materialised
                 _is_local = True
@@ -143,6 +148,7 @@ def _run_eval(
             _load_path,
             sandbox_backend=sandbox_backend,
             harness_name=agent_name,
+            split=split,  # Direct paths use directory defaults when no split is requested.
         )
         catalog_entry = {
             "description": bench_result.description,
@@ -155,9 +161,6 @@ def _run_eval(
         if not sandbox_backend and bench_result.sandbox_backend:
             agent_metadata = dict(agent_metadata or {})
             agent_metadata["sandbox_backend"] = bench_result.sandbox_backend
-
-        if split is None:
-            split = bench_result.split or "test"
 
         # Resolve agent name (display + harness lookup)
         if agent_name is None:
@@ -321,10 +324,10 @@ def _run_eval(
 
             if os.path.isfile(os.path.join(_materialised, "dataset.toml")) and BenchmarkLoader.is_local_benchmark(_materialised):
                 console.print(f"  [dim]Using materialised dataset at {_materialised}[/]")
-                bench_result = BenchmarkLoader.load(_materialised, harness_name=agent_name)
+                bench_result = BenchmarkLoader.load(_materialised, harness_name=agent_name, split=split)
                 from rllm.data.dataset import Dataset
 
-                dataset = Dataset(data=list(bench_result.tasks), name=bench_result.name, split=bench_result.split or split)
+                dataset = Dataset(data=list(bench_result.tasks), name=bench_result.name, split=bench_result.split)
 
         if bench_result is None:
             # Harbor rows root at their task dir, so SandboxTaskHooks resolves
@@ -335,7 +338,9 @@ def _run_eval(
             from rllm.data.dataset import Dataset
 
             tasks = _dict_rows_to_tasks(list(dataset.data))
-            dataset = Dataset(data=tasks, name=benchmark, split=split)
+            dataset = Dataset(data=tasks, name=benchmark, split=dataset.split)
+
+    split = dataset.split
 
     # Filter to specific task indices if requested
     if task_indices is not None:
@@ -601,6 +606,7 @@ def eval_cmd(
 ):
     """Evaluate a model on a benchmark dataset."""
     from rllm.cli._sampling import resolve_eval_sampling
+    from rllm.tasks.loader import BenchmarkSplitError
 
     try:
         sampling_config = resolve_eval_sampling(sampling_params, temperature, top_p, max_tokens)
@@ -695,6 +701,8 @@ def eval_cmd(
             sampling_config=sampling_config,
             attempts=attempts,
         )
+    except BenchmarkSplitError as e:
+        fail(str(e))
     finally:
         if proxy_manager is not None:
             proxy_manager.shutdown_proxy()
