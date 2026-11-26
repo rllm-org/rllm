@@ -1,5 +1,6 @@
 """Tests for rllm eval CLI command."""
 
+import json
 import os
 from unittest.mock import MagicMock, patch
 
@@ -242,3 +243,112 @@ def test_eval_with_explicit_evaluator(runner, tmp_rllm_home, mock_dataset):
 
     assert result.exit_code == 0
     mock_load_eval.assert_called_once_with("math_reward_fn")
+
+
+@pytest.fixture
+def captured_eval_tasks(monkeypatch, tmp_rllm_home):
+    from rllm.eval.results import EvalResult
+
+    tasks = []
+
+    async def capture(**kwargs):
+        tasks.extend(kwargs["tasks"])
+        return EvalResult.from_items(kwargs["dataset_name"], kwargs["model"], kwargs["agent_name"], []), []
+
+    monkeypatch.setattr("rllm.eval.runner.run_dataset", capture)
+    return tasks
+
+
+@pytest.fixture
+def split_benchmark(monkeypatch, tmp_rllm_home):
+    from rllm.data import DatasetRegistry
+    from rllm.eval.materialize import materialize_benchmark
+
+    name = "split_benchmark"
+    catalog_entry = {
+        "source": "unused/fixture",
+        "default_agent": "react",
+        "eval_split": "holdout",
+        "instruction_field": "question",
+        "reward_fn": "math_reward_fn",
+    }
+    monkeypatch.setattr("rllm.cli.eval.load_dataset_catalog", lambda: {"datasets": {name: catalog_entry}})
+
+    for split in ("test", "train", "holdout"):
+        rows = [{"question": f"{split} question", "ground_truth": "1"}]
+        DatasetRegistry.register_dataset(name, rows, split=split)
+        bench_dir = materialize_benchmark(name, split, rows, catalog_entry)
+
+    return bench_dir
+
+
+@pytest.mark.parametrize(
+    ("entry_point", "requested_split", "expected_split"),
+    [
+        ("path", "train", "train"),
+        ("explicit_agent", "train", "train"),
+        ("explicit_agent", None, "holdout"),
+        ("catalog", "train", "train"),
+        ("catalog", None, "holdout"),
+    ],
+)
+def test_eval_selects_materialized_split(runner, split_benchmark, captured_eval_tasks, tmp_path, entry_point, requested_split, expected_split):
+    benchmark = str(split_benchmark) if entry_point == "path" else split_benchmark.name
+    args = ["eval", benchmark, "--base-url", "http://localhost:8000/v1", "--model", "test-model", "--no-ui", "--episodes-dir", str(tmp_path / "run")]
+    if entry_point == "explicit_agent":
+        args.extend(["--agent", "react"])
+    if requested_split is not None:
+        args.extend(["--split", requested_split])
+
+    result = runner.invoke(cli, args)
+
+    assert result.exit_code == 0, result.output
+    assert [task.instruction.strip() for task in captured_eval_tasks] == [f"{expected_split} question"]
+    assert f"({expected_split}, 1 examples)" in result.output
+    assert json.loads((tmp_path / "run" / "meta.json").read_text())["split"] == expected_split
+
+
+def test_eval_reports_missing_materialized_split(runner, split_benchmark, captured_eval_tasks):
+    expected_path = split_benchmark / "data" / "train.jsonl"
+    expected_path.unlink()
+    args = ["eval", split_benchmark.name, "--split", "train", "--base-url", "http://localhost:8000/v1", "--model", "test-model", "--no-ui"]
+
+    result = runner.invoke(cli, args, env={"COLUMNS": "300"})
+
+    assert result.exit_code == 1
+    assert "Split 'train' is missing its data file" in result.output
+    assert str(expected_path) in result.output
+    assert not captured_eval_tasks
+
+
+def test_eval_selects_registry_split_without_materialization(runner, captured_eval_tasks, monkeypatch, tmp_path):
+    from rllm.data import DatasetRegistry
+
+    name = "registry_split_benchmark"
+    for split in ("test", "train"):
+        DatasetRegistry.register_dataset(name, [{"question": f"{split} question"}], split=split)
+    monkeypatch.setattr("rllm.cli.eval.load_dataset_catalog", lambda: {"datasets": {name: {"source": "harbor:fixture", "default_agent": "react"}}})
+
+    result = runner.invoke(
+        cli,
+        [
+            "eval",
+            name,
+            "--split",
+            "train",
+            "--base-url",
+            "http://localhost:8000/v1",
+            "--model",
+            "test-model",
+            "--sandbox-backend",
+            "modal",
+            "--no-ui",
+            "--episodes-dir",
+            str(tmp_path / "run"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [task.instruction for task in captured_eval_tasks] == ["train question"]
+    assert "(train, 1 examples)" in result.output
+    assert json.loads((tmp_path / "run" / "meta.json").read_text())["split"] == "train"
