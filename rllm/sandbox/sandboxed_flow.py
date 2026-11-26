@@ -22,7 +22,7 @@ class SandboxedAgentFlow(ABC):
     """Base class for agents that run against a sandboxed execution environment.
 
     The sandbox backend is pluggable via ``sandbox_backend``:
-    ``"docker"`` | ``"local"`` | ``"modal"`` | ``"daytona"``.
+    ``"docker"`` | ``"local"`` | ``"modal"`` | ``"daytona"`` | ``"opensandbox"``.
 
     Subclasses implement :meth:`run` and may override :meth:`get_image`
     for per-task images.
@@ -87,15 +87,20 @@ def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
         from rllm.sandbox.backends.daytona import DaytonaSandbox
 
         return DaytonaSandbox(name=name, image=image, **kwargs)
+    elif backend == "opensandbox":
+        from rllm.sandbox.backends.opensandbox import OpenSandboxSandbox
+
+        return OpenSandboxSandbox(name=name, image=image, **kwargs)
     else:
-        raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal, daytona")
+        raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal, daytona, opensandbox")
 
 
 def build_snapshot(backend: str, task: Task, key: str, prior_ref: str | None = None, *, force: bool = False, install_script: str = "") -> str | None:
     """Build a snapshot of ``task``'s environment; return a backend ref, or ``None``.
 
-    Each backend owns its mechanism (Modal: live-FS capture; Daytona:
-    declarative bake). Backends without snapshots (docker/local) return ``None``.
+    Each backend owns its mechanism (Modal/OpenSandbox: live-FS capture;
+    Daytona: declarative bake). Backends without snapshots (docker/local)
+    return ``None``.
     A known-live ``prior_ref`` is reused unless ``force``, which always rebuilds.
     ``install_script`` is baked on top of the task's RUN steps — ``key`` must
     have been computed with the same script.
@@ -108,6 +113,10 @@ def build_snapshot(backend: str, task: Task, key: str, prior_ref: str | None = N
         from rllm.sandbox.backends.daytona import build_daytona_snapshot
 
         return build_daytona_snapshot(task, key, force=force, install_script=install_script)
+    elif backend == "opensandbox":
+        from rllm.sandbox.backends.opensandbox import build_opensandbox_snapshot
+
+        return build_opensandbox_snapshot(task, key, prior_ref, force=force, install_script=install_script)
     return None
 
 
@@ -121,6 +130,10 @@ def delete_snapshot(backend: str, ref: str) -> bool:
         from rllm.sandbox.backends.daytona import delete_daytona_snapshot
 
         return delete_daytona_snapshot(ref)
+    elif backend == "opensandbox":
+        from rllm.sandbox.backends.opensandbox import delete_opensandbox_snapshot
+
+        return delete_opensandbox_snapshot(ref)
     return False
 
 
@@ -138,4 +151,8 @@ def snapshot_absent(backend: str, ref: str) -> bool:
         from rllm.sandbox.backends.daytona import _daytona_ref_absent
 
         return _daytona_ref_absent(ref)
+    elif backend == "opensandbox":
+        from rllm.sandbox.backends.opensandbox import _opensandbox_ref_absent
+
+        return _opensandbox_ref_absent(ref)
     return False
