@@ -1,12 +1,13 @@
 from typing import Any, Literal
 
 from rllm.tools.code_tools.code_tool import CodeTool, CodeToolOutput
+from rllm.tools.code_tools.daytona_tool import DaytonaPythonInterpreter
 from rllm.tools.code_tools.e2b_tool import E2BPythonInterpreter
 from rllm.tools.code_tools.lcb_tool import LCBPythonInterpreter
 from rllm.tools.code_tools.together_tool import TogetherCodeTool
 
 # Backend types
-BackendType = Literal["local", "e2b", "together", "lcb"]
+BackendType = Literal["local", "e2b", "together", "lcb", "daytona"]
 
 
 class PythonInterpreter(CodeTool):
@@ -15,7 +16,7 @@ class PythonInterpreter(CodeTool):
 
     This class provides a common interface for executing Python code using different
     backend implementations, including local execution, E2B sandbox, Together API,
-    and LiveCodeBench environment.
+    Daytona sandboxes, and LiveCodeBench environment.
     """
 
     def __init__(
@@ -30,9 +31,9 @@ class PythonInterpreter(CodeTool):
         Initialize the unified Python interpreter with the specified backend.
 
         Args:
-            backend: The backend to use ("local", "e2b", "together", or "lcb")
+            backend: The backend to use ("local", "e2b", "together", "lcb", or "daytona")
             n_sandboxes: Number of concurrent sandboxes/workers to use (for applicable backends)
-            api_key: API key for cloud-based backends (e2b, together)
+            api_key: API key for cloud-based backends (e2b, together, daytona)
             name: The name of the tool
             description: Description of what the tool does
         """
@@ -48,11 +49,13 @@ class PythonInterpreter(CodeTool):
     def _init_backend(self):
         """Initialize the selected backend interpreter."""
         if self.backend_type == "local":
-            self.backend: LCBPythonInterpreter | E2BPythonInterpreter | TogetherCodeTool = LCBPythonInterpreter()
+            self.backend: LCBPythonInterpreter | E2BPythonInterpreter | TogetherCodeTool | DaytonaPythonInterpreter = LCBPythonInterpreter()
         elif self.backend_type == "e2b":
             self.backend = E2BPythonInterpreter(n_sandboxes=self.n_sandboxes, api_key=self.api_key)
         elif self.backend_type == "together":
             self.backend = TogetherCodeTool(api_key=self.api_key)
+        elif self.backend_type == "daytona":
+            self.backend = DaytonaPythonInterpreter(n_sandboxes=self.n_sandboxes, api_key=self.api_key)
         else:
             raise ValueError(f"Unsupported backend type: {self.backend_type}")
 
