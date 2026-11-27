@@ -11,14 +11,18 @@ from rllm_model_gateway.store.sqlite_store import SqliteTraceStore
 
 # Parametrise to run every test against both store backends
 @pytest.fixture(params=["memory", "sqlite"])
-def store(request):
+async def store(request):
     if request.param == "memory":
         yield MemoryTraceStore()
     else:
         fd, path = tempfile.mkstemp(suffix=".db")
         os.close(fd)
-        yield SqliteTraceStore(db_path=path)
-        os.unlink(path)
+        sqlite_store = SqliteTraceStore(db_path=path)
+        try:
+            yield sqlite_store
+        finally:
+            await sqlite_store.close()
+            os.unlink(path)
 
 
 class TestStoreTrace:
@@ -42,6 +46,25 @@ class TestStoreTrace:
 
 
 class TestSessionTraces:
+    @pytest.mark.asyncio
+    async def test_shared_trace_keeps_all_session_links(self, store):
+        await store.store_trace("shared", "s1", {"v": 1})
+        await store.store_trace("shared", "s2", {"v": 2})
+
+        assert await store.get_session_traces("s1") == [{"v": 2}]
+        assert await store.get_session_traces("s2") == [{"v": 2}]
+        sessions = {s["session_id"]: s for s in await store.list_sessions()}
+        assert set(sessions) == {"s1", "s2"}
+        assert sessions["s1"]["trace_count"] == sessions["s2"]["trace_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_overwrite_preserves_session_trace_order(self, store):
+        await store.store_trace("t1", "s1", {"v": 1})
+        await store.store_trace("t2", "s1", {"v": 2})
+        await store.store_trace("t1", "s1", {"v": 3})
+
+        assert await store.get_session_traces("s1") == [{"v": 3}, {"v": 2}]
+
     @pytest.mark.asyncio
     async def test_get_session_traces(self, store):
         await store.store_trace("t1", "s1", {"order": 1})
@@ -67,6 +90,20 @@ class TestSessionTraces:
 
 
 class TestDeleteSession:
+    @pytest.mark.asyncio
+    async def test_delete_preserves_trace_shared_with_another_session(self, store):
+        await store.store_trace("shared", "s1", {"v": 1})
+        await store.store_trace("shared", "s2", {"v": 2})
+        await store.store_trace("unique", "s2", {"v": 3})
+
+        assert await store.delete_session("s2") == 1
+        assert await store.get_session_traces("s2") == []
+        assert await store.get_session_traces("s1") == [{"v": 2}]
+        assert await store.get_trace("shared") == {"v": 2}
+        assert await store.get_trace("unique") is None
+        assert await store.delete_session("s1") == 1
+        assert await store.get_trace("shared") is None
+
     @pytest.mark.asyncio
     async def test_delete(self, store):
         await store.store_trace("t1", "s1", {"x": 1})
@@ -208,7 +245,7 @@ class TestSqliteStoreSpecific:
 
     def test_missing_db_path_warns_and_resolves(self, tmp_path, monkeypatch, caplog):
         # Redirect ~/.rllm into tmp_path so the test doesn't touch the user's home.
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("rllm_model_gateway.store.sqlite_store.os.path.expanduser", lambda path: str(tmp_path / ".rllm"))
         with caplog.at_level("WARNING", logger="rllm_model_gateway.store.sqlite_store"):
             store = SqliteTraceStore(db_path=None)
         assert store.db_path  # auto-resolved to a non-empty path

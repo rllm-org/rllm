@@ -116,12 +116,15 @@ class SqliteTraceStore:
     async def store_trace(self, trace_id: str, session_id: str, data: dict[str, Any]) -> None:
         conn = await self._get_conn()
         now = time.time()
+        # REPLACE deletes the existing row, cascading away its session links.
+        # Update in place to preserve those links and the original timestamp.
         await conn.execute(
             """
-            INSERT OR REPLACE INTO traces (trace_id, data, created_at)
-            VALUES (?, ?, COALESCE((SELECT created_at FROM traces WHERE trace_id = ?), ?))
+            INSERT INTO traces (trace_id, data, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(trace_id) DO UPDATE SET data = excluded.data
             """,
-            (trace_id, json.dumps(data), trace_id, now),
+            (trace_id, json.dumps(data), now),
         )
         await conn.execute(
             """
