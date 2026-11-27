@@ -47,8 +47,9 @@ def evaluate_equation(equation_str):
     """Safely evaluate the arithmetic equation using eval() with precautions."""
     try:
         # Define a regex pattern that only allows numbers, operators, parentheses, and whitespace
-        allowed_pattern = r"^[\d+\-*/().\s]+$"
-        if not re.match(allowed_pattern, equation_str):
+        # Only + - * / on integers: no decimal points, and no ** or // (a ** chain can run for a very long time).
+        allowed_pattern = r"^[\d+\-*/()\s]+$"
+        if not re.match(allowed_pattern, equation_str) or "**" in equation_str or "//" in equation_str:
             raise ValueError("Invalid characters in equation.")
 
         # Evaluate the equation with restricted globals and locals
