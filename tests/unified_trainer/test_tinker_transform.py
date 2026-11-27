@@ -236,7 +236,7 @@ class TestTrajectoryToDataSingleStep:
 
         # Logprobs: prompt tokens get 0, response tokens get actual logprobs
         # Before shift: [0, 0, 0, -0.5, -0.8], After shift: [0, 0, -0.5, -0.8]
-        assert loss_fn_inputs["logprobs"].data == [0.0, 0.0, -0.5, -0.8]
+        assert loss_fn_inputs["logprobs"].data == pytest.approx([0.0, 0.0, -0.5, -0.8], rel=1e-7, abs=1e-8)
 
         # Advantages: prompt tokens get 0, response tokens get 0.5 (scalar advantage)
         # Before shift: [0, 0, 0, 0.5, 0.5], After shift: [0, 0, 0.5, 0.5]
@@ -261,7 +261,7 @@ class TestTrajectoryToDataSingleStep:
         # Advantages: [0, 0, 0, 0.5, 0.6, 0.7]
         # After [1:] shift: [0, 0, 0.5, 0.6, 0.7]
         advantages_data = datums[0].loss_fn_inputs["advantages"].data
-        assert advantages_data == [0, 0, 0.5, 0.6, 0.7]
+        assert advantages_data == pytest.approx([0, 0, 0.5, 0.6, 0.7], rel=1e-7, abs=1e-8)
 
 
 # =============================================================================

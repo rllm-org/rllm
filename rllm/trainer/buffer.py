@@ -100,6 +100,8 @@ class TrajectoryGroupBuffer:
         self._training_step = 0
         self._queue_update_event = asyncio.Event()
         self._generation_complete = False
+        self._offloaded_paths: set[str] = set()
+        self._io_tasks: set[asyncio.Task] = set()
 
     def set_training_step(self, step: int) -> None:
         self._training_step = step
@@ -122,33 +124,79 @@ class TrajectoryGroupBuffer:
 
     async def _offload_episode(self, task_id: str, episode: Episode) -> str:
         """Serialize episode to disk, return file path."""
-        idx = len(self._pending.get(task_id, []))
-        path = os.path.join(self._episode_offload_dir, f"{task_id}_{idx}.pkl")
-        await asyncio.to_thread(self._pickle_dump, path, episode)
+        return await self._offload(episode, self._episode_offload_dir)
+
+    async def _run_io(self, func, *args):
+        task = asyncio.create_task(asyncio.to_thread(func, *args))
+        self._io_tasks.add(task)
+        cancelled = False
+        try:
+            # Cancelling the await cannot stop the thread that owns the file.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception:
+                    break
+            if cancelled:
+                task.exception()
+                raise asyncio.CancelledError
+            return task.result()
+        finally:
+            self._io_tasks.discard(task)
+
+    def _remove_offload(self, path: str) -> None:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("Could not remove offloaded file %s", path, exc_info=True)
+            return
+        self._offloaded_paths.discard(path)
+
+    async def _offload(self, obj, directory: str) -> str:
+        fd, path = tempfile.mkstemp(dir=directory, suffix=".pkl")
+        self._offloaded_paths.add(path)
+        try:
+            os.close(fd)
+            await self._run_io(self._pickle_dump, path, obj)
+        except BaseException:
+            self._remove_offload(path)
+            raise
         return path
+
+    async def _load_offload(self, path: str):
+        try:
+            return await self._run_io(self._pickle_load, path)
+        finally:
+            self._remove_offload(path)
 
     async def _load_pending_episodes(self, task_id: str) -> list[Episode]:
         """Load all pending episodes for a task, deserializing offloaded ones."""
         episodes = []
-        for item in self._pending.pop(task_id, []):
-            if isinstance(item, str):
-                ep = await asyncio.to_thread(self._pickle_load, item)
-                episodes.append(ep)
-            else:
-                episodes.append(item)
+        items = self._pending.pop(task_id, [])
+        try:
+            for item in items:
+                if isinstance(item, str):
+                    episodes.append(await self._load_offload(item))
+                else:
+                    episodes.append(item)
+        finally:
+            for item in items:
+                if isinstance(item, str):
+                    self._remove_offload(item)
         return episodes
 
     async def _offload_task_batch(self, batch: TaskBatch) -> str:
         """Serialize task batch to disk, return file path."""
-        fd, path = tempfile.mkstemp(dir=self._tg_offload_dir, suffix=".pkl")
-        os.close(fd)
-        await asyncio.to_thread(self._pickle_dump, path, batch)
-        return path
+        return await self._offload(batch, self._tg_offload_dir)
 
     async def _load_task_batch(self, item: TaskBatch | str) -> TaskBatch:
         """Load task batch, deserializing if offloaded."""
         if isinstance(item, str):
-            return await asyncio.to_thread(self._pickle_load, item)
+            return await self._load_offload(item)
         return item
 
     @staticmethod
@@ -160,7 +208,6 @@ class TrajectoryGroupBuffer:
     def _pickle_load(path: str):
         with open(path, "rb") as f:
             obj = pickle.load(f)
-        os.remove(path)
         return obj
 
     async def add_episode(self, task_id: str, episode: Episode) -> bool:
@@ -172,6 +219,9 @@ class TrajectoryGroupBuffer:
         # Offload episode to disk if enabled
         if self._episode_offload_dir:
             path = await self._offload_episode(task_id, episode)
+            if self._generation_complete:
+                self._remove_offload(path)
+                return False
             self._pending.setdefault(task_id, []).append(path)
         else:
             self._pending.setdefault(task_id, []).append(episode)
@@ -184,6 +234,9 @@ class TrajectoryGroupBuffer:
             episodes = await self._load_pending_episodes(task_id)
         else:
             episodes = self._pending.pop(task_id, [])
+
+        if self._generation_complete:
+            return False
 
         weight_version = self._min_weight_version(episodes)
 
@@ -260,9 +313,13 @@ class TrajectoryGroupBuffer:
 
         batch = TaskBatch(groups=traj_groups, episodes=episodes)
         if self._tg_offload_dir:
-            await self._queue.put(await self._offload_task_batch(batch))
+            path = await self._offload_task_batch(batch)
+            if self._generation_complete:
+                self._remove_offload(path)
+                return False
+            self._queue.put_nowait(path)
         else:
-            await self._queue.put(batch)
+            self._queue.put_nowait(batch)
         self._training_queue_size += 1
         self._queue_update_event.set()
         self._record_classified_prompt_group()
@@ -320,15 +377,24 @@ class TrajectoryGroupBuffer:
             items = self._pending.pop(task_id, [])
             for item in items:
                 if isinstance(item, str):
-                    try:
-                        os.remove(item)
-                    except OSError:
-                        pass
+                    self._remove_offload(item)
             self._coordinator.on_group_filtered()
             self._filtered_count += 1
             self._record_classified_prompt_group()
         self._queue.put_nowait(None)
         self._queue_update_event.set()
+
+    async def aclose(self) -> None:
+        """Release offloaded files after the producer and consumer have stopped."""
+        self.mark_generation_complete()
+        if self._io_tasks:
+            await asyncio.gather(*self._io_tasks, return_exceptions=True)
+        for path in list(self._offloaded_paths):
+            self._remove_offload(path)
+        while not self._queue.empty():
+            self._queue.get_nowait()
+        self._training_queue_size = 0
+        self._queue.put_nowait(None)
 
     def stats(self) -> dict:
         return {

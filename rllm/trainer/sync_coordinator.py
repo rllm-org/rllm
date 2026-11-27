@@ -149,10 +149,12 @@ class SyncCoordinator:
         await self._task_error_event.wait()
         self.raise_if_task_failed()
 
-    def cancel_tracked_tasks(self) -> None:
-        """Cancel rollout tasks that were dispatched but are no longer useful."""
-        for task in list(self._in_flight_tasks):
+    def cancel_tracked_tasks(self) -> list[asyncio.Task]:
+        """Cancel outstanding rollouts and return them so their owner can join them."""
+        tasks = list(self._in_flight_tasks)
+        for task in tasks:
             task.cancel()
+        return tasks
 
     async def wait_for_drain(self) -> None:
         """Wait for all in-flight rollout tasks to complete."""
