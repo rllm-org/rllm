@@ -283,3 +283,49 @@ class TestConstants:
         """OrcaRouter should have an entry in DEFAULT_MODELS."""
         assert "orcarouter" in DEFAULT_MODELS
         assert DEFAULT_MODELS["orcarouter"] == "openai/gpt-5.5"
+
+    def test_cheaperinference_provider_info(self):
+        """Cheaper Inference provider should have correct metadata."""
+        info = get_provider_info("cheaperinference")
+        assert info is not None
+        assert info.label == "Cheaper Inference"
+        assert info.litellm_prefix == "openai"
+        assert info.env_key == "CHEAPER_INFERENCE_API_KEY"
+
+    def test_cheaperinference_base_url(self):
+        """Cheaper Inference routes through the OpenAI adapter pinned to its api_base."""
+        info = get_provider_info("cheaperinference")
+        assert info is not None
+        assert info.base_url == "https://api.cheaperinference.com/v1"
+
+    def test_cheaperinference_default_model(self):
+        """Cheaper Inference default model should be gpt-5.4-mini."""
+        info = get_provider_info("cheaperinference")
+        assert info is not None
+        assert info.default_model == "gpt-5.4-mini"
+
+    def test_cheaperinference_models(self):
+        """Cheaper Inference model ids are bare (no router namespace)."""
+        info = get_provider_info("cheaperinference")
+        assert info is not None
+        assert len(info.models) >= 5
+        for mid in info.models:
+            assert "/" not in mid, f"{mid} must be a bare model id"
+        assert "gpt-5.4-mini" in info.models
+        assert "claude-sonnet-5" in info.models
+        assert "deepseek-v4-flash" in info.models
+
+    def test_cheaperinference_config_validates(self):
+        """A complete Cheaper Inference config should pass validation."""
+        config = RllmConfig(
+            provider="cheaperinference",
+            api_keys={"cheaperinference": "ci-test-key"},
+            model="gpt-5.4-mini",
+        )
+        assert config.is_configured()
+        assert config.validate() == []
+
+    def test_cheaperinference_in_default_models(self):
+        """Cheaper Inference should have an entry in DEFAULT_MODELS."""
+        assert "cheaperinference" in DEFAULT_MODELS
+        assert DEFAULT_MODELS["cheaperinference"] == "gpt-5.4-mini"
