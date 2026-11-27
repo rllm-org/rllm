@@ -121,6 +121,7 @@ def check_correctness(tests: list[dict[str, str]] | dict[str, list[str]], code: 
 
         if process.is_alive():
             process.kill()
+            process.join()
         test_results_list = list(test_results)
 
         detailed_results: dict[str, Any] = {"all_passed": False, "test_results": [], "total_tests": num_tests, "passed_tests": 0}
@@ -232,6 +233,7 @@ def lcb_check_correctness_v2(sample, generation, timeout=6, debug=False):
 
         if p.is_alive():
             p.kill()
+            p.join()
         if not result:
             in_outs = json.loads(sample["input_output"])
             # consider that all tests failed
