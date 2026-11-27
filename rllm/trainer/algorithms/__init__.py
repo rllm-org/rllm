@@ -11,6 +11,7 @@ from rllm.trainer.algorithms.config import (
     CompactFilteringConfig,
     RejectionSamplingConfig,
     RolloutCorrectionConfig,
+    ScoreCenteringConfig,
     TransformConfig,
     rLLMAdvantageEstimator,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "CompactFilteringConfig",
     "RejectionSamplingConfig",
     "RolloutCorrectionConfig",
+    "ScoreCenteringConfig",
     "TransformConfig",
     "AlgorithmConfig",
     # Transform pipeline

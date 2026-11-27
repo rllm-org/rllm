@@ -116,7 +116,8 @@
             "pages": [
               "training/capability-matrix",
               "training/advantage-estimator",
-              "training/precompute-advantage"
+              "training/precompute-advantage",
+              "training/score-centering"
             ]
           }
         ]

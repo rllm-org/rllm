@@ -1,0 +1,75 @@
+---
+title: "Score centering"
+description: "Reduce train/inference mismatch drift in the policy gradient by centering each token's score under the sampler distribution (verl backend, opt-in)."
+---
+
+<Note>
+**Related modules**: `rllm.trainer.verl.score_centering`, `rllm.trainer.verl.sc_fsdp_adapter`, `rllm.trainer.verl.sc_rollout_adapter`, `rllm.trainer.verl.sc_config`
+</Note>
+
+Score centering (SC, [arXiv:2609.20807](https://arxiv.org/abs/2609.20807)) replaces the sampled token's score `∇log p(y)` with a centered score `∇log p(y) − E_q[∇log p]`. Here `q` is the sampler's actual distribution. The sampler (vLLM) and the trainer (FSDP) never agree exactly, and without centering that mismatch adds drift to the policy gradient even when the advantage is constant. Centering removes this drift.
+
+SC is off by default. When it's off, rLLM records no extra rollout data and does no extra work in the forward pass.
+
+## Enable it
+
+```bash
+python train.py rllm/backend=verl \
+    rllm.algorithm.score_centering.enabled=True \
+    rllm.algorithm.score_centering.record_topk=32 \
+    rllm.algorithm.rollout_correction.bypass_mode=True \
+    actor_rollout_ref.rollout.logprobs_mode=processed_logprobs \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.max_logprobs=32
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `rllm.algorithm.score_centering.enabled` | `bool` | `False` | Turn score centering on |
+| `rllm.algorithm.score_centering.record_topk` | `int` | `32` | Sampler candidates recorded per response token. This is a recording budget; it doesn't change the sampling `top_k`. |
+| `rllm.algorithm.score_centering.chunk_size` | `int` | `128` | Token rows per fp32 full-vocabulary chunk in the trainer. Lower values use less memory. |
+| `rllm.algorithm.rollout_correction.tis_mode` | `str \| null` | `null` | Set to `token` to apply token-level TIS inside the SC loss |
+| `rllm.algorithm.rollout_correction.tis_cap` | `float` | `2.0` | TIS weight cap |
+
+`engine_kwargs.vllm.max_logprobs` must be at least `record_topk`.
+
+## How it works
+
+1. **Sampling.** vLLM returns the top `record_topk` processed log-probs for every response token. These are the log-probs of the distribution the sampler actually draws from. They're stored as `rollout_topk_ids` and `rollout_topk_log_probs` on `ModelOutput`, and both fields survive episode serialization.
+2. **Alignment.** Response token `r` is predicted by the logit at full-sequence position `prompt_length − 1 + r`. rLLM moves each head to that position before verl removes padding.
+3. **Forward.** The trainer computes log-softmax over the full vocabulary in fp32 chunks and recomputes it in backward. It gathers the head log-probs `log p_v` and the log-mass of everything outside the head, `log P_T`.
+4. **Loss.** Tokens outside the head are treated as one tail bucket whose sampler mass `Q_T = 1 − Σ_head q` is spread in proportion to the trainer's tail. The center then has a closed form:
+
+```text
+loss   = −A · (w · log p(y) − center)
+center = Σ_head sg(c_v) · log p_v + sg(c_T) · log P_T
+c_v    = q_v,  c_T = Q_T,  w = 1                       (no TIS)
+c_v    = min(p_v, cap·q_v),  c_T = min(P_T, cap·Q_T),
+w      = min(p(y)/q(y), cap)                           (token TIS)
+```
+
+`sg` is stop-gradient. The head is never renormalized. The approximation is exact when the head covers the sampler's whole support, that is, when `Q_T = 0`.
+
+## Requirements
+
+Startup fails with a clear error when the configuration falls outside the supported scope:
+
+- verl `0.8.0`, the FSDP/FSDP2 actor, and vLLM rollout with BF16, no quantization, and `processed_logprobs`.
+- A direct single-turn Workflow. Gateway/AgentFlow and multi-turn aren't supported yet.
+- The vanilla policy loss, with no KL loss, entropy bonus, distillation, router replay, or per-role loss overrides.
+- `use_remove_padding=True`, with fused kernels, Liger, sequence parallelism, and MTP/speculative decoding disabled.
+- Untruncated sampling for training rollouts: `temperature=1`, `top_p=1`, no sampling `top_k` or `min_p`, and no repetition, presence, or frequency penalties. Validation sampling isn't restricted.
+- `ppo_epochs=1`. SC is an unclipped objective, so `ppo_mini_batch_size < train_batch_size` is an error without TIS and a warning with it.
+
+## Metrics
+
+| Metric | Meaning |
+|---|---|
+| `score_centering/sampler_head_mass` | Sampler probability mass inside the recorded head |
+| `score_centering/train_head_mass` | Trainer probability mass on the same head IDs. It should track `sampler_head_mass` closely; a large gap points to misalignment. |
+| `score_centering/sampler_tail_mass` | `1 − sampler_head_mass`, the mass handled by the tail approximation |
+| `score_centering/sample_abs_log_ratio_mean` | Mean `abs(log p(y) − log q(y))` on sampled tokens, a measure of train/inference mismatch |
+| `score_centering/tis_weight_mean`, `tis_capped_fraction` | With TIS only: the mean weight and the fraction of tokens that hit `tis_cap` |
+
+## Cost
+
+On Qwen3-0.6B with 2x RTX 4090 and `record_topk=32`, steps were about 40% slower than plain GRPO, and peak memory was about the same.
