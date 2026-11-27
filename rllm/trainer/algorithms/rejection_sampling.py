@@ -166,6 +166,9 @@ def apply_rejection_sampling_and_filtering(
     """
     Apply rejection sampling to trajectory groups and episodes.
 
+    Pending episode-mode data survives until release. Releasing data resets the
+    sampling state, while the returned data and metrics remain available.
+
     Args:
         episodes: List of episodes (for correctness metrics)
         groups: List of trajectory groups to filter
@@ -193,7 +196,9 @@ def apply_rejection_sampling_and_filtering(
     # Step 3: Apply mode-specific logic (TODO(listar2000): implement a group-level rejection sampling)
     if config.mode == "none":
         # No rejection, just return filtered groups with metrics
-        return filtered_groups, filtered_episodes, metrics.to_dict()
+        result = filtered_groups, filtered_episodes, metrics.to_dict()
+        state.reset()
+        return result
     elif config.mode == "episode":  # Episode-level: accumulate until we have enough partial solves
         state.accumulated_groups.extend(filtered_groups)
         state.accumulated_episodes.extend(filtered_episodes)
@@ -201,7 +206,9 @@ def apply_rejection_sampling_and_filtering(
         # Check if we have enough partial solves
         if metrics.solve_partial >= config.min_partial_solve_tasks:
             # Ready to proceed - return accumulated groups
-            return state.accumulated_groups.copy(), state.accumulated_episodes.copy(), metrics.to_dict()
+            result = state.accumulated_groups.copy(), state.accumulated_episodes.copy(), metrics.to_dict()
+            state.reset()
+            return result
         else:  # Not enough - skip this batch
             return [], [], metrics.to_dict()
     else:
