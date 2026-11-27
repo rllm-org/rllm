@@ -1,5 +1,7 @@
 """Tests for token/logprob extraction and trace record building."""
 
+import copy
+
 from rllm_model_gateway.data_process import (
     build_trace_record,
     build_trace_record_from_chunks,
@@ -140,6 +142,84 @@ class TestStripVllmFields:
 
 
 class TestBuildTraceRecord:
+    def test_streaming_tool_call_fragments(self):
+        chunks = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "bash", "arguments": '{"command":'},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {"tool_calls": [{"index": 0, "function": {"arguments": '"pwd"}'}}]},
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        ]
+        original_chunks = copy.deepcopy(chunks)
+        trace = build_trace_record_from_chunks("s", {"model": "m"}, chunks, 1.0)
+        assert trace.response_message == {
+            "role": "assistant",
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": '{"command":"pwd"}'}}],
+        }
+        assert trace.finish_reason == "tool_calls"
+        assert chunks == original_chunks
+
+    def test_streaming_parallel_tool_calls(self):
+        chunks = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": index,
+                                    "id": f"call_{index}",
+                                    "type": "function",
+                                    "function": {"name": "get_", "arguments": '{"city":'},
+                                }
+                                for index in [1, 0]
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"index": 0, "function": {"name": "weather", "arguments": '"Paris"}'}},
+                                {"index": 1, "function": {"name": "weather", "arguments": '"Tokyo"}'}},
+                            ]
+                        }
+                    }
+                ]
+            },
+        ]
+        trace = build_trace_record_from_chunks("s", {"model": "m"}, chunks, 1.0)
+        assert trace.response_message["tool_calls"] == [
+            {
+                "id": f"call_{index}",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": arguments},
+            }
+            for index, arguments in enumerate(['{"city":"Paris"}', '{"city":"Tokyo"}'])
+        ]
+
     def test_non_streaming(self):
         request_body = {
             "model": "test-model",
