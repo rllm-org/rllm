@@ -3,6 +3,7 @@
 import logging
 from bisect import bisect_left, bisect_right
 
+from tokenizers.decoders import Metaspace
 from transformers import PreTrainedTokenizer
 
 logger = logging.getLogger(__name__)
@@ -52,11 +53,20 @@ def build_byte_offsets(tokenizer: PreTrainedTokenizer, token_ids: list[int]) -> 
         return [0], ""
 
     token_strs = tokenizer.convert_ids_to_tokens(token_ids)
+    decoder = getattr(getattr(tokenizer, "backend_tokenizer", None), "decoder", None)
     offsets = [0]
     all_bytes = []
     cumulative = 0
-    for token_str in token_strs:
-        token_bytes = _token_str_to_bytes(token_str)
+    for index, token_str in enumerate(token_strs):
+        if isinstance(decoder, Metaspace):
+            # Metaspace pieces contain actual Unicode and an encoded space marker.
+            # An empty prefix preserves inter-token spaces by avoiding the decoder's
+            # first-token prefix removal for all pieces after the first.
+            context = [token_str or ""] if index == 0 else ["", token_str or ""]
+            token_bytes = decoder.decode(context).encode("utf-8")
+        else:
+            # ByteLevel pieces may hold only part of a UTF-8 character.
+            token_bytes = _token_str_to_bytes(token_str)
         all_bytes.append(token_bytes)
         cumulative += len(token_bytes)
         offsets.append(cumulative)
