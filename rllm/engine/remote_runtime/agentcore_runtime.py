@@ -1,12 +1,8 @@
-"""AgentCore Runtime adapter wrapping ART's RolloutClient async mode.
-
-Implements RemoteAgentRuntime for AWS Bedrock AgentCore Runtime. Uses
-``RolloutClient.invoke_async()`` for concurrent task submission and
-``RolloutFuture.result_async()`` for S3 reward polling.
-"""
+"""AgentCore Runtime adapter using ART's HTTP invocation contract."""
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from rllm.engine.remote_runtime.protocol import (
@@ -34,53 +30,45 @@ class AgentCoreRuntime(RemoteAgentRuntime):
         self._acr_config = AgentCoreRuntimeConfig(**config.agentcore)
         self._exp_id = exp_id
         self._model_id = model_id
-        self._client: Any = None
+        self._rate_limiter: Any = None
 
     def initialize(self) -> None:
-        """Create the ART RolloutClient from config."""
-        from agentcore_rl_toolkit import RolloutClient
+        """Share one request budget across concurrent executions."""
+        from agentcore_rl_toolkit.concurrency.rate_limiter import LocalRateLimiter
 
         cfg = self._acr_config
-        self._client = RolloutClient(
-            agent_runtime_arn=cfg.agent_runtime_arn,
-            s3_bucket=cfg.s3_bucket,
-            exp_id=self._exp_id,
-            tps_limit=cfg.tps_limit,
-        )
+        self._rate_limiter = LocalRateLimiter(tps_limit=cfg.tps_limit)
         logger.info(
-            "AgentCoreRuntime initialized: arn=%s, bucket=%s, exp=%s, model=%s, tps=%d",
+            "AgentCoreRuntime initialized: arn=%s, exp=%s, model=%s, tps=%d",
             cfg.agent_runtime_arn,
-            cfg.s3_bucket,
             self._exp_id,
             self._model_id,
             cfg.tps_limit,
         )
 
-    async def _run_one(self, sub: TaskSubmission, timeout: float) -> RemoteTaskResult:
-        """Submit a single task and poll S3 for the result."""
-        try:
-            future = await self._client.invoke_async(
-                payload=sub.task,
-                session_id=sub.session_id,
-                input_id=sub.task_id,
-                base_url=sub.inference_url,
-                model_id=self._model_id,
-            )
-        except Exception as e:
-            logger.error("Task %s submission failed: %s", sub.session_id, e)
-            return RemoteTaskResult(
-                finished=False,
-                session_id=sub.session_id,
-                task_id=sub.task_id,
-                error=str(e),
-                termination_reason=TerminationReason.ERROR,
-                elapsed=0.0,
-            )
+    async def _run_one(self, sub: TaskSubmission, timeout: float, client: Any) -> RemoteTaskResult:
+        from agentcore_rl_toolkit.rollout_session.agentcore_http_session import AgentCoreHttpSession
 
+        started = time.monotonic()
+        raw_result = None
         try:
-            result = await future.result_async(timeout=timeout)
+            async with AgentCoreHttpSession.with_client(sub.session_id, client) as session:
+                async with asyncio.timeout(timeout):
+                    result = await session.run(
+                        {
+                            **sub.task,
+                            "_config": {
+                                "base_url": sub.inference_url,
+                                "model_id": self._model_id,
+                                "api_key": sub.session_id,
+                            },
+                        }
+                    )
+                raw_result = result.task_output
+                if error := result.failure_reason():
+                    raise RuntimeError(error)
         except asyncio.TimeoutError:
-            elapsed = future.elapsed()
+            elapsed = time.monotonic() - started
             logger.error("Task %s timed out after %.1fs", sub.session_id, elapsed)
             return RemoteTaskResult(
                 finished=False,
@@ -91,64 +79,48 @@ class AgentCoreRuntime(RemoteAgentRuntime):
                 elapsed=elapsed,
             )
         except Exception as e:
-            elapsed = future.elapsed()
-            logger.error("Task %s polling failed: %s", sub.session_id, e)
+            logger.error("Task %s failed: %s", sub.session_id, e)
             return RemoteTaskResult(
                 finished=False,
                 session_id=sub.session_id,
                 task_id=sub.task_id,
                 error=str(e),
                 termination_reason=TerminationReason.ERROR,
-                elapsed=elapsed,
+                elapsed=time.monotonic() - started,
+                raw_result=raw_result,
             )
-
-        # Check for application-level errors from @rollout_entrypoint in ART
-        status_code = result.get("status_code")
-        if status_code is not None and status_code != 200:
-            error_msg = result.get("stop_reason", "unknown remote error")
-            logger.error(
-                "Task %s returned status_code=%s: %s",
-                sub.session_id,
-                status_code,
-                error_msg,
-            )
-            return RemoteTaskResult(
-                finished=False,
-                session_id=sub.session_id,
-                task_id=sub.task_id,
-                error=error_msg,
-                termination_reason=TerminationReason.ERROR,
-                elapsed=future.elapsed(),
-                raw_result=result,
-            )
-
-        reward = result.get("rewards")
-        if isinstance(reward, list):
-            reward = reward[-1] if reward else None
 
         return RemoteTaskResult(
             finished=True,
             session_id=sub.session_id,
             task_id=sub.task_id,
-            reward=reward,
+            reward=result.reward,
             termination_reason=TerminationReason.ENV_DONE,
-            elapsed=future.elapsed(),
-            raw_result=result,
+            elapsed=time.monotonic() - started,
+            raw_result=raw_result,
         )
 
     async def execute_tasks(self, submissions: list[TaskSubmission], timeout: float | None = None) -> list[RemoteTaskResult]:
-        """Submit all tasks concurrently via asyncio.gather.
+        """Share an HTTP client for this batch and close it after all sessions exit."""
+        from agentcore_rl_toolkit import AgentCoreHttpClient
 
-        Each task invokes then polls in sequence; all tasks run in parallel.
-        ART rate-limits invocations at TPS internally.
-        """
-        if self._client is None:
+        if self._rate_limiter is None:
             raise RuntimeError("Call initialize() before execute_tasks()")
 
         if timeout is None:
             timeout = self._config.session_timeout
 
-        return list(await asyncio.gather(*[self._run_one(sub, timeout) for sub in submissions]))
+        client = AgentCoreHttpClient(
+            self._acr_config.agent_runtime_arn,
+            request_rate_limiter=self._rate_limiter,
+        )
+        try:
+            async with asyncio.TaskGroup() as group:
+                tasks = [group.create_task(self._run_one(sub, timeout, client)) for sub in submissions]
+            return [task.result() for task in tasks]
+        finally:
+            await client.aclose()
 
     def shutdown(self) -> None:
+        self._rate_limiter = None
         logger.info("AgentCoreRuntime shutdown complete")

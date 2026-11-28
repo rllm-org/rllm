@@ -134,7 +134,6 @@ remote_runtime:
   # Per-backend named sub-configs. Only the sub-dict matching `backend` is read.
   agentcore:
     agent_runtime_arn: ""
-    s3_bucket: ""
     tps_limit: 25
   harbor:
     agent: mini-swe-agent       # scaffold name (mini-swe-agent | aider | openhands | swe-agent | qwen-coder | ...)

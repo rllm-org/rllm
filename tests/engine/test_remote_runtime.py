@@ -1,57 +1,18 @@
-"""Unit tests for AgentCoreRuntime and remote episode building (all mocked)."""
+"""Unit tests for remote episode building and gateway helpers."""
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from omegaconf import OmegaConf
 
 from rllm.engine.remote_agent_flow_engine import _build_episode
-from rllm.engine.remote_runtime.agentcore_runtime import AgentCoreRuntime
-from rllm.engine.remote_runtime.protocol import (
-    RemoteRuntimeConfig,
-    RemoteTaskResult,
-    TaskSubmission,
-)
+from rllm.engine.remote_runtime.protocol import RemoteTaskResult
 from rllm.engine.trace_converter import compute_step_metrics
 from rllm.gateway.manager import GatewayManager, _get_routable_ip
 from rllm.types import Step, Trajectory
-from rllm.workflows.workflow import TerminationReason
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_runtime() -> AgentCoreRuntime:
-    """Create an AgentCoreRuntime with a mock client (skips initialize())."""
-    config = RemoteRuntimeConfig(
-        enabled=True,
-        backend="agentcore",
-        agentcore={
-            "agent_runtime_arn": "arn:aws:bedrock:us-east-1:123456789:agent-runtime/test",
-            "s3_bucket": "test-bucket",
-        },
-    )
-    runtime = AgentCoreRuntime(config, exp_id="test-exp", model_id="test-model")
-    runtime._client = MagicMock()
-    return runtime
-
-
-def _make_submission(session_id: str = "sess-1", task_id: str = "task-1") -> TaskSubmission:
-    return TaskSubmission(
-        task={"prompt": "What is 2+2?", "answer": "4"},
-        session_id=session_id,
-        task_id=task_id,
-        inference_url="http://localhost:8000/v1",
-    )
-
-
-def _make_future(result: dict, elapsed: float = 1.5):
-    """Create a mock RolloutFuture."""
-    future = AsyncMock()
-    future.result_async = AsyncMock(return_value=result)
-    future.elapsed = MagicMock(return_value=elapsed)
-    return future
 
 
 def _make_step(prompt_len: int = 10, response_len: int = 20) -> Step:
@@ -60,126 +21,6 @@ def _make_step(prompt_len: int = 10, response_len: int = 20) -> Step:
         prompt_ids=list(range(prompt_len)),
         response_ids=list(range(response_len)),
     )
-
-
-# ---------------------------------------------------------------------------
-# _run_one tests
-# ---------------------------------------------------------------------------
-
-
-class TestRunOneSuccess:
-    def test_success_with_reward(self):
-        """status_code=200 result -> RemoteTaskResult(finished=True, reward=1.0)."""
-        runtime = _make_runtime()
-        sub = _make_submission()
-        future = _make_future(
-            result={"status_code": 200, "rewards": [1.0], "input_id": "task-1"},
-            elapsed=2.3,
-        )
-        runtime._client.invoke_async = AsyncMock(return_value=future)
-
-        result = asyncio.run(runtime._run_one(sub, timeout=300.0))
-
-        assert result.finished is True
-        assert result.reward == 1.0
-        assert result.session_id == "sess-1"
-        assert result.task_id == "task-1"
-        assert result.elapsed == 2.3
-        assert result.raw_result is not None
-        assert result.raw_result["status_code"] == 200
-
-    def test_success_reward_scalar(self):
-        """Non-list reward is preserved as-is (None)."""
-        runtime = _make_runtime()
-        sub = _make_submission()
-        future = _make_future(result={"rewards": None}, elapsed=1.0)
-        runtime._client.invoke_async = AsyncMock(return_value=future)
-
-        result = asyncio.run(runtime._run_one(sub, timeout=300.0))
-
-        assert result.finished is True
-        assert result.reward is None
-
-
-class TestRunOneErrorStatus:
-    def test_error_status_500(self):
-        """status_code=500 result -> RemoteTaskResult(finished=False, error=...)."""
-        runtime = _make_runtime()
-        sub = _make_submission()
-        future = _make_future(
-            result={
-                "status_code": 500,
-                "stop_reason": "ZeroDivisionError: division by zero",
-                "traceback": "...",
-            },
-            elapsed=3.0,
-        )
-        runtime._client.invoke_async = AsyncMock(return_value=future)
-
-        result = asyncio.run(runtime._run_one(sub, timeout=300.0))
-
-        assert result.finished is False
-        assert "ZeroDivisionError" in (result.error or "")
-        assert result.elapsed == 3.0
-        assert result.raw_result is not None
-        assert result.raw_result["status_code"] == 500
-
-    def test_error_status_no_stop_reason(self):
-        """Error without stop_reason gets default message."""
-        runtime = _make_runtime()
-        sub = _make_submission()
-        future = _make_future(result={"status_code": 500}, elapsed=1.0)
-        runtime._client.invoke_async = AsyncMock(return_value=future)
-
-        result = asyncio.run(runtime._run_one(sub, timeout=300.0))
-
-        assert result.finished is False
-        assert result.error == "unknown remote error"
-
-
-class TestRunOneTransportError:
-    def test_invoke_raises(self):
-        """invoke_async raising -> RemoteTaskResult(finished=False)."""
-        runtime = _make_runtime()
-        sub = _make_submission()
-        runtime._client.invoke_async = AsyncMock(side_effect=ConnectionError("network down"))
-
-        result = asyncio.run(runtime._run_one(sub, timeout=300.0))
-
-        assert result.finished is False
-        assert "network down" in (result.error or "")
-
-    def test_result_async_timeout(self):
-        """asyncio.TimeoutError -> termination_reason=TIMEOUT."""
-        runtime = _make_runtime()
-        sub = _make_submission()
-        future = AsyncMock()
-        future.result_async = AsyncMock(side_effect=asyncio.TimeoutError())
-        future.elapsed = MagicMock(return_value=1.7)
-        runtime._client.invoke_async = AsyncMock(return_value=future)
-
-        result = asyncio.run(runtime._run_one(sub, timeout=1.0))
-
-        assert result.finished is False
-        assert result.termination_reason == TerminationReason.TIMEOUT
-        assert result.elapsed == 1.7
-        assert "Timeout after 1.7s" in (result.error or "")
-
-    def test_result_async_other_error(self):
-        """Non-timeout polling error -> termination_reason=ERROR."""
-        runtime = _make_runtime()
-        sub = _make_submission()
-        future = AsyncMock()
-        future.result_async = AsyncMock(side_effect=RuntimeError("S3 unreachable"))
-        future.elapsed = MagicMock(return_value=2.4)
-        runtime._client.invoke_async = AsyncMock(return_value=future)
-
-        result = asyncio.run(runtime._run_one(sub, timeout=1.0))
-
-        assert result.finished is False
-        assert result.termination_reason == TerminationReason.ERROR
-        assert result.elapsed == 2.4
-        assert "S3 unreachable" in (result.error or "")
 
 
 # ---------------------------------------------------------------------------

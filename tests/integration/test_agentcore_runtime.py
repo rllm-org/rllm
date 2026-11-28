@@ -1,6 +1,6 @@
 """Integration tests for AgentCoreRuntime against a live ACR deployment.
 
-Skipped unless all env vars are set: AGENTCORE_AGENT_ARN, AGENTCORE_S3_BUCKET,
+Skipped unless all env vars are set: AGENTCORE_AGENT_ARN,
 AGENTCORE_BASE_URL, and AGENTCORE_MODEL_ID.
 """
 
@@ -14,7 +14,7 @@ from rllm.engine.remote_runtime.protocol import (
     TaskSubmission,
 )
 
-from .conftest import AGENT_ARN, BASE_URL, MODEL_ID, S3_BUCKET, requires_agentcore
+from .conftest import AGENT_ARN, BASE_URL, MODEL_ID, requires_agentcore
 
 
 def _make_runtime() -> AgentCoreRuntime:
@@ -23,7 +23,6 @@ def _make_runtime() -> AgentCoreRuntime:
         backend="agentcore",
         agentcore={
             "agent_runtime_arn": AGENT_ARN,
-            "s3_bucket": S3_BUCKET,
         },
     )
     runtime = AgentCoreRuntime(config, exp_id=f"integ-{uuid.uuid4().hex[:8]}", model_id=MODEL_ID)

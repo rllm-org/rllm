@@ -4,7 +4,7 @@
 # are tuned for this configuration; larger GPUs likely support lower TP.
 set -eux
 
-# Load environment variables (AGENTCORE_AGENT_ARN, AGENTCORE_S3_BUCKET)
+# Load environment variables (AGENTCORE_AGENT_ARN)
 set -a && source .env && set +a
 
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
@@ -84,6 +84,5 @@ python -m examples.agentcore_math.train_agentcore_math_verl \
     rllm.remote_runtime.enabled=true \
     rllm.remote_runtime.backend=agentcore \
     rllm.remote_runtime.agentcore.agent_runtime_arn=$AGENTCORE_AGENT_ARN \
-    rllm.remote_runtime.agentcore.s3_bucket=$AGENTCORE_S3_BUCKET \
     rllm.remote_runtime.agentcore.tps_limit=25 \
     rllm.remote_runtime.session_timeout=300
