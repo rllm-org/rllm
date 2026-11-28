@@ -360,7 +360,7 @@ class FireworksPolicyTrainer:
 
         metrics = {
             "offpolicy/kl": (rollout_flat - old_flat).mean().item(),
-            "offpolicy/k3_kl": (torch.exp(log_ratio) - log_ratio - 1).mean().item(),
+            "offpolicy/k3_kl": (ratio - log_ratio_safe - 1).mean().item(),
             "offpolicy/logprob_abs_diff/mean": logprob_abs_diff.mean().item(),
             "offpolicy/logprob_abs_diff/min": logprob_abs_diff.min().item(),
             "offpolicy/logprob_abs_diff/max": logprob_abs_diff.max().item(),
@@ -517,6 +517,7 @@ class FireworksPolicyTrainer:
         """Run optimizer step. Returns (scheduled_lr, metrics)."""
         scheduled_lr = learning_rate * compute_schedule_lr_multiplier(
             lr_schedule=self.algorithm_config.lr_schedule,
+            warmup_steps=self.algorithm_config.warmup_steps,
             warmup_steps_ratio=self.algorithm_config.warmup_steps_ratio,
             step=step,
             total_steps=total_steps,
